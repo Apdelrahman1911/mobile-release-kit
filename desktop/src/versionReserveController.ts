@@ -93,7 +93,7 @@ export class VersionReserveController {
   reviewReason(): string | null {
     const c = this.readContext();
     return this.disposed ? 'This controller is retired.' : this.ownerReason() ?? unavailable(c) ??
-      (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native iOS project.' : c.blockedReason) ??
+      (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native Android or iOS project.' : c.blockedReason) ??
       (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch (for example refs/heads/main) and acknowledge the Store limits.' : null);
   }
   reserveReason(): string | null {

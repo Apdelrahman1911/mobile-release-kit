@@ -15,14 +15,18 @@ pub(crate) enum Query {
     AppStoreProfileReuse,
     #[serde(rename = "ios-current-versions")]
     IOSCurrentVersions,
+    #[serde(rename = "android-current-versions")]
+    AndroidCurrentVersions,
 }
 
 impl Query {
+    pub(super) fn platform(self)->super::AccessPlatform { match self { Self::AndroidCurrentVersions=>super::AccessPlatform::Android,_=>super::AccessPlatform::Ios } }
     pub(super) fn consent(self) -> &'static str {
         match self {
             Self::BundleIdRegistration => CONSENT,
             Self::AppStoreProfileReuse => super::profile_read::CONSENT,
             Self::IOSCurrentVersions => super::store_versions::CONSENT,
+            Self::AndroidCurrentVersions => super::play_versions::CONSENT,
         }
     }
 }

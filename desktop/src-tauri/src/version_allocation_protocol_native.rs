@@ -112,7 +112,8 @@ impl Request {
             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
             "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock});
         if let Some((source,provider)) = native_source {
-            require(selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"])
+            require(((selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"]))
+                || (selected.schema_version()==3 && selected.0["platforms"]==json!(["android"])))
                 && source["ref"]==selected.0["source"]["ref"]
                 && source["savedConfig"]["sha256"]==selected.0["source"]["configurationSha256"]
                 && source["savedVersion"]["sha256"]==selected.0["source"]["versionSha256"]

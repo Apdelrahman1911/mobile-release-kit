@@ -114,8 +114,10 @@ impl NativeReservedVersionHandoff {
         if !control.edit_window()
             || data["schemaVersion"] != 1
             || data["provider"]["kind"] != "macos-clt-git/1"
-            || data["reservation"]["request"]["platforms"] != json!(["ios"])
-            || data["reservation"]["request"]["policy"]["schemaVersion"] != 2
+            || !((data["reservation"]["request"]["platforms"] == json!(["ios"])
+                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 2)
+                 || (data["reservation"]["request"]["platforms"] == json!(["android"])
+                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 3))
             || wire::bounded(&data, 12 * 1024).is_err()
         {
             return Err(invalid_owner());

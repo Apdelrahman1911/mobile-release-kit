@@ -1,8 +1,8 @@
-//! One current-iOS-inventory observation on the existing SavedCommandOwner.
+//! One current single-platform inventory observation on the existing SavedCommandOwner.
 //! Native final retirement is the only mint; summary DATA cannot construct it.
 use super::*;
 use crate::{
-    asset_session::StoreVersionMaterial, local_store_preflight_protocol::store_versions as wire,
+    asset_session::StoreVersionMaterial, local_store_preflight_protocol::{store_versions as wire, play_versions},
 };
 use std::{
     sync::Weak,
@@ -71,7 +71,7 @@ pub(crate) struct StoreVersionObservation {
     context: store_wire::Context,
     registration: u32,
     project: RegisteredRoot,
-    summary: wire::Summary,
+    summary: play_versions::Inventory,
     material: StoreVersionMaterial,
     clock: Clock,
     invalid: AtomicBool,
@@ -80,7 +80,7 @@ impl StoreVersionObservation {
     pub(crate) fn context(&self) -> &store_wire::Context {
         &self.context
     }
-    pub(crate) fn summary(&self) -> &wire::Summary {
+    pub(crate) fn summary(&self) -> &play_versions::Inventory {
         &self.summary
     }
     pub(crate) fn observed_at(&self) -> u64 {
@@ -122,7 +122,7 @@ impl Slot {
             return false;
         };
         if original.domain != SavedCommandDomain::LocalStorePreflight
-            || !wire::selected(context)
+            || !(wire::selected(context)||play_versions::selected(context))
             || !material.matches_context(context)
         {
             return false;
@@ -180,7 +180,7 @@ impl Slot {
         {
             return;
         }
-        let Some(summary) = terminal.current_versions_data(context) else {
+        let Some(summary) = terminal.current_inventory_data(context) else {
             return;
         };
         self.observation = Some(Arc::new(StoreVersionObservation {
@@ -291,57 +291,68 @@ mod tests {
     }
     #[test]
     fn normal_terminal_transport_close_is_not_a_failure_or_receipt() {
-        // Existing inert Session DATA and the ACTUAL terminal/stop handlers.
-        // No runtime, credential, watchdog join or positive receipt is made.
-        let mut input = serde_json::to_value(store_wire::tests::context()).unwrap();
-        input.as_object_mut().unwrap().remove("operation");
-        input["platform"] = serde_json::json!("ios");
-        input["query"] = serde_json::json!(wire::QUERY);
-        let context = store_wire::prepare(&input).unwrap().context();
-        let application = SavedCommandOwner::new(
-            RuntimeConfig::packaged("/unopened-store-version-runtime".into()),
-            SavedCommandDomain::LocalStorePreflight,
-        );
-        let (application, owner) = super::super::tests::active_with_context(
-            application,
-            Context::LocalStorePreflight(context.clone()),
-        );
-        let mut value = store_wire::tests::complete();
-        value["context"] = serde_json::json!(context);
-        value["lifetime"]["commands"] = serde_json::json!(7);
-        value["lifetime"]["commandDispatched"] = serde_json::json!(true);
-        value["result"] = serde_json::json!({"schemaVersion":1,"scope":wire::SCOPE,
-            "findings":[],"limitations":wire::LIMITATIONS,"currentVersions":{
-                "observation":"observed","coverage":wire::COVERAGE,"revision":"a".repeat(64),
-                "counts":{"builds":0,"buildUploads":0,"appStoreVersions":0},"maxBuild":0,
-                "marketingVersion":null,"historicalUniqueness":"not-established"}});
-        let terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
-        assert!(terminal.current_versions_data(&context).is_some());
-        application.inner.accept(
-            &owner,
-            Frame::LocalStorePreflight(store_wire::Frame::Accepted),
-        );
-        application.inner.accept(
-            &owner,
-            Frame::LocalStorePreflight(store_wire::Frame::Terminal(terminal)),
-        );
-        {
+        for android in [false, true] {
+            // Existing inert Session DATA and the ACTUAL terminal/stop handlers.
+            // No runtime, credential, watchdog join or positive receipt is made.
+            let mut input = serde_json::to_value(store_wire::tests::context()).unwrap();
+            input.as_object_mut().unwrap().remove("operation");
+            input["platform"] = serde_json::json!(if android {"android"} else {"ios"});
+            input["query"] = serde_json::json!(if android {play_versions::QUERY} else {wire::QUERY});
+            let context = store_wire::prepare(&input).unwrap().context();
+            let application = SavedCommandOwner::new(
+                RuntimeConfig::packaged("/unopened-store-version-runtime".into()),
+                SavedCommandDomain::LocalStorePreflight,
+            );
+            let (application, owner) = super::super::tests::active_with_context(
+                application,
+                Context::LocalStorePreflight(context.clone()),
+            );
+            let mut value = store_wire::tests::complete();
+            value["context"] = serde_json::json!(context);
+            value["lifetime"]["commands"] = serde_json::json!(if android { 6 } else { 7 });
+            value["lifetime"]["commandDispatched"] = serde_json::json!(true);
+            value["result"] = serde_json::json!({"schemaVersion":1,"scope":wire::SCOPE,
+                "findings":[],"limitations":wire::LIMITATIONS,"currentVersions":{
+                    "observation":"observed","coverage":wire::COVERAGE,"revision":"a".repeat(64),
+                    "counts":{"builds":0,"buildUploads":0,"appStoreVersions":0},"maxBuild":0,
+                    "marketingVersion":null,"historicalUniqueness":"not-established"}});
+            if android {
+                value["result"] = serde_json::json!({"schemaVersion":1,"scope":play_versions::SCOPE,
+                    "findings":[],"limitations":play_versions::LIMITATIONS,"currentVersions":{
+                        "observation":"observed","coverage":play_versions::COVERAGE,"revision":"a".repeat(64),
+                        "counts":{"tracks":0,"releases":0,"versionCodes":0,"bundles":0,"apks":1},
+                        "maxBuild":11000,"marketingVersion":null,"temporaryEdit":"deleted",
+                        "historicalUniqueness":"not-established"}});
+            }
+            let terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
+            assert!(terminal.current_inventory_data(&context).is_some());
+            assert_eq!(terminal.current_versions_data(&context).is_some(), !android);
+            application.inner.accept(
+                &owner,
+                Frame::LocalStorePreflight(store_wire::Frame::Accepted),
+            );
+            application.inner.accept(
+                &owner,
+                Frame::LocalStorePreflight(store_wire::Frame::Terminal(terminal)),
+            );
+            {
+                let r = application.inner.lock();
+                let active = r.active.as_ref().unwrap();
+                assert!(*owner.stop.borrow()); // Actual normal terminal closes input.
+                assert!(active.first_stop.is_none());
+                assert!(!original_veto(active, &owner));
+                assert!(!active.final_join_seen && !owner.watchdog_joined.load(Ordering::SeqCst));
+                assert!(owner.watchdog_return.lock().unwrap().is_none());
+                assert!(r.store_versions.observation.is_none());
+            }
+            // A genuine cancellation still vetoes even though transport STOP was
+            // already true. It does not need a second watch-channel transition.
+            application.inner.stop(&owner, Reason::Cancelled);
             let r = application.inner.lock();
             let active = r.active.as_ref().unwrap();
-            assert!(*owner.stop.borrow()); // Actual normal terminal closes input.
-            assert!(active.first_stop.is_none());
-            assert!(!original_veto(active, &owner));
-            assert!(!active.final_join_seen && !owner.watchdog_joined.load(Ordering::SeqCst));
-            assert!(owner.watchdog_return.lock().unwrap().is_none());
+            assert!(active.first_stop.is_some());
+            assert!(original_veto(active, &owner));
             assert!(r.store_versions.observation.is_none());
         }
-        // A genuine cancellation still vetoes even though transport STOP was
-        // already true. It does not need a second watch-channel transition.
-        application.inner.stop(&owner, Reason::Cancelled);
-        let r = application.inner.lock();
-        let active = r.active.as_ref().unwrap();
-        assert!(active.first_stop.is_some());
-        assert!(original_veto(active, &owner));
-        assert!(r.store_versions.observation.is_none());
     }
 }

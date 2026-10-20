@@ -564,7 +564,7 @@ impl DocumentBinding {
         let binding = github_setup_project_binding(&root)?;
         let template = serde_json::json!({"identityRevision":input.configuration_sha256,"source":review.source,
             "baseVersion":{"name":review.store.context().saved_version.name,"build":review.store.context().saved_version.build},
-            "platforms":["ios"],"policy":review.input.policy(),"storeContextRevision":crate::version_allocation_state_native::ios_inventory::context_digest(review.store.context()).map_err(|_|p::refused())?});
+            "platforms":[review.store.context().platform],"policy":review.input.policy(review.store.context().platform),"storeContextRevision":crate::version_allocation_state_native::play_inventory::current_context_digest(review.store.context()).map_err(|_|p::refused())?});
         let selection = match review.previous {
             Some(previous) => Selection::New {
                 previous_request_sha256: previous,

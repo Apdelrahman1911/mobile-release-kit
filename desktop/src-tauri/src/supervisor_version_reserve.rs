@@ -244,7 +244,7 @@ impl VersionReserveInvocation {
             .port()
             .map_err(|_| BridgeError::cleanup_unknown())?;
         let port = port.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-        let observation = crate::version_allocation_state_native::ios_inventory::observation_data(
+        let observation = crate::version_allocation_state_native::play_inventory::current_observation_data(
             &self.store_observation,
             &port,
         )

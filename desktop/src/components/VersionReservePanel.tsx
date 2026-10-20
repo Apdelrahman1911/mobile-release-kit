@@ -10,9 +10,9 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
   if (compact && !busy) return null;
   const configure = (value: Partial<typeof state.options>) => controller.configure({ ...state.options, ...value });
   return <section className={compact ? 'notice notice-warning' : 'card'} aria-labelledby={`${id}-title`}>
-    <h3 id={`${id}-title`}>{compact ? 'Original version reservation' : 'Automatic iOS version · optional'}</h3>
+    <h3 id={`${id}-title`}>{compact ? 'Original version reservation' : 'Automatic version · optional'}</h3>
     {!compact && <>
-      <p>Manual editing stays the default. This option uses the connected shared counter and your current iOS Store inventory; it does not build or upload an app.</p>
+      <p>Manual editing stays the default. This option uses the connected shared counter and your current Android or iOS Store inventory; it does not build or upload an app.</p>
       <label><input type="checkbox" checked={state.enabled} disabled={!!busy} onChange={(e) => controller.setEnabled(e.target.checked)} /> Use a shared reservation for this version</label>
       {state.enabled && <fieldset disabled={!!busy}>
         <legend>What should change?</legend>
@@ -28,7 +28,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
         <p className="save-note">Leave this unchecked to resume the same candidate. Failed or uncertain requests never get a new number automatically. Earlier numbers are never recycled.</p>
         <label><input type="checkbox" checked={state.options.acknowledgeLimitations} onChange={(e) => configure({ acknowledgeLimitations: e.target.checked })} />
           I understand that current Store listings are not a complete history and that uploaders outside this shared counter can still conflict.</label>
-        <p className="save-note">Read “Current iOS versions” first and connect the shared counter in GitHub. Initial support is iOS-only, a checked-out branch, and whole-number builds up to 9,999. Missing, stale, partial or unsupported Store data stops this action; it never falls back to a guessed floor.</p>
+        <p className="save-note">Check “Current Play versions” or “Current App Store versions” first and connect the shared counter in GitHub. One enabled platform and a checked-out branch are supported: Android builds up to 2,100,000,000; iOS builds up to 9,999. Shared Android+iOS sources still need paired native Store observations; use manual versioning for those projects. Missing, stale, partial or unsupported Store data stops this action; it never falls back to a guessed floor.</p>
       </fieldset>}
     </>}
     <p role={state.unknown ? 'alert' : 'status'}>{state.unknown ? 'Original outcome or cleanup unconfirmed' : state.pending === 'review' ? 'Reading the exact saved source…' :

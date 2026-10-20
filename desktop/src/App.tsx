@@ -53,6 +53,7 @@ import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { VersionEnrollmentController } from './versionEnrollmentController.ts';
 import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
 import { VersionReserveController } from './versionReserveController.ts';
+import { versionReserveProjectIssue } from './versionReserve.ts';
 import { VersionReservePanel } from './components/VersionReservePanel.tsx';
 import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import { AgentIdentityActionController } from './agentIdentityActions.ts';
@@ -777,6 +778,9 @@ export function App() {
     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
       return 'Finish the prepared GitHub review before reserving a version.';
     const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
+    const saved = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
+    const platformIssue = versionReserveProjectIssue(saved ? localStoreProjectObservation(saved, releaseVersion.getSnapshot()) : null);
+    if (platformIssue) return platformIssue;
     return current?.session?.state === 'connected' && current.session.projectId === selected &&
       connection.context?.projectId === selected && current.account.state === 'observed' && current.repository.state === 'observed'
       ? null : 'Connect the enrolled shared counter with the intended GitHub account first.';

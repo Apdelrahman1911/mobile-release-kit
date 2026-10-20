@@ -131,8 +131,8 @@ impl Capture {
             .map_err(|_| unknown())?;
         template["projectId"] = json!(port.authority.project_id);
         need(
-            template["policy"]["schemaVersion"] == 2
-                && template["platforms"] == json!(["ios"])
+            ((template["policy"]["schemaVersion"] == 2 && template["platforms"] == json!(["ios"]))
+                 || (template["policy"]["schemaVersion"] == 3 && template["platforms"] == json!(["android"])))
                 && template["source"]["ref"]
                     .as_str()
                     .is_some_and(|v| v.starts_with("refs/heads/") && full_ref(v)),

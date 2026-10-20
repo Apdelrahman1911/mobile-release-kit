@@ -16,7 +16,6 @@ import time
 
 from . import _desktop_version_allocation_protocol as dialogue_wire
 from . import _desktop_version_allocation_source_protocol as wire
-from . import ios_store_versions as inventory
 from . import release_version_edit as edit
 from . import version_allocation as allocation
 from . import version_policy as policy
@@ -33,7 +32,7 @@ class HandoffData:
     reservation: allocation.Reservation
     authority: allocation.AuthorityRegistration
     checkpoint: allocation.Checkpoint
-    observation: inventory.CurrentInventory
+    observation: allocation.CurrentInventory
     clock: dict
 
     @classmethod
@@ -47,8 +46,8 @@ class HandoffData:
         request = reservation.request
         authority = allocation.AuthorityRegistration.parse(row["authority"])
         checkpoint = allocation.Checkpoint.parse(row["checkpoint"])
-        observation = inventory.CurrentInventory.parse(row["observation"])
-        wire.require(request.version_policy.schema_version == 2 and request.enabled_platforms == ("ios",)
+        observation = allocation.current_inventory_policy(request).CurrentInventory.parse(row["observation"])
+        wire.require(request.version_policy.schema_version in {2, 3}
                      and source.matches(request.source) and authority.project_id == request.project_id
                      and authority.protected_branch and checkpoint.sequence >= reservation.sequence
                      and (checkpoint.sequence != reservation.sequence or checkpoint.head_sha256 == reservation.sha256)
@@ -362,7 +361,7 @@ class ReservedVersionEdit:
         request = self.data.reservation.request
         wire.require(edit._authentic_checkout(checkout) and checkout._lease is self.engine.lease
                      and checkout.selection.source == self.data.source.version_path
-                     and checkout.enabled_platforms == ("ios",)
+                     and checkout.enabled_platforms == self.data.reservation.request.enabled_platforms
                      and checkout.baseline["savedConfig"]["sha256"] == request.source.configuration_sha256
                      and checkout.baseline["savedVersion"].get("sha256") == request.source.version_sha256)
         self.lease = self.engine.lease
@@ -379,8 +378,8 @@ class ReservedVersionEdit:
 
     def apply(self, plan):
         wire.require(plan is self.plan and edit._authentic_plan(plan) and self.outcome is None)
-        inventory.check_reserved(self.data.reservation.version, self.data.reservation.request.version_policy,
-            enabled=("ios",), identity_revision=self.data.reservation.request.identity_revision,
+        allocation.current_inventory_policy(self.data.reservation.request).check_reserved(self.data.reservation.version, self.data.reservation.request.version_policy,
+            enabled=self.data.reservation.request.enabled_platforms, identity_revision=self.data.reservation.request.identity_revision,
             context_revision=self.data.reservation.request.store_context_revision,
             observations=(self.data.observation,), now=int(time.time()))
         with self.source("apply") as source:

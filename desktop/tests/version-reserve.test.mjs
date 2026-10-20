@@ -40,7 +40,7 @@ test('fixed port emits only four raw commands; no input can choose candidate/sou
 });
 test('strict status rejects malformed, contradictory, accessor and bounded-array data',()=>{
   for(const phase of ['idle','reading','reviewed','reserving','reserved','refused','cleanup-unknown']) assert.ok(parseVersionReserveStatus(frame(phase,phase==='idle'?0:1)),phase);
-  for(const invalid of [frame('reserved',1,{reason:'reservation-refused'}),frame('reserved',1,{reservation:{...reserved,build:10000}}),
+  for(const invalid of [frame('reserved',1,{reason:'reservation-refused'}),frame('reserved',1,{reservation:{...reserved,build:2_100_000_001}}),
     frame('reserved',1,{reservation:{...reserved,name:'1.2.4\n'}}),frame('reviewed',1,{review:null}),frame('reserved',1,{token:'not-secret'}),
     frame('idle',0,{reservation:reserved}),frame('reviewed',1,{revision:0xffff_ffff})])assert.equal(parseVersionReserveStatus(invalid),null);
   let called=0;const raw=frame('reserved');Object.defineProperty(raw,'reservation',{enumerable:true,get(){called++;return reserved;}});

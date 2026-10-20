@@ -33,6 +33,11 @@ from .stores import _fastlane_probe_commands, online_preflight_findings
 from . import apple_provisioning_bundle_read as bundle_read
 from . import apple_provisioning_profile_read as profile_read
 from . import ios_store_versions as store_versions
+from . import android_store_versions as play_versions
+
+
+def _captured_query(context):
+    return bundle_read.selected_read(context) or play_versions.selected_query(context)
 
 
 class _Refused(Exception):
@@ -90,7 +95,7 @@ class StorePreflightRun:
 
     def bind_scratch(self, scratch):
         layouts = ("online-runner", "store-selection", "store-selection", "online-runner", "online-readback")
-        if bundle_read.selected_read(self.request.context):
+        if _captured_query(self.request.context):
             layouts = layouts[:4]  # Private capture, never a Store-access output file.
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
                 and len(self.scratches) < len(layouts) and scratch.layout == layouts[len(self.scratches)]
@@ -224,8 +229,9 @@ class StorePreflightRun:
         self.checkpoint()
         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
                 and self._next_command <= self._lane_index and type(capture) is bool)
-        query = bundle_read.selected_read(self.request.context)
-        final = (bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
+        query = _captured_query(self.request.context)
+        final = (play_versions.fixed_argv(runtime.tooling_root) if play_versions.selected_query(self.request.context) else
+                 bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
                  ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
         expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
         index = self._next_command
@@ -250,15 +256,16 @@ class StorePreflightRun:
         require(self._pending is not None and not self._command_claimed
                 and tuple(argv) == self._pending_argv and capture is self._pending_capture
                 and (type(evidence) is CommandCallEvidence if self._pending == self._lane_index
-                     and not bundle_read.selected_read(self.request.context) else evidence is None))
+                     and not _captured_query(self.request.context) else evidence is None))
         self._command_claimed = True
 
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
-        query = self._pending == self._lane_index and bundle_read.selected_read(self.request.context)
+        query = self._pending == self._lane_index and _captured_query(self.request.context)
         maximum = 60 if self._pending < self._lane_index or query else 900
-        limit = (store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
+        limit = (play_versions.FRAME_LIMIT if query and play_versions.selected_query(self.request.context) else
+                 store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
                  else bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
         return min(timeout, maximum), min(output_limit, limit)
 
@@ -294,7 +301,17 @@ class StorePreflightRun:
                         with _selected_store_material(config, values=values, platforms=(platform,),
                                                       invocation=invocation, scratch_parent=home._path) as material:
                             findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
-                            if bundle_read.selected_read(self.request.context):
+                            if play_versions.selected_query(self.request.context):
+                                observation = play_versions.unavailable("not-checked")
+                                if not play_versions.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                    findings.append(Finding("store.online.gate", Status.BLOCKED,
+                                        "Configure the saved Android app identity and selected service-account key.", category="store-access"))
+                                else:
+                                    extra, observation = play_versions.read_saved_versions(self, config, material)
+                                    findings.extend(extra)
+                                self._source_post(); self._received_post()
+                                self.report = play_versions.project_result(findings, observation)
+                            elif bundle_read.selected_read(self.request.context):
                                 profiles = profile_read.selected_query(self.request.context)
                                 versions = store_versions.selected_query(self.request.context)
                                 observation = (store_versions.unavailable("not-checked") if versions else

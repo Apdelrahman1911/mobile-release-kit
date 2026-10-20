@@ -1,4 +1,4 @@
-//! Weak same-assignment witness for a joined current-iOS-inventory read.
+//! Weak same-assignment witness for a joined current single-platform inventory read.
 //! Child of the original material module: no key bytes, new loan or authority.
 use super::*;
 use std::sync::Weak;
@@ -16,14 +16,14 @@ impl SelectedStoreMaterial {
         let Some(StoreCommand::Access(context)) = &self.command else {
             return Err(refused());
         };
-        if !wire::store_versions::selected(context) {
+        if !(wire::store_versions::selected(context)||wire::play_versions::selected(context)) {
             return Ok(None);
         }
         if !self.matches(
             context,
             self.native.registry_generation,
             &self.native.project,
-        ) || apple_parts(&self.payload).is_none()
+        ) || !inventory_material(context.platform, &self.payload)
             || self.supplemental.iter().any(Option::is_some)
         {
             return Err(refused());
@@ -35,6 +35,9 @@ impl SelectedStoreMaterial {
             context: context.clone(),
         }))
     }
+}
+fn inventory_material(platform:wire::AccessPlatform,payload:&Payload)->bool {
+    match platform {wire::AccessPlatform::Ios=>apple_parts(payload).is_some(),wire::AccessPlatform::Android=>bytes(payload).is_some()}
 }
 impl StoreVersionMaterial {
     pub(crate) fn matches_context(&self, context: &wire::Context) -> bool {
@@ -54,7 +57,7 @@ impl StoreVersionMaterial {
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &native))
             && native.execution_mode == commands::ExecutionMode::Local
-            && native.platform == Platform::Ios
+            && native.platform == match self.context.platform {wire::AccessPlatform::Ios=>Platform::Ios,wire::AccessPlatform::Android=>Platform::Android}
             && matches!(native.purpose, Purpose::Store | Purpose::Full)
             && native.project_id == self.context.project_id
             && native.registry_generation == registration
@@ -62,9 +65,9 @@ impl StoreVersionMaterial {
             && native.revision == self.context.credential_context_revision
             && self.key.id.0 == self.context.record_id
             && self.key.revision == self.context.record_revision
-            && github_secret::assigned(state, &self.key, Kind::AscP8, &native)
+            && github_secret::assigned(state, &self.key, match self.context.platform {wire::AccessPlatform::Ios=>Kind::AscP8,wire::AccessPlatform::Android=>Kind::GoogleServiceAccount}, &native)
                 .is_some_and(|assigned| Arc::ptr_eq(assigned, &payload))
-            && apple_parts(&payload).is_some()
+            && inventory_material(self.context.platform,&payload)
     }
     pub(crate) fn backing_bytes() -> usize {
         // A Weak may keep its original Arc allocation, but never the dropped
@@ -157,4 +160,44 @@ mod tests {
         assert!(weak.upgrade().is_none());
         assert!(!witness.current(&state, 7, &root));
     }
+    #[test]
+    fn android_inventory_weak_material_requires_same_google_assignment_and_original_context() {
+        // Existing format-only material fixture, not a usable account or native receipt.
+        let mut state = super::super::tests::apple_model();
+        Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform = Platform::Android;
+        let raw = super::super::tests::sample();
+        let observation = credential_format::inspect(credential_format::FileKind::GoogleServiceAccount,
+            &raw, &mut || false).ok().unwrap();
+        assert!(observation.is_observed());
+        state.records[0].payload = Arc::new(Payload { kind: Kind::GoogleServiceAccount, fields: None,
+            material: Some(Arc::new(Material { observation,
+                origin: MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(raw)) })) });
+        state.assignments[0].kind = Kind::GoogleServiceAccount;
+        let mut input = serde_json::json!(wire::tests::context());
+        input.as_object_mut().unwrap().remove("operation");
+        input["projectId"] = serde_json::json!("inert-project");
+        input["platform"] = serde_json::json!("android");
+        input["query"] = serde_json::json!(wire::play_versions::QUERY);
+        input["credentialContextRevision"] = serde_json::json!(2);
+        input["recordId"] = serde_json::json!("a".repeat(32));
+        input["recordRevision"] = serde_json::json!(1);
+        let context = wire::prepare(&input).unwrap().context();
+        let root = state.context.as_ref().unwrap().project.clone();
+        let loan = borrow_preflight_material(&state, &context, 7, &root).unwrap();
+        let witness = loan.version_inventory_witness().unwrap().unwrap();
+        assert!(witness.current(&state, 7, &root));
+        assert!(!witness.current(&state, 8, &root));
+        state.assignments[0].record_revision += 1;
+        assert!(!witness.current(&state, 7, &root));
+        state.assignments[0].record_revision -= 1;
+        state.assignments[0].kind = Kind::AscP8;
+        assert!(!witness.current(&state, 7, &root));
+        state.assignments[0].kind = Kind::GoogleServiceAccount;
+        assert!(witness.current(&state, 7, &root));
+        drop(loan);
+        state.records.clear(); state.assignments.clear();
+        assert!(witness.payload.upgrade().is_none());
+        assert!(!witness.current(&state, 7, &root));
+    }
+
 }

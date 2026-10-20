@@ -9,6 +9,7 @@ from ._desktop_android_build_protocol import saved_version
 from . import apple_provisioning_bundle_read as bundle_read
 from . import apple_provisioning_profile_read as profile_read
 from . import ios_store_versions as store_versions
+from . import android_store_versions as play_versions
 
 PROTOCOL = "mrk-local-store-preflight/1"
 CONSENT = "local-android-store-access-v1"
@@ -39,8 +40,9 @@ def context(value, *, apple_access=False, bundle_query=False):
     require(type(apple_access) is bool and type(bundle_query) is bool)
     query_keys = {"query"} if type(value) is dict and "query" in value else set()
     # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
-    require(not query_keys or apple_access and bundle_query and value.get("platform") == "ios"
-            and value["query"] in (bundle_read.QUERY, profile_read.QUERY, store_versions.QUERY))
+    require(not query_keys or apple_access and bundle_query and (
+        value.get("platform") == "ios" and value["query"] in (bundle_read.QUERY, profile_read.QUERY, store_versions.QUERY)
+        or value.get("platform") == "android" and value["query"] == play_versions.QUERY))
     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
                          "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
@@ -101,7 +103,8 @@ def project_result(findings, *, platform="android"):
 
 def validate_result(value, *, platform="android", query=None):
     if query is not None:
-        require(platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
+        require(platform == "android" and query == play_versions.QUERY and play_versions.valid_result(value)
+                or platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
                 or query == profile_read.QUERY and profile_read.valid_result(value)
                 or query == store_versions.QUERY and store_versions.valid_result(value)))
         return

@@ -1,3 +1,4 @@
+import type { LocalStoreProject } from './localStorePreflight.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 
 // Public DATA only. Actual source/account/Store/candidate/namespace originals
@@ -40,7 +41,7 @@ export function parseReservedVersion(raw: unknown): ReservedVersion | null {
     return exact(v, ['id', 'candidateId', 'name', 'build']) && reserveId(v.id) && typeof v.candidateId === 'string' &&
       v.candidateId.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v.candidateId) &&
       typeof v.name === 'string' && v.name.length <= 64 && !/[^0-9.]/.test(v.name) && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v.name) &&
-      integer(v.build, 9999) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build }) : null;
+      integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build }) : null;
   } catch { return null; }
 }
 export const reserveActive = (s: VersionReserveStatus | null): boolean => !!s && ['reading', 'reserving', 'cleanup-unknown'].includes(s.phase);
@@ -85,6 +86,16 @@ export function createVersionReservePort(invoke: (name: string, bytes: Uint8Arra
     reserve: (projectId: string, reviewId: string) => reserveProject(projectId) && reserveId(reviewId) ? send('version_reserve_start', { projectId, reviewId }) : invalid(),
     cancel: (operationId: string) => reserveId(operationId) ? send('version_reserve_cancel', { operationId }) : invalid(),
   });
+}
+// UI refusal/help only; native still proves the same saved source and original Store receipt.
+export function versionReserveProjectIssue(project: LocalStoreProject | null): string | null {
+  if (!project) return 'Choose a saved native Android or iOS project.';
+  if (project.inputIssue) return project.inputIssue;
+  if (project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input review before reserving a version.';
+  const platforms = project.versionPlatforms;
+  if (platforms?.length === 2 && platforms[0] === 'android' && platforms[1] === 'ios') return 'Shared Android+iOS version sources need paired current Store observations and are not supported here yet. Keep manual versioning.';
+  return platforms?.length === 1 && (platforms[0] === 'android' || platforms[0] === 'ios') ? null :
+    'Read the current saved configuration and version for exactly one enabled platform.';
 }
 export function versionReserveHelp(reason: VersionReserveStatus['reason'] | null): string {
   switch (reason) {
