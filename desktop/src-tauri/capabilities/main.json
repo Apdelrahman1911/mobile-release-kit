@@ -7,6 +7,9 @@
   "permissions": [
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+    "allow-agent-android-build-access",
+    "allow-allow-agent-android-build",
+    "allow-revoke-agent-android-build",
     "allow-app-info", "allow-reveal-installation", "allow-installation-status", "allow-inspect-installation", "allow-cancel-installation",
     "allow-installation-preparation-status", "allow-prepare-installation-quit",
     "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",

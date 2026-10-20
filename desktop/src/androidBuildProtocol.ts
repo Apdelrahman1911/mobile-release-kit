@@ -1,3 +1,4 @@
+import { sameAgentAndroidBuildOrigin, validAgentAndroidBuildOrigin } from './agentAndroidBuildOrigin.ts';
 import { candidateInputs, LOCAL_CANDIDATE_CONSENT as ANDROID_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
 import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
 // Renderer-consumed closed DATA only. The four requests are original UTF-8 Raw
@@ -351,13 +352,16 @@ function disposition(value: unknown): value is AndroidBuildDisposition {
     oneOf(value.artifacts, ['not-created', 'removed', 'retained-local-result', 'retained-incomplete', 'unknown']);
 }
 function operation(value: unknown): value is AndroidBuildOperation {
-  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
+  if ((!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) &&
+       !keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', 'agentAndroidBuild'])) ||
       !identity(value) || !context(value.context) || !oneOf(value.phase, phases) || typeof value.intentUsable !== 'boolean' ||
       !(value.outcome === null || oneOf(value.outcome, outcomes)) || !oneOf(value.reason, Object.keys(androidBuildReasonText)) ||
       !(value.stage === null || oneOf(value.stage, ANDROID_BUILD_STAGES)) || !(value.activity === null || activity(value.activity)) ||
       !(value.disposition === null || disposition(value.disposition)) || !(value.result === null ||
         (value.context.operation === 'android-candidate-inputs' ? candidateResult(value.result, value.operationId) : result(value.result)))) return false;
   const op = value as unknown as AndroidBuildOperation;
+  if (Object.hasOwn(value, 'agentAndroidBuild') && (!validAgentAndroidBuildOrigin(value.agentAndroidBuild) ||
+      op.context.operation !== 'android-build-inspect' || op.context.artifactValidation.mode !== 'structure-and-version')) return false;
   const candidate = op.context.operation === 'android-candidate-inputs';
   if (candidate ? !/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(op.operationId) :
       ['journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'].includes(op.reason)) return false;
@@ -426,7 +430,7 @@ export function sameAndroidBuildIdentity(a: AndroidBuildIdentity | null, b: Andr
   return !!a && !!b && a.operationId === b.operationId && a.ownerGeneration === b.ownerGeneration;
 }
 export function androidBuildOperationProgress(a: AndroidBuildOperation, b: AndroidBuildOperation): boolean {
-  if (!sameAndroidBuildIdentity(a, b) || !sameAndroidBuildData(a.context, b.context)) return false;
+  if (!sameAndroidBuildIdentity(a, b) || !sameAndroidBuildData(a.context, b.context) || !sameAgentAndroidBuildOrigin(a.agentAndroidBuild, b.agentAndroidBuild)) return false;
   if (a.phase === 'terminal') return sameAndroidBuildData(a, b);
   if (a.phase === 'unknown' && b.phase !== 'unknown' || !a.intentUsable && b.intentUsable) return false;
   const stageIndex = (stage: AndroidBuildStage | null) => stage === null ? -1 : ANDROID_BUILD_STAGES.indexOf(stage);

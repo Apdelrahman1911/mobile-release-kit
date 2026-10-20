@@ -49,6 +49,7 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
     <div className="inline-heading"><h3>Local AAB observation · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This build only'}</Badge></div>
     <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
     <AndroidBuildDetails state={state} />
+    {op.agentAndroidBuild && <p>CLI request <code>{op.agentAndroidBuild.requestId}</code> · original operation <code>{op.operationId}</code>. This is the same completed build, not an invitation to run it again.</p>}
     {candidate && (historical ? <p className="review-caution">This candidate belongs to an earlier context. Verify it in the correct project's Local release history before using its files.</p> : <div className="session-review" aria-label="Created local candidate inputs">
       <h4>Local candidate inputs kept · not submitted</h4>
       <p>Candidate <code>{candidate.operationId}</code> · source commit <code>{candidate.sourceCommit}</code>.</p>
@@ -130,6 +131,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
   </section>;
   const selected = project?.selection;
   return <section className="card offline-preflight" aria-labelledby={label}>
+    {op?.agentAndroidBuild && <p className="review-caution">CLI-authorized original <code>{op.operationId}</code> · request <code>{op.agentAndroidBuild.requestId}</code>. This panel observes and can stop it; Start belongs to that one CLI request. Do not prepare or run a replacement.</p>}
     <SectionHeading title="Build Android app" description="Build the selected saved configuration, then inspect its AAB. This does not publish a release.">
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
     </SectionHeading>

@@ -6,7 +6,9 @@ use crate::android_build_protocol::{Availability, Profile};
 fn empty_state() -> DocumentState {
     DocumentState {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
+        agent_local_check_grant: None,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
         maintenance: macos_maintenance::Closure::default(),

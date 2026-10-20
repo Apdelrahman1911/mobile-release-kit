@@ -1275,6 +1275,8 @@ pub(crate) enum Availability { Available, Busy, Shutdown, CleanupUnknown, Docume
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Projection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_android_build: Option<crate::agent_android_build::Query>,
     pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context,
     pub(crate) phase: Phase, pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason,
     pub(crate) stage: Option<Stage>, pub(crate) activity: Option<Activity>, pub(crate) disposition: Option<Disposition>,
@@ -1282,6 +1284,8 @@ pub(crate) struct Projection {
 }
 impl Projection {
     fn valid(&self) -> bool {
+        if self.agent_android_build.is_some() && (self.context.operation != Operation::AndroidBuildInspect || self.context.signed()
+            || self.context.artifact_validation.mode != ValidationMode::StructureAndVersion) { return false; }
         if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
             || self.context.candidate() && !candidate_id(&self.operation_id)
             || !self.context.candidate() && self.reason.candidate_only()
@@ -1334,7 +1338,8 @@ pub(crate) struct Status {
     pub(crate) operation: Option<Projection>,
 }
 fn projection_shape(value: &Value) -> bool {
-    keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result"])
+    (keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result"])
+        || keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result", "agentAndroidBuild"]) && value.get("agentAndroidBuild").is_some_and(|v| !v.is_null()))
         && value.get("activity").is_some_and(|v| v.is_null() || activity_shape(v))
         && value.get("result").is_some_and(|v| v.is_null() || result_value_shape(v))
 }

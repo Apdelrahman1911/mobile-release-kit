@@ -89,6 +89,7 @@ export interface AndroidBuildDisposition {
 // native terminal finality can publish the paired observations; completion may
 // still contain FAIL findings and never means release approval.
 export interface AndroidBuildOperation extends AndroidBuildIdentity {
+  readonly agentAndroidBuild?: import('./agentAndroidBuildOrigin.ts').AgentAndroidBuildOrigin;
   context: AndroidBuildContext; phase: AndroidBuildPhase; intentUsable: boolean; outcome: AndroidBuildOutcome | null;
   reason: AndroidBuildReason; stage: AndroidBuildStage | null; activity: AndroidBuildActivity | null;
   disposition: AndroidBuildDisposition | null; result: AndroidBuildPublishedResult | null;

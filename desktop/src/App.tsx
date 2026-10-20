@@ -36,6 +36,8 @@ import { ExternalProjectObservationController } from './externalProjectObservati
 import { CliReadAccessController } from './cliReadAccessController.ts';
 import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
 import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
+import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
+import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
 import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { VersionEnrollmentController } from './versionEnrollmentController.ts';
 import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
@@ -995,6 +997,15 @@ export function App() {
   // App-owned pending calls survive the Advanced panel being hidden. Current
   // context is also sampled again synchronously inside the Allow event.
   useEffect(() => { agentLocalChecks.syncContext(); });
+  const [agentAndroidBuild] = useState(() => new AgentAndroidBuildPermission(() => {
+    const service = cliService.current;
+    return { api: service.api?.mode === 'native' ? service.api.agentAndroidBuild ?? null : null,
+      project: androidBuildControllerRef.current?.agentBuildApproval() ?? null,
+      blocked: service !== pathService.current || connectionPicking.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ??
+        externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
+    };
+  }));
+  useEffect(() => { agentAndroidBuild.syncContext(); });
   const [externalObserver] = useState(() => new ExternalProjectObservationController({
     current: () => {
       const current = workspaceRef.current;
@@ -1879,7 +1890,8 @@ export function App() {
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /></div>}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
+            <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}

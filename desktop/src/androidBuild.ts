@@ -1,3 +1,6 @@
+import { canObserveAgentAndroidBuild } from './agentAndroidBuildOrigin.ts';
+import { copyAndroidBuildApproval } from './agentAndroidBuild.ts';
+import type { AndroidBuildApproval } from './agentAndroidBuild.ts';
 // App-owned coordination only, following OfflinePreflightController's original
 // observer/one-Start lifetime. A view, Promise or saved comparison is not native
 // custody, qualification, cancellation settlement or a release approval.
@@ -240,6 +243,8 @@ export class AndroidBuildController {
     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
   private readonly context: Context;
   private observer: Observer | null = null;
+  private pendingGuiSubmissions = 0;
+  private deferredAgentObservation: { observer: Observer; status: AndroidBuildStatus } | null = null;
   private attempt: Attempt | null = null;
   private cancelClaim: AndroidBuildIdentity | null = null;
   private catalogAttempt: CatalogAttempt | null = null;
@@ -467,7 +472,7 @@ export class AndroidBuildController {
   }
   private originCandidate(attempt: Attempt, status: AndroidBuildStatus): boolean {
     const op = status.operation;
-    return !!op && status.statusRevision > attempt.after && !sameAndroidBuildIdentity(op, attempt.previous) &&
+    return !!op && !op.agentAndroidBuild && status.statusRevision > attempt.after && !sameAndroidBuildIdentity(op, attempt.previous) &&
       sameAndroidBuildData(op.context, attempt.binding.context) && (!attempt.identity || sameAndroidBuildIdentity(op, attempt.identity));
   }
   private reconcile(observer: Observer): void {
@@ -501,6 +506,21 @@ export class AndroidBuildController {
       this.fail({ code: 'android_build_protocol' }, true); return null;
     }
     if (a && b && sameAndroidBuildIdentity(a, b) && !androidBuildOperationProgress(a, b)) { this.fail({ code: 'android_build_protocol' }, true); return null; }
+    if (canObserveAgentAndroidBuild(previous, status, false) && this.pendingGuiSubmissions !== 0) {
+      // Keep one bounded native observation until the original GUI invoke
+      // actually returned; terminal DATA never discards an in-flight caller.
+      const held = this.deferredAgentObservation?.status;
+      if (!held || held.operation && b && sameAndroidBuildIdentity(held.operation, b) &&
+          status.statusRevision > held.statusRevision && androidBuildOperationProgress(held.operation, b)) this.deferredAgentObservation = { observer, status };
+      return status;
+    }
+    const agentObservation = canObserveAgentAndroidBuild(previous, status,
+      this.pendingGuiSubmissions !== 0 || this.state.pending !== null || this.state.originalUnconfirmed || !!this.attempt && !this.attempt.settled);
+    if (agentObservation) {
+      this.attempt = null; this.clearTimer(); this.cancelClaim = null;
+      // Observe/STOP only; no GUI Start consent is reconstructed.
+      this.update({ consent: null, pending: null, originalUnconfirmed: false, historical: true, cancelClaimed: null });
+    }
     const attempt = this.attempt;
     if (attempt?.observer === observer && attempt.prepareSent) {
       if (attempt.identity ? !sameAndroidBuildIdentity(attempt.identity, b) :
@@ -518,7 +538,7 @@ export class AndroidBuildController {
       if (selected && !sameAndroidBuildData({ module: selected.module, variant: selected.variant, applicationId: selected.applicationId }, attempt.binding.selection)) {
         this.fail({ code: 'android_build_protocol' }, true); return null;
       }
-    } else if (previous && !sameAndroidBuildIdentity(a ?? null, b) && (a !== null || b !== null)) {
+    } else if (!agentObservation && previous && !sameAndroidBuildIdentity(a ?? null, b) && (a !== null || b !== null)) {
       this.fail({ code: 'android_build_protocol' }, true); return null; // Unsolicited foreign IDs cannot authorize a run.
     }
     if (status.statusRevision === ANDROID_BUILD_COUNTER_MAX) this.retire({ generationLost: true });
@@ -529,6 +549,13 @@ export class AndroidBuildController {
       this.reconcile(observer); this.expireConsent();
     }
     return status;
+  }
+  private returnedGuiSubmission(): void {
+    if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
+    const held = this.deferredAgentObservation;
+    if (!held || this.pendingGuiSubmissions !== 0) return;
+    this.deferredAgentObservation = null;
+    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
   }
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
   async checkStatus(): Promise<void> {
@@ -1565,6 +1592,17 @@ export class AndroidBuildController {
       'Local upload-key signing requires the separately admitted Apple-silicon or Intel Mac tool owner; Linux and Windows signing are not qualified by this action.') : null) ?? (this.artifactValidation() === null ?
       'Save android.uploadCertificateSha256, then refresh the saved configuration and version before reviewing upload-signature inspection.' : null) ?? this.context.otherOperationReason();
   }
+  /** Same saved-input/catalog builder and existing busy gates. This is UI
+   * comparison DATA; the native grant independently checks original readers. */
+  agentBuildApproval(): AndroidBuildApproval | null {
+    this.syncProject();
+    const project = this.state.project, toolchainSelection = this.state.catalogStatus?.selected;
+    if (this.prepareReason() || this.pendingGuiSubmissions !== 0 || !project || project.dirtyDraft || !project.savedConfig || !project.savedVersion ||
+        !toolchainSelection || this.state.buildMode !== 'unsigned' || this.state.retainCandidateInputs || this.state.verifyUploadSignature) return null;
+    return copyAndroidBuildApproval({ input: { projectId: project.projectId, draftRevision: project.draftRevision,
+      baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
+      artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } }, toolchainSelection });
+  }
   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? androidBuildAvailabilityText.busy : null);
   startReason = (): string | null => {
@@ -1613,6 +1651,7 @@ export class AndroidBuildController {
     if (!this.matches(attempt) || this.commonReason()) {
       attempt.prepareSent = false; attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false }); return;
     }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const value = await observer.api.prepareAndroidBuild(request);
       if (!observer.active || this.attempt !== attempt) return;
@@ -1637,7 +1676,7 @@ export class AndroidBuildController {
           attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false, consent: null, error: safe });
         } else this.fail(error, safe.code !== 'android_build_protocol');
       }
-    }
+    } finally { this.returnedGuiSubmission(); }
   }
   setAcknowledged(operationId: string, ownerGeneration: string, acknowledged: boolean): void {
     this.syncProject(); this.expireConsent();
@@ -1652,6 +1691,7 @@ export class AndroidBuildController {
     attempt.startSent = true; attempt.startAfter = attempt.observer.status?.statusRevision ?? 0; this.clearTimer();
     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null }); this.syncProject();
     if (!this.matches(attempt) || this.commonReason()) { this.retire(); return; }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const value = await attempt.observer.api.startAndroidBuild({ operationId, ownerGeneration, consentVersion: attempt.binding.context.operation === 'android-candidate-inputs' ? ANDROID_CANDIDATE_CONSENT : attempt.binding.context.operation === 'android-build-sign' ? ANDROID_BUILD_SIGNED_CONSENT : ANDROID_BUILD_CONSENT });
       if (!attempt.observer.active || this.attempt !== attempt) return;
@@ -1661,6 +1701,7 @@ export class AndroidBuildController {
       }
       this.receive(attempt.observer, status);
     } catch (error) { if (attempt.observer.active && this.attempt === attempt && !attempt.settled) this.fail(error); }
+    finally { this.returnedGuiSubmission(); }
   }
   canCancel(): boolean {
     const observer = this.observer, op = observer?.status?.operation;

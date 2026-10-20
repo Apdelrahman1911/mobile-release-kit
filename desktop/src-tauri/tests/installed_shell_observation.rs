@@ -21,6 +21,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
 #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
+#[path = "../src/agent_android_build.rs"] mod agent_android_build;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/version_allocation_state_native.rs"] mod version_allocation_state_native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

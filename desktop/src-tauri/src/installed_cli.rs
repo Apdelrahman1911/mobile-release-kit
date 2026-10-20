@@ -8,6 +8,8 @@ use std::{ffi::OsString, io::Write, path::PathBuf};
 mod identity;
 #[path = "installed_cli_local_checks.rs"]
 mod local_checks;
+#[path = "installed_cli_android_build.rs"]
+mod android_build;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -22,6 +24,10 @@ Usage:\n\
   mrk local-check PROJECT_ID OBSERVATION_REVISION [--json]\n\
   mrk local-check-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk local-check-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk android-build-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
+  mrk android-build-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
+  mrk android-build-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk android-build-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk --help\n\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
 For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
@@ -33,7 +39,9 @@ Stdin is one closed JSON object: selection {platform,target,project}, desiredIde
 Local checks require a separate one-use 15-minute project permission in Desktop.\n\
 Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
 Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
-There is no direct CLI Apply, build, credential or publishing route.\n";
+Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
+The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
+There is no direct CLI Apply, toolkit signing, credential or publishing route.\n";
 
 struct Options { request: p::Request, json: bool }
 enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
@@ -78,6 +86,12 @@ const LOCAL_CHECK_COMMANDS: [CommandCapability; 3] = [
     CommandCapability { command: "local-check-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same request and original operation without reexecution." },
     CommandCapability { command: "local-check-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request STOP of the same original; cancellation is not settlement." },
 ];
+const ANDROID_BUILD_COMMANDS: [CommandCapability; 4] = [
+    CommandCapability { command: "android-build-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved Android build; no Start or GO." },
+    CommandCapability { command: "android-build-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
+    CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
+    CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
+];
 const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
     CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose an identity change for explicit Desktop review; this does not apply an edit." },
     CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
@@ -106,6 +120,14 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop": true, "projectReadGrant": true, "separateProjectExecutionPermission": true},
                 "commands": LOCAL_CHECK_COMMANDS,
             },
+            "androidBuilds": {
+                "scope": "saved-android-build-structure-and-version", "defaultEnabled": false, "oneUse": true,
+                "maxStartWindowSeconds": crate::agent_android_build::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_android_build::LIMIT,
+                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
+                "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
+                "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedSelectedTools": true},
+                "commands": ANDROID_BUILD_COMMANDS,
+            },
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -120,13 +142,15 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         let mut text = String::from("Compiled CLI capabilities (Desktop availability not checked).\n\
             Reads require a running Desktop and an explicit project read grant.\n\
             Saved observations are not live validation or native operation authority.\n\
-            Direct edits, credentials, builds and publishing are not supported by this CLI.\n\
+            Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+            A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
+            Prepare never starts a build; project code may have file/network/signing effects.\n\
             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
             Identity proposals require a separate Desktop permission and explicit Desktop review/apply.\n\n");
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -135,7 +159,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         text.into_bytes()
     };
     if json { bytes.push(b'\n'); }
-    if bytes.len() > p::REQUEST_BYTES { return Err(Error::StateUnknown); }
+    if bytes.len() > 8192 { return Err(Error::StateUnknown); }
     Ok(bytes)
 }
 
@@ -220,6 +244,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
+        p::ResponseBody::AndroidBuildRequest(value) => android_build::human(value),
     }
 }
 
@@ -232,6 +257,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
     if local_checks::recognizes(&args) { return local_checks::run(args); }
+    if android_build::recognizes(&args) { return android_build::run(args); }
     let output = match parse(args) {
         Ok(Parsed::Help) => { let _ = std::io::stdout().write_all(HELP.as_bytes()); return 0; }
         Ok(Parsed::Version) => { let _ = std::io::stdout().write_all(b"mrk application-observation protocol 1\n"); return 0; }
@@ -283,7 +309,7 @@ mod tests {
     #[test]
     fn capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals() {
         let bytes = capabilities(true).unwrap();
-        assert!(bytes.len() <= p::REQUEST_BYTES && bytes.ends_with(b"\n"));
+        assert!(bytes.len() <= 8192 && bytes.ends_with(b"\n"));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["protocolVersion"], p::VERSION);
         assert_eq!(value["scope"], "compiled-interface");
@@ -297,6 +323,10 @@ mod tests {
         assert_eq!(value["localChecks"]["maxLeaseSeconds"], crate::agent_local_checks::LIFETIME.as_secs());
         assert_eq!(value["localChecks"]["maxRetainedRequests"], crate::agent_local_checks::LIMIT);
         assert_eq!(value["localChecks"]["commands"].as_array().unwrap().len(), 3);
+        assert_eq!(value["androidBuilds"]["commands"].as_array().unwrap().len(), 4);
+        assert_eq!(value["androidBuilds"]["prepareStartsBuild"], false);
+        assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
+        assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
         let commands = value["commands"].as_array().unwrap();

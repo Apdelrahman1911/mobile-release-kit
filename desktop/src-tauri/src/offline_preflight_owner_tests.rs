@@ -9,11 +9,11 @@ use serde_json::json;
 fn owner() -> OfflinePreflightOwner { OfflinePreflightOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-runtime"))) }
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-preflight-project"),
     identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
-fn projection() -> RunProjection { RunProjection { agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
+fn projection() -> RunProjection { RunProjection { agent_android_build: None, agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) { active_with_agent(None) }
@@ -32,7 +32,7 @@ pub(super) fn active_with_agent(agent_local_check: Option<Arc<crate::agent_local
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
-    let session = Arc::new(Session { agent_local_check, apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+    let session = Arc::new(Session { agent_android_build: None, agent_local_check, apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
@@ -54,7 +54,7 @@ pub(super) fn active_with_agent(agent_local_check: Option<Arc<crate::agent_local
     // Offline fixture data must not acquire another domain's input or tool loan.
     assert!(session.artifact_selection.is_none() && session.artifact_tools.is_none()
         && session.artifact_binding.lock().unwrap().is_none());
-    let p = RunProjection { agent_local_check: p.agent_local_check, operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
+    let p = RunProjection { agent_android_build: None, agent_local_check: p.agent_local_check, operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
         phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
     owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
         accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });

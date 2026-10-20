@@ -283,6 +283,7 @@ fn main() {
             "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "application_read_status", "allow_application_read", "revoke_application_read",
             "agent_local_check_access", "allow_agent_local_check", "revoke_agent_local_check",
+    "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",

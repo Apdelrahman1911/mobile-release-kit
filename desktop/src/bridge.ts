@@ -84,6 +84,7 @@ import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } 
 import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
+import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
@@ -398,6 +399,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
     agentIdentity: createAgentIdentityApi(mode, invoke),
     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
+    agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,

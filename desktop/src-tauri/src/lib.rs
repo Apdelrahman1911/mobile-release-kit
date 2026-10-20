@@ -112,6 +112,7 @@ mod service_protocol;
 mod service_setup_guidance;
 mod agent_identity_requests;
 mod agent_local_checks;
+mod agent_android_build;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod version_allocation_state_native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

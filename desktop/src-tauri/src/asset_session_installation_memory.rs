@@ -556,7 +556,9 @@ mod known {
             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
         let state=DocumentState {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        agent_local_check_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+        agent_local_check_grant: None,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,version_enrollment:version_enrollment::State::new(),git_local:None,git_local_review:None,
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
@@ -664,7 +666,9 @@ mod known {
         fn state() -> DocumentState {
             DocumentState {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+        agent_local_check_grant: None,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(),
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),

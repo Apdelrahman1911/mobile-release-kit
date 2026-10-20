@@ -1248,8 +1248,11 @@ struct Registry {
 }
 #[path = "saved_command_agent_local_checks.rs"]
 mod agent_local_checks;
+#[path = "saved_command_agent_android_build.rs"]
+mod agent_android_build;
+pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
 
-struct Prepared { agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+struct Prepared { agent_android_build: Option<Arc<crate::agent_android_build::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
@@ -1289,7 +1292,7 @@ impl Stage {
     fn at_or_after(self, previous: Self) -> bool { self == previous || self.after(previous) }
 }
 #[derive(Clone)]
-struct RunProjection { agent_local_check: Option<crate::agent_local_checks::Query>,
+struct RunProjection { agent_android_build: Option<crate::agent_android_build::Query>, agent_local_check: Option<crate::agent_local_checks::Query>,
     operation_id: String, owner_generation: String, context: Context, phase: Phase, intent_usable: bool,
     outcome: Option<Outcome>, reason: Reason, result: Option<Terminal>, stage: Option<Stage>,
 }
@@ -1413,7 +1416,7 @@ impl RunProjection {
             Some(Terminal::AndroidBuild(t)) => (t.result, Some(t.activity), Some(t.disposition)),
             None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::IOSArchive(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_) | Terminal::GenerateUploadKey(_) | Terminal::AppleProvisioning(_)) => return Err(BridgeError::protocol()),
         };
-        Ok(android_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
+        Ok(android_wire::Projection { agent_android_build: self.agent_android_build, operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.android(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::android),
             reason: self.reason.android()?, stage: match self.stage { None => None, Some(Stage::AndroidBuild(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition })
     }
@@ -1428,7 +1431,7 @@ impl RunProjection {
             reason: self.reason.ios()?, stage: match self.stage { None => None, Some(Stage::IOSArchive(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition, report })
     }
 }
-struct Session { agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
+struct Session { agent_android_build: Option<Arc<crate::agent_android_build::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
     upload_key: upload_key::State,
     apple: apple_provisioning::State,
     tools: tool_acquisition::State,
@@ -2275,9 +2278,14 @@ impl SavedCommandOwner {
         material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>) -> Result<Status, BridgeError> {
         self.prepare_bound_agent(context, registration, project, gate, material, artifact_tools, None)
     }
-    fn prepare_bound_agent(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+    fn prepare_bound_agent(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
         material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>,
         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>) -> Result<Status, BridgeError> {
+        self.prepare_bound_requests(context, registration, project, gate, material, artifact_tools, agent_entry, None)
+    }
+    fn prepare_bound_requests(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>,
+        agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_android_build::Preparation>) -> Result<Status, BridgeError> {
         if artifact_tools.is_some()&&!matches!(&context,Context::ArtifactInspection(c) if c.format==artifact_wire::Format::Aab){return Err(self.inner.domain.invalid_owner());}
         if artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(self.inner.domain.unavailable());}
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
@@ -2351,11 +2359,13 @@ impl SavedCommandOwner {
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let agent_local_check = agent_local_checks::prepare(agent_entry, &context, registration, &project, &id, &generation,
             r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?)?;
-        let projection = RunProjection { agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
+        let agent_android_build = agent_android_build::prepare(agent_build, &self.inner, &r, &context, registration, &project, &id, &generation,
+            r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?, expires)?;
+        let projection = RunProjection { agent_android_build: agent_android_build.as_ref().map(|link| link.origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
         let android_selection = r.android_catalog.selection().cloned();
-        r.prepared = Some(Prepared { agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+        r.prepared = Some(Prepared { agent_android_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.
@@ -2383,6 +2393,12 @@ impl SavedCommandOwner {
         material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>)->Result<Admitted,BridgeError>{
+        self.start_bound_requests(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,None)
+    }
+    fn start_bound_requests(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
+        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>, agent_build:Option<&Arc<crate::agent_android_build::Entry>>)->Result<Admitted,BridgeError>{
         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
         let mut r = self.inner.lock();
@@ -2391,12 +2407,14 @@ impl SavedCommandOwner {
         }
         // All Start routes share this guard BEFORE take. Ordinary GUI Start
         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry)) {
+        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_android_build::start_matches(p,agent_build)) {
             return Err(self.inner.domain.invalid_owner());
         }
+        agent_android_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+            agent_android_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
         }
@@ -2443,6 +2461,7 @@ impl SavedCommandOwner {
         if let Some(reason) = refused {
             if reason == Reason::CleanupUnknown { r.disabled = true; }
             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+            agent_android_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
         }
@@ -2462,11 +2481,12 @@ impl SavedCommandOwner {
         // the original worker and re-counted under the vault READY gate.
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
         let upload_key_native=upload_key::native_new(&prepared,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks)?;
+        if let Some(link) = &prepared.agent_android_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
         if let Some(link) = &prepared.agent_local_check {
             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
         }
         let context = prepared.projection.context;
-        let projection = RunProjection { agent_local_check: prepared.agent_local_check.as_ref().map(|link|link.origin()), operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
+        let projection = RunProjection { agent_android_build: prepared.agent_android_build.as_ref().map(|link|link.origin()), agent_local_check: prepared.agent_local_check.as_ref().map(|link|link.origin()), operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         let android_native=if self.inner.domain==SavedCommandDomain::AndroidBuild{
@@ -2498,7 +2518,7 @@ impl SavedCommandOwner {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
         let requires_private_material = context.requires_private_material();
-        let owner = Arc::new(Session { agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+        let owner = Arc::new(Session { agent_android_build: prepared.agent_android_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
@@ -2818,6 +2838,7 @@ impl SavedCommandOwner {
                 tool_acquisition::after_final(&mut r,&mut active,&owner);
                 upload_key::after_final(&active,&owner);
                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
+                agent_android_build::retired(&active,r.revision.saturating_add(1));
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -3091,22 +3112,28 @@ impl Inner {
                 r.android_registration.exhaust(at);
                 if let Some(prepared) = r.prepared.take() {
                     agent_local_checks::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                    agent_android_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
                 }
                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
             },
         }
         agent_local_checks::changed(r);
+        agent_android_build::changed(r);
         self.changes.send_replace(r.revision); self.changed.notify_waiters();
     }
     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
         if let Some(prepared) = r.prepared.take() {
             if reason == Reason::CleanupUnknown { r.disabled = true; }
             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+            agent_android_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
         }
     }
     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
+        if r.prepared.as_ref().and_then(|p|p.agent_android_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
+            self.retire_prepared(r,Reason::Cancelled);
+        }
         if r.prepared.as_ref().and_then(|p|p.agent_local_check.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
             self.retire_prepared(r,Reason::Cancelled);
         }
@@ -3250,6 +3277,7 @@ impl Inner {
     }
     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
         if !original_session(r,owner){return;}
+        if let Some(at)=owner.agent_android_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
             self.stop_locked(r,owner,Reason::Cancelled,at);
         }
@@ -3801,7 +3829,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     // wake this existing watchdog independently of relay/store locks. There is
     // no new observer and a true latch never spins a newly-created receiver.
     let mut local_stop = owner.stop.subscribe();
-    let mut listen_local_stop = owner.agent_local_check.is_some() && !*local_stop.borrow_and_update();
+    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_android_build.is_some()) && !*local_stop.borrow_and_update();
     loop {
         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},
@@ -5451,7 +5479,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
         let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
         let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
-        let owner = Arc::new(Session { agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+        let owner = Arc::new(Session { agent_android_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
             recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
@@ -5472,7 +5500,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: None,
         });
-        let projection = RunProjection { agent_local_check: None, operation_id: owner.id.clone(), owner_generation: owner.generation.clone(), context,
+        let projection = RunProjection { agent_android_build: None, agent_local_check: None, operation_id: owner.id.clone(), owner_generation: owner.generation.clone(), context,
             phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         application.inner.lock().active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
@@ -5646,7 +5674,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
     let expiry = SavedCommandOwner::project_recovery(runtime);
     {
         let mut r = expiry.inner.lock(); let expires = t + INTENT;
-        r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+        r.prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_android_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });

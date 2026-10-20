@@ -214,6 +214,10 @@ pub enum RequestBody {
     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
     #[serde(rename = "local-check.status")] LocalCheckStatus(crate::agent_local_checks::Query),
     #[serde(rename = "local-check.cancel")] LocalCheckCancel(crate::agent_local_checks::Query),
+    #[serde(rename = "android-build.prepare")] AndroidBuildPrepare(crate::agent_android_build::Prepare),
+    #[serde(rename = "android-build.start")] AndroidBuildStart(crate::agent_android_build::Start),
+    #[serde(rename = "android-build.status")] AndroidBuildStatus(crate::agent_android_build::Query),
+    #[serde(rename = "android-build.cancel")] AndroidBuildCancel(crate::agent_android_build::Query),
     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
 }
@@ -238,6 +242,7 @@ pub enum ResponseBody {
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
     LocalCheck(crate::agent_local_checks::Status),
+    AndroidBuildRequest(crate::agent_android_build::Status),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -274,6 +279,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
+    if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
     Ok(request)
 }
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
@@ -344,6 +350,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         ResponseBody::Operation(row) => operation(row)?,
         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+        ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         _ => {}
     }
     Ok(())

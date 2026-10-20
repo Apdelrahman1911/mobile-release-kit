@@ -208,6 +208,15 @@ impl AndroidBuildOwner {
     pub(crate) fn can_exit(&self) -> bool { self.saved.can_exit() }
     pub(crate) fn busy(&self) -> bool { self.saved.busy() }
     pub(crate) fn ensure_idle(&self) -> Result<(), BridgeError> { self.saved.ensure_idle() }
+    pub(crate) fn approve_agent_android_build(&self, input: Prepare, selected: &crate::android_build_protocol::MacToolchainSelection, document: &std::sync::Arc<()>)
+        -> Result<std::sync::Arc<crate::saved_command_owner::AgentAndroidBuildApproval>, BridgeError> { self.saved.approve_agent_android_build(input, selected, document) }
+    pub(crate) fn agent_android_build_approval_current(&self, approval: &crate::saved_command_owner::AgentAndroidBuildApproval, document: &std::sync::Arc<()>) -> bool {
+        self.saved.agent_android_build_approval_current(approval, document)
+    }
+    pub(crate) fn prepare_agent_android_build(&self, entry: std::sync::Arc<crate::agent_android_build::Entry>, approval: std::sync::Arc<crate::saved_command_owner::AgentAndroidBuildApproval>,
+        registration: u32, root: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> { self.saved.prepare_agent_android_build(entry, approval, registration, root, gate) }
+    pub(crate) fn start_agent_android_build(&self, entry: &std::sync::Arc<crate::agent_android_build::Entry>, registered: Option<(u32, RegisteredRoot)>, gate: Availability)
+        -> Result<Admitted, BridgeError> { self.saved.start_agent_android_build(entry, registered, gate) }
     pub(crate) fn installation_source_custody_empty(&self) -> bool {
         self.saved.installation_source_custody_empty()
     }
