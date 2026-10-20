@@ -1802,6 +1802,7 @@ export function App() {
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
+    onProjectIdentity={() => setIdentityReveal(value => value + 1)}
     projectScripts={metadataOnly ? null : <ProjectScripts context={projectScriptsContext()}
       onAdd={(intent) => applyProjectScriptEdit(intent, projectScriptsContext, (action) => dispatch(action))} onHelp={setHelp} />}
     chooseReason={chooseReason}

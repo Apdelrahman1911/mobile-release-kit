@@ -16,13 +16,14 @@ interface GuidedConfigurationProps {
   pathPicker: ProjectPathControls;
   reviewReason: string | null;
   onReview: () => void;
+  onProjectIdentity?: () => void;
   onEdit: (path: string, value: JsonValue | undefined) => void;
   onHelp: (help: HelpContent) => void;
 }
 
 // Presentation of the existing draft only. All fields stay mounted once when
 // changing groups/search, and the original review/picker/save owners are reused.
-export function GuidedConfigurationFields({ catalog, session, preview, pathPicker, reviewReason, onReview, onEdit, onHelp }: GuidedConfigurationProps) {
+export function GuidedConfigurationFields({ catalog, session, preview, pathPicker, reviewReason, onReview, onProjectIdentity, onEdit, onHelp }: GuidedConfigurationProps) {
   const [requestedStage, setRequestedStage] = useState<GuidedConfigStage>('app');
   const [search, setSearch] = useState('');
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
@@ -119,7 +120,14 @@ export function GuidedConfigurationFields({ catalog, session, preview, pathPicke
         <SectionHeading title={section.title} description={section.description}>
           {section.attentionCount !== null && section.attentionCount > 0 && <Badge tone="warning">{section.attentionCount} need review</Badge>}
         </SectionHeading>
-      </div>{fields(section)}
+      </div>
+      {section.id === 'app' && onProjectIdentity && <div className="notice notice-info">
+        <div><strong>Want to change the app ID in your project?</strong>
+          <p>The fields below change toolkit settings only. The guided app ID editor can review supported project files and their matching settings together. Opening it keeps your draft and changes no files.</p>
+          <button type="button" className="button secondary" disabled={pending} onClick={onProjectIdentity}>Open app ID editor</button>
+        </div>
+      </div>}
+      {fields(section)}
     </section>)}
     {searching && matchingCount === 0 && <div className="card"><EmptyState compact icon="search" title="No matching settings" description="Try another term. Search includes every group and Advanced settings." /></div>}
     {!searching && <div className="guided-config-navigation">
