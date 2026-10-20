@@ -17,6 +17,8 @@ import time
 
 from . import _desktop_git_local_protocol as wire
 from . import _desktop_git_branches as branch
+from . import _desktop_git_switch as switch
+from . import _desktop_git_rename as rename
 from . import _desktop_git_read_protocol as source_fields
 from . import git_repository_local as local
 from . import git_service as core
@@ -50,6 +52,14 @@ class GitLocalOperation:
         self.entered = self.returned = self.closed = self.unknown = False
         self.calls = 0
         self.pending = self.repository = self.review = self.diff = self.result = None
+        self.switch_state = None
+        if type(request.action) is switch.Action:
+            from ._desktop_git_switch_sources import State
+            self.switch_state = State(self)
+        self.rename_state = None
+        if type(request.action) is rename.Action:
+            from ._desktop_git_rename_sources import State
+            self.rename_state = State(self)
         source.bind_operation(self)
 
     def _publication(self):
@@ -95,6 +105,10 @@ class GitLocalOperation:
         GitReadOperation._check(self, successor, True)
 
     def _check(self, original: _Original, hash_file: bool) -> None:
+        if self.rename_state is not None:
+            return self.rename_state.check(original, hash_file)
+        if self.switch_state is not None:
+            return self.switch_state.check(original, hash_file)
         publication = self._publication()
         if original is not self.index_original or publication is None:
             GitReadOperation._check(self, original, hash_file)
@@ -126,6 +140,10 @@ class GitLocalOperation:
         self.checkpoint()
 
     def source_post(self, *, hash_files: bool) -> None:
+        if self.rename_state is not None:
+            return self.rename_state.post(hash_files=hash_files)
+        if self.switch_state is not None:
+            return self.switch_state.post(hash_files=hash_files)
         self.checkpoint()
         publication = self._publication()
         if publication is not None and self.index_successor is None:
@@ -161,7 +179,9 @@ class GitLocalOperation:
                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
         sessions = self.repository._active_sessions
         wire.require(len(sessions) == 1
-                     and (branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
+                     and (rename.local_session(self, sessions[0]) if type(self.request.action) is rename.Action else
+                          switch.local_session(self, sessions[0]) if type(self.request.action) is switch.Action else
+                          branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
                           type(sessions[0]) is local._LocalSession)
                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
         session = sessions[0]
@@ -172,7 +192,9 @@ class GitLocalOperation:
         selected_index = environ.get("GIT_INDEX_FILE")
         index = None if selected_index in (None, str(self.request.root / ".git/index")) else Path(selected_index)
         plan = self.repository._active_plan
-        identity = plan._identity if args and args[0] == "commit-tree" and plan is not None else None
+        identity = (rename.command_identity(self, session, args) if type(self.request.action) is rename.Action else
+                    switch.command_identity(self, session, args) if type(self.request.action) is switch.Action else
+                    plan._identity if args and args[0] == "commit-tree" and plan is not None else None)
         expected_argv, expected_env = session.command_spec(args, index=index, identity=identity)
         wire.require(argv == expected_argv and environ == expected_env and cwd == session.frozen.root
                      and session.root == self.request.root and session.repository.git_executable == wire.TOOL_PATH
@@ -185,6 +207,10 @@ class GitLocalOperation:
             verdict = self.guard.lifetime_ledger.verdict()
             wire.require(pending.claimed and verdict.cleanup_complete and verdict.contained
                          and verdict.commands == self.calls)
+            if type(self.request.action) is rename.Action:
+                rename.returned_command(self, session, args, result)
+            if type(self.request.action) is switch.Action:
+                switch.returned_command(self, session, args, result)
             self.source_post(hash_files=False)
             self.pending = None
             return result
@@ -219,29 +245,34 @@ class GitLocalOperation:
         wire.require(self.source.go_returned and not self.entered)
         self.entered = True
         action = self.request.action
-        repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
-        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
-            work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
         try:
-            # Apply performs a genuine fresh prepare from the retained exact
-            # input, not reconstruction of a serialized/core plan capability.
-            if type(action) is branch.Action:
-                self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
-                    expected_reference_revision=action.expected_reference_revision)
+            if type(action) is rename.Action:
+                rename.prepare_or_apply(self)
+            elif type(action) is switch.Action:
+                switch.prepare_or_apply(self)
             else:
-                self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
-                    paths=action.paths, message=action.message, identity=action.identity)
-            wire.matches_review(self.request, self.review)
-            if self.request.phase == "prepare" and type(action) is not branch.Action:
-                self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
-                                                expected_revision=action.expected_revision)
-            elif self.request.phase == "apply":
+                repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
+                self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+                    work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
+                # Apply performs a genuine fresh prepare from the retained exact
+                # input, not reconstruction of a serialized/core plan capability.
                 if type(action) is branch.Action:
-                    self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
+                    self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
+                        expected_reference_revision=action.expected_reference_revision)
                 else:
-                    self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
-                if self.result.state != "succeeded":
-                    self.source.failure_observed()
+                    self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
+                        paths=action.paths, message=action.message, identity=action.identity)
+                wire.matches_review(self.request, self.review)
+                if self.request.phase == "prepare" and type(action) is not branch.Action:
+                    self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
+                                                    expected_revision=action.expected_revision)
+                elif self.request.phase == "apply":
+                    if type(action) is branch.Action:
+                        self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
+                    else:
+                        self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
+            if self.result is not None and self.result.state != "succeeded":
+                self.source.failure_observed()
             wire.require(not self.repository._unknown and not self.repository._active_sessions
                          and not self.repository._retained_sessions and self.pending is None)
             self.source_post(hash_files=True)
@@ -254,6 +285,10 @@ class GitLocalOperation:
             raise
 
     def publication(self) -> str:
+        if self.rename_state is not None:
+            return self.rename_state.publication()
+        if self.switch_state is not None:
+            return self.switch_state.publication()
         if type(self.request.action) is branch.Action:
             return branch.publication(self)
         if self._publication() is not None:
@@ -344,6 +379,10 @@ class _Engine:
                 values = {"review": operation.review, "diff": operation.diff}
             else:
                 values = {"result": operation.result, "publication": operation.publication()}
+                if operation.switch_state is not None:
+                    values["progress"] = operation.switch_state.progress
+                if operation.rename_state is not None:
+                    values["progress"] = operation.rename_state.progress
         elif isinstance(self.primary, core.GitError):
             reason = self.primary.reason
         elif isinstance(self.primary, ProcessError):

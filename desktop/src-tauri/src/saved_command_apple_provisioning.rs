@@ -11,6 +11,12 @@ use crate::{apple_provisioning_journal::OriginalReservation, application_state_s
 
 use super::*;
 use crate::apple_provisioning_protocol as apple_wire;
+#[path="saved_command_apple_profile_review.rs"]
+mod profile_review;
+#[path = "saved_command_apple_key_review.rs"]
+mod key_review;
+#[path = "saved_command_apple_profile_recovery.rs"]
+mod profile_recovery;
 
 /// Worker/provider/source and material CONSUMERS, driver/manager and all
 /// PRE-final-CAS jobs have joined. The same material loan remains retained for
@@ -86,11 +92,18 @@ impl AppleProvisioningReview {
 pub(super) struct Intent {
     input: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
     review: Option<Arc<AppleProvisioningReview>>,
+    profile_review: Option<Arc<profile_review::Review>>,
+    key_review: Option<Arc<key_review::Review>>,
 }
 #[derive(Default)]
 pub(super) struct Registry {
     review: Option<Arc<AppleProvisioningReview>>,
     recovery: Option<RecoveryPublication>,
+    profile_review: Option<Arc<profile_review::Review>>,
+    profile_saved: Option<profile_review::SavedPublication>,
+    key_review: Option<Arc<key_review::Review>>,
+    key_saved: Option<key_review::SavedPublication>,
+    profile_recovery: Option<profile_recovery::Publication>,
 }
 
 // Detached historical DATA only. It must not keep a finished Session,
@@ -186,18 +199,28 @@ impl RunProjection {
             reason: self.reason.apple(),
             result,
             recovery: None,
+            profile_recovery: None,
+            saved_profile:None, saved_key:None,
         })
     }
 }
 
 pub(super) fn invalidate_review(registry: &mut Registry) -> bool {
     registry.review = None;
+    registry.profile_review = None;
+    registry.key_review = None;
+    let saved_changed=registry.profile_saved.take().is_some();
+    let key_saved_changed = registry.key_saved.take().is_some();
+    let profile_history_changed = registry.profile_recovery.take().is_some();
     // Public historical DATA may be withdrawn, never replaced or upgraded.
     // Idle context invalidation must advance the same original status revision.
-    registry.recovery.take().is_some()
+    registry.recovery.take().is_some() || saved_changed || profile_history_changed || key_saved_changed
 }
 
 pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
+    profile_review::project(registry,projection);
+    key_review::project(registry, projection);
+    profile_recovery::project(registry, projection);
     projection.recovery = None;
     if let Some(stored) = &registry.recovery {
         if projection.operation_id == stored.reference.operation_id
@@ -220,7 +243,8 @@ fn recovery_backing_bytes() -> Option<usize> {
     apple_wire::RECOVERY_LIMIT
         .checked_mul(2)?
         .checked_add(apple_wire::IPC_LIMIT)?
-        .checked_add(std::mem::size_of::<RecoveryPublication>())
+        .checked_add(std::mem::size_of::<RecoveryPublication>())?
+        .checked_add(profile_recovery::backing_bytes()?)
 }
 
 pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
@@ -232,7 +256,9 @@ pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
         .checked_add(APPLE_PROVISIONING_INPUT_LIMIT)?
         .checked_add(2 * apple_wire::STATUS_LIMIT)?
         .checked_add(recovery_backing_bytes()?)?
-        .checked_add(8192)
+        .checked_add(8192)?
+        .checked_add(16*1024)?
+        .checked_add(6*1024*1024)
 }
 /// Finite representations, NOT RSS or a replacement for the installed
 /// runtime's separate control/FD admission. All jobs are serial, so reserve
@@ -244,13 +270,18 @@ pub(crate) fn document_backing_bytes() -> Option<usize> {
     for (count, size) in [
         (8usize, STATE_LIMIT),
         (2, ROWS.checked_mul(ROW_LIMIT)?),
-        (7, ROW_LIMIT),
+        (11, ROW_LIMIT),
         (2, APPLE_PROVISIONING_INPUT_LIMIT),
         (2, apple_wire::REQUEST_LIMIT),
         (6, apple_wire::RESPONSE_LIMIT),
         (2, apple_wire::STATUS_LIMIT),
         (4, apple_wire::IPC_LIMIT),
-        (3, apple_wire::ACK_LIMIT),
+        (5, apple_wire::ACK_LIMIT),
+        (4, apple_wire::PROFILE_IDENTITY_LIMIT),
+        (4, apple_wire::PROFILE_JSON_LIMIT),
+        (4, apple_wire::KEY_JSON_LIMIT),
+        (1, 2*1024*1024), // fixed NEW/profile AEAD scratch; old file limits unchanged
+        (2, 4*1024*1024+4096+16*1024+46), // actual private receive/worker input overlap
     ] {
         total = total.checked_add(count.checked_mul(size)?)?;
     }
@@ -259,6 +290,11 @@ pub(crate) fn document_backing_bytes() -> Option<usize> {
         .checked_add(std::mem::size_of::<State>())?
         .checked_add(std::mem::size_of::<Intent>())?
         .checked_add(std::mem::size_of::<AppleProvisioningReview>())?
+        .checked_add(std::mem::size_of::<profile_review::Review>())?
+        .checked_add(super::apple_signing::backing_bytes()?)?
+        .checked_add(std::mem::size_of::<key_review::Review>())?
+        .checked_add(super::apple_key::backing_bytes(apple_wire::Mode::KeyPrepare)?)?
+        .checked_add(6*1024*1024)?
         .checked_sub(retained_document_backing_bytes()?)
 }
 
@@ -340,15 +376,18 @@ struct Route {
     completed: u32,
     pending: Option<apple_wire::EventDataFrame>,
     observed: Option<(apple_wire::Observed, Instant)>,
+    profile_observed: Option<(apple_wire::ProfileObserved, Instant)>,
+    key_observed: Option<(apple_wire::KeyObserved, Instant)>,
+    key_not_generated: Option<apple_wire::KeyNotGenerated>,
     ack_writing: bool,
-    ack_entered: [bool; 3],
+    ack_entered: [bool; 4],
     failed: bool,
 }
 pub(super) struct State {
     intent: Option<Arc<Intent>>,
     binding: Mutex<Option<Arc<apple_wire::RequestBinding>>>,
     route: Mutex<Route>,
-    changed: Notify,
+    pub(super) changed: Notify,
     #[cfg(all(
         target_os = "macos",
         target_pointer_width = "64",
@@ -365,9 +404,10 @@ impl State {
                 received: 0,
                 completed: 0,
                 pending: None,
-                observed: None,
+                observed: None, profile_observed: None,
+                key_observed: None, key_not_generated: None,
                 ack_writing: false,
-                ack_entered: [false; 3],
+                ack_entered: [false; 4],
                 failed: false,
             }),
             changed: Notify::new(),
@@ -379,7 +419,7 @@ impl State {
             native: AsyncMutex::new(native::Jobs::new()),
         }
     }
-    fn input(
+    pub(super) fn input(
         &self,
     ) -> Result<&Arc<crate::asset_session::AppleProvisioningDocumentInput>, BridgeError> {
         self.intent
@@ -387,7 +427,7 @@ impl State {
             .map(|intent| &intent.input)
             .ok_or_else(apple_wire::invalid)
     }
-    fn request_binding(&self) -> Result<Arc<apple_wire::RequestBinding>, BridgeError> {
+    pub(super) fn request_binding(&self) -> Result<Arc<apple_wire::RequestBinding>, BridgeError> {
         self.binding
             .try_lock()
             .map_err(|_| BridgeError::cleanup_unknown())?
@@ -410,7 +450,7 @@ impl State {
         if route.failed
             || route.pending.is_some()
             || route.received.checked_add(1) != Some(event.sequence)
-            || event.sequence > apple_wire::MAX_EVENTS
+            || event.sequence > input.context().mode.events()
             || route.received > route.completed + u32::from(route.ack_writing)
         {
             route.failed = true;
@@ -435,6 +475,31 @@ impl State {
                     data,
                 });
             }
+            apple_wire::EventData::Key(apple_wire::KeyEvent::Observed(observed))
+                if input.context().mode == apple_wire::Mode::KeyReview && event.sequence == 1 && route.key_observed.is_none() => {
+                route.key_observed = Some((observed, at)); route.received = 1; route.completed = 1;
+            },
+            apple_wire::EventData::Key(apple_wire::KeyEvent::NotGenerated(absent))
+                if input.context().mode == apple_wire::Mode::KeyPrepare && event.sequence == 2 && route.key_not_generated.is_none() => {
+                route.key_not_generated = Some(absent); route.received = 2;
+                if !route.ack_writing { route.completed = 2; }
+            },
+            data @ apple_wire::EventData::Key(apple_wire::KeyEvent::Pending { .. } | apple_wire::KeyEvent::Output(_))
+                if input.context().mode == apple_wire::Mode::KeyPrepare => {
+                route.received = event.sequence;
+                route.pending = Some(apple_wire::EventDataFrame { sequence: event.sequence, data });
+            },
+            apple_wire::EventData::Profile(apple_wire::ProfileEvent::Observed(observed))
+                if input.context().mode.profile() && !input.context().mode.profile_save()
+                    && event.sequence == 2 && route.profile_observed.is_none() => {
+                route.profile_observed = Some((observed, at));
+                route.received = event.sequence;
+                if !route.ack_writing { route.completed = event.sequence; }
+            },
+            data @ apple_wire::EventData::Profile(_) if input.context().mode.profile() => {
+                route.received = event.sequence;
+                route.pending = Some(apple_wire::EventDataFrame { sequence: event.sequence, data });
+            },
             _ => {
                 route.failed = true;
                 return Err(apple_wire::invalid());
@@ -454,20 +519,30 @@ impl State {
     /// After F only an already-armed attempt may publish its bounded audit.
     /// This never admits another Pending event or authorizes provider work.
     pub(super) fn accepts_audit(&self, event: &apple_wire::EventDataFrame) -> bool {
-        matches!(&event.data, apple_wire::EventData::Attempt(_))
+        (matches!(&event.data, apple_wire::EventData::Attempt(_))
             && (2..=apple_wire::MAX_EVENTS).contains(&event.sequence)
             && self
                 .route
                 .lock()
-                .is_ok_and(|route| !route.failed && route.ack_entered[0])
+                .is_ok_and(|route| !route.failed && route.ack_entered[0]))
+            || matches!(&event.data, apple_wire::EventData::Profile(apple_wire::ProfileEvent::Attempt(_)))
+                && (3..=4).contains(&event.sequence)
+                && self.route.lock().is_ok_and(|route| !route.failed && route.ack_entered[1])
+            || matches!(&event.data, apple_wire::EventData::Key(apple_wire::KeyEvent::Output(_) | apple_wire::KeyEvent::NotGenerated(_)))
+                && event.sequence == 2 && self.input().is_ok_and(|input| input.context().mode == apple_wire::Mode::KeyPrepare)
+                && self.route.try_lock().is_ok_and(|route| !route.failed && (route.ack_entered[0] || route.completed == 1))
     }
 }
 
 pub(crate) struct AppleProvisioningAdmitted {
     status: apple_wire::Status,
     release: Option<oneshot::Sender<()>>,
+    profile: Option<Arc<AppleProfileSession>>,
+    key: Option<Arc<super::apple_key::AppleKeySession>>,
 }
 impl AppleProvisioningAdmitted {
+    pub(crate) fn key(&self) -> Option<&Arc<super::apple_key::AppleKeySession>> { self.key.as_ref() }
+    pub(crate) fn profile(&self) -> Option<&Arc<AppleProfileSession>> { self.profile.as_ref() }
     /// The original Document caller releases this only after dropping BOTH
     /// its Edit guard and Document lock. Losing this message is not a retry.
     pub(crate) fn release(self) -> apple_wire::Status {
@@ -508,6 +583,16 @@ impl SavedCommandOwner {
         } else {
             None
         };
+        let profile_review=if input.context.mode.profile_save() {
+            let registry=self.inner.lock();
+            Some(registry.apple.profile_review.as_ref().filter(|review|review.matches(&document,now))
+                .cloned().ok_or_else(apple_wire::invalid)?)
+        } else { None };
+        let key_review = if input.context.mode == apple_wire::Mode::KeyPrepare {
+            let registry = self.inner.lock();
+            Some(registry.apple.key_review.as_ref().filter(|review| review.matches(&document, now))
+                .cloned().ok_or_else(apple_wire::invalid)?)
+        } else { None };
         let material = document.material().clone();
         let status = self.prepare_bound(
             Context::AppleProvisioning(input.context),
@@ -525,9 +610,12 @@ impl SavedCommandOwner {
         if let Some(review) = &review {
             prepared.expires = prepared.expires.min(review.expires);
         }
+        if let Some(review)=&profile_review { prepared.expires=prepared.expires.min(review.expires()); }
+        if let Some(review) = &key_review { prepared.expires = prepared.expires.min(review.expires()); }
         prepared.apple = Some(Arc::new(Intent {
             input: document,
             review,
+            profile_review, key_review,
         }));
         status.apple()
     }
@@ -575,6 +663,8 @@ impl SavedCommandOwner {
             if let Some(review) = &intent.review {
                 review.claim(&document, Instant::now())?;
             }
+            if let Some(review)=&intent.profile_review { review.claim(&document,Instant::now())?; }
+            if let Some(review) = &intent.key_review { review.claim(&document, Instant::now())?; }
         }
         let admitted = self.start_bound(
             Start {
@@ -586,9 +676,21 @@ impl SavedCommandOwner {
             Availability::from_store(gate),
             Some(PrivateSigningMaterial::Store(document.material().clone())),
         )?;
+        let profile = {
+            let registry = self.inner.lock();
+            registry.active.as_ref().filter(|active| active.owner.apple.input().is_ok_and(|held| Arc::ptr_eq(held, &document)))
+                .and_then(|active| active.owner.apple_profile.get().cloned())
+        };
+        let key = {
+            let registry = self.inner.lock();
+            registry.active.as_ref().filter(|active| active.owner.apple.input().is_ok_and(|held| Arc::ptr_eq(held, &document)))
+                .and_then(|active| active.owner.apple_key.get().cloned())
+        };
+        if document.context().mode.profile() != profile.is_some() || document.context().mode.local_key() != key.is_some() {
+            return Err(apple_wire::invalid());
+        }
         Ok(AppleProvisioningAdmitted {
-            status: admitted.status.apple()?,
-            release: admitted.release,
+            status: admitted.status.apple()?, release: admitted.release, profile, key,
         })
     }
     pub(crate) fn status_apple_provisioning(
@@ -616,6 +718,12 @@ pub(super) fn decoder(owner: &Session) -> Result<apple_wire::Decoder, BridgeErro
     }
     Ok(apple_wire::Decoder::new(owner.apple.request_binding()?))
 }
+pub(super) fn audit_open(owner: &Session, now: Instant) -> bool {
+    if let Some(key) = owner.apple_key.get() {
+        matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::KeyPrepare)
+            && !owner.resource_unknown.load(Ordering::SeqCst) && now < key.clock().cleanup_end()
+    } else { now < *owner.native_audit_cutoff.borrow() }
+}
 pub(super) fn complete(owner: &Session) -> bool {
     owner.apple.route_complete()
 }
@@ -625,6 +733,12 @@ pub(super) fn complete(owner: &Session) -> bool {
 pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, owner: &Arc<Session>) {
     registry.review = None;
     registry.recovery = None;
+    registry.profile_review=None;registry.profile_saved=None;
+    registry.profile_recovery = None;
+    registry.key_review = None; registry.key_saved = None;
+    // Detached saved-key DATA may survive a known cancellation only after
+    // the actual native/Asset/private/watchdog retirement. Never a new loan.
+    key_review::publish_saved(registry, active, owner);
     if owner.domain != SavedCommandDomain::AppleProvisioning
         || active.unknown
         || active.context_invalidated
@@ -640,20 +754,25 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
     let Context::AppleProvisioning(context) = &owner.context else {
         return;
     };
-    if context.mode != apple_wire::Mode::Review
-        || active.projection.outcome != Some(Outcome::Complete)
-    {
-        return;
-    }
+    if active.projection.outcome != Some(Outcome::Complete) { return; }
     let Some(Terminal::AppleProvisioning(terminal)) = &active.projection.result else {
         return;
     };
-    if !terminal.lifetime.settled() || terminal.result.is_none() {
+    if !terminal.settled() || terminal.result.is_none() {
         return;
     }
-    if !native_complete(owner) {
+    if !native_complete(owner) { return; }
+    if context.mode.profile() {
+        if owner.apple_profile.get().is_some_and(|profile|profile.clock().completed()) {
+            profile_recovery::publish(registry, owner);
+            profile_review::publish(registry,active,owner,terminal);
+        }
         return;
     }
+    if context.mode.local_key() {
+        key_review::publish_review(registry, owner, terminal); return;
+    }
+    if context.mode != apple_wire::Mode::Review { return; }
     // A denied/inconclusive provider query may accompany a known joined local
     // journal read. Publish only that historical DATA, never a Register review.
     if let Some(history) = native_history(owner) {
@@ -667,7 +786,7 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
         });
     }
     // Preserve the original private one-use Register-review predicate exactly.
-    if terminal.result.as_ref().is_none_or(|result| {
+    if terminal.result.as_ref().and_then(apple_wire::ResultData::bundle).is_none_or(|result| {
         result.observation != apple_wire::Observation::NotReturned
             || result.decision != apple_wire::Decision::ReviewRequired
     }) {
@@ -852,7 +971,7 @@ pub(super) async fn finish_after_manager(inner: &Arc<Inner>, owner: &Arc<Session
         false
     }
 }
-fn native_complete(owner: &Session) -> bool {
+pub(super) fn native_complete(owner: &Session) -> bool {
     #[cfg(all(
         target_os = "macos",
         target_pointer_width = "64",

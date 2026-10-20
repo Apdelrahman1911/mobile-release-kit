@@ -45,15 +45,35 @@ pub(super) struct Invocation {
 /// Publication only permits the exact original old-FD successor comparison;
 /// it is deliberately NOT journal finality or a successful operation receipt.
 pub(crate) struct GitLocalPublication {
-    request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,
+    request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
 }
 impl GitLocalPublication {
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if self.request.id!=id || &self.request.native!=native
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename) || self.request.id!=id || &self.request.native!=native
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
+    }
+    pub(crate) fn rename_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_rename_protocol::Sources)
+        ->Result<(&crate::git_rename_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
+        if self.request.action.kind()!=wire::Kind::BranchRename || self.request.id!=id || &self.request.native!=native
+            || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            || self.request.rename_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
+            || self.publication==wire::Publication::NotReported || crate::git_rename_protocol::effect(self.publication).is_none() {
+            return Err(crate::asset_commands::Reason::SourceChanged)
+        }
+        Ok((self.candidate.intent.rename_details().ok_or(crate::asset_commands::Reason::SourceChanged)?,self.publication))
+    }
+    pub(crate) fn switch_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_switch_protocol::Sources)
+        ->Result<(&crate::git_switch_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
+        if self.request.action.kind()!=wire::Kind::BranchSwitch || self.request.id!=id || &self.request.native!=native
+            || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            || self.request.switch_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
+            || self.publication==wire::Publication::NotReported || crate::git_switch_protocol::effect(self.publication).is_none() {
+            return Err(crate::asset_commands::Reason::SourceChanged)
+        }
+        Ok((self.candidate.intent.switch_details().ok_or(crate::asset_commands::Reason::SourceChanged)?,self.publication))
     }
 }
 /// Created only from management_ready + the SAME actual Resources after the
@@ -62,6 +82,8 @@ impl GitLocalPublication {
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) struct GitLocalNativeJoined {
     native_use:Arc<NativeUse>,original:Arc<Original>,completion:Completion,
+    switch_final:Option<crate::git_switch_protocol::FinalData>,
+    rename_final:Option<crate::git_rename_protocol::FinalData>,
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl GitLocalNativeJoined {
@@ -69,6 +91,8 @@ impl GitLocalNativeJoined {
         Arc::ptr_eq(&self.native_use,native_use)&&Arc::ptr_eq(&self.original,original)
     }
     pub(crate) fn completion(&self)->Completion {self.completion}
+    pub(crate) fn rename_final(&self)->Option<&crate::git_rename_protocol::FinalData> {self.rename_final.as_ref()}
+    pub(crate) fn switch_final(&self)->Option<&crate::git_switch_protocol::FinalData> {self.switch_final.as_ref()}
 }
 #[derive(Clone)]
 pub(crate) enum GitLocalReceipt {
@@ -78,6 +102,11 @@ pub(crate) struct GitLocalTicket {owner:Arc<Owner>,receipt:Arc<Mutex<GitLocalRec
 impl GitLocalTicket {
     pub(crate) fn operation_id(&self)->&str {&self.owner.id}
     pub(crate) fn stop(&self) {self.owner.fail(BridgeError::new("cancelled","The original local Git action was stopped."));}
+    pub(crate) fn agent_stop_at(&self,at:Instant) {
+        let mut state=lock(&self.owner.state);if state.terminal {return;}
+        state.fail_at(BridgeError::new("cancelled","The original local Git action was stopped."),at);
+        drop(state);self.owner.stop.send_replace(true);self.owner.changed.notify_waiters();
+    }
     pub(crate) fn receipt(&self)->GitLocalReceipt {lock(&self.receipt).clone()}
     pub(crate) fn settled(&self)->bool {matches!(&*lock(&self.receipt),GitLocalReceipt::Settled {was_unknown:false,..})}
     pub(crate) fn pending_stage(&self)->crate::git_read_protocol::Phase {
@@ -153,11 +182,13 @@ impl Invocation {
     pub(super) fn request(&self)->Result<Arc<wire::Request>,BridgeError> {
         self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)
     }
-    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;}
+    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;
+        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);}
     pub(super) fn retire(&self,outcome:Result<(),BridgeError>,was_unknown:bool) {
         let mut receipt=lock(&self.receipt);
         if was_unknown || !matches!(*receipt,GitLocalReceipt::Pending)
-            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;return}
+            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;drop(receipt);
+            #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);return}
         let reply=self.child_reply.lock().ok().and_then(|s|s.clone());
         let result=match (outcome,reply) {
             (Ok(()),Some(reply))=>Ok(reply),
@@ -166,6 +197,7 @@ impl Invocation {
             (Err(error),_)=>Err(error),_=>Err(BridgeError::protocol()),
         };
         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
+        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) fn inspect(&self,runtime:&RuntimeConfig,owner:&Owner,preparing:Option<&crate::git_local_state::Ack>)
@@ -177,11 +209,11 @@ impl Invocation {
             let result=runtime.resolve_git_local_installed(&mut native,owner.endpoint(),&stop);
             owner.observe_native_failure(native.first_failure());result?};
         let review=self.gate.review();
-        let snapshot={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let (snapshot,switch_sources,rename_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
                 &owner.id,review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
-            sources.native_snapshot().map_err(source_error)?.clone()};
+            (sources.native_snapshot().map_err(source_error)?.clone(),sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned())};
         let binding=match (self.phase,review,preparing) {
             (wire::Phase::Prepare,None,None)=>None,
             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
@@ -191,7 +223,11 @@ impl Invocation {
         let mut clock=mrk_macos_installed_native::vault_helper_wire::ClockBridge::capture().ok_or_else(BridgeError::cleanup_unknown)?;
         let clock_data=wire::Clock {work_end_ns:clock.endpoint(ends.work).ok_or_else(BridgeError::cleanup_unknown)?,
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
-        let request=Arc::new(wire::Request::from_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding)?);
+        let request=Arc::new(if self.action.kind()==wire::Kind::BranchSwitch {
+            wire::Request::from_switch_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,switch_sources)?
+        } else if self.action.kind()==wire::Kind::BranchRename {
+            wire::Request::from_rename_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,rename_sources)?
+        } else {wire::Request::from_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding)?});
         let mut slot=self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let mut bridge=self.clock.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
@@ -250,7 +286,7 @@ impl Invocation {
             }
             let mut slot=self.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             if slot.is_some() {return Err(BridgeError::cleanup_unknown())}
-            *slot=Some(GitLocalPublication {request:request.clone(),candidate});
+            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication});
         }
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         if let Some(first)=terminal.first_failure_ns {
@@ -360,7 +396,26 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
         }else if owner.preflight_go_claimed.load(Ordering::SeqCst) && reply.is_none() {return Err(BridgeError::cleanup_unknown())}
         else if state.error.as_ref().is_some_and(|e|matches!(e.code.as_str(),"cancelled"|"shutting_down")) {Completion::Cancelled}
         else {Completion::Failed};
-        Ok(Some(GitLocalNativeJoined {native_use,original,completion}))
+        // Historical detail is copied only from this original positive
+        // publication after ALL earlier management/source/runtime returns.
+        // No candidate/readback/negative result can manufacture this evidence.
+        let switch_final=if invocation.action.kind()==wire::Kind::BranchSwitch {
+            let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            match publication.as_ref() {
+                Some(p)=>Some(crate::git_switch_protocol::FinalData::from_returned(&p.request,&p.candidate,
+                    reply.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,p.publication)?),
+                None=>None,
+            }
+        } else {None};
+        let rename_final=if invocation.action.kind()==wire::Kind::BranchRename {
+            let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            match publication.as_ref() {
+                Some(p)=>Some(crate::git_rename_protocol::FinalData::from_returned(&p.request,&p.candidate,
+                    reply.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,p.publication)?),
+                None=>None,
+            }
+        } else {None};
+        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final}))
     })();
     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
@@ -424,8 +479,18 @@ pub(super) fn settle(owner:&Owner,slots:&Arc<Mutex<crate::installed_runtime::Git
         observe_source_failure(owner,sources.first_failure());
         if let Err(reason)=result {owner.fail(source_error(reason));}
     }
-    let source_closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
-    let runtime_closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
+    // Switch retains its exact target lock until the original runtime closes
+    // are known too. All old actions keep their original order. This body is
+    // already after process/pipe joins; later management/journal/NativeUse
+    // joins are still mandatory, never inferred from a positive publication.
+    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename) {
+        let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
+        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
+        (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
+    } else {
+        let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
+        (closed,native.settle_originals(&mut |first|owner.native_cleanup_expired(first)))
+    };
     if !source_closed||!sources.settled()||!matches!(runtime_closed,CloseOutcome::Settled) {CloseOutcome::Unknown}
     else {CloseOutcome::Settled}
 }
@@ -638,3 +703,7 @@ pub(super) fn acquire_original(
 #[cfg(test)]
 #[path="supervisor_git_local_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="git_switch_supervisor_tests.rs"]
+mod switch_tests;

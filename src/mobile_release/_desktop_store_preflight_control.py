@@ -13,10 +13,12 @@ HEADER_LIMIT, MATERIAL_LIMIT = 1024, 16 * 1024
 
 def parse_header(raw: bytes, *, platform="android", stage=None, review_demo=False):
     require(type(raw) is bytes and 0 < len(raw) <= HEADER_LIMIT and raw.endswith(b"\n")
-            and platform in ("android", "ios") and type(review_demo) is bool
+            and platform in ("android", "ios", "both") and type(review_demo) is bool
             and (stage is None and not review_demo or platform == "ios" and stage in ("external-testing", "production-submit")))
     roles = (("google-service-account", MATERIAL_LIMIT),) if platform == "android" else (
         ("asc-p8", MATERIAL_LIMIT), ("asc-key-id", 10), ("asc-issuer-id", 36))
+    if platform == "both":
+        roles = (("google-service-account", MATERIAL_LIMIT), *roles)
     if stage is not None:
         roles += tuple((role,4096) for role in ("contact-first-name","contact-last-name","contact-email","contact-phone"))
         roles += (("commitment-key-base64",44),("commitment-version",64))
@@ -103,6 +105,10 @@ class StorePreflightInput(_SavedCommandInput):
                 self._require(len(header) < HEADER_LIMIT)
                 header.extend(take(1))
             platform = operation.request.context["platform"]
+            if platform == "both":
+                from .desktop_store_preflight import StorePreflightRun
+                from .paired_store_versions import selected_query
+                self._require(type(operation) is StorePreflightRun and selected_query(operation.request.context))
             options={}
             from .local_store_prepare import LocalStorePrepareRun
             from .local_store_execute import LocalStoreExecuteRun
@@ -117,6 +123,11 @@ class StorePreflightInput(_SavedCommandInput):
                 self._require(take(len(SUFFIX)) == SUFFIX)
                 operation.validate_material_shape(self._material)
                 snapshot = scratch.put("google-adc", self._material)
+            elif platform == "both":
+                self._material = tuple(take(length) for length in lengths)
+                self._require(take(len(SUFFIX)) == SUFFIX)
+                operation.validate_pair_shape(self._material)
+                snapshot = (scratch.put("google-adc", self._material[0]), scratch.put("asc-p8", self._material[1]))
             else:
                 self._material = tuple(take(length) for length in lengths)
                 self._require(take(len(SUFFIX)) == SUFFIX)

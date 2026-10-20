@@ -3,8 +3,12 @@
 import { connectionBounded, connectionKeys } from './githubConnectionProtocol.ts';
 import { GIT_REASONS, parseGitDiff, parseGitObservation } from './gitRepositoryProtocol.ts';
 import { gitReadPathOrder } from './gitReadProtocol.ts';
-import { branchIntentMatchesReview, isGitBranchAction, isGitBranchIntent, isGitBranchMutation, isGitBranchReason, isGitBranchReview } from './gitBranchesProtocol.ts';
+import { branchIntentMatchesReview, gitLocalIssueHelp as previousIssueHelp, isGitBranchAction, isGitBranchIntent, isGitBranchMutation, isGitBranchReason, isGitBranchReview } from './gitBranchesProtocol.ts';
 import type { GitBranchAction, GitBranchIntent, GitBranchIssue, GitBranchMutationResult, GitBranchReason, GitBranchReview } from './gitBranchesProtocol.ts';
+import { gitSwitchIssueHelp, isGitSwitchAction, isGitSwitchIntent, isGitSwitchMutation, isGitSwitchReason, isGitSwitchReview, switchIntentMatchesReview } from './gitSwitchProtocol.ts';
+import type { GitSwitchAction, GitSwitchIntent, GitSwitchIssue, GitSwitchMutationResult, GitSwitchReason, GitSwitchReview } from './gitSwitchProtocol.ts';
+import { gitRenameIssueHelp, isGitRenameAction, isGitRenameReview, isGitRenameIntent, isGitRenameMutation, isGitRenameReason, renameIntentMatchesReview } from './gitRenameProtocol.ts';
+import type { GitRenameAction, GitRenameReview, GitRenameIntent, GitRenameMutationResult, GitRenameReason, GitRenameIssue } from './gitRenameProtocol.ts';
 import type { GitAction, GitDiff, GitIntent, GitMutationResult, GitReason, GitIssue } from './gitRepositoryProtocol.ts';
 import type { GitReadContext } from './gitReadProtocol.ts';
 
@@ -25,20 +29,20 @@ export function createGitLocalApi(mode: string, invoke: (command: string, raw: U
     discard: (raw: Uint8Array) => call('discard', raw), status: (raw: Uint8Array) => call('status', raw), cancel: (raw: Uint8Array) => call('cancel', raw) });
 }
 export interface GitLocalFileAction { readonly kind: GitAction; readonly expectedRevision: string; readonly paths: readonly string[] }
-export type GitLocalAction = GitLocalFileAction | GitBranchAction;
+export type GitLocalAction = GitLocalFileAction | GitBranchAction | GitSwitchAction | GitRenameAction;
 export interface GitLocalFileInput extends GitLocalFileAction { readonly message: string | null; readonly identity: { readonly name: string; readonly email: string } | null }
-export type GitLocalInput = GitLocalFileInput | GitBranchAction;
+export type GitLocalInput = GitLocalFileInput | GitBranchAction | GitSwitchAction | GitRenameAction;
 export interface GitLocalFileReview { readonly action: GitAction; readonly expectedRevision: string; readonly paths: readonly string[];
   readonly wholeIndex: boolean; readonly head: string | null; readonly branch: string | null; readonly expectedIndex: string; readonly reviewDigest: string }
-export type GitLocalReview = GitLocalFileReview | GitBranchReview;
-export type GitLocalIntent = GitIntent | GitBranchIntent;
-export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult;
-export type GitLocalReason = GitReason | GitBranchReason;
-export type GitLocalIssue = GitIssue | GitBranchIssue;
-export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview };
+export type GitLocalReview = GitLocalFileReview | GitBranchReview | GitSwitchReview | GitRenameReview;
+export type GitLocalIntent = GitIntent | GitBranchIntent | GitSwitchIntent | GitRenameIntent;
+export type GitLocalMutationResult = GitMutationResult | GitBranchMutationResult | GitSwitchMutationResult | GitRenameMutationResult;
+export type GitLocalReason = GitReason | GitBranchReason | GitSwitchReason | GitRenameReason;
+export type GitLocalIssue = GitIssue | GitBranchIssue | GitSwitchIssue | GitRenameIssue;
+export type GitLocalPrepareResult = { readonly review: GitLocalFileReview; readonly diff: GitDiff } | { readonly review: GitBranchReview } | { readonly review: GitSwitchReview } | { readonly review: GitRenameReview };
 export type GitLocalPrepared = { readonly reviewId: string; readonly context: GitReadContext } &
   ({ readonly action: GitLocalFileAction; readonly review: GitLocalFileReview; readonly diff: GitDiff } |
-   { readonly action: GitBranchAction; readonly review: GitBranchReview });
+   { readonly action: GitBranchAction; readonly review: GitBranchReview } | { readonly action: GitSwitchAction; readonly review: GitSwitchReview } | { readonly action: GitRenameAction; readonly review: GitRenameReview });
 export interface GitLocalOperation { readonly operationId: string; readonly context: GitReadContext; readonly phase: 'prepare' | 'apply';
   readonly action: GitLocalAction; readonly stage: 'starting' | 'running' | 'stopping' | 'settled' | 'cleanup-unknown';
   readonly outcome: 'ok' | 'refused' | 'cancelled' | 'timed-out' | 'cleanup-unknown' | null; readonly reason: GitLocalReason | null;
@@ -60,7 +64,7 @@ const revision = (v: unknown): v is number => u32(v) && v > 0 && v < 0xffffffff;
 const kind = (v: unknown): v is GitAction => v === 'stage' || v === 'unstage' || v === 'commit';
 const nullable = (v: unknown, check: (value: unknown) => boolean) => v === null || check(v);
 const reason = (v: unknown, expected: GitLocalAction): v is GitLocalReason => typeof v === 'string' &&
-  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'branch-create' && isGitBranchReason(v));
+  (GIT_REASONS.includes(v as GitReason) || expected.kind === 'branch-create' && isGitBranchReason(v) || expected.kind === 'branch-switch' && isGitSwitchReason(v) || expected.kind === 'branch-rename' && isGitRenameReason(v));
 function text(v: unknown, max: number, multiline = false): v is string {
   return typeof v === 'string' && v.length <= max && utf8.encode(v).length <= max && !/\p{Cs}/u.test(v) &&
     !(multiline ? /[\x00-\x08\x0b-\x1f\x7f]/ : /[\x00-\x1f\x7f]/).test(v);
@@ -79,9 +83,9 @@ function fileAction(v: unknown): v is GitLocalFileAction {
   return connectionKeys(v, ['kind', 'expectedRevision', 'paths']) && kind(v.kind) && digest(v.expectedRevision) &&
     (v.kind === 'commit' ? Array.isArray(v.paths) && v.paths.length === 0 : paths(v.paths));
 }
-function action(v: unknown): v is GitLocalAction { return isGitBranchAction(v) || fileAction(v); }
+function action(v: unknown): v is GitLocalAction { return isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v) || fileAction(v); }
 function input(v: unknown): v is GitLocalInput {
-  if (isGitBranchAction(v)) return true;
+  if (isGitBranchAction(v) || isGitSwitchAction(v) || isGitRenameAction(v)) return true;
   if (!connectionKeys(v, ['kind', 'expectedRevision', 'paths', 'message', 'identity']) ||
       !fileAction({ kind: v.kind, expectedRevision: v.expectedRevision, paths: v.paths })) return false;
   if (v.kind !== 'commit') return v.message === null && v.identity === null;
@@ -97,12 +101,16 @@ function fileReview(v: unknown, expected: GitLocalFileAction): v is GitLocalFile
     (expected.kind !== 'commit' || v.branch !== null) && digest(v.expectedIndex) && digest(v.reviewDigest);
 }
 function reviewed(v: unknown, expected: GitLocalAction): boolean {
+  if (expected.kind === 'branch-rename') return connectionKeys(v, ['review']) && isGitRenameReview(v.review, expected);
+  if (expected.kind === 'branch-switch') return connectionKeys(v, ['review']) && isGitSwitchReview(v.review, expected);
   if (expected.kind === 'branch-create') return connectionKeys(v, ['review']) && isGitBranchReview(v.review, expected);
   if (!connectionKeys(v, ['review', 'diff']) || !fileReview(v.review, expected)) return false;
   const diff = parseGitDiff(v.diff);
   return !!diff && diff.revision === expected.expectedRevision && diff.staged === (expected.kind !== 'stage') && samePaths(diff.paths, v.review.paths);
 }
 function intent(v: unknown, expected: GitLocalAction): v is GitLocalIntent {
+  if (expected.kind === 'branch-rename') return isGitRenameIntent(v, expected);
+  if (expected.kind === 'branch-switch') return isGitSwitchIntent(v, expected);
   if (expected.kind === 'branch-create') return isGitBranchIntent(v, expected);
   if (!connectionKeys(v, ['action', 'expectedRevision', 'expectedRef', 'expectedHead', 'expectedIndex', 'candidateIndex', 'candidateCommit']) ||
       v.action !== expected.kind || v.expectedRevision !== expected.expectedRevision || !nullable(v.expectedRef, branch) || !nullable(v.expectedHead, oid) ||
@@ -111,6 +119,8 @@ function intent(v: unknown, expected: GitLocalAction): v is GitLocalIntent {
     (v.expectedHead === null || (v.expectedHead as string).length === v.candidateCommit.length) : digest(v.candidateIndex) && v.candidateCommit === null;
 }
 function mutation(v: unknown, expected: GitLocalAction, operationId: string): boolean {
+  if (expected.kind === 'branch-rename') return isGitRenameMutation(v, expected, operationId);
+  if (expected.kind === 'branch-switch') return isGitSwitchMutation(v, expected, operationId);
   if (expected.kind === 'branch-create') return isGitBranchMutation(v, expected, operationId);
   if (!connectionKeys(v, ['operationId', 'action', 'state', 'settlement', 'reason', 'observation', 'intent']) || v.operationId !== operationId ||
       v.action !== expected.kind || v.settlement !== 'settled' || !nullable(v.intent, (i) => intent(i, expected))) return false;
@@ -132,16 +142,19 @@ function operation(v: unknown): v is GitLocalOperation {
 }
 function prepared(v: unknown): boolean {
   if (connectionKeys(v, ['reviewId', 'context', 'action', 'review'])) return id(v.reviewId) && context(v.context) &&
-    isGitBranchAction(v.action) && reviewed({ review: v.review }, v.action);
+    (isGitBranchAction(v.action) || isGitSwitchAction(v.action) || isGitRenameAction(v.action)) && reviewed({ review: v.review }, v.action);
   return connectionKeys(v, ['reviewId', 'context', 'action', 'review', 'diff']) && id(v.reviewId) && context(v.context) && fileAction(v.action) &&
     reviewed({ review: v.review, diff: v.diff }, v.action);
 }
 export function gitLocalPreparedResult(v: GitLocalPrepared): GitLocalPrepareResult {
-  return 'diff' in v ? { review: v.review, diff: v.diff } : { review: v.review };
+  return 'diff' in v ? { review: v.review, diff: v.diff } :
+    v.review.action === 'branch-switch' ? { review: v.review } : v.review.action === 'branch-rename' ? { review: v.review } : { review: v.review };
 }
 export function gitLocalIntentMatchesReview(v: GitLocalIntent, r: GitLocalReview): boolean {
+  if (v.action === 'branch-rename') return r.action === 'branch-rename' && renameIntentMatchesReview(v, r);
+  if (v.action === 'branch-switch') return r.action === 'branch-switch' && switchIntentMatchesReview(v, r);
   if (v.action === 'branch-create') return r.action === 'branch-create' && branchIntentMatchesReview(v, r);
-  return r.action !== 'branch-create' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
+  return r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && v.action === r.action && v.expectedRevision === r.expectedRevision &&
     v.expectedIndex === r.expectedIndex && v.expectedHead === r.head && v.expectedRef === r.branch;
 }
 function immutable<T>(v: unknown): T {
@@ -182,9 +195,16 @@ export function gitLocalRequest(name: GitLocalCommand, v: unknown): Uint8Array |
 }
 export function samePaths(a: readonly string[], b: readonly string[]): boolean { return a.length === b.length && a.every((p, i) => p === b[i]); }
 export function sameGitLocalAction(a: GitLocalAction, b: GitLocalAction): boolean {
+  if (a.kind === 'branch-rename') return b.kind === 'branch-rename' && a.expectedRevision === b.expectedRevision &&
+    a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
+  if (a.kind === 'branch-switch') return b.kind === 'branch-switch' && a.expectedRevision === b.expectedRevision &&
+    a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
   if (a.kind === 'branch-create') return b.kind === 'branch-create' && a.expectedRevision === b.expectedRevision &&
     a.expectedReferenceRevision === b.expectedReferenceRevision && a.name === b.name;
-  return b.kind !== 'branch-create' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
+  return b.kind !== 'branch-create' && b.kind !== 'branch-switch' && b.kind !== 'branch-rename' && a.kind === b.kind && a.expectedRevision === b.expectedRevision && samePaths(a.paths, b.paths);
+}
+export function gitLocalIssueHelp(issue: GitLocalIssue): string {
+  return gitRenameIssueHelp(issue) ?? gitSwitchIssueHelp(issue) ?? previousIssueHelp(issue as GitIssue | GitBranchIssue);
 }
 // Only finite decoded immutable DATA is passed here, never caller getters.
 export function sameGitLocalData(a: unknown, b: unknown): boolean {

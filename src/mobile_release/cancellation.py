@@ -386,6 +386,13 @@ class DefaultCancellation:
 
     @property
     def _version_allocation_source(self) -> Any:
+        if self._edit_source is not None:
+            from .reserved_version_edit import BorrowedReservedVersionInput, ReservedVersionEdit
+            owner = self._edit_source.reserved
+            if type(owner) is ReservedVersionEdit and owner.input is self._edit_source:
+                source = owner.active
+                if type(source) is BorrowedReservedVersionInput and source.owner is owner:
+                    return source
         source = self._saved_command_input()
         if source is None:
             return None

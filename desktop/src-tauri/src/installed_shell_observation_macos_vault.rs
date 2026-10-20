@@ -17,7 +17,7 @@ impl Case {
         Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
     } }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
-    pub(crate) fn maximum_original(self) -> u32 { if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,8 +119,8 @@ impl Control {
     pub(crate) fn quit_id(&self) -> u32 { u32::from(self.quit.load(Ordering::SeqCst)) }
     pub(crate) fn completed(&self) -> bool { self.complete.load(Ordering::SeqCst) }
     fn finish(&self, originals: usize) -> bool {
-        if matches!(self.case, Case::UploadKey(_)) && self.upload.finished(originals) {
-            if self.complete.swap(true,Ordering::SeqCst){return false;}
+        if let Case::UploadKey(case) = self.case {
+            if !self.upload.finished(case, originals) || self.complete.swap(true, Ordering::SeqCst) { return false; }
             self.quit.store((originals+1) as u8,Ordering::SeqCst);return true;
         }
         let expected = if originals == 6 { 7 } else if originals == 4 { 5 } else { return false; };
@@ -179,7 +179,7 @@ impl Observation {
     pub(crate) fn attach_vault(self: &Arc<Self>, document: &DocumentBinding) -> Result<(), BridgeError> {
         match self.vault.as_ref() { Some(control) => control.attach(self, document), None => Ok(()) }
     }
-    pub(super) fn quit_id(&self) -> u32 { self.vault.as_ref().map_or_else(|| self.case.quit_id(), |c| c.quit_id()) }
+    pub(super) fn quit_id(&self) -> u32 { self.tool_setup.as_ref().map_or_else(||self.vault.as_ref().map_or_else(|| self.case.quit_id(), |c| c.quit_id()),|c|c.quit_id()) }
     pub(super) fn vault_tick(self: &Arc<Self>, document: &DocumentBinding, step: Step) {
         let Some(control) = &self.vault else { self.fail_with("vault-original-contract"); return; };
         // Calls below run outside Observation::Record. All action admission and

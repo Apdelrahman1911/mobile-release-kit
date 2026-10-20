@@ -1,8 +1,10 @@
-"""One original synchronous native typed-edit child, no descendants.
+"""One original synchronous native typed-edit child.
 
 Only desktop/config_edit_bootstrap.py admits this entry point. It is neither a
 CLI mutation method nor the passive engine. The native capability gate remains
 closed; this source alone does not qualify a runtime or filesystem backend.
+Only its closed reserved-version arm borrows the existing C/A/W source reader;
+ordinary edit domains still run no descendant commands.
 """
 from __future__ import annotations
 
@@ -211,6 +213,8 @@ class _Engine:
                 else:
                     raise ProtocolError("Invalid fixed edit domain")
         actions = [retire]
+        if self.input.reserved is not None:
+            actions.append(self.input.reserved.close)
         if self.lease is not None:
             actions.append(self.lease.close)
         actions.append(self.input.close)
@@ -225,11 +229,15 @@ class _Engine:
         # Terminal output follows root/handler settlement and has only a small
         # local bounded delivery allowance. It cannot restart native cleanup.
         end = time.monotonic() + 2.0 if terminal else None
+        if terminal and self.input.reserved is not None:
+            end = min(end, self.input.reserved.hard_end)
         while remaining:
             if not terminal:
                 self.guard.check()
             elif end is not None and time.monotonic() >= end:
                 raise ProtocolError("Edit terminal delivery did not settle")
+            if terminal and self.input.reserved is not None:
+                self.input.reserved.check_clock(terminal=True)
             try:
                 count = os.write(1, remaining[:64 * 1024])
                 if count <= 0:
@@ -253,6 +261,9 @@ class _Engine:
         root = _root(request.params["root"])
         self.saved_text_recovery = self.domain in {"metadata_text", "release_version"} and request.params.get("intent") == "recover"
         self.configuration_recovery = self.domain == "configuration" and request.params.get("intent") == "recover"
+        if self.domain == "release_version" and "reservedVersion" in request.params:
+            from .reserved_version_edit import ReservedVersionEdit
+            ReservedVersionEdit(self, request.params["reservedVersion"])
         if self.domain == "project_identity":
             self.identity_intent = request.params["intent"]
             self.identity_recovery = self.identity_intent == "recover"
@@ -321,6 +332,8 @@ class _Engine:
             checkout = capture_metadata_text_edit(self.lease, request.params["platform"], request.params["locale"])
         elif self.domain == "release_version":
             checkout = capture_release_version_edit(self.lease)
+            if self.input.reserved is not None:
+                self.input.reserved.check_saved(checkout)
         elif self.domain == "metadata_images":
             if self.image_intent == "recover":
                 from .metadata_images_recovery import capture_metadata_images_recovery
@@ -409,8 +422,9 @@ class _Engine:
             plan = prepare_metadata_text_edit(self.lease, checkout, request.params["revision"],
                                              request.params["expectedBaseline"], request.params["fields"])
         elif self.domain == "release_version":
-            plan = prepare_release_version_edit(self.lease, checkout, request.params["revision"],
-                request.params["expectedBaseline"], request.params["intent"], request.params["values"])
+            plan = (self.input.reserved.prepare(checkout, request.params) if self.input.reserved is not None else
+                    prepare_release_version_edit(self.lease, checkout, request.params["revision"],
+                    request.params["expectedBaseline"], request.params["intent"], request.params["values"]))
         elif self.domain == "metadata_images":
             if self.image_intent == "recover":
                 from .metadata_images_recovery import prepare_metadata_images_recovery
@@ -463,7 +477,8 @@ class _Engine:
         elif self.domain == "metadata_text":
             self.outcome = apply_metadata_text_edit(self.lease, plan)
         elif self.domain == "release_version":
-            self.outcome = apply_release_version_edit(self.lease, plan)
+            self.outcome = (self.input.reserved.apply(plan) if self.input.reserved is not None else
+                            apply_release_version_edit(self.lease, plan))
         elif self.domain == "metadata_images":
             if self.image_intent == "recover":
                 from .metadata_images_recovery import apply_metadata_images_recovery
@@ -486,6 +501,11 @@ class _Engine:
             observed = self.lease.last_outcome
             outcome = CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
         outcome = outcome or CoreEditOutcome("not_started", "not_created", "settled", "none")
+        if self.input.reserved is not None:
+            # The same ledger/source closures, not an ordinary terminal shape,
+            # must settle before native may consume this optional edit result.
+            if not self.input.reserved.settled():
+                raise ProtocolError("Reserved version source did not settle")
         if (not self.input.closed or self.lease is not None and not self.lease.closed
                 or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal):
             outcome = CoreEditOutcome(outcome.effect, outcome.journal, "unknown",

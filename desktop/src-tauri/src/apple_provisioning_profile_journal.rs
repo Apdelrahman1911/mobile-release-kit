@@ -94,7 +94,7 @@ impl AppleProvisioningJournal {
         update: ProfileUpdate,
     ) -> Result<ProfileJournalAck> {
         self.healthy()?;
-        if self.original.is_some() || self.profile_original.is_some() {
+        if self.reservation_taken() {
             return Err(Error::Conflict.into());
         }
         intent.validate()?;

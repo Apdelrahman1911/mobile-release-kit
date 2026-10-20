@@ -273,6 +273,7 @@ class LockedInitScope:
         self.identity: dict[str, int] | None = None
         self.meta_identity: dict[str, int] | None = None
         self.workspace: InitWorkspace | None = None
+        self.reserved_version = None
         self.locked = False
         self.claimed = False
         self.closed = False
@@ -295,7 +296,13 @@ class LockedInitScope:
             raise _failure("stale_revision")
         try:
             with guard.deferred(check_on_exit=False):
-                fcntl.flock(number, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                from .reserved_version_edit import BorrowedReservedVersionInput
+                reserved = guard._version_allocation_source
+                if type(reserved) is BorrowedReservedVersionInput:
+                    reserved.borrow_workspace(self)
+                    self.reserved_version = reserved
+                else:
+                    fcntl.flock(number, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self.locked = True
         except BlockingIOError as error:
             raise _failure("busy", error) from None
@@ -333,6 +340,8 @@ class LockedInitScope:
 
     def check(self) -> None:
         self.lease.check()
+        if self.reserved_version is not None:
+            self.reserved_version.check_workspace(self)
         number = self.fd
         if _directory(os.fstat(number)) != self.identity:
             raise _failure("stale_revision")

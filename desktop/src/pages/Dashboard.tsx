@@ -11,6 +11,7 @@ import type { ReleaseVersionState } from '../releaseVersion.ts';
 import type { VersionEditState } from '../releaseVersionEditController.ts';
 import { setupOverview } from '../setupOverview.ts';
 import type { SetupAction, SetupActivity, SetupCheckObservation } from '../setupOverview.ts';
+import type { SetupResumeSource } from '../setupResume.ts';
 import type { AppInfo, HelpContent, Page } from '../types.ts';
 import { Badge, EmptyState, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
@@ -39,8 +40,8 @@ const laterTasks: readonly { page: Page; icon: IconName; title: string; descript
 ];
 
 export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, setupReadinessReason, releaseVersionState, releaseVersionReason,
-  versionEditor, versionEditState, initializationPanel, initializationState, appleProvisioningPanel, appleProvisioningNeedsAttention, configSaveState, checks, activities,
-  onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+  versionEditor, versionEditState, initializationPanel, initializationState, appleProvisioningPanel, appleProvisioningNeedsAttention, configSaveState, checks, activities, resume,
+  onReadVersion, onChoose, onRefresh, onNavigate, onOpenBuildTools, onShowOriginalControls, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean;
   chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
   setupReadinessReason: string | null;
@@ -49,7 +50,8 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
   appleProvisioningPanel?: ReactNode; appleProvisioningNeedsAttention?: boolean;
   configSaveState: ConfigEditState;
   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null;
-  checks?: readonly SetupCheckObservation[]; activities?: readonly SetupActivity[];
+  checks?: readonly SetupCheckObservation[]; activities?: readonly SetupActivity[]; resume: SetupResumeSource;
+  onOpenBuildTools: (platform: 'android' | 'ios') => void; onShowOriginalControls: () => void;
   onReadVersion: () => void; onChoose: () => void; onRefresh: () => void;
   onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
 }) {
@@ -57,7 +59,7 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
   const [initializationReveal, setInitializationReveal] = useState(0);
   const overview = setupOverview({ session, preview, configSaveState, releaseVersionState, initializationState, versionEditState,
     chooseReason: chooseDisabled ? chooseReason ?? 'Finish the current task before choosing a project.' : null,
-    refreshReason, releaseVersionReason, checks, activities });
+    refreshReason, setupReadinessReason, releaseVersionReason, checks, activities, resume });
   const act = (action: SetupAction) => {
     switch (action.kind) {
       case 'choose-project': if (!chooseDisabled) onChoose(); break;
@@ -66,6 +68,8 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
       case 'open-version': setVersionReveal((revision) => revision + 1); break;
       case 'open-initialization': setInitializationReveal((revision) => revision + 1); break;
       case 'navigate': onNavigate(action.page); break;
+      case 'open-build-tools': onOpenBuildTools(action.platform); break;
+      case 'show-original-controls': onShowOriginalControls(); break;
     }
   };
   const config = session?.snapshot?.config.data ?? null;
@@ -99,7 +103,7 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
       <div><strong>Saved settings need another look</strong><p>Files have changed since the earlier read. Read them again when the current task finishes; your unsaved draft will stay intact.</p></div>
     </div>}
     {overview.otherProjectActivities.length > 0 && <div className="notice notice-warning guided-notice" role="status"><Icon name="info" />
-      <div><strong>Another project has unfinished work</strong><p>Use that project’s original task controls shown on this page. Its result does not describe this project, and changing projects does not stop it.</p></div>
+      <div><strong>An original task still needs attention</strong><p>This may be a computer-wide task or work from another project. Use its original controls shown on this page; changing projects does not stop it or make its result current here.</p></div>
     </div>}
     {session && isDirty(session) && <p className="guided-blocker">Unsaved release settings are kept in this window. They are not applied to the saved version or a build.</p>}
 
@@ -114,7 +118,7 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
       {versionEditor}
     </ProgressiveDisclosure>
 
-    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple Bundle ID · reuse or register"
+    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple setup · Bundle ID and signing"
       needsAttention={appleProvisioningNeedsAttention}
       description="A separate optional Store task. Review an existing ID first; a new registration needs its own approval. This does not make signing or release ready.">
       {appleProvisioningPanel}

@@ -38,7 +38,7 @@ impl PickerOriginals {
 }
 
 pub(super) fn future_bytes(known: &Known) -> Option<usize> {
-    if !known.sources.has_picks() || known.catalog.empty().is_none() {
+    if known.catalog.empty().is_none() {
         return Some(FUTURE_PUBLIC_BYTES);
     }
     #[cfg(all(
@@ -68,9 +68,45 @@ pub(super) fn future_bytes(known: &Known) -> Option<usize> {
     None
 }
 
+// Classification only; the SAME original failure timestamp and unknown latch
+// stay with Session. Cleanup's generic normalization cannot replace first F.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
+    not(feature = "macos-android-registration-helper")))]
+fn source_failure_reason(failure: AdmissionFailure) -> Option<wire::Reason> {
+    match failure {
+        AdmissionFailure::Inventory => Some(wire::Reason::ExistingToolsIncompatible),
+        AdmissionFailure::Ownership | AdmissionFailure::Native => Some(wire::Reason::ExistingToolsUnreadable),
+        AdmissionFailure::Identity => Some(wire::Reason::Stale),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
+        not(feature = "macos-android-registration-helper")))]
+    #[test]
+    fn source_diagnostic_keeps_original_first_failure_through_generic_cleanup_normalization() {
+        for (failure, reason) in [(AdmissionFailure::Inventory, wire::Reason::ExistingToolsIncompatible),
+            (AdmissionFailure::Ownership, wire::Reason::ExistingToolsUnreadable), (AdmissionFailure::Native, wire::Reason::ExistingToolsUnreadable),
+            (AdmissionFailure::Identity, wire::Reason::Stale)] {
+            assert_eq!(source_failure_reason(failure), Some(reason));
+            let context = wire::prepare(&json!({"projectId":"inert-source","draftRevision":0,"baselineGeneration":1,
+                "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"action":"inspect","review":null})).unwrap();
+            let application = SavedCommandOwner::tool_acquisition(RuntimeConfig::packaged("/unopened-source-diagnostic".into()));
+            let (_application, owner) = crate::saved_command_owner::tests::active_with_context(application, Context::ToolAcquisition(context));
+            let at = owner.clocks.admitted;
+            owner.observe_failure_at(Reason::from_tools(reason), at, false);
+            owner.publish_native_failure(Some((failure, at)));
+            assert_eq!(*owner.native_failure.lock().unwrap(), Some((Reason::from_tools(reason), at)));
+            assert!(*owner.stop.borrow());
+            assert!(!original_joined(&owner)); // Inert owner: no finality or native source was supplied.
+        }
+        for failure in [AdmissionFailure::Stopped, AdmissionFailure::Deadline, AdmissionFailure::Unknown] {
+            assert_eq!(source_failure_reason(failure), None);
+        }
+    }
     #[test]
     fn picker_census_keeps_current_and_replaced_originals_and_deduplicates_shared_arcs() {
         // Existing genuinely unentered originals. No selected/closed/receipt
@@ -172,6 +208,10 @@ impl SourceGate {
     }
     pub(crate) fn source_note(&self, failure: AdmissionFailure, at: Instant) {
         if let Some(owner) = self.owner.upgrade() {
+            // Preserve this SAME original source failure/F before generic
+            // cleanup normalizes it. A denied/wrong tree is never "missing".
+            let reason = source_failure_reason(failure);
+            if let Some(reason) = reason { owner.observe_failure_at(Reason::from_tools(reason), at, false); }
             owner.publish_native_failure(Some((failure, at)));
         }
     }

@@ -39,6 +39,13 @@ class BorrowedAllocationInput:
     def work_end(self):
         return self.dialogue.work_end
 
+    @property
+    def provider_selection(self):
+        return self.dialogue.initial.provider
+
+    def source_time(self):
+        self.dialogue._time()
+
     def _owner(self):
         wire.require(self.pid == os.getpid() and self.thread is threading.current_thread()
                      and self.thread is threading.main_thread())
@@ -165,9 +172,12 @@ class BorrowedAllocationInput:
         self.guard._remove_saved_command_source(self)
 
     def terminal_bounds(self):
-        """Actual SOURCE-only closed originals; never a caller-supplied grace."""
+        """Actual SOURCE/Reserve closed originals; never caller-supplied grace."""
+        from . import _desktop_version_allocation_protocol as reserve_wire
         self._owner()
-        wire.require(type(self.dialogue.initial) is wire.Initial and self.dialogue.initial.source is self.request
+        initial = self.dialogue.initial
+        wire.require((type(initial) is wire.Initial or type(initial) is reserve_wire.Initial
+                      and initial.provider is not None) and initial.source is self.request
                      and self.acquired and self.borrow_ended and not self.unknown
                      and self.guard is not None and self.guard.handler_state == "RESTORED"
                      and self.guard._saved_command_input() is None and self.originals_closed())

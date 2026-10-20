@@ -125,6 +125,8 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             names = {"root", "registeredIdentity", "platform", "locale"}
         elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
             names = {"root", "registeredIdentity"}
+            if protocol == VERSION_PROTOCOL and "reservedVersion" in params:
+                names.add("reservedVersion")
             if protocol == WORKFLOW_PROTOCOL and "intent" in params:
                 names.add("intent")
         else:
@@ -136,6 +138,15 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             valid = params["intent"] == "recover"
         if valid and (recovering_text or recovering_config):
             valid = params["intent"] == "recover"
+        if valid and protocol == VERSION_PROTOCOL and "reservedVersion" in params:
+            from .reserved_version_edit import HandoffData
+            try:
+                handoff = HandoffData.parse(params["reservedVersion"])
+                identity = registered_identity(params["registeredIdentity"])
+                valid = str(handoff.source.root) == params["root"] and handoff.source.identity == tuple(
+                    identity[key] for key in ("device", "inode", "mode", "uid", "gid"))
+            except (ValueError, TypeError, KeyError):
+                valid = False
         if valid and protocol == METADATA_PROTOCOL and not recovering_text:
             try:
                 platform_value(params["platform"])

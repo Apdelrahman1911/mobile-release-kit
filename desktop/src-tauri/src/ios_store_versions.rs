@@ -112,7 +112,7 @@ pub(super) fn valid_result(value: &ResultData) -> bool {
         && value.scope == SCOPE
         && value.observation.is_none()
         && value.profile_reuse.is_none()
-        && value.current_versions.as_ref().is_some_and(Summary::valid)
+        && value.current_versions.as_ref().and_then(super::play_versions::Inventory::ios).is_some_and(Summary::valid)
         && value.limitations.as_slice() == LIMITATIONS
         && value.findings.len() <= 16
         && value.findings.iter().all(|f| {
@@ -120,6 +120,7 @@ pub(super) fn valid_result(value: &ResultData) -> bool {
                 && (!value
                     .current_versions
                     .as_ref()
+                    .and_then(super::play_versions::Inventory::ios)
                     .is_some_and(Summary::observed)
                     || !matches!(
                         f.status,
@@ -151,6 +152,7 @@ impl Terminal {
             .as_ref()?
             .current_versions
             .as_ref()
+            .and_then(super::play_versions::Inventory::ios)
             .filter(|s| s.observed())
     }
 }

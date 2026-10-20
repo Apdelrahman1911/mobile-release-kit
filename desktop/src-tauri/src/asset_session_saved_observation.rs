@@ -109,6 +109,15 @@ impl SavedInputBinding {
             && document.bridge.native_project(&input.project_id).is_ok_and(|(registration, root)|
                 registration == self.lane.registration && root == self.lane.root)
     }
+    pub(super) fn reserved_version_prepublication(&self,document:&Inner,original:&Arc<SavedObservationLane>,
+        input:&crate::supervisor::VersionAllocationSourceInput,edit:&crate::edit_owner::SavedEditGuard<'_>,publisher:&RegistrationPublisher)->bool {
+        !publisher.accepted()&&publisher.same_slot(&document.android_registration_control)
+            &&publisher.tool_source_epoch().is_ok_and(|e|e==original.epoch)&&Arc::ptr_eq(&self.lane,original)
+            &&original.tool_source_matches(document,edit,original.registration,&input.root,&input.project_id)
+            &&input.configuration_size==self.comparison.config_bytes&&SavedComparisonData::digest(&input.configuration_sha256)==Some(self.comparison.config_sha256)
+            &&input.version_size==self.comparison.version_bytes&&SavedComparisonData::digest(&input.version_sha256)==Some(self.comparison.version_sha256)
+            &&input.version_path.as_bytes()==&self.comparison.source[..usize::from(self.comparison.source_len)]
+    }
     pub(super) fn version_source_input(&self, document: &Inner, project_id: &str, reference: &str,
         edit: &crate::edit_owner::SavedEditGuard<'_>)
         -> Result<(Arc<SavedObservationLane>, Arc<crate::supervisor::VersionAllocationSourceInput>), BridgeError> {
@@ -302,6 +311,14 @@ mod saved_observation_control_tests {
 
 impl DocumentBinding {
     pub(super) fn saved_observation_gate(&self, state: &DocumentState, exact: Option<&Arc<SavedObservationLane>>) -> Result<(), BridgeError> {
+        self.saved_observation_gate_mode(state,exact,false)
+    }
+    /// Fixed SOURCE read may coexist with an idle retained GitHub account; it
+    /// still gets no token or remote consent. Ordinary saved reads unchanged.
+    pub(super) fn version_source_observation_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
+        self.saved_observation_gate_mode(state,None,true)
+    }
+    fn saved_observation_gate_mode(&self,state:&DocumentState,exact:Option<&Arc<SavedObservationLane>>,source:bool)->Result<(),BridgeError>{
         passive_document_gate(state)?;
         if !state.lifetime.original_bound() || state.lost_observed { return Err(stale()); }
         if state.saved_observation.as_ref().is_some_and(|lane| !lane.returned()
@@ -309,7 +326,8 @@ impl DocumentBinding {
             return Err(BridgeError::new("busy", "The original saved observation has not returned."));
         }
         if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
-            || state.github.registration().is_some() || !self.inner.bridge.supervisor.can_exit() {
+            || (if source {state.github.native_work_pending()}else{state.github.registration().is_some()})
+            || !self.inner.bridge.supervisor.can_exit() {
             return Err(BridgeError::new("busy", "Finish the original native operation first."));
         }
         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.android_build.ensure_idle()?;

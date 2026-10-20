@@ -4,11 +4,14 @@ import type { ApiError, JsonObject } from './types.ts';
 export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'google-service-account';
 export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment';
 export type AssetKind = AssetFileKind | AssetScalarKind;
-export type AssetPlatform = 'android' | 'ios' | 'project';
+// Encrypted descriptor-only row; never an input/assessment/assignment kind.
+export type StoredAssetKind = AssetKind | 'apple-distribution-key';
+export type AssetPlatform = 'android' | 'ios' | 'project' | 'both';
 export type AssetStage = 'candidate' | 'external-testing' | 'production';
-export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning';
+export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning' | 'version-inventory';
 export type AssetExecutionMode = 'github' | 'local';
 export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose; executionMode?: AssetExecutionMode }
+export interface CoreAssetScope extends Omit<AssetScope,'platform'|'purpose'> { platform: Exclude<AssetPlatform,'both'>; purpose: Exclude<AssetPurpose,'version-inventory'> }
 export interface AssetContextRequest extends AssetScope { projectId: string; draft: JsonObject }
 export interface AssetRecordRef { recordId: string; expectedRevision: number }
 export type AssetBackupExportRequest = { contextRevision: number; record: AssetRecordRef };
@@ -52,7 +55,7 @@ export type CredentialPrepareRequest =
 export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platform' | 'unsupported-filesystem' | 'unsupported-format' | 'invalid-request' | 'busy' | 'source-refused' | 'source-changed' | 'material-limit' | 'parser-limit' | 'project-overlap' | 'exclusion-unconfirmed' | 'capacity' | 'context-stale' | 'user-cancelled' | 'review-expired' | 'deadline' | 'document-lost' | 'shutdown' | 'cleanup-unknown' |
   'vault-uninitialized' | 'vault-key-missing' | 'vault-keyring-locked' | 'vault-keyring-denied' | 'vault-keyring-unavailable' | 'vault-provider-unsupported' | 'vault-corrupt' | 'vault-interrupted' | 'vault-durability-unknown';
 export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
-export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key' | 'recover-upload-key';
+export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key' | 'recover-upload-key' | 'apple-profile-setup' | 'prepare-apple-distribution-key' | 'use-apple-distribution-key';
 export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
 export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
 export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
@@ -61,7 +64,7 @@ export interface CredentialAssessment {
   schemaVersion: 1;
   policyVersion: 'credential-policy-v1';
   kind: AssetKind;
-  context: AssetScope;
+  context: CoreAssetScope;
   applicability: { state: 'required' | 'not-applicable'; reason: 'selected' | 'wrong-platform' | 'platform-disabled' | 'not-required' };
   state: CredentialState;
   fields: { id: CredentialFieldId; requirement: string; presence: 'missing' | 'supplied'; state: CredentialState; issues: CredentialIssue[]; checks: { scope: CredentialCheckScope; outcome: 'passed' | 'failed' | 'asserted-pass' | 'asserted-fail' }[] }[];
@@ -92,7 +95,7 @@ export interface AssetStatus {
     selectionToken: string | null; assessment: CredentialAssessment | null;
     preview: { token: string; action: AssetPreviewAction; expiresInMs: number; subject: AssetPreviewSubject } | null;
   } | null;
-  records: { recordId: string; revision: number; kind: AssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
+  records: { recordId: string; revision: number; kind: StoredAssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
   assignments: { kind: AssetKind; recordId: string; recordRevision: number; contextRevision: number; availability: 'available' | 'unavailable' }[];
 }
 

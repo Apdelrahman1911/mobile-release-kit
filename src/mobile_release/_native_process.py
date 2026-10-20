@@ -112,16 +112,21 @@ class CommandBootstrapMap:
 
     def __init__(self, *, role: str, command_nonce: bytes, parent_pid: int,
                  parent_session: int, parent_group: int, fd_map_version: int,
-                 account_binding: tuple[int, int, int] | None, _key: object) -> None:
+                 account_binding: tuple[int, int, int] | None, _key: object,
+                 git_remote_identity: tuple[int, int, int] | None = None) -> None:
         _require(_key is _COMMAND_KEY and role in ("C", "A", "W")
                  and type(command_nonce) is bytes and len(command_nonce) == 16
-                 and type(fd_map_version) is int and fd_map_version == 1
+                 and type(fd_map_version) is int and fd_map_version in (1, 2)
+                 and (git_remote_identity is None) is (fd_map_version == 1)
+                 and (fd_map_version == 1 or account_binding is None)
                  and all(type(value) is int and 0 < value <= _MAX_PID
                          for value in (parent_pid, parent_session, parent_group)),
                  "command bootstrap binding differs")
         self.role, self.command_nonce = role, command_nonce
         self._parent = parent_pid, parent_session, parent_group
         self._pid, self._hold_adopted = os.getpid(), False
+        self.fd_map_version = fd_map_version
+        self.git_remote_binding = None
         self._account_binding = None
         if account_binding is not None:
             _require(role in ("C", "A") and type(account_binding) is tuple
@@ -131,6 +136,9 @@ class CommandBootstrapMap:
                 uid=uid, identity=(device, inode), command_nonce=command_nonce,
                 origin=self, _key=_ACCOUNT_KEY,
             )
+        if fd_map_version == 2:
+            from ._git_remote_command_channel import bootstrap_binding
+            self.git_remote_binding = bootstrap_binding(self, git_remote_identity)
 
     @property
     def account_binding(self) -> AccountHoldBinding | None:
@@ -139,22 +147,31 @@ class CommandBootstrapMap:
 
 def _issue_command_bootstrap(*, role: str, command_nonce: bytes, parent_pid: int,
                              parent_session: int, parent_group: int, fd_map_version: int = 1,
-                             account_binding: tuple[int, int, int] | None = None) -> CommandBootstrapMap:
+                             account_binding: tuple[int, int, int] | None = None,
+                             git_remote_identity: tuple[int, int, int] | None = None) -> CommandBootstrapMap:
     return CommandBootstrapMap(role=role, command_nonce=command_nonce, parent_pid=parent_pid,
                                parent_session=parent_session, parent_group=parent_group,
                                fd_map_version=fd_map_version, account_binding=account_binding,
-                               _key=_COMMAND_KEY)
+                               git_remote_identity=git_remote_identity, _key=_COMMAND_KEY)
 
 
 class CommandMapPermit:
     def __init__(self, acquisition: Acquisition, *, role: str, command_nonce: bytes,
                  executable: str, argv: tuple[str, ...], env: tuple[tuple[str, str], ...],
-                 fd_sources: tuple[FDLease, ...], _key: object) -> None:
+                 fd_sources: tuple[FDLease, ...], _key: object,
+                 git_remote_binding: object | None = None) -> None:
         _require(_key is _COMMAND_KEY and type(acquisition) is Acquisition
                  and role in ("C", "A", "W") and type(command_nonce) is bytes
-                 and len(command_nonce) == 16 and len(fd_sources) == 8,
+                 and len(command_nonce) == 16
+                 and len(fd_sources) == (8 if git_remote_binding is None else 9),
                  "command map permit differs")
         self._acquisition, self._role, self._nonce = acquisition, role, command_nonce
+        self._git_remote_binding = git_remote_binding
+        self._map_version = 1 if git_remote_binding is None else 2
+        if git_remote_binding is not None:
+            from ._git_remote_command_channel import SocketBinding
+            _require(type(git_remote_binding) is SocketBinding, "Git credential map issuer differs")
+            git_remote_binding._check(command_nonce)
         self._recipe = executable, argv, env
         self._sources, self._pid, self._used = fd_sources, os.getpid(), False
 
@@ -162,11 +179,19 @@ class CommandMapPermit:
         _require(self._pid == os.getpid() and not self._used
                  and self._acquisition is acquisition
                  and self._recipe == (spec.executable, spec.argv, spec.env)
-                 and len(spec.fd_sources) == 8
+                 and len(spec.fd_sources) == (8 if self._map_version == 1 else 9)
                  and all(left is right for left, right in zip(self._sources, spec.fd_sources)),
                  "command map permit is unavailable")
         self._used = True  # Irreversible before any duplication effect.
+        if self._map_version == 2:
+            _require(spec.fd_sources[5]._kind == "null",
+                     "Git credential map cannot inherit a signing account")
         for index, source in enumerate(spec.fd_sources):
+            if index == 8:
+                from ._git_remote_command_channel import binding_of
+                _require(binding_of(source, self._nonce) is self._git_remote_binding,
+                         "Git credential map original differs")
+                continue
             _require(source._kind == ("null" if index < 3 else "pipe")
                      if index != 5 else source._kind in ("null", "account_hold"),
                      "command descriptor role differs")
@@ -180,11 +205,13 @@ class CommandMapPermit:
 
 def _issue_command_map(acquisition: Acquisition, *, role: str, command_nonce: bytes,
                        executable: str, argv: tuple[str, ...], env: tuple[tuple[str, str], ...],
-                       fd_sources: tuple[FDLease, ...]) -> CommandMapPermit:
+                       fd_sources: tuple[FDLease, ...],
+                       git_remote_binding: object | None = None) -> CommandMapPermit:
     # Only the fixed command engine's _command_spec selects this recipe.
     return CommandMapPermit(acquisition, role=role, command_nonce=command_nonce,
                             executable=executable, argv=argv, env=env,
-                            fd_sources=fd_sources, _key=_COMMAND_KEY)
+                            fd_sources=fd_sources, git_remote_binding=git_remote_binding,
+                            _key=_COMMAND_KEY)
 
 
 class NativeProcessError(RuntimeError):
@@ -242,7 +269,10 @@ class SpawnSpec:
         _require(argv_size <= _MAX_COLLECTION and env_size <= _MAX_COLLECTION
                  and argv_size + env_size <= _MAX_CONFIGURATION,
                  "native process vectors exceed their bound")
-        _require(type(self.fd_sources) is tuple and len(self.fd_sources) in (3, 8)
+        _require(type(self.fd_sources) is tuple
+                 and (len(self.fd_sources) in (3, 8)
+                      or len(self.fd_sources) == 9 and type(self.command_map) is CommandMapPermit
+                      and self.command_map._map_version == 2)
                  and all(type(source) is FDLease for source in self.fd_sources),
                  "native child descriptor map differs")
         _require(self.command_map is None or type(self.command_map) is CommandMapPermit,
@@ -860,6 +890,7 @@ class FDLease:
         self._state = "NEW"
         self._borrowers: set[Acquisition] = set()
         self._account_binding: AccountHoldBinding | None = None
+        self._git_remote_binding: object | None = None
 
     @property
     def account_binding(self) -> AccountHoldBinding | None:
@@ -929,6 +960,11 @@ class FDLease:
                  "native descriptor access or inheritance differs")
         if self._kind == "pipe":
             _require(stat.S_ISFIFO(info.st_mode), "native pipe type differs")
+        elif self._kind == "git_remote_socket":
+            from ._git_remote_command_channel import SocketBinding
+            _require(type(self._git_remote_binding) is SocketBinding,
+                     "Git credential socket issuer differs")
+            self._git_remote_binding._check_descriptor(info, self._access)
         elif self._kind == "account_hold":
             binding = self._account_binding
             _require(type(binding) is AccountHoldBinding and binding._pid == os.getpid()
@@ -1173,14 +1209,18 @@ def _prepare(acquisition: Acquisition, spec: SpawnSpec) -> _Prepared:
     prepared = _Prepared(native)
     acquisition._prepared = prepared  # All buffers/containers are rooted before init/dup.
     prepared.buffers(spec, acquisition)
+    remote_map = spec.command_map is not None and spec.command_map._map_version == 2
+    duplicate_floor = 9 if remote_map else 8
     modes = (os.O_RDONLY, os.O_WRONLY, os.O_WRONLY, os.O_RDONLY,
              os.O_WRONLY, os.O_RDONLY, os.O_WRONLY, os.O_WRONLY)
+    if remote_map:
+        modes += (os.O_RDWR,)
     for index, source in enumerate(spec.fd_sources):
         if source not in acquisition._borrowed:
             acquisition._borrowed.append(source)
             source._borrow(acquisition)
         _require(source._access == modes[index], "native child descriptor direction differs")
-        if len(spec.fd_sources) == 8:
+        if len(spec.fd_sources) in (8, 9):
             _require((index >= 3 or source._kind == "null")
                      and (index not in (3, 4) or source._kind == "pipe"),
                      "native helper descriptor role differs")
@@ -1196,17 +1236,18 @@ def _prepare(acquisition: Acquisition, spec: SpawnSpec) -> _Prepared:
             acquisition._check()
             duplicate._state = "ACQUIRING"
             descriptor = acquisition._invoke("fd_duplicate", native.call, "fcntl", source.fileno(),
-                                              native.abi.constants["F_DUPFD_CLOEXEC"], 8,
+                                              native.abi.constants["F_DUPFD_CLOEXEC"], duplicate_floor,
                                               roots=(prepared, source, duplicate))
             if type(descriptor) is int and descriptor == -1:
                 duplicate._state = "NEW"  # Genuine failure: no positive FD was published.
                 raise NativeProcessError("native atomic descriptor duplication failed")
-            _require(type(descriptor) is int and 8 <= descriptor <= _MAX_PID
+            _require(type(descriptor) is int and duplicate_floor <= descriptor <= _MAX_PID
                      and descriptor not in originals
                      and all(other._original_fd != descriptor for other in prepared.duplicates[:-1]),
                      "native duplicate descriptor publication differs")
             duplicate._publish(descriptor, native, source._access, source._kind)
             duplicate._account_binding = source._account_binding
+            duplicate._git_remote_binding = source._git_remote_binding
             duplicate._validate()
         except BaseException as error:
             acquisition._record_error(error)

@@ -1,0 +1,197 @@
+--- a/src/mobile_release/api/_snapshot.py
++++ b/src/mobile_release/api/_snapshot.py
+@@ -25,6 +25,7 @@
+ from ..init_transaction import is_state_name
+ from ._json import bounded_json_text
+ from ._setup_analysis import analyze_setup
++from ._project_scripts import conventional_script, process_access_identity, project_script_hints
+ from .contracts import ApiError, ConfigObservation, Issue, ScanCounts, SnapshotResult, assurance, issue
+
+ MAX_DEPTH = 12
+@@ -173,6 +174,7 @@
+ @dataclass
+ class _Inventory:
+     sources: dict[str, str] = field(default_factory=dict)
++    script_modes: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+     directories: set[str] = field(default_factory=set)
+     issues: list[Issue] = field(default_factory=list)
+     counts: ScanCounts = field(default_factory=lambda: {
+@@ -587,7 +589,7 @@
+
+ def _source_candidate(relative: str) -> bool:
+     path = PurePosixPath(relative)
+-    return (path.name in _SOURCE_NAMES or relative == "gradle/libs.versions.toml"
++    return (conventional_script(relative) or path.name in _SOURCE_NAMES or relative == "gradle/libs.versions.toml"
+             or path.suffix in {".xcconfig", ".xcscheme"}
+             or (path.suffix == ".properties" and "version" in path.name.lower()))
+
+@@ -642,7 +644,17 @@
+                         finally:
+                             _close_handles([child])
+                     elif relative != config_path and _source_candidate(relative):
+-                        inventory.sources[relative] = _read_file(descriptor, entry.name, relative, inventory)
++                        if conventional_script(relative):
++                            receipts: list[tuple[int, str, tuple[int, ...] | None]] = []
++                            text = _read_file(descriptor, entry.name, relative, inventory, receipts=receipts)
++                            # The original reader has rechecked AND closed before
++                            # these mode hints can be retained. No second probe.
++                            inventory.sources[relative] = text
++                            original = receipts[0][2]
++                            if original is not None:
++                                inventory.script_modes[relative] = (original[2], original[7], original[8])
++                        else:
++                            inventory.sources[relative] = _read_file(descriptor, entry.name, relative, inventory)
+                 except _ReadProblem as error:
+                     inventory.note(error.code, error.message)
+                 except OSError:
+@@ -712,6 +724,9 @@
+                                  partial=inventory.partial)
+     except ApiError:
+         pass
++    scripts = project_script_hints(inventory.sources, inventory.script_modes,
++                                   bounded if isinstance(bounded, dict) else {},
++                                   partial=inventory.partial, identity=process_access_identity()) if inventory.root_settled else None
+     # Cooperative parsing over finite input may use the remaining scan allowance.
+     inventory.tick()
+     result: SnapshotResult = {
+@@ -724,4 +739,6 @@
+     }
+     if analysis is not None and analysis["discoveryPartial"] == inventory.partial:
+         result["setupAnalysis"] = analysis
++    if scripts is not None and scripts["sourcePartial"] == inventory.partial:
++        result["scriptDiscovery"] = scripts
+     return result
+--- a/src/mobile_release/api/contracts.py
++++ b/src/mobile_release/api/contracts.py
+@@ -1058,6 +1058,7 @@
+     assurance: Assurance
+     issues: list[Issue]
+     setupAnalysis: NotRequired[dict[str, Any]]
++    scriptDiscovery: NotRequired[dict[str, Any]]
+
+
+ def assurance(basis: Literal["static-text", "schema-policy"]) -> Assurance:
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -314,6 +314,7 @@
+   assurance: Assurance;
+   issues: Issue[];
+   setupAnalysis?: JsonObject;
++  scriptDiscovery?: JsonObject;
+ }
+
+ export interface ProjectReference { id: string; name: string; path: string }
+--- a/desktop/src/drafts.ts
++++ b/desktop/src/drafts.ts
+@@ -115,7 +115,7 @@
+   | { type: 'snapshot-done'; projectId: string; requestId: number; snapshot: ProjectSnapshot; observedAt: number }
+   | { type: 'snapshot-failed'; projectId: string; requestId: number; error: ApiError }
+   | { type: 'new-draft'; projectId: string; draft: JsonObject }
+-  | { type: 'edit'; projectId: string; path: string; value: JsonValue | undefined }
++  | { type: 'edit'; projectId: string; path: string; value: JsonValue | undefined; expectedSession?: ProjectSession }
+   | { type: 'remove-forbidden'; projectId: string; reviewId: number; paths: string[] }
+   | { type: 'undo-removal'; projectId: string; removalId: number }
+   | { type: 'forget-removal'; projectId: string; removalId: number }
+@@ -263,6 +263,8 @@
+       next = { ...session, draft: action.draft, draftOrigin: 'empty', revision: session.revision + 1, validationError: null, editError: null };
+       break;
+     case 'edit': {
++      // Guided script appends must not overwrite a reentrant newer draft.
++      if (action.expectedSession !== undefined && (state.selectedId !== action.projectId || session !== action.expectedSession)) return state;
+       if (session.draft === null) return state;
+       if (blockingAncestor(session.draft, action.path) !== null) {
+         next = editFailure(session, 'A parent field has a non-object value. It was preserved; a child control cannot replace it.');
+--- a/desktop/src/components/DraftEditor.tsx
++++ b/desktop/src/components/DraftEditor.tsx
+@@ -1,4 +1,5 @@
+ import { useState } from 'react';
++import type { ReactNode } from 'react';
+ import { fieldsFor } from '../catalog.ts';
+ import { draftStatus } from '../certainty.ts';
+ import { isDirty, savedRevisionFresh, validationFresh } from '../drafts.ts';
+@@ -19,6 +20,7 @@
+   catalog: Catalog | null;
+   session: ProjectSession | null;
+   metadataOnly?: boolean;
++  projectScripts?: ReactNode;
+   preview: boolean;
+   chooseReason: string | null;
+   pathPicker: ProjectPathControls;
+@@ -42,7 +44,7 @@
+   onHelp: (help: HelpContent) => void;
+ }
+
+-export function DraftEditor({ catalog, session, metadataOnly = false, preview, chooseReason, pathPicker, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
++export function DraftEditor({ catalog, session, metadataOnly = false, projectScripts, preview, chooseReason, pathPicker, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
+   const [search, setSearch] = useState('');
+   if (!session) return <div className="card"><EmptyState icon="folder" title="First, choose a project" description="The native folder picker establishes the project boundary. Drafts remain separate for every project you open."><button className="button primary" disabled={chooseReason !== null} aria-describedby={chooseReason ? 'draft-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : 'Choose project folder'}</button>{chooseReason && <p id="draft-choose-reason" className="toolbar-reason">{chooseReason}</p>}</EmptyState></div>;
+   if (!catalog) return <div className="card"><EmptyState icon="settings" title="The field catalogue is unavailable" description="A compatible core must provide the schema and contextual help before configuration controls are enabled. No fallback policy is substituted." /></div>;
+@@ -83,6 +85,7 @@
+       </section>
+       {count === 0 && <div className="card"><EmptyState compact icon="search" title="No matching metadata settings" description="Try a different term." /></div>}
+     </div> : <GuidedConfigurationFields catalog={catalog} session={session} preview={preview} pathPicker={pathPicker} reviewReason={reviewReason} onReview={onReview} onEdit={onEdit} onHelp={onHelp} />}
++    {!metadataOnly && projectScripts}
+     <DraftSaveActions session={session} status={{ tone: status.tone, label: statusText }} saveReason={saveReason} discardReason={discardReason}
+       validateReason={validateReason} reviewReason={reviewReason} onPrepareSave={onPrepareSave} onDiscard={onDiscard}
+       onValidate={onValidate} onReview={onReview} onHelp={onHelp} />
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -111,6 +111,9 @@
+ import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page, ProjectPathField } from './types.ts';
+ import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
+ import { DraftEditor } from './components/DraftEditor.tsx';
++import { ProjectScripts } from './components/ProjectScripts.tsx';
++import { applyProjectScriptEdit } from './projectScripts.ts';
++import type { ProjectScriptContext } from './projectScripts.ts';
+ import { ConfigSave } from './components/ConfigSave.tsx';
+ import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
+ import { GitHubConnection } from './components/GitHubConnection.tsx';
+@@ -400,7 +403,7 @@
+     initializationControllerRef.current?.beforeWorkspaceAction(action);
+     const previous = workspaceRef.current;
+     const next = workspaceReducer(previous, action);
+-    if (next === previous) return;
++    if (next === previous) return false;
+     if (next.selectedId !== previous.selectedId) {
+       // Retire before publishing the project change; even away-and-back cannot
+       // adopt an older catalogue reply. No native document/session is invented.
+@@ -438,6 +441,7 @@
+     editControllerRef.current?.syncDraft();
+     syncConnectionContext();
+     githubHistoryControllerRef.current?.syncContext();
++    return true; // Reports only this local reducer update, never a native save.
+   }, [syncConnectionContext, retirePathPicker, retireIdentity]);
+   const [configEdit] = useState(() => new ConfigEditController({
+     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
+@@ -1689,9 +1693,20 @@
+
+   const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initializationRetainsDraft(initialization.getSnapshot(),projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
+
++  const projectScriptsContext = (): ProjectScriptContext => {
++    const current = workspaceRef.current, service = pathService.current;
++    return { session: current.selectedId ? current.projects[current.selectedId] ?? null : null, catalog,
++      service: service.api?.mode === 'native' ? service : null, epoch: identityEpoch.current, preview,
++      // This is only a local draft edit: an idle connected account is not a
++      // reason to disconnect, but pending/unknown owners and reviews still gate.
++      reason: bootstrapPending.current ? 'Wait for the current application capabilities.' :
++        projectPathOwnerReason(pathPickerRef.current) ?? savedCommandBusy() ?? savedCommandPrerequisiteReason(false, false, undefined, false, true) };
++  };
+   const editor = (metadataOnly = false) => <DraftEditor
+     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
+     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
++    projectScripts={metadataOnly ? null : <ProjectScripts context={projectScriptsContext()}
++      onAdd={(intent) => applyProjectScriptEdit(intent, projectScriptsContext, (action) => dispatch(action))} onHelp={setHelp} />}
+     chooseReason={chooseReason}
+     pathPicker={{ reason: projectPathStartReason(), pendingField: pathPicker.eligible?.field ?? null, onBrowse: (field) => void chooseProjectPath(field) }}
+     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {

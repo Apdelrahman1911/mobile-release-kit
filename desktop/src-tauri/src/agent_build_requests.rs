@@ -454,9 +454,7 @@ impl Entry {
             _ => false,
         }
     }
-    pub(crate) fn status(&self) -> Result<Snapshot, Error> {
-        self.occupies();
-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+    fn observed_request_state(&self) -> RequestState {
         let request_state = match self.phase.load(Ordering::Acquire) {
             QUEUED => RequestState::Queued,
             PREPARING => RequestState::Preparing,
@@ -466,12 +464,50 @@ impl Entry {
             EXPIRED => RequestState::Expired,
             _ => RequestState::AdmissionUnknown,
         };
+        request_state
+    }
+    fn observed_start_state(&self) -> StartState {
         let start_state = match self.start.load(Ordering::Acquire) {
             NO_START => StartState::NotRequested,
             START_QUEUED => StartState::Queued,
             START_ADMITTING => StartState::Admitting,
             _ => StartState::Consumed,
         };
+        start_state
+    }
+    /// Same original metadata, with no Report, Review or tool binding clone.
+    pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
+        use crate::service_request_catalogue as data;
+        self.occupies();
+        let operation = {
+            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
+            latest.as_ref().map(|value| data::Operation {
+                operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
+                status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
+            })
+        }; // Never invert the existing latest -> publication order.
+        let request_state = self.observed_request_state();
+        let start_state = self.observed_start_state();
+        let progress = match self.family() {
+            Family::AndroidInspect => data::Progress::AndroidBuild { request_state, start_state },
+            Family::IosArchive => data::Progress::IosArchive { request_state, start_state },
+        };
+        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+        let history_available = !history.failed && operation.as_ref()
+            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
+        let row = data::Request {
+            request_id: self.input.request_id.clone(),
+            expected_observation_revision: self.input.expected_observation_revision,
+            progress, operation, history_available,
+        };
+        row.validate().map_err(|_| Error::StateUnknown)?;
+        Ok(row)
+    }
+    pub(crate) fn status(&self) -> Result<Snapshot, Error> {
+        self.occupies();
+        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+        let request_state = self.observed_request_state();
+        let start_state = self.observed_start_state();
         let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
         let result = Snapshot {
             origin: self.input.query(),

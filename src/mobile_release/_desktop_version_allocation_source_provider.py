@@ -97,10 +97,17 @@ class Provider:
 class HeldProvider:
     def __init__(self, operation, selection):
         from .version_allocation_source import AllocationSourceRun
+        from . import _desktop_version_allocation_protocol as reserve_wire
+        from .reserved_version_edit import BorrowedReservedVersionInput
+        editing = type(operation.input) is BorrowedReservedVersionInput
+        initial = None if editing else operation.input.dialogue.initial
         wire.require(type(operation) is AllocationSourceRun and type(selection) is Provider
-                     and operation.input.operation is operation and operation.selected is None
-                     and type(operation.input.dialogue.initial) is wire.Initial
-                     and operation.input.dialogue.initial.provider is selection
+                     and operation.input.operation is operation
+                     and (editing and operation.input.admits_provider(selection)
+                          or (operation.selected is None and type(initial) is wire.Initial)
+                          or (operation.selected is not None and type(initial) is reserve_wire.Initial
+                              and initial.source is operation.request))
+                     and operation.input.provider_selection is selection
                      and Provider.parse(selection.value(), operation.request) == selection)
         wire.require((os.getuid(), os.geteuid(), os.getgid(), os.getegid()) ==
                      (selection.uid, selection.uid, selection.gid, selection.gid))
@@ -113,7 +120,7 @@ class HeldProvider:
     def _owner(self):
         run = self.operation
         run._owner()
-        wire.require(run.provider is self and run.input.dialogue.initial.provider is self.selection
+        wire.require(run.provider is self and run.input.provider_selection is self.selection
                      and not self.close_claimed and not run.failed and not run.close_claimed)
         run.checkpoint()
         wire.require((os.getuid(), os.geteuid(), os.getgid(), os.getegid()) ==

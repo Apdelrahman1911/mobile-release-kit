@@ -20,6 +20,11 @@ use std::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
+#[path = "application_service_android_tools.rs"]
+mod android_tools;
+#[path = "application_service_repository_summary.rs"]
+mod repository_summary;
+
 #[path = "application_service_identity_history.rs"]
 mod identity_history;
 pub(crate) use identity_history::{IdentityCapture, IdentityObservation, IdentitySource, identity_history_document_backing_bytes};
@@ -193,6 +198,8 @@ struct Originals {
 pub(crate) struct ApplicationHost {
     identity: Arc<()>, control: Mutex<Control>, originals: AsyncMutex<Originals>,
     history: Arc<identity_history::History>,
+    android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+    repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
 }
 impl ApplicationHost {
     /// No path lookup, directory, reservation, socket or background task.
@@ -201,7 +208,9 @@ impl ApplicationHost {
             phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None, prepared_binding: None,
             native_location: None, native_roots: Vec::new(), store: None, service: None,
             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
-        }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()) }
+        }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()),
+            android_tools: Arc::new(crate::service_android_tools::ObservationSlot::default()),
+            repository_summary: Arc::new(crate::service_repository_summary::ObservationSlot::default()) }
     }
     fn lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
         match self.control.lock() {
@@ -469,7 +478,7 @@ impl ApplicationHost {
             // agent grant. Native setup needs its stable IDs without an IPC
             // listener; later explicit Allow reuses these same originals.
             if originals.service.is_none() {
-                let service = match ApplicationService::open(store.clone()) {
+                let service = match ApplicationService::open_with_observations(store.clone(), self.android_tools.clone(), self.repository_summary.clone()) {
                     Ok(service) => Arc::new(service),
                     Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::OpenService, error))),
                 };
@@ -646,6 +655,8 @@ impl ApplicationHost {
     /// Accepted exit/document retirement only. A cancelled quit does not call
     /// this method, and therefore does not silently destroy existing consent.
     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
+        self.repository_summary.retire(); // SAME relay DATA, no late publication after retirement.
+        self.android_tools.unavailable(); // Memory-only; no late relay publication can revive it.
         self.history.retire_capture(); // Memory-only barrier before existing Host/Service work.
         let mut state = self.lock()?;
         state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
@@ -830,7 +841,7 @@ mod tests {
                 originals.store = Some(store.clone()); state.store = Some(store.clone());
             }
             if originals.service.is_none() {
-                let service = match ApplicationService::open(originals.store.as_ref().unwrap().clone()) {
+                let service = match ApplicationService::open_with_android_tools(originals.store.as_ref().unwrap().clone(), host.android_tools.clone()) {
                     Ok(service) => Arc::new(service),
                     Err(error) => { state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error); }
                 };
@@ -890,7 +901,7 @@ mod tests {
             // Same scope as seed_lifecycle_fixture above: actual private Store
             // and IPC behavior, NOT successful native SourceBook qualification.
             let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
-            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+            let service = Arc::new(ApplicationService::open_with_android_tools(store.clone(), host.android_tools.clone()).unwrap());
             let binding = service.register_native(&project.runtime_id, &project.canonical_root, project.device, project.inode).unwrap();
             {
                 let mut originals = host.originals.lock().await;

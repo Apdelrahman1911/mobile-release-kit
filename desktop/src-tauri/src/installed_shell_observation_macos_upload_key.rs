@@ -5,6 +5,7 @@ use super::*;
 use crate::android_toolchain_catalog as catalog;
 use crate::asset_session::{InstalledUploadSample, InstalledUploadTrace};
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case {
@@ -44,6 +45,15 @@ pub(crate) enum Action {
     Recontext,
     Read,
     Relock,
+    RecoverySaved,
+    RecoveryPrepare,
+    AcknowledgeUnstarted,
+    RecoveredRelock,
+    BindSaved,
+    BoundSaved,
+    BoundPrepare,
+    RememberBound,
+    BoundRelock,
     Missing,
 }
 impl Action {
@@ -63,6 +73,15 @@ impl Action {
             Self::Recontext => 11,
             Self::Read => 12,
             Self::Relock => 13,
+            Self::RecoverySaved => 12,
+            Self::RecoveryPrepare => 13,
+            Self::AcknowledgeUnstarted => 14,
+            Self::RecoveredRelock => 15,
+            Self::BindSaved => 13,
+            Self::BoundSaved => 14,
+            Self::BoundPrepare => 15,
+            Self::RememberBound => 16,
+            Self::BoundRelock => 17,
             Self::Missing => 254,
         }
     }
@@ -70,9 +89,20 @@ impl Action {
         match self {
             Self::RefuseRepeat | Self::Lock | Self::Reopen => 5,
             Self::Unlock => 6,
-            Self::Recontext | Self::Read => 7,
-            Self::Relock => 8,
+            Self::Recontext | Self::Read | Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted => 7,
+            Self::Relock | Self::RecoveredRelock | Self::BindSaved => 8,
+            Self::BoundSaved | Self::BoundPrepare | Self::RememberBound => 9,
+            Self::BoundRelock => 10,
             _ => 4,
+        }
+    }
+    fn allowed(self, case: Case) -> bool {
+        match self {
+            Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
+            Self::Read => case != Case::StopBeforeGo,
+            Self::Relock => case == Case::RoundTrip,
+            Self::BindSaved | Self::BoundSaved | Self::BoundPrepare | Self::RememberBound | Self::BoundRelock => case == Case::StopAfterNew,
+            _ => true,
         }
     }
     pub(crate) fn creates(self) -> bool {
@@ -101,7 +131,7 @@ impl Flow {
         original: u32,
     ) -> Option<Selection> {
         if !std::ptr::eq(self, &control.upload)
-            || self.case(control.case).is_none()
+            || !self.case(control.case).is_some_and(|case| action.allowed(case))
             || !control.permits(document)
             || original != action.original()
         {
@@ -132,9 +162,13 @@ impl Flow {
             spent: AtomicBool::new(false),
         })
     }
-    pub(super) fn finished(&self, originals: usize) -> bool {
-        (originals == 8 && self.next.load(Ordering::SeqCst) == 14)
-            || (originals == 4 && self.next.load(Ordering::SeqCst) == 255)
+    pub(super) fn finished(&self, case: Case, originals: usize) -> bool {
+        let next = self.next.load(Ordering::SeqCst);
+        (originals == 4 && next == 255) || match case {
+            Case::RoundTrip => originals == 8 && next == 14,
+            Case::StopBeforeGo => originals == 8 && next == 16,
+            Case::StopAfterNew => originals == 10 && next == 18,
+        }
     }
 }
 
@@ -163,7 +197,8 @@ impl Selection {
         Some(self.control)
     }
     fn claim(&self, document: &Arc<()>, original: u32, path: Option<&Path>) -> bool {
-        self.serial
+        self.control.upload.case(self.control.case).is_some_and(|case| self.action.allowed(case))
+            && self.serial
             == if self.action == Action::Missing {
                 255
             } else {
@@ -175,7 +210,7 @@ impl Selection {
                 .is_some_and(|same| Arc::ptr_eq(&same, document))
             && original == self.action.original()
             && self.control.upload.next.load(Ordering::SeqCst) == self.serial
-            && if matches!(self.action, Action::Prepare | Action::Reopen) {
+            && if matches!(self.action, Action::Prepare | Action::RecoveryPrepare | Action::BoundPrepare | Action::Reopen) {
                 path == Some(self.control.root())
             } else {
                 path.is_none()
@@ -204,6 +239,16 @@ pub(in super::super) enum Step {
     Recontext,
     Read,
     Readback,
+    BindSaved,
+    BoundReadback,
+    BoundSaved,
+    BoundPrepare,
+    RememberBound,
+    BoundRecoveryReadback,
+    RecoverySaved,
+    RecoveryPrepare,
+    AcknowledgeUnstarted,
+    RecoveryReadback,
     Relock,
     Relocked,
     Missing,
@@ -214,6 +259,9 @@ pub(super) struct Record {
     pub(super) sample: Option<InstalledUploadSample>,
     repeated_refused: bool,
     readback: bool,
+    acknowledged: bool,
+    bound: bool,
+    remembered: bool,
     not_executed: bool,
 }
 #[derive(Clone, Copy)]
@@ -268,6 +316,12 @@ impl Observation {
     /// Called by the SAME existing Relay task. An async native startup/saved
     /// observation is awaited by that original; there is no new unjoined task.
     pub(crate) async fn tick_original(self: &Arc<Self>, app: &tauri::AppHandle) {
+        let tool=self.record().and_then(|r|match r.step {super::super::Step::ToolSetup(step) if !matches!(step,super::super::tool_setup::Step::Native(_))=>Some(step),_=>None});
+        if let Some(step)=tool {
+            if !self.timely(){self.tick(app);return;}
+            let Some(state)=app.try_state::<crate::shell::ShellState>() else {self.fail_with("tool-setup-original-contract");return;};
+            self.tool_tick(app,&state.document,step).await;return;
+        }
         let step = self.record().and_then(|r| match r.step {
             super::super::Step::UploadKey(step) => Some(step),
             _ => None,
@@ -384,30 +438,14 @@ impl Observation {
                             .upload
                             .sample = Some(sample);
                         Some(Step::Repeat)
-                    } else if sample.stopped_observed(case) {
-                        // Record the actual retained negative. Do NOT dispose,
-                        // claim all-originals-final, force exit or start another
-                        // fixture. The outer owner may time out/retain UNKNOWN.
-                        if !document.installed_upload_create(true).map_err(asset)? {
-                            return Err(BridgeError::invalid());
-                        }
-                        let mut r = self.record().ok_or_else(BridgeError::invalid)?;
-                        r.vault_record
-                            .as_mut()
-                            .ok_or_else(BridgeError::invalid)?
-                            .upload
-                            .repeated_refused = true;
-                        if super::super::latch_failure(
-                            &self.failure_reason,
-                            &self.failed,
-                            "upload-key-expected-retention",
-                        ) {
-                            r.upload_failure = Some(FailureSample {
-                                sample,
-                                repeated_create_refused: true,
-                            });
-                        }
-                        None
+                    } else if sample.cancelled(case) {
+                        // Observe only the original positive cleanup/CAS/use
+                        // retirement. UserCancelled stays UserCancelled; no
+                        // transient retained STOP becomes a pass or an exit.
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.sample = Some(sample);
+                        Some(Step::Repeat)
                     } else {
                         None
                     }
@@ -495,7 +533,7 @@ impl Observation {
                     document
                         .installed_upload_context(&self.base, &project, true)
                         .map_err(asset)?;
-                    Some(Step::Read)
+                    Some(if case == Case::StopBeforeGo { Step::RecoverySaved } else { Step::Read })
                 }
                 Step::Read => {
                     document
@@ -512,6 +550,64 @@ impl Observation {
                             .ok_or_else(BridgeError::invalid)?
                             .upload
                             .readback = true;
+                        Some(if case == Case::StopAfterNew { Step::BindSaved } else { Step::Relock })
+                    }
+                    Some(false) => return Err(BridgeError::invalid()),
+                    None => None,
+                },
+                Step::BindSaved => {
+                    document.installed_upload_bind_saved().map_err(asset)?;
+                    Some(Step::BoundReadback)
+                }
+                Step::BoundReadback => match document.installed_upload_bound_saved() {
+                    Some(true) => {
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.bound = true;
+                        Some(Step::BoundSaved)
+                    }
+                    Some(false) => return Err(BridgeError::invalid()),
+                    None => None,
+                },
+                Step::BoundSaved => {
+                    document.installed_upload_bound_saved_input().await.map_err(asset)?;
+                    Some(Step::BoundPrepare)
+                }
+                Step::BoundPrepare => {
+                    document.installed_upload_bound_prepare().await.map_err(asset)?;
+                    Some(Step::RememberBound)
+                }
+                Step::RememberBound => {
+                    document.installed_upload_remember_bound().map_err(asset)?;
+                    Some(Step::BoundRecoveryReadback)
+                }
+                Step::BoundRecoveryReadback => match document.installed_upload_remembered_bound() {
+                    Some(true) => {
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.remembered = true;
+                        Some(Step::Relock)
+                    }
+                    Some(false) => return Err(BridgeError::invalid()),
+                    None => None,
+                },
+                Step::RecoverySaved => {
+                    document.installed_upload_recovery_saved().await.map_err(asset)?;
+                    Some(Step::RecoveryPrepare)
+                }
+                Step::RecoveryPrepare => {
+                    document.installed_upload_recovery_prepare().await.map_err(asset)?;
+                    Some(Step::AcknowledgeUnstarted)
+                }
+                Step::AcknowledgeUnstarted => {
+                    document.installed_upload_acknowledge_unstarted().map_err(asset)?;
+                    Some(Step::RecoveryReadback)
+                }
+                Step::RecoveryReadback => match document.installed_upload_acknowledged() {
+                    Some(true) => {
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.acknowledged = true;
                         Some(Step::Relock)
                     }
                     Some(false) => return Err(BridgeError::invalid()),
@@ -519,7 +615,11 @@ impl Observation {
                 },
                 Step::Relock => {
                     document
-                        .installed_upload_vault(Action::Relock)
+                        .installed_upload_vault(match case {
+                            Case::RoundTrip => Action::Relock,
+                            Case::StopBeforeGo => Action::RecoveredRelock,
+                            Case::StopAfterNew => Action::BoundRelock,
+                        })
                         .map_err(asset)?;
                     Some(Step::Relocked)
                 }
@@ -589,34 +689,40 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
         || !record.opened
         || !record.preview_consumed
         || !record.locked
+        || data.bound != (case == Case::StopAfterNew && !not_executed)
+        || data.remembered != (case == Case::StopAfterNew && !not_executed)
         || (!not_executed
-            && (case != Case::RoundTrip
-                || !data.sample.is_some_and(InstalledUploadSample::positive)
+            && (!data.sample.is_some_and(|sample| if case == Case::RoundTrip { sample.positive() } else { sample.cancelled(case) })
                 || !data.repeated_refused
-                || !data.readback
-                || record.original_count != 8))
+                || data.readback != (case != Case::StopBeforeGo)
+                || data.acknowledged != (case == Case::StopBeforeGo)
+                || record.original_count != if case == Case::StopAfterNew { 10 } else { 8 }))
     {
         return None;
     }
-    Some(
-        json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
+    let mut value = json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
         "execution":if not_executed{"not-executed-prerequisite"}else{"executed"},
-        "testResult":if not_executed{"not-executed"}else{"positive"},
+        "testResult":if not_executed{"not-executed"}else if case == Case::RoundTrip{"positive"}else{"cancelled-cleanup"},
         "initializeHelper":record.initialization,"storage":record.storage,
-        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,
+        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,"stoppedIntentAcknowledged":data.acknowledged,
         "originalCount":record.original_count+1,"allOriginalsSettled":true,"finalDocumentEmpty":true,
         "automaticallyAssigned":false,"backupCreated":false,"releaseSigningQualified":false,
-        "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"}),
-    )
+        "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"});
+    if case == Case::StopAfterNew && !not_executed {
+        let object = value.as_object_mut()?;
+        object.insert("explicitlyBoundSavedKey".into(), Value::Bool(data.bound));
+        object.insert("rememberedBoundSavedKey".into(), Value::Bool(data.remembered));
+    }
+    Some(value)
 }
 
 pub(super) fn data_checks() -> bool {
     // Pure selector DATA, not a registered Control or native availability.
     // No User lookup, directory, private scalar or process is constructed.
     let root = PathBuf::from("/Users/inert/upload-key-native-test");
-    let inert = || {
+    let inert = |case| {
         Arc::new(Control {
-            case: super::Case::UploadKey(Case::RoundTrip),
+            case: super::Case::UploadKey(case),
             root: root.clone(),
             project: PathBuf::from("/private/tmp/inert-project"),
             original: OnceLock::new(),
@@ -630,7 +736,7 @@ pub(super) fn data_checks() -> bool {
             upload: Flow::default(),
         })
     };
-    let control = inert();
+    let control = inert(Case::RoundTrip);
     let document = Arc::new(());
     let other = Arc::new(());
     let select = |document: &Arc<()>, action: Action| Selection {
@@ -675,17 +781,51 @@ pub(super) fn data_checks() -> bool {
     let dead = Arc::new(());
     let lost = select(&dead, Action::Prepare);
     drop(dead);
-    if lost.claim(&document, 4, Some(&root)) || control.upload.finished(5) {
+    if lost.claim(&document, 4, Some(&root)) || control.upload.finished(Case::RoundTrip, 5) {
         return false;
     }
-    control.upload.next.store(14, Ordering::SeqCst);
-    if !control.upload.finished(8) || control.upload.finished(7) || control.upload.finished(9) {
-        return false;
+    for case in Case::ALL {
+        for next in [14, 16, 18, 255] {
+            control.upload.next.store(next, Ordering::SeqCst);
+            for originals in [4, 5, 7, 8, 9, 10, 11] {
+                let expected = (originals == 4 && next == 255) || match case {
+                    Case::RoundTrip => originals == 8 && next == 14,
+                    Case::StopBeforeGo => originals == 8 && next == 16,
+                    Case::StopAfterNew => originals == 10 && next == 18,
+                };
+                if control.upload.finished(case, originals) != expected { return false; }
+            }
+        }
     }
-    control.upload.next.store(255, Ordering::SeqCst);
-    if !control.upload.finished(4) || control.upload.finished(5) {
-        return false;
+    if Action::AcknowledgeUnstarted.allowed(Case::RoundTrip)
+        || Action::RecoveryPrepare.allowed(Case::StopAfterNew)
+        || Action::Read.allowed(Case::StopBeforeGo)
+        || Action::Relock.allowed(Case::StopBeforeGo)
+        || Action::Relock.allowed(Case::StopAfterNew)
+        || !Action::AcknowledgeUnstarted.allowed(Case::StopBeforeGo)
+        || Action::AcknowledgeUnstarted.original() != 7
+        || Action::RecoveredRelock.original() != 8
+    { return false; }
+    for (action, original, index) in [
+        (Action::BindSaved, 8, 13), (Action::BoundSaved, 9, 14),
+        (Action::BoundPrepare, 9, 15), (Action::RememberBound, 9, 16),
+        (Action::BoundRelock, 10, 17),
+    ] {
+        if !action.allowed(Case::StopAfterNew) || action.allowed(Case::RoundTrip)
+            || action.allowed(Case::StopBeforeGo)
+            || action.original() != original || action.index() != index
+        { return false; }
     }
+    let after = inert(Case::StopAfterNew);
+    after.upload.next.store(16, Ordering::SeqCst);
+    let bound = Selection { control: after, document: Arc::downgrade(&document),
+        action: Action::BoundPrepare, serial: 16, spent: AtomicBool::new(false) };
+    if bound.claim(&other, 9, Some(&root)) || bound.claim(&document, 8, Some(&root))
+        || bound.claim(&document, 9, None)
+        || bound.claim(&document, 9, Some(Path::new("/Users/inert/other")))
+        || !bound.claim(&document, 9, Some(&root))
+        || bound.claim(&document, 9, Some(&root))
+    { return false; }
     Action::Create.original() == 4
         && Action::RefuseRepeat.original() == 5
         && Action::Read.original() == 7

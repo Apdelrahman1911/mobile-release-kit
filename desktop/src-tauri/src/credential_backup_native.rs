@@ -366,6 +366,7 @@ fn import_new(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custody: &
     let candidate = sources.seal_new(&key, record, allowance, &mut || owner.interrupted())?;
     if candidate.revision().counter != 1 { return Err(Reason::VaultCorrupt); }
     let revision = candidate.revision();
+    let exact_length = candidate.bytes().len();
     let intent = key.seal_intent(format::Mutation::New, record, None, Some(&candidate)).map_err(crypto_problem)?;
     // Actual ordinary exclusion owner, distinct from the retained input pair's
     // one-shot SourceBook. New/None is fixed here, never selected by a DTO.
@@ -375,16 +376,38 @@ fn import_new(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custody: &
     custody.outcome = book.storage_outcome();
     remember(owner, book, true)?; // Before effect/readback failure can return.
     effect.map_err(problem)?;
-    drop(candidate); // Release ciphertext BEFORE bounded descriptor readback.
-    let row = descriptor(book, &key, record, allowance, owner)?;
-    if row.authenticated.record != record || row.authenticated.revision != revision
-        || row.authenticated.descriptor.kind != sources.kind()? { return Err(Reason::VaultCorrupt); }
-    book.recheck_record(&row.original, &mut || owner.interrupted()).map_err(problem)?;
-    if owner.interrupted() { return Err(Reason::UserCancelled); }
+    if custody.outcome != Some(store::StorageOutcome { effect: store::Effect::KnownApplied,
+        durability: store::Durability::Confirmed, cleanup: store::Cleanup::Known }) {
+        return Err(Reason::VaultDurabilityUnknown);
+    }
+    drop(candidate); // Retained restored input remains charged; no cipher/readback overlap.
+    if exact_length.checked_add(crypto::CONTROL_BYTES).is_none_or(|bytes| bytes > allowance) {
+        return Err(Reason::Capacity);
+    }
+    let actual = book.read_record(record, true, &mut || owner.interrupted()).map_err(problem)?;
+    let (bytes, witness, complete) = actual.into_parts();
+    if !complete || bytes.len() != exact_length
+        || bytes.capacity().checked_add(crypto::CONTROL_BYTES).is_none_or(|bytes| bytes > allowance) {
+        return Err(Reason::VaultCorrupt);
+    }
+    let opened = key.open_record(bytes, allowance).map_err(crypto_problem)?;
+    if opened.record != record || opened.revision != revision
+        || !sources.matches_authenticated_readback(&opened) { return Err(Reason::VaultCorrupt); }
+    book.recheck_root(&mut || owner.interrupted()).map_err(problem)?;
+    book.recheck_record(&witness, &mut || owner.interrupted()).map_err(problem)?;
+    if owner.interrupted() || !Arc::ptr_eq(&key, &active_key(owner)?) { return Err(Reason::UserCancelled); }
+    let row = Descriptor { authenticated: crypto::AuthenticatedDescriptor {
+        record: opened.record, revision: opened.revision, descriptor: opened.descriptor,
+    }, original: witness, mutation_pending: false };
+    drop((opened.fields, opened.file));
     custody.saved = Some(row.reference(key.identity()));
     custody.phase = Phase::StoredNew;
     Ok(ChildResult::Mutated { record, row: Some(row) })
 }
+
+#[cfg(all(test, debug_assertions, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[path = "credential_backup_component_macos.rs"]
+mod component_tests;
 
 /// Before child GO, compare the exact retained unentered import, not a caller
 /// preference or result-shaped mutation outcome. Linux has no such content.

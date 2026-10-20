@@ -68,7 +68,7 @@ function projection(phase, opened = checkout(), preparedView = view(opened, open
       journal: versionNoOp(preparedView) ? 'not_created' : 'clean', resources: 'settled', reason: 'none' } : null,
     nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
 }
-function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status(), onSaveBoundary = () => {} } = {}) {
+function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason } = {}) {
   let workspace = addProject(initialWorkspace), registry = clone(nativeStatus), listener, clock = 100, other = null, operation = null;
   let sessionId = ID.session; const calls = [], boundaries = [], reads = [];
   const selected = () => workspace.projects[workspace.selectedId] ?? null;
@@ -80,7 +80,7 @@ function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status
     applyReleaseVersionEdit: (sessionId, planToken, intent) => request('apply', intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }), closeReleaseVersionEdit: (sessionId) => request('close', { sessionId }),
   };
   const controller = new ReleaseVersionEditController({ selectedProject: selected, project: (id) => workspace.projects[id] ?? null,
-    otherEditReason: () => other, otherOperationReason: () => operation, now: () => clock,
+    otherEditReason: () => other, otherOperationReason: () => operation, reservedOperationReason, now: () => clock,
     onSaveBoundary: (id) => { boundaries.push(id); onSaveBoundary(id); } });
   controller.beginConnection(); controller.setHelp(guideResource); controller.syncProject();
   const h = { controller, api, selected, calls, boundaries,
@@ -702,5 +702,79 @@ test('release_version recovery completion covers only older exact-context known 
     if (kind.startsWith('newer-')) assert.ok(h.state.edit.status.statusRevision > h.state.edit.recovery.projectionRevision);
     else assert.equal(h.state.edit.status.statusRevision, h.state.edit.recovery.projectionRevision);
     h.controller.dispose();
+  }
+});
+
+// Reserved DATA only selects the new fixed native Open. The SAME existing
+// controller still owns observed checkout, explicit review, Apply and receipt.
+const RESERVATION = { id: '9'.repeat(32), candidateId: '12345678-1234-4abc-8abc-123456789abc', name: VALUES.name, build: Number(VALUES.build) };
+test('reserved handoff waits for real Open then explicit review and Apply on same controller', async () => {
+  const h = await connected();
+  assert.equal(h.controller.openReserved(RESERVATION), true);
+  assert.deepEqual(h.last('open').args, { projectId: 'p', reservationId: RESERVATION.id });
+  assert.equal(h.controller.selectedEntry(), null); assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
+  const opening = h.publish(h.owner('opening')); h.last('open').resolve(opening); await flush();
+  h.publish(h.owner('editing'));
+  assert.deepEqual(h.controller.selectedEntry().values, VALUES); assert.equal(h.controller.editField('build', '99'), false);
+  assert.equal(h.count('prepare'), 0); assert.equal(h.controller.review(), true); assert.equal(h.count('prepare'), 1);
+  const reviewing = h.publish(h.owner('reviewing')); h.last('prepare').resolve(reviewing); await flush();
+  const binding = currentVersionApplyBinding(h.state); assert.ok(binding); assert.equal(h.controller.apply(binding), true);
+  const applying = h.publish(h.owner('applying')); h.last('apply').resolve(applying); await flush();
+  h.publish(h.owner('final')); assert.equal(h.count('apply'), 1);
+  assert.deepEqual(h.controller.selectedEntry().original.values, VALUES); assert.equal(h.state.edit.attempt.handled, true);
+});
+test('reserved handoff preserves dirty draft and refuses foreign checkout or missing native writer', async () => {
+  const h = await connected(); await openSaved(h); h.controller.editField('build', '91'); h.closeFinal();
+  const before = clone(h.controller.selectedEntry()); assert.equal(h.controller.openReserved(RESERVATION), false);
+  assert.deepEqual(h.controller.selectedEntry(), before); assert.equal(h.count('open'), 1);
+  const foreign = await connected({ opened: checkout(ORIGINAL, {name:'1.2.3',build:'7'}, {iosEnabled:false}) });
+  assert.equal(foreign.controller.openReserved(RESERVATION), true); foreign.publish(foreign.owner('editing'));
+  assert.equal(foreign.state.edit.attempt.invalidated, true); assert.equal(foreign.count('prepare'), 0);
+  const unavailable = harness(); assert.equal(unavailable.controller.openReserved(RESERVATION), false);
+});
+test('reserved handoff subscriber ABA peer and API invalidation prevent native Open', async () => {
+  for (const mutate of [h => h.controller.selectionIntent(), h => { h.controller.selectionIntent(); h.controller.syncProject(); },
+      h => h.operation('foreign operation'), h => h.controller.beginConnection()]) {
+    const h = await connected(); let once = false;
+    h.controller.subscribe(() => { if (!once && h.state.edit.attempt?.binding.reserved) { once = true; mutate(h); } });
+    assert.equal(h.controller.openReserved(RESERVATION), false); assert.equal(h.count('open'), 0); assert.equal(h.count('apply'), 0);
+  }
+});
+test('reserved handoff uses only fixed raw reservation command and existing status parser', async () => {
+  const calls = [];
+  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return status(); });
+  await api.openReleaseVersionEdit({ projectId: 'p', reservationId: RESERVATION.id });
+  assert.equal(calls[0].command, 'version_reserve_edit'); assert.ok(calls[0].args instanceof Uint8Array);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].args)), { projectId: 'p', reservationId: RESERVATION.id });
+  assert.equal(versionEditRequestFits('version_reserve_edit', { projectId: 'p', reservationId: RESERVATION.id, values: VALUES }), false);
+  assert.equal(versionEditRequestFits('release_version_edit_open', { projectId: 'p', reservationId: RESERVATION.id }), false);
+});
+
+test('reserved handoff may retain only the idle connection; manual and foreign owners remain blocked', async () => {
+  let blocked = null;
+  const h = await connected({ reservedOperationReason: () => blocked });
+  h.operation('Disconnect the idle GitHub session before ordinary saved code.');
+  assert.match(h.controller.openReason(), /Disconnect/); assert.equal(h.controller.open(), false);
+  assert.equal(h.controller.reservedOpenReason(), null); assert.equal(h.controller.openReserved(RESERVATION), true);
+  h.publish(h.owner('editing')); assert.equal(h.controller.review(), true);
+  h.publish(h.owner('reviewing')); const binding = currentVersionApplyBinding(h.state); assert.ok(binding);
+  blocked = 'The exact connection is now unconfirmed'; assert.equal(h.controller.canApply(binding), false);
+  assert.equal(h.controller.apply(binding), false); assert.equal(h.count('apply'), 0);
+  blocked = null; h.other('A different original owner is active'); assert.equal(h.controller.canApply(binding), false);
+});
+test('reserved handoff notification cannot dispatch Prepare or Apply after peer or context retirement', async () => {
+  for (const phase of ['prepare', 'apply']) {
+    let blocked = null;
+    const h = await connected({ reservedOperationReason: () => blocked });
+    assert.equal(h.controller.openReserved(RESERVATION), true); h.publish(h.owner('editing'));
+    if (phase === 'apply') { h.controller.review(); h.publish(h.owner('reviewing')); }
+    let once = false;
+    h.controller.subscribe(() => { const a = h.state.edit.attempt;
+      if (!once && (phase === 'prepare' ? a.prepareClaimed : a.applyClaimed)) { once = true; blocked = 'Original peer changed'; }
+    });
+    if (phase === 'prepare') h.controller.review();
+    else h.controller.apply(currentVersionApplyBinding(h.state));
+    assert.equal(h.count(phase), 0); assert.ok(h.state.edit.attempt.binding.reserved);
+    assert.deepEqual(h.controller.selectedEntry().values, VALUES); // kept, not saved
   }
 });

@@ -2,7 +2,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { LocalStorePrepareController, localStorePrepareRequest, localStorePrepareOwnerReason } from '../src/localStorePrepare.ts';
-import { encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus, STORE_PREPARE_CONSENT, IOS_STORE_PREPARE_CONSENT } from '../src/localStorePrepareProtocol.ts';
+import { encodeLocalStorePrepareRequest, parseLocalStorePrepareRequest, parseLocalStorePrepareStatus, STORE_PREPARE_CONSENT, IOS_STORE_PREPARE_CONSENT } from '../src/localStorePrepareProtocol.ts';
+import { localStoreRequest } from '../src/localStorePreflight.ts';
+import { parseLocalStoreRequest } from '../src/localStorePreflightProtocol.ts';
+import { PAIRED_VERSIONS_QUERY, PAIRED_VERSIONS_CONSENT } from '../src/pairedStoreVersions.ts';
 import { createNativeApi } from '../src/bridge.ts';
 
 const A='a'.repeat(32),B='b'.repeat(32),C='c'.repeat(32),UUID='12345678-1234-4234-8234-123456789abc';
@@ -47,6 +50,33 @@ test('raw IPC stays distinct from access/execute authority and result is exact p
 });
 test('one-use preparation starts once and only positively complete candidate summary is returned',async()=>{
  const h=await fixture();try{assert.equal(h.controller.prepareReason(),null);assert.equal(h.controller.getSnapshot().applicationId,'dev.example.app');await h.controller.prepare();h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(h.counts().start,1);assert.equal(h.counts().cancel,0);const running=h.latest();h.emit(status(running.statusRevision+1,complete(running.operation)));assert.equal(h.controller.getSnapshot().status.operation.result.headSequence,5);assert.equal(localStorePrepareOwnerReason(h.controller.getSnapshot()),null);await h.controller.start();assert.equal(h.counts().start,1);}finally{h.controller.dispose();}
+});
+test('valid paired inventory cannot become a candidate Prepare or Start operation',async()=>{
+ const candidateRequest=localStorePrepareRequest(project(),assets(),history());assert.ok(candidateRequest);
+ const h=await fixture();let prepareCalls=0,startCalls=0,paired;
+ try{
+  h.change((p,a)=>{
+   p.versionPlatforms=['android','ios'];
+   Object.assign(a.scope,{platform:'both',purpose:'version-inventory'});
+   Object.assign(a.status.context,{platform:'both',purpose:'version-inventory'});
+   a.status.assignments.push({kind:'asc-p8',recordId:'d'.repeat(32),recordRevision:4,contextRevision:3,availability:'available'});
+   a.status.records.push({kind:'asc-p8',recordId:'d'.repeat(32),revision:4,availability:'assigned'});
+   paired=localStoreRequest(p,a);
+  });
+  assert.ok(paired);assert.ok(parseLocalStoreRequest(paired));
+  assert.equal(paired.platform,'both');assert.equal(paired.query,PAIRED_VERSIONS_QUERY);
+  for(const extra of [{platform:'both'},{query:PAIRED_VERSIONS_QUERY},{iosRecord:paired.iosRecord},paired]){
+   const invalid={...candidateRequest,...extra};
+   assert.equal(parseLocalStorePrepareRequest(invalid),null);
+   assert.equal(encodeLocalStorePrepareRequest('prepare_local_store_prepare',invalid),null);
+  }
+  assert.equal(encodeLocalStorePrepareRequest('start_local_store_prepare',{operationId:A,ownerGeneration:B,consentVersion:PAIRED_VERSIONS_CONSENT}),null);
+  h.api.prepareLocalStorePrepare=async()=>{prepareCalls++;throw Error('paired inventory must not prepare a Store release');};
+  h.api.startLocalStorePrepare=async()=>{startCalls++;throw Error('paired inventory must not start a Store release');};
+  assert.equal(h.controller.getSnapshot().request,null);
+  await h.controller.prepare();h.controller.acknowledge(true);await h.controller.start();
+  assert.equal(prepareCalls,0);assert.equal(startCalls,0);assert.equal(h.counts().cancel,0);
+ }finally{h.controller.dispose();}
 });
 test('late consent after explicit cancel, selection, or navigation is retired before the identity reply',async()=>{
  for(const retire of [h=>h.controller.cancel(),h=>h.controller.setSelectionPending(true),h=>h.controller.setVisible(false)]){

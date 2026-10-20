@@ -31,6 +31,12 @@ pub(crate) mod jobs;
 pub(crate) mod enrollment;
 #[path="version_allocation_ios_inventory.rs"]
 pub(crate) mod ios_inventory;
+#[path="version_allocation_android_inventory.rs"]
+pub(crate) mod play_inventory;
+#[path="version_allocation_paired_inventory.rs"]
+pub(crate) mod paired_inventory;
+#[path="version_reserve_state_native.rs"]
+pub(crate) mod reserve;
 
 const PROTOCOL: &str = "mrk-version-allocation-state/1";
 const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
@@ -118,17 +124,19 @@ struct Request(Value);
 impl Request {
     fn project(&self) -> &str { self.0["projectId"].as_str().unwrap_or("") }
     fn candidate(&self) -> &str { self.0["candidateId"].as_str().unwrap_or("") }
-    fn schema_version(&self) -> u32 { if self.0["policy"]["schemaVersion"] == 2 { 2 } else { 1 } }
-    fn request_hash(&self) -> Result<String> { hash(if self.schema_version() == 2 { ios_inventory::REQUEST_DOMAIN } else { b"mrk:allocation-request:1\0" }, self) }
-    fn reservation_domain(&self) -> &'static [u8] { if self.schema_version() == 2 { ios_inventory::RESERVATION_DOMAIN } else { b"mrk:allocation-reservation:1\0" } }
+    fn schema_version(&self) -> u32 { match self.0["policy"]["schemaVersion"].as_u64() {Some(2)=>2,Some(3)=>3,Some(4)=>4,_=>1} }
+    fn request_hash(&self) -> Result<String> { hash(match self.schema_version() {2=>ios_inventory::REQUEST_DOMAIN,3=>play_inventory::REQUEST_DOMAIN,4=>paired_inventory::REQUEST_DOMAIN,_=>b"mrk:allocation-request:1\0"}, self) }
+    fn reservation_domain(&self) -> &'static [u8] { match self.schema_version() {2=>ios_inventory::RESERVATION_DOMAIN,3=>play_inventory::RESERVATION_DOMAIN,4=>paired_inventory::RESERVATION_DOMAIN,_=>b"mrk:allocation-reservation:1\0"} }
     fn observations_valid(&self, values: &[Value]) -> bool {
-        if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
+        if self.schema_version() == 4 { paired_inventory::observations_shape(values,self) }
+        else if self.schema_version() == 3 { values.len() == 1 && values.iter().all(|v| play_inventory::observation_shape(v,self)) }
+        else if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
         else { values.len() <= 2 && values.iter().all(observation_shape) }
     }
     fn valid(&self) -> bool {
         let v = &self.0;
         let source = &v["source"]; let policy = &v["policy"];
-        let newer = policy["schemaVersion"].as_u64() == Some(2);
+        let newer = matches!(policy["schemaVersion"].as_u64(),Some(2|3|4));
         let rules = policy["rules"].as_array();
         let mut refs = BTreeSet::new();
         closed(v, if newer { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"] }
@@ -141,7 +149,9 @@ impl Request {
             && [json!(["android"]), json!(["ios"]), json!(["android", "ios"])].contains(&v["platforms"])
             && closed(policy, if newer { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds", "storeScope"] }
                 else { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"] })
-            && (if newer { v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE
+            && (if newer { (if self.schema_version()==2 {v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE}
+                else if self.schema_version()==3 {v["platforms"]==json!(["android"])&&policy["storeScope"]==play_inventory::POLICY_SCOPE}
+                else {v["platforms"]==json!(["android","ios"])&&policy["storeScope"]==paired_inventory::POLICY_SCOPE})
                 && string(&v["storeContextRevision"], |s| hex(s, 64)) } else { policy["schemaVersion"].as_u64() == Some(1) })
             && policy["mode"] == "automatic"
             && integer(&policy["buildCeiling"], 1, 2_100_000_000) && integer(&policy["storeMaxAgeSeconds"], 1, 3600)
@@ -194,7 +204,7 @@ struct Pending {
 impl Pending {
     fn valid(&self) -> Result<()> {
         need(self.schema_version == self.reservation.request.schema_version()
-            && self.protocol == if self.schema_version == 2 { ios_inventory::PROTOCOL } else { ALLOCATION_PROTOCOL }
+            && self.protocol == match self.schema_version {2=>ios_inventory::PROTOCOL,3=>play_inventory::PROTOCOL,4=>paired_inventory::PROTOCOL,_=>ALLOCATION_PROTOCOL}
             && self.authority.valid()
             && self.checkpoint.valid() && hex(&self.expected_blob, 40)
             && self.reservation.request.project() == self.authority.project_id
@@ -323,7 +333,7 @@ struct Attempt { state: State, bytes: Vec<u8>, returned: Option<Snapshot> }
 pub(crate) struct VersionAllocationStatePort {
     store: Arc<PrivateStateDirectory>, project: ProjectBinding, authority: Authority,
     snapshot: Option<Snapshot>, state: Option<State>, bound: Option<Request>,
-    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8,
+    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8, bounded: bool,
 }
 impl VersionAllocationStatePort {
     /// Pure construction. The original caller retains this object BEFORE load.
@@ -332,7 +342,7 @@ impl VersionAllocationStatePort {
         let authority: Authority = decode(authority)?;
         need(authority.valid() && project.inode != 0 && Id::parse(project.project_id.as_str()).is_ok())?;
         Ok(Self { store, project, authority, snapshot: None, state: None, bound: None,
-            attempted: None, failure: None, poisoned: false, remote_writes: 0 })
+            attempted: None, failure: None, poisoned: false, remote_writes: 0, bounded: false })
     }
     /// Pure rematch only. Fresh native service/root/Document checks belong to
     /// the original caller; this does NOT check the filesystem or claim a lease.
@@ -352,6 +362,7 @@ impl VersionAllocationStatePort {
     // the exact 1MiB / 50k-node behavior. There is no caller-selected decoder.
     fn load_bounded(&mut self, limit: usize) -> Result<()> {
         self.usable()?; need(self.snapshot.is_none() && [256 * 1024, STATE_LIMIT].contains(&limit))?;
+        self.bounded = limit != STATE_LIMIT;
         self.poisoned = true;
         let loaded = self.store.read(Namespace::VersionAllocations);
         match loaded {
@@ -378,6 +389,10 @@ impl VersionAllocationStatePort {
         let expected = self.snapshot()?.revision;
         let next_revision = Revision(expected.0.checked_add(1).ok_or_else(|| StateError::from(Error::RecoveryRequired))?);
         let bytes = state.bytes()?;
+        if self.bounded {
+            strict_version_enrollment_state_json(&bytes).map_err(|error|
+                StateError::from(if error.code == "version_enrollment_state_limit" { Error::Unavailable } else { Error::RecoveryRequired }))?;
+        }
         // Retain attempted input and latch BEFORE the sole native call. A panic
         // or cancellation cannot expose a second usable writer. The original
         // native Store retains its own intent fence and exact error facts too.
@@ -434,7 +449,7 @@ impl VersionAllocationStatePort {
     /// refresh/retry uses selected_request instead. OS randomness is consumed
     /// once, then the FULL request is retained through the actual durable CAS.
     pub(crate) fn select_new(&mut self, mut template: Value, previous_request: Option<&Value>) -> Result<WriteAck> {
-        need(closed(&template, if template["policy"]["schemaVersion"] == 2 {
+        need(closed(&template, if matches!(template["policy"]["schemaVersion"].as_u64(),Some(2|3|4)) {
             &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"]
         } else { &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"] }))?;
         template["candidateId"] = json!("00000000-0000-4000-8000-000000000000");

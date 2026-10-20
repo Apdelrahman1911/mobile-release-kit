@@ -39,6 +39,8 @@ impl LocalStorePreflightOwner {
     }
     pub(crate) fn document_lost(&self) { self.saved.document_lost(); }
     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
+    pub(crate) fn current_versions_for_saved(&self,id:&str,registration:u32,root:&RegisteredRoot,configuration:&str,version:&str)
+        ->Result<Arc<crate::saved_command_owner::StoreVersionObservation>,BridgeError>{self.saved.current_store_versions_for_saved(id,registration,root,configuration,version)}
     pub(crate) fn current_versions(&self, context:&crate::local_store_preflight_protocol::Context, registration:u32, root:&RegisteredRoot)
         ->Result<Arc<crate::saved_command_owner::StoreVersionObservation>,BridgeError>{self.saved.current_store_versions(context,registration,root)}
     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }

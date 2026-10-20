@@ -79,6 +79,21 @@ def main(*, started: float, runtime_dir: str) -> int:
             end = started + 60.0
             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
             request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-github-actions-retry/1":
+            from ._desktop_github_actions_retry import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-github-pull-request/1":
+            from ._desktop_github_pull_request import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-github-activity/1":
+            from ._desktop_github_activity import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
         elif type(header) is dict and header.get("protocol") == "mrk-github-repository-create/1":
             from ._desktop_github_repository_create import run_owned
             end = started + 60.0
@@ -86,6 +101,11 @@ def main(*, started: float, runtime_dir: str) -> int:
             request = None
         elif type(header) is dict and header.get("protocol") == "mrk-version-enrollment/1":
             from .desktop_version_enrollment import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-version-reserve/1":
+            from .desktop_version_reserve import run_owned
             end = started + 60.0
             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
             request = None

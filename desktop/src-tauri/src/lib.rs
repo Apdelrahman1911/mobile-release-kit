@@ -105,12 +105,25 @@ pub mod error;
 pub mod protocol;
 mod git_read_protocol;
 mod version_enrollment_protocol;
+mod version_reserve_protocol;
 mod git_local_protocol;
 mod git_branch_protocol;
+mod git_switch_protocol;
+mod git_rename_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;
+#[path="service_version_reserve_protocol.rs"]
+mod service_version_reserve_protocol;
+#[path="service_version_reserve_requests.rs"]
+mod service_version_reserve_requests;
+mod service_git_protocol;
+mod service_git_commit_protocol;
+mod service_git_requests;
 mod service_setup_guidance;
+mod service_android_tools;
+mod service_request_catalogue;
+mod service_repository_summary;
 mod agent_identity_requests;
 mod agent_local_checks;
 mod agent_android_build;
@@ -294,6 +307,10 @@ mod github_release_session;
 mod github_setup_protocol;
 mod github_publication_protocol;
 mod github_repository_create_protocol;
+mod github_activity_protocol;
+mod github_browser_protocol;
+mod github_pull_request_protocol;
+mod github_actions_retry_protocol;
 mod github_setup_session;
 mod github_history_protocol;
 mod github_history_session;

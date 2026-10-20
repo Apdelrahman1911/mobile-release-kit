@@ -1,5 +1,10 @@
 // App-held UI coordination only. Neither promises, events nor comparison
 // counters can settle the original native Session or its account-wide journal.
+import { appleDistributionKeyInputBase, retainedAppleDistributionKeyInput, isAppleDistributionKeyMode } from './appleDistributionKeySetupProtocol.ts';
+import type { AppleDistributionKeyResult, AppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
+import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
+import { appleProfileInputBase, retainedAppleProfileInput, isAppleProfileMode } from './appleProfileSetup.ts';
+import type { AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
 import { localStoreRequest } from './localStorePreflight.ts';
 import type { LocalStoreProject } from './localStorePreflight.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
@@ -17,11 +22,13 @@ interface Source {
   now?(): number;
 }
 type Base = Omit<PrepareAppleProvisioning, 'mode' | 'reference' | 'newApplication' | 'displayName'>;
-interface Witness { base: Base; observation: number; entry: number }
+type InputFamily = 'bundle' | 'profile' | 'key';
+const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
 interface Attempt {
   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
-  preparedAt: number; startedAt: number | null; retired: boolean; prepareAccepted: boolean;
+  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
   prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean;
 }
 interface Reference { identity: AppleProvisioningIdentity; witness: Witness; displayName: string; expires: number | null }
@@ -34,18 +41,24 @@ export interface AppleProvisioningState {
   pending: 'prepare' | 'start' | null; requestPending: boolean; cancelPending: boolean;
   status: AppleProvisioningStatus | null; projectId: string | null; ios: boolean;
   previousAttempts: AppleRecoveryHistory | null; continueReason: string | null;
+  previousProfileAttempts: AppleProfileRecoveryHistory | null; profileContinueReason: string | null;
   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
   consent: (AppleProvisioningIdentity & { mode: AppleProvisioningMode; acknowledged: boolean }) | null;
   result: AppleProvisioningResult | null; reviewReference: AppleProvisioningIdentity | null;
   registrationReference: AppleProvisioningIdentity | null;
+  profileResult: AppleProfileSetupResult | null; savedProfile: AppleProfileSavedReference | null;
+  keyResult: AppleDistributionKeyResult | null; savedKey: AppleDistributionKeySavedReference | null; keyTerminalRead: boolean;
+  keyReviewReference: AppleProvisioningIdentity | null; keyReviewReason: string | null; keyPrepareReason: string | null;
+  profileReviewReference: AppleProvisioningIdentity | null; profileAttemptReference: AppleProvisioningIdentity | null;
+  profileReviewReason: string | null; profileReuseReason: string | null; profileCreateReason: string | null; profileReconcileReason: string | null;
   reviewReason: string | null; registerReason: string | null; reconcileReason: string | null; startReason: string | null;
   canRead: boolean; canCancel: boolean; retained: boolean; cancelRequested: boolean;
 }
 const identity = (value: AppleProvisioningIdentity): AppleProvisioningIdentity => ({ operationId: value.operationId, ownerGeneration: value.ownerGeneration });
 const active = (op: AppleProvisioningOperation | null | undefined) => !!op && op.phase !== 'terminal';
 const sameWitness = (a: Witness | null, b: Witness | null): boolean => a === null || b === null ? a === b :
-  a.observation === b.observation && a.entry === b.entry && sameOfflineData(a.base, b.base);
-const attention = 'The original Bundle-ID operation is unconfirmed. Keep its status and cancellation; do not repeat registration or reconnect to dismiss it.';
+  a.family === b.family && a.observation === b.observation && a.entry === b.entry && sameOfflineData(a.base, b.base);
+const attention = 'The original Apple setup operation is unconfirmed. Keep its status and cancellation; do not repeat registration or reconnect to dismiss it.';
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value;
@@ -64,6 +77,11 @@ export class AppleProvisioningController {
   private review: Reference | null = null;
   private registration: Reference | null = null;
   private restored: Reference | null = null;
+  private profileReview: (Reference & { action: 'profile-reuse' | 'profile-create' }) | null = null;
+  private profileAttempt: Reference | null = null;
+  private restoredProfile: Reference | null = null;
+  private keyReview: Reference | null = null;
+  private inputFamily: InputFamily | null = null;
   private witness: Witness | null = null;
   private status: AppleProvisioningStatus | null = null;
   private issue: Issue | null = null;
@@ -87,15 +105,24 @@ export class AppleProvisioningController {
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private now(): number { return (this.source.now ?? (() => performance.now()))(); }
-  private capture(): Witness | null {
+  private capture(requestedFamily: InputFamily | null = this.inputFamily): Witness | null {
     try {
       if (this.selectionPending) return null;
       const project = this.source.project(), assets = this.source.assets();
-      const base = localStoreRequest(project, assets);
+      const family = requestedFamily ?? (assets?.scope.purpose === 'provisioning' ? 'profile' : 'bundle');
+      let base = family === 'key' ? appleDistributionKeyInputBase(project, assets) :
+        family === 'profile' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
+      const a = this.attempt;
+      if (!base && family === 'key' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
+        base = retainedAppleDistributionKeyInput(project, assets, a.witness.base);
+      }
+      if (!base && family === 'profile' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
+        base = retainedAppleProfileInput(project, assets, a.witness.base);
+      }
       if (!project || !assets || !base || base.platform !== 'ios' || Object.hasOwn(base, 'query') ||
           !Number.isSafeInteger(project.observationGeneration) || project.observationGeneration < 0 ||
           !Number.isSafeInteger(assets.entryGeneration) || assets.entryGeneration < 0) return null;
-      return freeze({ base: { ...base, platform: 'ios' as const }, observation: project.observationGeneration, entry: assets.entryGeneration });
+      return freeze({ family, base: { ...base, platform: 'ios' as const }, observation: project.observationGeneration, entry: assets.entryGeneration });
     } catch { return null; }
   }
   private current(attempt: Attempt): boolean {
@@ -108,13 +135,16 @@ export class AppleProvisioningController {
   }
   ownerReason = (): string | null => this.issue || this.action || this.cancellation || this.subscribing || this.read ||
     active(this.status?.operation) || this.attempt && !this.attempt.terminalRead ?
-    'A Bundle-ID intent, request or original cleanup is retained. Finish or cancel it before other work.' : null;
-  private baseReason(): string | null {
-    if (!this.original || this.connectionRetired) return 'Use the installed Mac app. Browser preview cannot prepare or register Bundle IDs.';
+    'An Apple setup intent, request or original cleanup is retained. Finish or cancel it before other work.' : null;
+  private baseReason(family: InputFamily = 'bundle'): string | null {
+    if (!this.original || this.connectionRetired) return 'Use the installed Mac app. Browser preview cannot run Apple setup.';
     if (this.issue) return attention;
     if (this.ownerReason() || this.read) return this.ownerReason() ?? 'Wait for the current original status response.';
-    if (!this.initialized || !this.off || this.status?.availability !== 'available') return 'The original native Bundle-ID capability is unavailable or busy. Refresh its status; no fallback account is used.';
-    if (!this.witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
+    if (!this.initialized || !this.off || this.status?.availability !== 'available') return 'Apple setup is unavailable or busy. Refresh its status; no other account is selected automatically.';
+    const witness = this.capture(family);
+    if (family === 'key' && !witness) return 'Choose the App Store Connect key, unlock encrypted storage, then assess and assign its P8, Key ID and Issuer ID in Set up Apple signing. Save the app settings and read the saved version first. No P12 is needed.';
+    if (family === 'profile' && !witness?.base.p12RecordId) return 'Choose Set up Apple signing, unlock encrypted storage, then assess and assign the existing P12/password and App Store Connect P8 in that context. Save the app settings and read its saved version first.';
+    if (!witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
     if (!appleDisplayName(this.displayName)) return 'Enter an explicit Bundle ID display name (1–128 characters, no control characters).';
     return this.source.otherOperationReason();
   }
@@ -131,8 +161,22 @@ export class AppleProvisioningController {
         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
     return op.recovery;
   }
+  private profileReconciliationReference(): Reference | null {
+    return this.referenceCurrent(this.restoredProfile) ? this.restoredProfile : this.referenceCurrent(this.profileAttempt) ? this.profileAttempt : null;
+  }
+  private previousProfileAttempts(): AppleProfileRecoveryHistory | null {
+    const a = this.attempt, op = this.status?.operation;
+    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+        !sameAppleIdentity(a.identity, op) || a.request.mode !== 'profile-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+    return op.profileRecovery ?? null;
+  }
   private reason(mode: AppleProvisioningMode): string | null {
-    const base = this.baseReason(); if (base) return base;
+    const base = this.baseReason(inputFamily(mode)); if (base) return base;
+    if (mode === 'key-prepare' && !this.referenceCurrent(this.keyReview)) return 'Finish a fresh existing-key check first. Its one-use local-key review expires and cannot be restored from an old result.';
+    if (mode === 'profile-reuse' || mode === 'profile-create') {
+      if (!this.referenceCurrent(this.profileReview) || this.profileReview?.action !== mode) return 'Finish a current signing review first. Only its exact reuse or create choice can continue.';
+    }
+    if (mode === 'profile-reconcile' && !this.profileReconciliationReference()) return 'No matching profile attempt is selected. Keep earlier pending attempts; this action never repeats their request.';
     if (mode === 'register') {
       if (!this.referenceCurrent(this.review)) return 'First finish a current reuse-first review. A key-only not-returned result is not global availability or permission.';
       if (!this.declaredNew) return 'Explicitly declare this is a new application, not a change to an existing store identity.';
@@ -152,6 +196,8 @@ export class AppleProvisioningController {
     const a = this.attempt, op = this.status?.operation;
     const current = !!a && this.current(a) && sameAppleIdentity(a.identity, op);
     const readResult = !!a?.terminalRead && !this.action && !this.cancellation && !this.issue && sameAppleIdentity(a.identity, op) ? op?.result ?? null : null;
+    const keyTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
+      !this.issue && isAppleDistributionKeyMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
     const cancelId = a?.identity ?? (active(op) ? op : null);
     return Object.freeze({ native: !!this.original && !this.connectionRetired, visible: this.visible, initialized: this.initialized,
       listening: !!this.off, reading: !!this.read, pending: this.action?.kind ?? null, requestPending: !!this.action && !this.action.joined,
@@ -160,9 +206,21 @@ export class AppleProvisioningController {
       issue: this.issue, historical: !!op && !current,
       consent: a?.identity && this.consentUntil !== null && current && !a.startClaimed ?
         Object.freeze({ ...identity(a.identity), mode: a.request.mode, acknowledged: this.acknowledged }) : null,
-      result: readResult, reviewReference: this.referenceCurrent(this.review) ? this.review.identity : null,
+      result: readResult?.scope === 'local-ios-bundle-provisioning' ? readResult : null,
+      profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
+      keyResult: keyTerminalRead && readResult?.scope === 'local-ios-distribution-key' ? readResult : null,
+      savedKey: keyTerminalRead ? op?.savedKey ?? null : null, keyTerminalRead,
+      keyReviewReference: this.referenceCurrent(this.keyReview) ? this.keyReview.identity : null,
+      keyReviewReason: this.reason('key-review'), keyPrepareReason: this.reason('key-prepare'),
+      savedProfile: readResult?.scope === 'local-ios-profile-setup' ? op?.savedProfile ?? null : null,
+      profileReviewReference: this.referenceCurrent(this.profileReview) ? this.profileReview.identity : null,
+      profileAttemptReference: this.restoredProfile?.identity ?? this.profileAttempt?.identity ?? null,
+      profileReviewReason: this.reason('profile-review'), profileReuseReason: this.reason('profile-reuse'),
+      profileCreateReason: this.reason('profile-create'), profileReconcileReason: this.reason('profile-reconcile'),
+      reviewReference: this.referenceCurrent(this.review) ? this.review.identity : null,
       registrationReference: this.restored?.identity ?? this.registration?.identity ?? null,
       previousAttempts: this.previousAttempts(), continueReason: this.baseReason(),
+      previousProfileAttempts: this.previousProfileAttempts(), profileContinueReason: this.baseReason('profile'),
       reviewReason: this.reason('review'), registerReason: this.reason('register'), reconcileReason: this.reason('reconcile'),
       startReason: this.startReason(), canRead: !!this.original && !this.read && (!this.connectionRetired || !this.settled()),
       canCancel: !!this.original && !!cancelId && !this.cancellation && !sameAppleIdentity(this.cancelClaim, cancelId) && active(op),
@@ -174,7 +232,7 @@ export class AppleProvisioningController {
     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
   }
   private fail(issue: Issue = 'unconfirmed'): void {
-    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null;
+    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
     if (this.attempt) this.attempt.retired = true;
     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
   }
@@ -186,7 +244,7 @@ export class AppleProvisioningController {
     this.publish();
   };
   invalidate = (): void => {
-    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.declaredNew = false;
+    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
     if (this.attempt) this.attempt.retired = true;
     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
     this.publish();
@@ -223,7 +281,7 @@ export class AppleProvisioningController {
       try { this.off?.(); } catch { this.fail(); return; }
     }
     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
     if (!api) return;
     const pending = (async () => {
       try {
@@ -258,8 +316,21 @@ export class AppleProvisioningController {
         (!a.startClaimed || a.startJoined) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal' && !this.issue) {
       a.terminalRead = true; this.clearConsent();
       if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'review' && op.outcome === 'complete' &&
-          op.result?.decision === 'review-required' && op.result.observation === 'not-returned' && this.now() < a.startedAt + 300000) {
+          op.result?.scope === 'local-ios-bundle-provisioning' && op.result.decision === 'review-required' && op.result.observation === 'not-returned' && this.now() < a.startedAt + 300000) {
         this.review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+      }
+      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'key-review' && op.outcome === 'complete' &&
+          op.result?.scope === 'local-ios-distribution-key' && op.result.decision === 'prepare-review' && op.result.reason === 'local-key-required' &&
+          this.now() < a.startedAt + 300000) {
+        // Conservative UI age only: native expires from its original provider
+        // observation. A read/event/reconnect never starts another 300 seconds.
+        this.keyReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+      }
+      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
+          op.result?.scope === 'local-ios-profile-setup' && ['reuse-available', 'create-available'].includes(op.result.decision) &&
+          this.now() < a.startedAt + 300000) {
+        this.profileReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000,
+          action: op.result.decision === 'reuse-available' ? 'profile-reuse' : 'profile-create' });
       }
     }
     if (this.cancelRequested || a?.retired) void this.cancelOriginal();
@@ -298,21 +369,56 @@ export class AppleProvisioningController {
     if (!sameContinuation()) return Promise.resolve();
     return this.prepareIntent('reconcile', continuation);
   };
+  continuePreviousProfile = (operationId: string, ownerGeneration: string): Promise<void> => {
+    this.syncProject();
+    if (this.disposed || !this.visible || this.baseReason('profile') || !this.original || !this.witness) return Promise.resolve();
+    const row = this.previousProfileAttempts()?.attempts.find(candidate => sameAppleIdentity(candidate.reference, { operationId, ownerGeneration }));
+    if (!row) return Promise.resolve();
+    const continuation = { api: this.original, witness: this.witness, epoch: this.epoch + 1 };
+    const sameContinuation = () => this.original === continuation.api && this.witness === continuation.witness &&
+      this.epoch === continuation.epoch && !this.disposed && !this.connectionRetired;
+    this.invalidate();
+    if (!sameContinuation()) return Promise.resolve();
+    // Explicit historical selection adopts DISPLAY text and a read-only prior
+    // reference, never the old Review/save destination/key/native settlement.
+    this.displayName = row.displayName;
+    this.restoredProfile = freeze({ identity: identity(row.reference), witness: continuation.witness, displayName: row.displayName, expires: null });
+    this.publish();
+    if (!sameContinuation()) return Promise.resolve();
+    return this.prepareIntent('profile-reconcile', continuation);
+  };
   prepare = (mode: AppleProvisioningMode): Promise<void> => this.prepareIntent(mode);
   private prepareIntent(mode: AppleProvisioningMode, continuation?: { api: AppleProvisioningApi; witness: Witness; epoch: number }): Promise<void> {
+    const family = inputFamily(mode), api = this.original, target = this.capture(family);
+    if (this.disposed || !this.visible || this.reason(mode) || !api || !target || !this.status) return Promise.resolve();
+    // Only an explicit, settled Prepare can switch input families. Retire the
+    // old comparison locally before publishing; no pending original is replaced.
+    if (this.inputFamily !== family) {
+      if (continuation || this.ownerReason()) return Promise.resolve();
+      this.epoch++; this.clearConsent(); this.review = null; this.restored = null;
+      this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
+      this.declaredNew = false; if (this.attempt) this.attempt.retired = true;
+      this.inputFamily = family; this.witness = target;
+    }
+    const handoffEpoch = this.epoch;
     this.syncProject();
-    // syncProject publishes too. A subscriber's cancellation/currentness veto
-    // must survive that seam, not become a new continuation epoch or reference.
-    if (continuation && (this.original !== continuation.api || this.witness !== continuation.witness ||
-        this.epoch !== continuation.epoch)) return Promise.resolve();
-    if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
-    const reference = mode === 'review' ? null : mode === 'register' ? this.review?.identity : this.reconciliationReference()?.identity;
+    // syncProject publishes to subscribers. Cancellation, source ABA, another
+    // owner or connection retirement during that notification vetoes THIS call.
+    if (this.original !== api || this.epoch !== handoffEpoch || this.inputFamily !== family ||
+        !sameWitness(target, this.witness) || !sameWitness(target, this.capture(family)) ||
+        continuation && (this.original !== continuation.api || this.witness !== continuation.witness || this.epoch !== continuation.epoch) ||
+        this.disposed || !this.visible || this.reason(mode) || !this.witness || !this.status) return Promise.resolve();
+    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' ? null : mode === 'key-prepare' ? this.keyReview?.identity :
+      mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
+      mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
     if (!request) return Promise.resolve();
-    const api = this.original, a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
-      previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null,
+    const a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
+      previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
       retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false };
-    this.attempt = a; if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
+    this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
+    if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
+    if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
     this.cancelClaim = null; this.cancelRequested = false; this.clearConsent(); this.mutation++;
     const slot: ActionSlot = { kind: 'prepare', joined: false, original: null, promise: null }; this.action = slot;
     slot.promise = (async () => {
@@ -327,7 +433,7 @@ export class AppleProvisioningController {
         if (this.action === slot) this.action = null;
         const op = this.status?.operation;
         if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
-          this.consentUntil = a.preparedAt + 60000; this.acknowledged = false;
+          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity); this.acknowledged = false;
           if (this.now() >= this.consentUntil) this.invalidate();
           else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed) this.invalidate(); }, this.consentUntil - this.now());
         }
@@ -339,6 +445,7 @@ export class AppleProvisioningController {
     this.syncProject(); const a = this.attempt, api = this.original;
     if (!a || !api || a.startClaimed || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
     a.startClaimed = true; a.startedAt = this.now(); this.clearConsent(); this.mutation++;
+    if (a.request.mode === 'profile-reuse' || a.request.mode === 'profile-create') this.profileAttempt = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
     if (a.request.mode === 'register') this.registration = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
     const slot: ActionSlot = { kind: 'start', joined: false, original: null, promise: null }; this.action = slot;
     slot.promise = (async () => {

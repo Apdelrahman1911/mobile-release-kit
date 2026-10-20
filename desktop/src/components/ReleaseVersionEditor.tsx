@@ -136,10 +136,11 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
         <code className="version-digest">Saved config: {entry.original.baseline.savedConfig.bytes} bytes · SHA256 {entry.original.baseline.savedConfig.sha256}</code>
         {entry.original.baseline.savedVersion.state === 'present' && <code className="version-digest">Saved source: {entry.original.baseline.savedVersion.bytes} bytes · SHA256 {entry.original.baseline.savedVersion.sha256}</code>}
       </div>
+      {attempt?.binding.reserved && !attempt.handled && <p className="save-note">These exact values belong to the retained shared-counter candidate. They are locked for this review; closing never recycles the number. Review the file, then confirm Save separately.</p>}
       <div className="version-values"><div><label htmlFor={nameId}>Marketing version <span>Required</span>{help('name') && <HelpButton content={help('name')!} onHelp={onHelp} />}</label>
-        <input id={nameId} type="text" inputMode="decimal" value={entry.values.name} maxLength={64} autoComplete="off" spellCheck={false} placeholder="Example: 1.2.3" onChange={(event) => controller.editField('name', event.target.value)} /></div>
+        <input id={nameId} type="text" inputMode="decimal" value={entry.values.name} readOnly={!!attempt?.binding.reserved && !attempt.handled} maxLength={64} autoComplete="off" spellCheck={false} placeholder="Example: 1.2.3" onChange={(event) => controller.editField('name', event.target.value)} /></div>
         <div><label htmlFor={buildId}>Build number <span>Required</span>{help('build') && <HelpButton content={help('build')!} onHelp={onHelp} />}</label>
-          <input id={buildId} type="text" inputMode="numeric" value={entry.values.build} maxLength={10} autoComplete="off" spellCheck={false} placeholder="Example: 42" onChange={(event) => controller.editField('build', event.target.value)} /></div></div>
+          <input id={buildId} type="text" inputMode="numeric" value={entry.values.build} readOnly={!!attempt?.binding.reserved && !attempt.handled} maxLength={10} autoComplete="off" spellCheck={false} placeholder="Example: 42" onChange={(event) => controller.editField('build', event.target.value)} /></div></div>
       {entry.error && <ErrorNotice error={entry.error} />}
       {entry.stale && <p role="alert" className="review-caution">Earlier baseline retained. Close the original session, then explicitly reload saved values and discard this draft; no automatic rebase.</p>}
       <div className="button-row"><button type="button" className="button primary" disabled={reviewReason !== null} title={reviewReason ?? undefined} onClick={() => controller.review()}>Validate and review {entry.original.values === null ? 'creation' : 'values'}</button>

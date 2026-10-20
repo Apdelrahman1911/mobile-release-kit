@@ -14,12 +14,25 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 // observer executable. No library duplicate owner, helper/publisher/CLI entry.
 #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
 #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
+#[path = "../src/version_reserve_protocol.rs"] mod version_reserve_protocol;
 #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
 #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
+#[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
+#[path = "../src/git_rename_protocol.rs"] mod git_rename_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path="../src/service_version_reserve_protocol.rs"]
+mod service_version_reserve_protocol;
+#[path="../src/service_version_reserve_requests.rs"]
+mod service_version_reserve_requests;
+#[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
+#[path = "../src/service_git_commit_protocol.rs"] mod service_git_commit_protocol;
+#[path = "../src/service_git_requests.rs"] mod service_git_requests;
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+#[path = "../src/service_android_tools.rs"] mod service_android_tools;
+#[path = "../src/service_request_catalogue.rs"] mod service_request_catalogue;
+#[path = "../src/service_repository_summary.rs"] mod service_repository_summary;
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
 #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
 #[path = "../src/agent_android_build.rs"] mod agent_android_build;
@@ -69,6 +82,10 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_auth_accounts.rs"] mod github_auth_accounts;
 #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
 #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
+#[path = "../src/github_activity_protocol.rs"] mod github_activity_protocol;
+#[path = "../src/github_browser_protocol.rs"] mod github_browser_protocol;
+#[path = "../src/github_pull_request_protocol.rs"] mod github_pull_request_protocol;
+#[path = "../src/github_actions_retry_protocol.rs"] mod github_actions_retry_protocol;
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;

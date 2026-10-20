@@ -129,7 +129,8 @@ struct ShellState {
     relay: AsyncMutex<RelayBook>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))] exit_observer: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
-struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
+struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool,
+    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve: Arc<crate::asset_session::ReserveRelay> }
 
 #[tauri::command]
 fn application_read_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
@@ -1586,6 +1587,119 @@ async fn revoke_agent_local_check(webview: Webview, request: tauri::ipc::Request
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
 }
 #[tauri::command]
+async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        crate::asset_session::decode_agent_version_reserve_empty(raw)?;
+        serde_json::to_value(state.document.agent_version_reserve_access(window)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    { let _=(window,request,state); Err(BridgeError::unavailable("Agent version reservation is unavailable on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_version_reserve(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        let args=crate::asset_session::decode_agent_version_reserve_allow(raw)?;
+        serde_json::to_value(state.document.allow_agent_version_reserve(window, args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    { let _=(window,request,state); Err(BridgeError::unavailable("Agent version reservation is unavailable on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_version_reserve(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        crate::asset_session::decode_agent_version_reserve_empty(raw)?;
+        serde_json::to_value(state.document.revoke_agent_version_reserve(window)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    { let _=(window,request,state); Err(BridgeError::unavailable("Agent version reservation is unavailable on this platform.")) }
+}
+#[tauri::command]
+async fn agent_git_index_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_git_index_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        let args=crate::asset_session::agent_git_index::decode_allow(raw)?;
+        serde_json::to_value(state.document.allow_agent_git_index(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_git_index(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn agent_git_commit_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_git_commit_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git commits are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_git_commit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        let args=crate::asset_session::agent_git_index::decode_commit_allow(raw)?;
+        serde_json::to_value(state.document.allow_agent_git_commit(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git commits are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_git_commit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_git_commit(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git commits are not supported on this platform.")) }
+}
+#[tauri::command]
 async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -1657,6 +1771,48 @@ async fn revoke_agent_ios_archive(webview: Webview, request: tauri::ipc::Request
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
 }
+#[tauri::command]
+async fn allow_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::actions::Allow = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
+#[tauri::command]
+async fn agent_identity_action_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_identity_action_status(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
+#[tauri::command]
+async fn revoke_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
 #[tauri::command]
 async fn agent_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -1918,6 +2074,67 @@ async fn version_enrollment_cancel(webview: Webview, request: tauri::ipc::Reques
     let crate::version_enrollment_protocol::Command::Cancel(id) = version_enrollment_command("version_enrollment_cancel", &webview, &request)?
         else { return Err(BridgeError::invalid()); };
     state.document.cancel_version_enrollment(&id)
+}
+
+// One closed reserve dialogue. The separate Edit command transfers only a
+// native retained reservation into the SAME existing version EditOwner.
+fn version_reserve_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::version_reserve_protocol::Command, BridgeError> {
+    edit_window(webview)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    crate::version_reserve_protocol::decode(name, bytes)
+}
+#[tauri::command]
+async fn version_reserve_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    version_reserve_command("version_reserve_status", &webview, &request)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { Ok(state.document.version_reserve_status()) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { Err(crate::version_reserve_protocol::unavailable()) }
+}
+#[tauri::command]
+async fn version_reserve_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Review(input) = version_reserve_command("version_reserve_review", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.review_version_reservation(input).await }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = input; Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
+}
+#[tauri::command]
+async fn version_reserve_start(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Reserve { project_id, review_id } = version_reserve_command("version_reserve_start", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        // Fixed native app-data location only; no renderer path or CLI grant.
+        let location = app.path().app_local_data_dir().map_err(|_| crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable()))?;
+        state.document.reserve_version(&project_id, &review_id, &location).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (app, project_id, review_id); Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
+}
+#[tauri::command]
+async fn version_reserve_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Cancel(id) = version_reserve_command("version_reserve_cancel", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.cancel_version_reserve(&id) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = id; Err(crate::version_reserve_protocol::unavailable()) }
+}
+#[tauri::command]
+async fn version_reserve_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Edit { project_id, reservation_id } = version_reserve_command("version_reserve_edit", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.edit_reserved_version(&project_id, &reservation_id) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (project_id, reservation_id); Err(crate::version_reserve_protocol::unavailable()) }
 }
 
 fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
@@ -2239,6 +2456,124 @@ async fn github_repository_create_discard(webview: Webview, request: tauri::ipc:
 async fn github_repository_create_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
     repository_create_command("github_repository_create_cancel", &webview, &request, &state)
+}
+
+fn pull_request_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_pull_request_protocol::raw_input(name, bytes)?;
+    state.document.pull_request_command(name, &value)
+}
+#[tauri::command]
+async fn github_pull_request_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_prepare", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_create(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_create", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_pending", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_reconcile", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_discard", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_pull_request_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+    pull_request_command("github_pull_request_cancel", &webview, &request, &state)
+}
+
+
+fn actions_retry_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_actions_retry_protocol::raw_input(name, bytes)?;
+    state.document.actions_retry_command(name, &value)
+}
+#[tauri::command]
+async fn github_actions_retry_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_prepare", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_start", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_pending", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_reconcile", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_discard", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
+}
+
+// Non-async: Tauri executes this original command on the main thread. The
+// native shim checks that again; no dispatch queue can outlive the Doc gate.
+#[tauri::command]
+fn github_browser_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_browser_protocol::RequestSent, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Browser handoff has no fixture admission."));
+    edit_window(&webview)?;
+    let tauri::ipc::InvokeBody::Raw(bytes)=request.body() else {return Err(BridgeError::invalid());};
+    let selected=crate::github_browser_protocol::decode(bytes)?;
+    state.document.github_browser_open(&selected)
+}
+
+fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_activity_protocol::raw_input(bytes)?;
+    state.document.github_activity_command(name, &value)
+}
+#[tauri::command]
+async fn github_activity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Activity reads have no fixture admission."));
+    github_activity_command("github_activity_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_activity_read(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Activity reads have no fixture admission."));
+    github_activity_command("github_activity_read", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_activity_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Activity reads have no fixture admission."));
+    github_activity_command("github_activity_cancel", &webview, &request, &state)
 }
 
 #[tauri::command]
@@ -2684,6 +3019,12 @@ fn trusted_document(url: &tauri::Url) -> bool {
         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct RepositorySummaryRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for RepositorySummaryRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.repository_summary_relay_lost(); } }
+}
 struct LocalHistoryRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for LocalHistoryRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_release_history_relay_lost(); } }
@@ -2732,8 +3073,33 @@ struct ArtifactInspectionRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for ArtifactInspectionRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct GitIndexRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for GitIndexRelayGuard {fn drop(&mut self){if !self.closed {self.document.git_index_relay_lost();}}}
+#[cfg(any(target_os="linux",target_os="macos"))]
+struct IdentityActionsRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for IdentityActionsRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.identity_actions_relay_lost(); } }
+}
+
+#[cfg(any(target_os="linux",target_os="macos"))]
+struct VersionReserveRelayGuard { document:DocumentBinding, slot:Arc<crate::asset_session::ReserveRelay>, closed:bool }
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for VersionReserveRelayGuard {fn drop(&mut self){if !self.closed {self.slot.lost(&self.document);}}}
+
 #[deny(unused_variables, unused_assignments)]
-fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let git_index_guard = GitIndexRelayGuard { document: document.clone(), closed: false };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
@@ -2765,6 +3131,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let removal_notice=document.removal_notice_runtime();
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut identity_actions_guard = identity_actions_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut reserve_guard=reserve_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut git_index_guard = git_index_guard;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut repository_summary_guard = repository_summary_guard;
         let mut local_history_guard = local_history_guard;
         let mut local_history_revision = None;
         let mut local_history_relay_failed = false;
@@ -2804,6 +3178,9 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut github_setup_revision = None;
         let mut github_publication_revision = None;
         let mut repository_create_revision = None;
+        let mut pull_request_revision = None;
+        let mut actions_retry_revision = None;
+        let mut github_activity_revision = None;
         let mut github_history_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
@@ -2824,7 +3201,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+            if *stop.borrow() {
+                #[cfg(any(target_os="linux",target_os="macos"))] {
+                    reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                }
+                #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // Optional history performs bounded synchronous service IO only
@@ -2832,6 +3213,19 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // SAME retained relay owns the call; no detached writer is created.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let _ = application_history.publish_identity_history();
+            // Fixed DATA tap in this SAME retained relay; no new task, Git
+            // command, status IPC, Store write or native read is introduced.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            document.service_repository_summary_tick();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            document.service_identity_actions_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            match app.path().app_local_data_dir() {
+                Ok(location)=>reserve.tick(&document,&location).await,
+                Err(_)=>reserve.lost(&document),
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            match app.path().app_local_data_dir() {Ok(location)=>document.service_git_index_tick(&location),Err(_)=>document.git_index_relay_lost()};
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !preflight_relay_failed { document.service_local_checks_tick(); }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2941,6 +3335,21 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 repository_create_revision=Some(status.revision);
                 let _=app.emit_to(MAIN_WINDOW,crate::github_repository_create_protocol::EVENT,&status);
             }
+            let status=document.pull_request_status();
+            if pull_request_revision!=Some(status.revision){
+                pull_request_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_pull_request_protocol::EVENT,&status);
+            }
+            let status=document.actions_retry_status();
+            if actions_retry_revision!=Some(status.revision){
+                actions_retry_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_actions_retry_protocol::EVENT,&status);
+            }
+            let status=document.github_activity_status();
+            if github_activity_revision!=Some(status.revision){
+                github_activity_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_activity_protocol::EVENT,&status);
+            }
             let status=document.github_history_status();
             if github_history_revision!=Some(status.revision){
                 github_history_revision=Some(status.revision);
@@ -3044,6 +3453,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if !android_build_relay_failed {
                 match document.android_toolchain_catalog_status() {
                     Ok(status) => {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        application_history.publish_android_tools_catalogue(&status); // Original status has dropped native locks.
                         if android_catalog_revision != Some(status.status_revision) {
                             android_catalog_revision = Some(status.status_revision);
                             if app.emit_to(MAIN_WINDOW, crate::android_toolchain_catalog::EVENT, &status).is_err() {
@@ -3159,7 +3570,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
+                #[cfg(any(target_os="linux",target_os="macos"))] {
+                    reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                }
+                #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
@@ -3209,11 +3624,16 @@ async fn settle_relay(app: &tauri::AppHandle) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
+    #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         if enter.await.is_err() { return; }
         loop {
+            // Borrow/join the SAME retained continuation before can_exit.
+            // Neither continuation nor this join ever acquires RelayBook.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            reserve.join_finished(&document).await;
             // One fixed app-level exit observer. can_exit only observes the
             // already-ended original quit coordinator; it starts no dialog or
             // business operation. Windows extends this SAME finality path with
@@ -3233,6 +3653,8 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
                     // positively joined above. Drain captured terminal facts
                     // before closing the original service, including on quit.
                     // A history error remains in Host custody; cleanup MUST run.
+                    document.drain_git_index_for_exit();
+                    document.drain_identity_actions_for_exit();
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
                     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -4487,15 +4909,20 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             // or binding failure leaves only tool acquisition unavailable;
             // no alternate path, retry, directory creation or action is used.
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
-            if let Ok(application_data) = app.path().app_local_data_dir() {
-                let _ = document.bind_tool_acquisition(&application_data);
+            {
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application());
+                #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+                let observed_application:Option<&std::path::Path>=None;
+                if let Some(path)=observed_application {document.bind_tool_acquisition(path)?;}
+                else if let Ok(application_data)=app.path().app_local_data_dir(){let _=document.bind_tool_acquisition(&application_data);}
             }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             if let Some(q) = &observation { q.bind_diagnostic_document(document.clone()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -4505,7 +4932,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 bridge: bridge.clone(), document: document.clone(),
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))] picker: Arc::new(AtomicBool::new(false)),
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))] closing: AtomicBool::new(false),
-                exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false }),
+                exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false,
+                    #[cfg(any(target_os="linux",target_os="macos"))] version_reserve:Arc::new(crate::asset_session::ReserveRelay::new()) }),
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))] exit_observer: Mutex::new(None),
             });
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -4664,13 +5092,17 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             // Both observer bodies wait behind barriers until their ORIGINAL
             // handles have been stored in the application, not an invoke.
             let mut book = state.relay.try_lock().map_err(|_| "The original event relay could not be retained.")?;
-            let (handle, start) = start_relay(app.handle().clone(), bridge.edits.clone(), document.clone(), stop_receiver);
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            let reserve=book.version_reserve.clone(); // Rooted before either enter barrier.
+            let (handle, start) = start_relay(app.handle().clone(), bridge.edits.clone(), document.clone(), stop_receiver,
+                #[cfg(any(target_os="linux",target_os="macos"))] reserve.clone());
             book.handle = Some(handle); drop(book);
             let _ = start.send(());
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
                 let mut book = state.exit_observer.lock().map_err(|_| "The original exit observer could not be retained.")?;
-                let (handle, start) = start_exit_observer(app.handle().clone(), document);
+                let (handle, start) = start_exit_observer(app.handle().clone(), document,
+                    #[cfg(any(target_os="linux",target_os="macos"))] reserve);
                 *book = Some(handle); drop(book);
                 let _ = start.send(());
             }
@@ -4697,8 +5129,12 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
             app_info, application_read_status, allow_application_read, revoke_application_read,
+            allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+            agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
+            agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+            agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,
@@ -4743,6 +5179,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
             git_read_status, git_read_start, git_read_cancel,
             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
+            version_reserve_status, version_reserve_review, version_reserve_start, version_reserve_cancel, version_reserve_edit,
             git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
@@ -4750,6 +5187,9 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_release_reconcile, github_release_pending, github_release_cancel,
             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
+            github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
+            github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
+            github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,

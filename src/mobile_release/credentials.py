@@ -1940,8 +1940,19 @@ class SelectedStoreMaterial:
         self._owner()
         if self._state != "selected":
             raise CredentialError("Store material validation cannot be repeated")
-        if runtime_context is not None and (self._platforms != ("ios",) or execution_source is not None):
-            raise CredentialError("Bundled Apple validation requires its exact access selection")
+        if runtime_context is not None:
+            paired = False
+            if self._platforms == ("android", "ios"):
+                from ._desktop_store_preflight_control import StorePreflightInput
+                from .desktop_store_preflight import StorePreflightRun
+                from .paired_store_versions import selected_query
+                source = self._scratch.cancellation._store_preflight_source
+                if type(source) is StorePreflightInput:
+                    operation = source.require_operation()
+                    paired = (type(operation) is StorePreflightRun and selected_query(operation.request.context)
+                              and operation.runtime is runtime_context and operation.invocation is self._invocation)
+            if (self._platforms != ("ios",) and not paired) or execution_source is not None:
+                raise CredentialError("Bundled Apple validation requires its exact access selection")
         self._state = "validating"
         findings: list[Finding] = []
         try:

@@ -1364,6 +1364,10 @@ impl Book {
             cache.witness.clone(),
         ))
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn observed_application_attempt(&self) -> bool {
+        self.application_source.is_some() || self.application.is_some() || self.application_creation_pending || self.cache.is_some()
+    }
     pub(super) fn settled(&self) -> bool {
         self.retired
             && !self.unknown

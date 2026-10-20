@@ -206,9 +206,25 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+    #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+    #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+    #[serde(rename="git-index.scope")] GitIndexScope(ProjectQuery),
+    #[serde(rename="git-index.prepare")] GitIndexPrepare(crate::service_git_protocol::Prepare),
+    #[serde(rename="git-index.start")] GitIndexStart(crate::service_git_protocol::Start),
+    #[serde(rename="git-index.status")] GitIndexStatus(crate::service_git_protocol::Query),
+    #[serde(rename="git-index.cancel")] GitIndexCancel(crate::service_git_protocol::Query),
+    #[serde(rename="git-commit.scope")] GitCommitScope(ProjectQuery),
+    #[serde(rename="git-commit.prepare")] GitCommitPrepare(crate::service_git_commit_protocol::Prepare),
+    #[serde(rename="git-commit.start")] GitCommitStart(crate::service_git_commit_protocol::Start),
+    #[serde(rename="git-commit.status")] GitCommitStatus(crate::service_git_commit_protocol::Query),
+    #[serde(rename="git-commit.cancel")] GitCommitCancel(crate::service_git_commit_protocol::Query),
     #[serde(rename = "service.info")] Info(Empty),
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+    #[serde(rename = "android-tools.observation")] AndroidTools(ProjectQuery),
+    #[serde(rename = "request.list")] Requests(ProjectQuery),
+    #[serde(rename = "repository.observation")] Repository(ProjectQuery),
     #[serde(rename = "operation.list")] Operations(ProjectQuery),
     #[serde(rename = "operation.status")] Operation(OperationQuery),
     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
@@ -224,6 +240,10 @@ pub enum RequestBody {
     #[serde(rename = "ios-archive.cancel")] IosArchiveCancel(crate::agent_ios_archive::Query),
     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.prepare")] IdentityPrepare(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.start")] IdentityStart(crate::agent_identity_requests::actions::Start),
+    #[serde(rename = "identity.status")] IdentityActionStatus(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.cancel")] IdentityCancel(crate::agent_identity_requests::Query),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -242,9 +262,18 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+    GitIndexScope(crate::service_git_protocol::Scope),
+    GitIndexRequest(crate::service_git_protocol::Status),
+    GitCommitScope(crate::service_git_commit_protocol::Scope),
+    GitCommitRequest(crate::service_git_commit_protocol::Status),
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+    AndroidTools(crate::service_android_tools::View),
+    Requests(crate::service_request_catalogue::Catalogue),
+    Repository(crate::service_repository_summary::View),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+    IdentityAction(crate::agent_identity_requests::actions::Status),
     LocalCheck(crate::agent_local_checks::Status),
     AndroidBuildRequest(crate::agent_android_build::Status),
     IosArchiveRequest(crate::agent_ios_archive::Status),
@@ -282,6 +311,9 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
+    if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+        && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) = &request.request { input.validate()?; }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -347,7 +379,32 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             let mut seen = std::collections::BTreeSet::new();
             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
         }
+        ResponseBody::VersionReserveRequest(row) => {
+            row.validate()?;
+            if row.origin.service_instance != response.service_instance
+                || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len() > crate::service_version_reserve_protocol::STATUS_LIMIT
+            { return Err(Error::InvalidRequest); }
+        },
+        ResponseBody::GitIndexScope(row) => {
+            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, true)?;
+        },
+        ResponseBody::GitIndexRequest(row) => {
+            row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, false)?;
+        },
+        ResponseBody::GitCommitScope(row) => {
+            row.validate()?; if row.0.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, true)?;
+        },
+        ResponseBody::GitCommitRequest(row) => {
+            row.validate()?; if row.0.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, false)?;
+        },
         ResponseBody::Observation(row) => project(row)?,
+        ResponseBody::AndroidTools(row) => row.validate()?,
+        ResponseBody::Repository(row) => row.validate()?,
+        ResponseBody::Requests(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::Operations(rows) => {
             if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
             let mut seen = std::collections::BTreeSet::new();
@@ -355,6 +412,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         }
         ResponseBody::Operation(row) => operation(row)?,
         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+        ResponseBody::IdentityAction(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::IosArchiveRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },

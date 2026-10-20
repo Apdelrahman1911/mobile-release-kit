@@ -234,6 +234,7 @@ interface Attempt {
   context: IdentityUiContext; stamp: number; window: string; after: number; previous: string | null;
   request: IdentityOpenRequest; sessionId: string | null; projection: IdentityProjection | null;
   preparation: IdentityPrepareRequest | null;
+  delegated: IdentityPrepareRequest | null; mutationPublished: boolean;
   retired: boolean; sent: boolean; prepareClaimed: boolean; applyClaimed: boolean; applySent: boolean;
   closeRequested: boolean; closeSent: boolean; outcomePublished: boolean;
 }
@@ -411,10 +412,17 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
           { platform: p.checkout.view.selection.platform, target: p.checkout.view.selection.target, project: p.checkout.view.selection.project })) {
           this.#fail('protocol'); return;
         }
-        if (p.prepared && (!a.preparation || a.preparation.intent === 'edit' && (p.checkout?.view.kind !== 'project-identity' ||
+        const expectedPreparation = a.preparation ?? a.delegated;
+        if (p.prepared && (!expectedPreparation || expectedPreparation.intent === 'edit' && (p.checkout?.view.kind !== 'project-identity' ||
           p.prepared.view.kind !== 'project-identity-preview' || !identityPreviewMatches(p.prepared.view, p.checkout.view,
-            a.preparation.desiredIdentity, a.preparation.identityIntent)))) { this.#fail('protocol'); return; }
+            expectedPreparation.desiredIdentity, expectedPreparation.identityIntent)))) { this.#fail('protocol'); return; }
         a.sessionId = p.sessionId; a.projection = p;
+        if (p.applySubmitted && a.delegated && !a.mutationPublished) {
+          // Actual original observation, not a permission ACK, invalidates the
+          // same saved inputs. Mark submitted BEFORE the reentrant callback.
+          a.applySent = true; a.mutationPublished = true;
+          try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); }
+        }
         if (terminal(p) && !a.outcomePublished && (p.phase === 'unknown' || this.#issue === null)) {
           a.outcomePublished = true;
           try { this.#source.onOutcome?.(p); } catch { this.#fail('unconfirmed'); }
@@ -455,7 +463,7 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
       // A late transport error cannot erase an original settled receipt.
       if (!(a.projection?.phase === 'final' && a.projection.nativeFinality === 'settled')) this.#fail('unconfirmed');
     }).finally(() => this.#finish(work));
-    if (kind === 'apply') { try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); } }
+    if (kind === 'apply' && !a.mutationPublished) { a.mutationPublished = true; try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); } }
     this.#publish();
     return true;
   }
@@ -475,7 +483,7 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
         this.#original()?.projectId === c.projectId && this.#original()?.coreOutcome?.journal === 'recovery_required')) return false;
     const a: Attempt = { context: c, stamp: this.#stamp, window: status.windowGeneration, after: status.statusRevision,
       previous: status.lastTerminal?.sessionId ?? null, request, sessionId: null, projection: null, retired: false, sent: false,
-      preparation: null, prepareClaimed: false, applyClaimed: false, applySent: false, closeRequested: false, closeSent: false, outcomePublished: false };
+      preparation: null, delegated: null, mutationPublished: false, prepareClaimed: false, applyClaimed: false, applySent: false, closeRequested: false, closeSent: false, outcomePublished: false };
     this.#attempt = a;
     const sent = this.#send('open', a, () => this.#api.open(request), () => this.#guard(a, status, a.stamp));
     if (!sent && this.#attempt === a && !a.sent) { this.#attempt = null; this.#publish(); }
@@ -496,7 +504,7 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
   #prepare(request: IdentityPrepareRequest): boolean {
     if (!encodeProjectIdentityRequest('project_identity_prepare', request)) return false;
     const a = this.#bound(), p = a?.projection, status = this.#status;
-    if (!a || !p?.checkout || p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || a.prepareClaimed || request.intent !== p.intent ||
+    if (!a || !p?.checkout || p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || a.prepareClaimed || a.delegated || request.intent !== p.intent ||
       request.sessionId !== p.sessionId || request.revision !== p.checkout.revision) return false;
     if (request.intent === 'edit' && (p.checkout.view.kind !== 'project-identity' || p.checkout.view.state !== 'supported' ||
       !identityValueFits(request.desiredIdentity, p.checkout.view.selection.platform) || request.desiredIdentity !== p.checkout.view.identity &&
@@ -517,7 +525,7 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
   #apply(request: IdentitySendRequest): boolean {
     if (!encodeProjectIdentityRequest('project_identity_apply', request)) return false;
     const a = this.#bound(), p = a?.projection, status = this.#status;
-    if (!a || !a.prepareClaimed || !a.preparation || !p?.prepared || p.phase !== 'reviewing' || p.nativeReason !== 'none' ||
+    if (!a || a.delegated || !a.prepareClaimed || !a.preparation || !p?.prepared || p.phase !== 'reviewing' || p.nativeReason !== 'none' ||
       p.reviewRemainingMs === 0 || a.applyClaimed || p.applySubmitted ||
       request.intent !== p.intent || request.sessionId !== p.sessionId || request.revision !== p.prepared.revision || request.planToken !== p.prepared.planToken) return false;
     a.applyClaimed = true;
@@ -529,6 +537,28 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
   }
   apply(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'edit'); }
   recover(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'recover'); }
+  /** Passive expectation for one explicitly delegated, already-opened proposal.
+   * This sends nothing and is NOT native permission or a Prepare claim. The
+   * separate original native Allow still has to bind the exact source/change. */
+  expectAgentIdentityAction(request: IdentitySessionRequest & { desiredIdentity: string; intent: IdentityIntent }): boolean {
+    const args = uiArguments(request, ['sessionId', 'revision', 'desiredIdentity', 'intent']);
+    const a = this.#bound(), p = a?.projection;
+    if (!args || !a || a.delegated || a.preparation || a.prepareClaimed || a.applyClaimed || p?.intent !== 'edit' ||
+      p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || !p.checkout || p.checkout.view.kind !== 'project-identity' ||
+      p.checkout.view.state !== 'supported' || p.checkout.revision !== args.revision || p.sessionId !== args.sessionId ||
+      !identityValueFits(args.desiredIdentity, p.checkout.view.selection.platform) || !['preserve', 'new-application'].includes(args.intent as string) ||
+      args.desiredIdentity !== p.checkout.view.identity && (args.intent !== 'new-application' || p.checkout.view.selection.continuity !== 'unknown' ||
+        p.checkout.view.identityStatus !== 'unverified')) return false;
+    a.delegated = Object.freeze({ intent: 'edit', sessionId: p.sessionId, revision: p.checkout.revision,
+      desiredIdentity: args.desiredIdentity, identityIntent: args.intent as IdentityIntent });
+    this.#publish(); return true;
+  }
+  /** Read the SAME original attempt, including during its synchronous mutation
+   * callback before the next view publication. Permission DATA cannot set it. */
+  agentIdentityApplySubmitted(): boolean {
+    const a = this.#attempt;
+    return !!a?.delegated && a.applySent && a.projection?.applySubmitted === true;
+  }
   /** BEFORE every context/API/selection intent, even no-op or ABA intents. */
   beforeContextIntent(): void {
     if (this.#stamp === Number.MAX_SAFE_INTEGER) this.#fail('protocol'); else this.#stamp += 1;

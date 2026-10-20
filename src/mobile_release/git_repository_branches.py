@@ -117,9 +117,7 @@ class _LogPolicy:
                 "identity": (self.identity.name, self.identity.email)}
 
 
-def _logging(git_dir: Path, target: str, config: dict) -> _LogPolicy:
-    values = config.get("core.logallrefupdates", (b"true",))
-    core._need(values in ((b"true",), (b"false",)), "unsupported-repository")
+def _local_identity(config: dict) -> core.CommitIdentity:
     # This supported profile never guesses a login/host identity or loads
     # ambient global config. Refuse other identity policies rather than silently
     # overriding them. Explicit env values below equal these retained local
@@ -140,6 +138,13 @@ def _logging(git_dir: Path, target: str, config: dict) -> _LogPolicy:
         core._need(core._SECRET.search(name[0] + b"\n" + email[0]) is None, "invalid-input")
     except (KeyError, UnicodeError, core.GitError):
         raise BranchError("branch-identity-required") from None
+    return identity
+
+
+def _logging(git_dir: Path, target: str, config: dict) -> _LogPolicy:
+    values = config.get("core.logallrefupdates", (b"true",))
+    core._need(values in ((b"true",), (b"false",)), "unsupported-repository")
+    identity = _local_identity(config)
     path = git_dir / "logs" / target
     parents, missing = [], False
     for parent in reversed(path.parents):

@@ -264,6 +264,12 @@ impl BackupSources {
         if self.first.is_some() || !self.book.settled() { return Err(Reason::SourceRefused); }
         self.restored.as_ref().map(|value| value.descriptor.kind).ok_or(Reason::SourceRefused)
     }
+
+    pub(crate) fn matches_authenticated_readback(&self, record: &crypto::AuthenticatedRecord) -> bool {
+        self.captured && self.authentication_started && self.first.is_none()
+            && self.transition_bytes == 0 && self.book.settled()
+            && self.restored.as_ref().is_some_and(|restored| restored.matches_authenticated_readback(record))
+    }
 }
 
 fn input_size(index: usize, size: usize) -> bool {

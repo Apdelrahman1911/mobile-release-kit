@@ -216,7 +216,11 @@ pub(crate) fn valid_label(value: Option<&str>) -> bool {
 }
 impl Descriptor {
     pub(crate) fn new(kind: Kind, label: Option<String>, field_presence: Vec<bool>, file_present: bool) -> Result<Self> {
-        if !kind.enabled() || !valid_label(label.as_deref()) || field_presence.len() != commands::field_names(kind).len()
+        // The pending signing key is an encrypted storage kind only. Listing
+        // it must not require making it a general credential/picker input.
+        if (!kind.enabled() && kind != Kind::AppleDistributionKey)
+            || (kind == Kind::AppleDistributionKey && (label.is_some() || field_presence != [true; 3] || file_present))
+            || !valid_label(label.as_deref()) || field_presence.len() != commands::field_names(kind).len()
             || file_present != kind.file().is_some() { return Err(Error::Shape); }
         Ok(Self { kind, label, field_presence, file_present })
     }
@@ -226,7 +230,8 @@ impl Descriptor {
         // fields (including escaped spelling), unknown keys and trailing data.
         let wire: DescriptorWire = serde_json::from_slice(bytes).map_err(|_| Error::Shape)?;
         if wire.schema_version != 1 { return Err(Error::Shape); }
-        let kind = commands::kind(&serde_json::Value::String(wire.kind)).map_err(|_| Error::Shape)?;
+        let kind = if wire.kind == "apple-distribution-key" { Kind::AppleDistributionKey }
+            else { commands::kind(&serde_json::Value::String(wire.kind)).map_err(|_| Error::Shape)? };
         Self::new(kind, wire.label, wire.field_presence, wire.file_present)
     }
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {

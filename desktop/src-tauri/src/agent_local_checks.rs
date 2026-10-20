@@ -471,9 +471,7 @@ impl Entry {
             _ => false,
         }
     }
-    pub(crate) fn status(&self) -> Result<Status, Error> {
-        self.occupies();
-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+    fn observed_request_state(&self, has_operation: bool) -> RequestState {
         let phase = self.phase.load(Ordering::Acquire);
         let request_state = match phase {
             QUEUED => RequestState::Queued,
@@ -484,6 +482,37 @@ impl Entry {
             EXPIRED => RequestState::Expired,
             _ => RequestState::AdmissionUnknown,
         };
+        if has_operation && matches!(request_state, RequestState::Queued | RequestState::Admitting) {
+            RequestState::OriginalAvailable
+        } else { request_state }
+    }
+    /// Compact DATA only; never clone a report or acquire a native owner.
+    pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
+        use crate::service_request_catalogue as data;
+        self.occupies();
+        let operation = {
+            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
+            latest.as_ref().map(|value| data::Operation {
+                operation_id: value.operation_id.clone(), owner_generation: value.owner_generation.clone(),
+                status_revision: value.status_revision, state: value.state, settlement: value.settlement,
+            })
+        }; // Same lock order as status: latest is released BEFORE publication.
+        let request_state = self.observed_request_state(operation.is_some());
+        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+        let history_available = !history.failed && operation.as_ref()
+            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
+        let row = data::Request {
+            request_id: self.input.request_id.clone(),
+            expected_observation_revision: self.input.expected_observation_revision,
+            progress: data::Progress::LocalCheck { request_state }, operation, history_available,
+        };
+        row.validate().map_err(|_| Error::StateUnknown)?;
+        Ok(row)
+    }
+    pub(crate) fn status(&self) -> Result<Status, Error> {
+        self.occupies();
+        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+        let request_state = self.observed_request_state(operation.is_some());
         let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
         let history_available = operation
             .as_ref()
@@ -492,15 +521,7 @@ impl Entry {
         let status = Status {
             origin: self.input.query(),
             expected_observation_revision: self.input.expected_observation_revision,
-            request_state: if operation.is_some()
-                && matches!(
-                    request_state,
-                    RequestState::Queued | RequestState::Admitting
-                ) {
-                RequestState::OriginalAvailable
-            } else {
-                request_state
-            },
+            request_state,
             operation,
             history_available,
             do_not_replay: true,

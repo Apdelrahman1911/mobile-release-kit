@@ -37,13 +37,19 @@ pub(crate) struct Jobs {
     slots: [Option<Job>; wire::MAX_TRANSITIONS as usize],
     active: Option<usize>, registered: u8, failed: bool,
     revoked: Arc<AtomicBool>,
+    reserve: Option<(Arc<crate::supervisor::VersionReserveControl>, Arc<super::reserve::StateHold>)>,
 }
 impl Jobs {
     /// Pure metadata only: no port/Store/Host mutex, namespace read or worker.
     pub(crate) fn new(request: Arc<wire::Request>, port: Arc<Mutex<VersionAllocationStatePort>>,
         stop: watch::Receiver<bool>, end: Instant) -> Result<Self> {
         if !current(&stop,end) { return Err(Failure::Stopped); }
-        Ok(Self { request,port,stop,end,slots:std::array::from_fn(|_|None),active:None,registered:0,failed:false,revoked:Arc::new(AtomicBool::new(false)) })
+        Ok(Self { request,port,stop,end,slots:std::array::from_fn(|_|None),active:None,registered:0,failed:false,revoked:Arc::new(AtomicBool::new(false)),reserve:None })
+    }
+    pub(crate) fn new_reserve(request:Arc<wire::Request>,port:Arc<Mutex<VersionAllocationStatePort>>,
+        stop:watch::Receiver<bool>,end:Instant,control:Arc<crate::supervisor::VersionReserveControl>,state:Arc<super::reserve::StateHold>)->Result<Self> {
+        if !control.current() || end!=control.work_end() {return Err(Failure::Currentness);}
+        let mut jobs=Self::new(request,port,stop,end)?;jobs.reserve=Some((control,state));Ok(jobs)
     }
     fn fail(&mut self) { self.failed = true; self.revoked.store(true,Ordering::Release); }
     /// The caller has already installed Jobs in the actual original Resources.
@@ -59,16 +65,28 @@ impl Jobs {
         self.slots[index] = Some(Job { step:step.clone(),release:Some(release),handle:None,returned:None,join_error:None,released:false });
         self.active = Some(index); self.registered += 1;
         let port = self.port.clone(); let request = self.request.clone(); let stop = self.stop.clone(); let end = self.end;
+        let reserve=self.reserve.clone();
         let job = self.slots[index].as_mut().ok_or(Failure::Currentness)?;
         job.handle = Some(tokio::task::spawn_blocking(move || {
-            enter.blocking_recv().map_err(|_|Failure::NotReleased)?;
-            if !current(&stop,end) { return Err(Failure::Stopped); }
-            let mut port = port.lock().map_err(|_|Failure::PortUnknown)?;
-            if !current(&stop,end) || !request.matches_port(&port) { return Err(Failure::Currentness); }
-            // The one actual native CAS/close call. No Document/Edit lock is
-            // held here. A STOP during fsync is not a pretend interruption;
-            // retain/join this original and preserve its exact result instead.
-            port.apply(step.expected_revision,request.selected(),step.transition()).map_err(Failure::Native)
+            let result=(||{
+                enter.blocking_recv().map_err(|_|Failure::NotReleased)?;
+                if !current(&stop,end) { return Err(Failure::Stopped); }
+                if let Some((control,state))=&reserve {
+                    if !control.current(){return Err(Failure::Stopped);}
+                    state.check_use().map_err(Failure::Native)?;
+                }
+                let mut port = port.lock().map_err(|_|Failure::PortUnknown)?;
+                if !current(&stop,end) || !request.matches_port(&port) { return Err(Failure::Currentness); }
+                // Original CAS result stays on the registered job. No Doc/Edit
+                // lock or fake interruption of the actual Store fsync.
+                port.apply(step.expected_revision,request.selected(),step.transition()).map_err(Failure::Native)
+            })();
+            let at=Instant::now();
+            if let (Some((control,_)),Err(error))=(&reserve,&result) {
+                match error {Failure::Native(e)=>control.state_failed(*e,at),
+                    Failure::JoinUnknown|Failure::PortUnknown=>control.unknown(),_=>control.stop_at(at)}
+            }
+            result
         }));
         self.failed = false; Ok(())
     }

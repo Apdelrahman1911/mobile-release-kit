@@ -227,6 +227,8 @@ export class ToolAcquisitionController {
     if (i.result.protectedTools !== 'none-in-supported-catalogue')
       return 'A matching supported tool selection was not confirmed. Use the existing Recover or Choose tools controls; do not replace working tools.';
     if (!i.result.components) return 'The selected folders have not been fully checked. Use the existing Choose and Inspect tools controls; nothing will be replaced.';
+    if (i.result.discoveredSources?.compatibleComponents.length)
+      return 'Found matching existing tools. Use the found folders or choose another installation, then check the remaining tools. No duplicate download will be offered.';
     if (!i.result.components.missing.length)
       return 'The chosen tool sources match. Nothing needs downloading. Inspect all selected tools and separately approve the protected copy.';
     const a = i.result.requirements.android;

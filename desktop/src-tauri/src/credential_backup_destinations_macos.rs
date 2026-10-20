@@ -32,6 +32,15 @@ enum Effect { NotStarted, Entered, Applied, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase { Reserved, Admitting, Ready, Publishing, Returned, Failed }
 
+// Only the ignored ordinary Rust Mac component fixture uses this. It grants
+// no shipping selection and never writes GuiFacts/SelectedPair/join receipts.
+#[cfg(all(test, debug_assertions))]
+#[derive(Default)]
+struct ComponentOnly {
+    admitted: bool, stop_after_code: bool, lose_code_close: bool,
+    close_calls: [u8; 2], close_returned: [bool; 2],
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DirectorySnapshot { index: usize, identity: DirectoryIdentity, flags: u32 }
 impl DirectorySnapshot {
@@ -96,6 +105,8 @@ pub(crate) struct BackupDestinations {
     acl: Option<SnapshotBook>, ancestors: Vec<DirectorySnapshot>, outputs: [Output; 2],
     comparison: Zeroizing<Vec<u8>>, phase: Phase, closed: bool,
     first: Option<(Reason, Instant)>, uid: Option<u32>,
+    #[cfg(all(test, debug_assertions))]
+    component: ComponentOnly,
 }
 impl BackupDestinations {
     #[cfg(test)]
@@ -108,7 +119,9 @@ impl BackupDestinations {
         outputs[1].publication = Effect::Unknown;
         Self { owner: Arc::downgrade(owner), paths: [PathBuf::new(), PathBuf::new()], book,
             acl: None, ancestors: Vec::new(), outputs, comparison: Zeroizing::new(Vec::new()),
-            phase: Phase::Failed, closed: true, first: Some((Reason::SourceRefused, Instant::now())), uid: None }
+            phase: Phase::Failed, closed: true, first: Some((Reason::SourceRefused, Instant::now())), uid: None,
+            #[cfg(debug_assertions)] component: ComponentOnly::default(),
+        }
     }
     #[cfg(test)]
     pub(crate) fn unsynced_publication_predicate_data(owner: &Arc<OriginalWork>) -> Self {
@@ -124,16 +137,49 @@ impl BackupDestinations {
     /// No filesystem/key generation. Sole production caller is the closed
     /// native SelectedPair; no renderer/CLI path adapter calls this function.
     pub(crate) fn new(owner: &Arc<OriginalWork>, paths: [PathBuf; 2]) -> Result<Self, Reason> {
-        if !owner.credential_backup_destination_scope() || paths[0] == paths[1]
+        if !owner.credential_backup_destination_scope() { return Err(Reason::SourceRefused); }
+        Self::reserve(owner, paths)
+    }
+    fn reserve(owner: &Arc<OriginalWork>, paths: [PathBuf; 2]) -> Result<Self, Reason> {
+        if paths[0] == paths[1]
             || paths.iter().any(|path| path.capacity() > PATH_LIMIT) { return Err(Reason::SourceRefused); }
         for path in &paths { if parts(path)?.is_empty() { return Err(Reason::SourceRefused); } }
         Ok(Self { owner: Arc::downgrade(owner), paths, book: SourceBook::new(), acl: None,
             ancestors: Vec::new(), outputs: [Output::reserved(), Output::reserved()],
-            comparison: Zeroizing::new(Vec::new()), phase: Phase::Reserved, closed: false, first: None, uid: None })
+            comparison: Zeroizing::new(Vec::new()), phase: Phase::Reserved, closed: false, first: None, uid: None,
+            #[cfg(all(test, debug_assertions))] component: ComponentOnly::default(),
+        })
+    }
+    /// Test-only backend entry. Actual APFS/ACL/no-follow/exclusion/file/sync/
+    /// close work is unchanged. There is deliberately NO native picker proof.
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn new_component_fixture(owner: &Arc<OriginalWork>, paths: [PathBuf; 2]) -> Result<Self, Reason> {
+        if owner.interrupted() || owner.has_credential_backup_picker() { return Err(Reason::SourceRefused); }
+        let mut value = Self::reserve(owner, paths)?;
+        value.component.admitted = true;
+        Ok(value)
+    }
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn component_stop_after_code_and_lose_close(&mut self) -> Result<(), Reason> {
+        if !self.component.admitted || !self.not_started() || self.component.stop_after_code {
+            return Err(Reason::SourceRefused);
+        }
+        self.component.stop_after_code = true;
+        self.component.lose_code_close = true;
+        Ok(())
+    }
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn component_close_observation(&self) -> ([u8; 2], [bool; 2], bool) {
+        (self.component.close_calls, self.component.close_returned,
+            self.book.settled() && self.acl.as_ref().is_none_or(SnapshotBook::settled))
     }
     fn current(&self, owner: &Arc<OriginalWork>) -> bool {
-        self.owner.upgrade().is_some_and(|original| Arc::ptr_eq(&original, owner))
-            && owner.credential_backup_destination_scope()
+        let same = self.owner.upgrade().is_some_and(|original| Arc::ptr_eq(&original, owner));
+        #[cfg(all(test, debug_assertions))]
+        if self.component.admitted {
+            return same && !owner.interrupted() && !owner.has_credential_backup_picker();
+        }
+        same && owner.credential_backup_destination_scope()
     }
     fn fail_at(&mut self, owner: &OriginalWork, reason: Reason, at: Instant) {
         if self.first.is_none() { self.first = Some((reason, at)); }
@@ -349,7 +395,14 @@ impl BackupDestinations {
             // before STOP/error observation. Neither output may be rerun.
             self.write_one(1, code, owner)?; self.write_one(0, encrypted, owner)?;
             self.recheck_directories(owner)?;
-            self.publish_one(1, code, owner)?; self.publish_one(0, encrypted, owner)?;
+            self.publish_one(1, code, owner)?;
+            #[cfg(all(test, debug_assertions))]
+            if self.component.stop_after_code {
+                // Genuine code rename+directory sync/readback happened above;
+                // the backup is still the original pending file. No fake effect.
+                return Err(Reason::UserCancelled);
+            }
+            self.publish_one(0, encrypted, owner)?;
             self.recheck_directories(owner)?;
             for (index, bytes) in [(1, code), (0, encrypted)] {
                 self.verify_unchanged(index, owner)?; self.readback(index, bytes, owner)?;
@@ -467,7 +520,17 @@ impl BackupDestinations {
                 Handle::Closed | Handle::NoHandle => {},
                 Handle::Owned => {
                     out.handle = Handle::Closing;
+                    #[cfg(all(test, debug_assertions))]
+                    { self.component.close_calls[index] += 1; }
                     let closed = out.fd.take().is_some_and(|fd| unistd::close(ManuallyDrop::into_inner(fd)).is_ok());
+                    #[cfg(all(test, debug_assertions))]
+                    { self.component.close_returned[index] = closed; }
+                    #[cfg(all(test, debug_assertions))]
+                    let closed = if self.component.admitted && self.component.lose_code_close && index == 1 {
+                        // Explicitly INJECTED receipt loss after the original
+                        // native close call. This is not a kernel close fault.
+                        false
+                    } else { closed };
                     out.handle = if closed { Handle::Closed } else { Handle::Unknown };
                     if !closed { known = false; self.fail(owner, Reason::CleanupUnknown); }
                 },

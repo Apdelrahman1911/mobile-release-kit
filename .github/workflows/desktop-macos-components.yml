@@ -38,9 +38,9 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-native-tests, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
-        description: Architecture for app-typecheck (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
+        description: Architecture for app-typecheck/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -434,25 +434,25 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
-    name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
+    name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(inputs.component == 'app-typecheck' && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
+        include: ${{ fromJSON((inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
     steps:
-      - name: Require the explicit ARM-only typecheck selection
-        if: inputs.component == 'app-typecheck'
+      - name: Require the explicit ARM-only focused selection
+        if: inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests'
         shell: bash
         env:
           SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
         run: |
           set -euo pipefail
           if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
-            printf '%s\n' 'app-typecheck requires architecture=arm64; no other architecture was compiled.' >&2
+            printf '%s\n' 'app-typecheck/app-native-tests require architecture=arm64; no other architecture was compiled.' >&2
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -475,7 +475,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B desktop/tools/prepare_ci_xcode.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts'
+        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests'
         with:
           node-version: '24.20.0'
       - name: Allocate task-owned app compiler directory
@@ -519,7 +519,7 @@ jobs:
           # Exact SDK/Rust/profile/dependency key only. Source changes still
           # run Cargo, including build.rs SOURCE/release env invalidation.
           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
-      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native DATA contracts' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -534,7 +534,7 @@ jobs:
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
           export npm_config_cache="$WORK_ROOT/npm-cache"
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
-          if [[ "$APP_CHECKS" != app-contracts && "$APP_CHECKS" != local-keychain-contracts ]]; then
+          if [[ "$APP_CHECKS" != app-contracts && "$APP_CHECKS" != local-keychain-contracts && "$APP_CHECKS" != app-native-tests ]]; then
             npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
             npm --prefix desktop run build
             # Actual packaged graph including command/ACL generation and native
@@ -549,6 +549,10 @@ jobs:
             fi
           fi
           if [[ "$APP_CHECKS" == app-typecheck ]]; then
+            # Compile the actual transport-only CLI target, not only the shared
+            # library modules. This does not invoke a CLI or grant Desktop access.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features installed-cli --manifest-path desktop/src-tauri/Cargo.toml --bin mrk
             # Check the actual nonshipping native observation target before
             # spending time signing or packaging it. This does not run the app
             # or add observation features to the separate shipping invocation.
@@ -556,8 +560,8 @@ jobs:
               --features desktop-shell,custom-protocol,macos-installed-observation \
               --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
             # Fixed DATA only in the ordinary native library graph, separate
-            # from the shipping image check above. No service, tool, credential
-            # or app is launched; do not fall through into the broad suites.
+            # from the shipping image check above. These three tests launch no
+            # service, tool, credential or app; do not run the broad suites.
             rustup run 1.98.1 cargo test --locked --no-default-features \
               --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
               android_registration::tests::native_prepare_role_predicate_matches_closed_rust_roles \
@@ -565,9 +569,14 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Twelve Mac-only cache, acquisition and Git-source comparisons in
-            # the ordinary library, never in the shipping image. These methods
-            # open no files, services or tools; native acquisition is separate.
+          fi
+          if [[ "$APP_CHECKS" == app-typecheck || "$APP_CHECKS" == app-native-tests ]]; then
+            # app-native-tests reuses unchanged successful shipping/CLI/observer
+            # checks. It still compiles the actual current library test graph.
+            # Twenty-eight Mac-only cache, acquisition, Git-source and Apple
+            # credential/codec cases in the ordinary library, not the shipping
+            # image. These open no files, services or tools; native operations
+            # and persisted credential storage are verified separately.
             rustup run 1.98.1 cargo test --locked --no-default-features \
               --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
               saved_command_owner::tool_acquisition::cache::tests::unentered_cache_close_never_mints_a_producer_origin \
@@ -580,10 +589,91 @@ jobs:
               installed_runtime::android_registration_source::acquisition::tests::missing_requires_exact_enoent_not_denial_link_or_interruption \
               installed_runtime::android_registration_source::acquisition::tests::both_compiled_rosters_reserve_one_read_phase_not_registration_authority \
               installed_runtime::android_registration_source::acquisition::tests::sdk_scope_never_includes_sibling_packages \
+              saved_command_owner::tool_acquisition::picked::tests::source_diagnostic_keeps_original_first_failure_through_generic_cleanup_normalization \
+              installed_runtime::android_registration_source::acquisition::discovery::tests::fixed_lookup_paths_require_native_account_home_and_keep_unentered_account_settled \
               asset_source::macos::git_local_sources::branch_tests::new_branch_source_head_stays_original_and_only_destination_must_be_absent \
               asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_positive_metadata_prefix_is_exact_and_does_not_accept_generic_index_or_ref_receipts \
+              asset_source::macos::git_local_sources::switch_sources::tests::ambiguous_target_lock_acquisition_retains_all_original_routes_without_fake_cleanup_or_retry \
+              asset_source::macos::git_local_sources::switch_sources::tests::one_attempt_slot_retirement_keeps_unknown_and_never_invents_missing_owned_descriptor_success \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_extra_roster_is_charged_without_discount_for_aliases_review_or_future_close \
+              asset_source::macos::git_local_sources::switch_sources::tests::uncertain_return_promotes_prior_known_refusal_so_original_lock_cleanup_cannot_run \
+              asset_source::macos::git_local_sources::rename_sources::tests::ambiguous_rename_lock_preserves_original_slots_without_fake_close_or_retry \
+              asset_source::macos::git_local_sources::rename_sources::tests::rename_roster_counts_full_ref_and_log_chains_without_future_close_credit \
+              asset_source::macos::git_local_sources::rename_sources::tests::failed_original_rename_rematch_is_sticky_and_cannot_release_ref_locks \
+              asset_session::vault::provisioning_native::profile_store::tests::self_mutation_exception_keeps_original_loan_checks_and_excludes_other_owners \
+              asset_session::vault::provisioning_native::profile_store::tests::known_storage_effect_alone_cannot_retire_unknown_original_or_rearm_save \
+              asset_session::vault::provisioning_native::profile_store::tests::no_save_requires_unattempted_original_even_after_known_refusal \
+              vault_crypto::apple_profile::tests::profile_cipher_uses_the_reserved_revision_and_full_authenticated_bytes \
+              vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation \
+              vault_store::macos::tests::apple_key_inventory_compares_old_full_witnesses_and_only_one_new_record \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            # Real synthetic-record backup backend, not picker/Keychain/signing
+            # or Desktop lifecycle qualification. The injected lost-close receipt
+            # is retained until this exact, synchronous test process has exited.
+            (
+              umask 077
+              test_name=asset_session::vault::backup_native::component_tests::native_apfs_backup_roundtrip_wrong_code_and_lost_close_receipt
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --list |
+                grep -Fx "$test_name: test"
+              # Same original private APFS fixture convention as desktop-ci.yml.
+              # This subshell owns its trap; the IPC HOME fixture below is separate.
+              temp_root="$(cd -P -- "$RUNNER_TEMP" && pwd -P)"
+              fixture="$(mktemp -d "$temp_root/mrk-backup-component.XXXXXX")"
+              fixture_identity=''
+              cleanup_backup_fixture() {
+                status=$?
+                trap - EXIT
+                cleanup_status=0
+                if [[ -n "$fixture_identity" && -d "$fixture" && ! -L "$fixture" &&
+                      "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" &&
+                      "$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")" == "$fixture_identity" ]]; then
+                  rm -rf -- "$fixture" || cleanup_status=$?
+                else
+                  printf '%s\n' 'Private backup fixture identity changed; leave it for disposable-host teardown.' >&2
+                  cleanup_status=1
+                fi
+                if (( status == 0 )); then status=$cleanup_status; fi
+                exit "$status"
+              }
+              trap cleanup_backup_fixture EXIT
+              [[ -d "$fixture" && ! -L "$fixture" && "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" ]]
+              [[ "$(/usr/bin/stat -f '%u:%Lp' "$fixture")" == "$(id -u):700" ]]
+              fixture_identity="$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")"
+              # No background work: caller cleanup follows the actual test join.
+              MRK_MACOS_VAULT_FIXTURE_ROOT="$fixture" rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --test-threads=1 |
+                tee "$WORK_ROOT/app-typecheck-backup-component.log"
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-backup-component.log"
+            )
+            # Real Darwin AF_UNIX peer credentials, capability/reconnect checks
+            # and original socket/task shutdown, using the existing library.
+            # No GUI consent, native project operation, cross-UID attack test,
+            # Keychain, installed app or CLI subprocess is claimed by this run.
+            # A short fresh HOME keeps the production sockaddr_un bound; do not
+            # move the fixture to writable /tmp or relax native ancestry checks.
+            ipc_home=$(/usr/bin/mktemp -d "$HOME/.mrki.XXXXXX")
+            trap 'ipc_status=$?; if ! /bin/rmdir "$ipc_home"; then printf "%s\n" "IPC fixture retained; no recursive cleanup attempted." >&2; test "$ipc_status" -ne 0 || ipc_status=1; fi; exit "$ipc_status"' EXIT
+            HOME="$ipc_home" /usr/bin/python3 -I -B - <<'PY'
+          import os
+          home = os.environ["HOME"]
+          assert os.geteuid() != 0 and os.path.isabs(home)
+          probe = home + "/.mrks-0000000000000000/dev.mobile-release-kit.desktop/service-v1/s"
+          assert len(os.fsencode(probe)) < 104, "IPC fixture exceeds native socket path bound"
+          PY
+            HOME="$ipc_home" rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+              installed_cli_ipc::tests::real_socket_two_clients_share_completed_observations_and_history \
+              installed_cli_ipc::tests::stalled_client_and_disconnect_do_not_block_other_client_or_shutdown \
+              installed_cli_ipc::tests::private_capability_wrong_instance_and_revoked_access_are_rejected \
+              installed_cli_ipc::tests::replaced_endpoint_is_retained_and_state_cannot_close_before_join \
+              installed_cli_ipc::tests::stale_descriptor_and_symlink_are_not_an_auto_cleanup_authority \
+              installed_cli_ipc::tests::client_handshake_timeout_closes_original_and_preserves_unknown_close \
+              installed_cli_ipc::tests::poisoned_revoke_still_stops_and_joins_original_workers_once \
+              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-ipc-contracts.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-ipc-contracts.log"
             exit 0
           fi
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then

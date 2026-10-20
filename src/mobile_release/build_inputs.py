@@ -680,11 +680,19 @@ _LAYOUTS = {
     "signing-validation": {**_MATERIALS, **_EXTRACTIONS},
     "store-selection": {"asc-p8": _MATERIALS["asc-p8"],
                         "google-adc": _ScratchSpec("google-adc.json", _LARGE)},
+    "apple-provisioning-p12": {
+        # Closed automatic-profile mode; other P12/signing limits are unchanged.
+        "distribution-p12": _ScratchSpec("distribution.p12", 4 * 1024**2),
+        "p12-password": _ScratchSpec("p12-password", 4096),
+    },
     "bundletool": {"bundletool": _ScratchSpec("bundletool.jar", _BUNDLETOOL_BYTES)},
     # Public metadata plus bounded ZIP directory overhead; not a generic output role.
     "store-metadata": {"metadata": _ScratchSpec("store-metadata.zip", 512 * 1024**2)},
     "ios-snapshot": {},  # Fixed bounded tree implementation lives in ios_artifacts.
     "online-runner": {},
+    # Fixed input for bundled Apple PKCS8/CSR/SPKI verification only. Existing
+    # private _FD/FiniteScratch publication, identity checks and cleanup apply.
+    "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
                         for platform in ("android", "ios")},
 }
@@ -1762,8 +1770,11 @@ class InvocationCustody:
               "allocation source requires its original cancellation borrower")
         if allocation is not None:
             from ._desktop_version_allocation_source_control import BorrowedAllocationInput
-            _need(type(guard) is DefaultCancellation and type(allocation) is BorrowedAllocationInput
-                  and allocation.guard is guard and guard._saved_command_input() is allocation,
+            from .reserved_version_edit import BorrowedReservedVersionInput
+            _need(type(guard) is DefaultCancellation and allocation.guard is guard
+                  and (type(allocation) is BorrowedAllocationInput and guard._saved_command_input() is allocation
+                       or type(allocation) is BorrowedReservedVersionInput
+                       and guard._edit_source is allocation.owner.input and allocation.owner.active is allocation),
                   "allocation source borrower is not original")
         _need((mode == "store") == (lane_evidence is not None),
               "Store invocation requires exactly its original composite record")
@@ -2023,6 +2034,23 @@ class InvocationCustody:
               and operation.guard is self.cancellation and operation.source.operation is operation,
               "Store access closure requires its original invocation")
         return self._store_online_closed()
+
+    def _apple_key_returned_runtime(self, operation) -> None:
+        """Same active online environment at a returned key-command exit only."""
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        self._owner(cleanup=True)
+        _need(type(operation) is AppleProvisioningRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation
+              and self.cancellation._apple_provisioning_source is operation.source
+              and operation.request.context["mode"] == "key-prepare" and operation._pending == 6
+              and self.root == operation.root and self.mode == "online" and self.lane_evidence is None
+              and self.active and self.reserved and not self.claimed and not self._cleanup_complete
+              and self.reservation_state == "ACQUIRED" and self.lock_result is True
+              and self.environment_lock is _ENV_LOCK and _ENV_OWNER is self and not _ENV_TAINTED
+              and self.child is None and not self.frames and not self.project_started
+              and self.project_owner is None and self._original_project is None
+              and self.signing_lease is None and self.store_namespace is None,
+              "returned key command requires its same active online environment")
 
     def _apple_provisioning_closed(self, operation) -> bool:
         from .desktop_apple_provisioning import AppleProvisioningRun

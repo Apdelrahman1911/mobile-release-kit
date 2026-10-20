@@ -83,19 +83,27 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
+import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
 import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
+import { createGitIndexApi } from './service_git_permission.ts';
+import { createGitCommitApi } from './service_git_commit_permission.ts';
 import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
+import { createVersionReservePort } from './versionReserve.ts';
+import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
 import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+import { createGitHubActivityPort } from './githubActivityProtocol.ts';
+import { createGitHubPullRequestPort } from './githubPullRequestProtocol.ts';
+import { createGitHubActionsRetryPort } from './githubActionsRetryProtocol.ts';
 import { createGitLocalApi } from './gitLocalProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -379,7 +387,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     try {
       if (mode !== 'native') throw { code: 'VersionEditUnavailable' };
       if (!versionEditRequestFits(command, args)) throw { code: 'VersionEditInvalid' };
-      const status = parseVersionEditStatus(await invoke<unknown>(command, structuredClone(args) as Record<string, unknown>));
+      const status = parseVersionEditStatus(await invoke<unknown>(command, command === 'version_reserve_edit' ?
+        new TextEncoder().encode(JSON.stringify(args)) : structuredClone(args) as Record<string, unknown>));
       if (!status) throw { code: 'VersionEditStatusInvalid' };
       return status;
     } catch (error) { throw versionEditError(error); }
@@ -400,13 +409,21 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     mode,
     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
     agentIdentity: createAgentIdentityApi(mode, invoke),
+    agentIdentityActions: createAgentIdentityActionApi(mode, invoke),
     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
     agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
+    agentGitIndex: createGitIndexApi(mode, invoke),
+    agentGitCommit: createGitCommitApi(mode, invoke),
     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
+    versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+    githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+    githubPullRequest: createGitHubPullRequestPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+    githubActionsRetry: createGitHubActionsRetryPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     gitLocal: createGitLocalApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
@@ -720,7 +737,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         return await listen('github-workflow-edit-status', onStatus);
       } catch (error) { throw workflowEditError(error); }
     },
-    openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
+    openReleaseVersionEdit: (request) => versionCall('reservationId' in request ? 'version_reserve_edit' : 'release_version_edit_open', request),
     prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
     applyReleaseVersionEdit: (sessionId, planToken, intent) => versionCall('release_version_edit_apply',
       intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }),

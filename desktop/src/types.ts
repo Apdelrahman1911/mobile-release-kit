@@ -314,6 +314,7 @@ export interface ProjectSnapshot {
   assurance: Assurance;
   issues: Issue[];
   setupAnalysis?: JsonObject;
+  scriptDiscovery?: JsonObject;
 }
 
 export interface ProjectReference { id: string; name: string; path: string }
@@ -423,13 +424,21 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+  readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;
+  readonly agentGitCommit?: import('./service_git_commit_permission.ts').GitCommitApi | null;
+  readonly agentGitIndex?: import('./service_git_permission.ts').PermissionApi<import('./service_git_permission.ts').GitIndexApproval> | null;
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+  readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+  readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+  readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
+  readonly githubPullRequest?: import('./githubPullRequestProtocol.ts').PullRequestPort | null;
+  readonly githubActionsRetry?: import('./githubActionsRetryProtocol.ts').ActionsRetryPort | null;
   readonly gitLocal?: import('./gitLocalProtocol.ts').GitLocalApi | null;
   // Fixed original native owner only; no preview or generic transport fallback.
   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;

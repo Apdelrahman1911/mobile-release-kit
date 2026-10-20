@@ -14,6 +14,14 @@ mod upload_key_fields;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use upload_key_fields::UploadKeySecrets;
 
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "credential_apple_distribution_key_fields.rs"]
+mod apple_distribution_key_fields;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use apple_distribution_key_fields::{AppleDistributionKeyFields, AppleDistributionKeyMetadata,
+    PRIVATE_FRAME_LIMIT as APPLE_KEY_PRIVATE_FRAME_LIMIT, CONSTRUCTION_BYTES as APPLE_KEY_CONSTRUCTION_BYTES,
+    public_parts_match as apple_distribution_key_public_matches};
+
 pub(crate) const POLICY: &str = "credential-policy-v1";
 pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;
 const SMALL_LIMIT: usize = 1024;
@@ -23,6 +31,8 @@ const PREPARE_LIMIT: usize = 128 * 1024;
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Kind {
     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
+    // Native storage only: deliberately absent from kind()/enabled()/FileKind.
+    AppleDistributionKey,
     IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount,
 }
 impl Kind {
@@ -35,6 +45,7 @@ impl Kind {
             Self::AppleReviewDemo => "apple-review-demo",
             Self::OperationCommitment => "operation-commitment",
             Self::GoogleServiceAccount => "google-service-account",
+            Self::AppleDistributionKey => "apple-distribution-key",
         }
     }
     pub(crate) fn enabled(self) -> bool {
@@ -52,13 +63,13 @@ impl Kind {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Platform { Android, Ios, Project }
+pub(crate) enum Platform { Android, Ios, Project, Both }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Stage { Candidate, ExternalTesting, Production }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Purpose { Full, Signing, Store }
+pub(crate) enum Purpose { Full, Signing, Store, Provisioning, #[serde(rename="version-inventory")] VersionInventory }
 #[derive(Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ExecutionMode { #[default] Github, Local }
@@ -328,6 +339,7 @@ pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile | Kind::GoogleServiceAccount => &[],
+        Kind::AppleDistributionKey => &["privateKeyPkcs8Base64", "csrPem", "publicKeySpkiBase64"],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         Kind::AscP8 => &["keyId", "issuerId"],
         Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
@@ -359,6 +371,13 @@ pub(crate) fn own_fields(kind: Kind, value: &Value) -> Result<Fields, AssetError
         else { values.push(Some(copy_text(text(source)?)?)); }
     }
     Ok(Fields { kind, values })
+}
+// Called only by authenticated vault/portable-backup decoding. It does not
+// widen ordinary renderer field admission, assessment or session kinds.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) fn stored_fields(kind: Kind, value: &Value) -> Result<Fields, AssetError> {
+    if kind == Kind::AppleDistributionKey { apple_distribution_key_fields::stored_fields(value) }
+    else { validate_fields(kind, value)?; own_fields(kind, value) }
 }
 pub(crate) fn copy_text(text: &str) -> Result<String, AssetError> {
     let mut copy = String::new(); copy.try_reserve_exact(text.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
@@ -393,9 +412,16 @@ pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
         .map_err(|_| AssetError::invalid())).transpose()?.unwrap_or_default();
     let project_id = text(&object["projectId"])?;
     if !protocol::valid_id(project_id) || !object["draft"].is_object() || !within(&object["draft"], DRAFT_LIMIT) { return Err(AssetError::invalid()); }
-    let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, _ => return Err(AssetError::invalid()) };
+    let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, "both" => Platform::Both, _ => return Err(AssetError::invalid()) };
     let stage = match text(&object["stage"])? { "candidate" => Stage::Candidate, "external-testing" => Stage::ExternalTesting, "production" => Stage::Production, _ => return Err(AssetError::invalid()) };
-    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, _ => return Err(AssetError::invalid()) };
+    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, "provisioning" => Purpose::Provisioning, "version-inventory" => Purpose::VersionInventory, _ => return Err(AssetError::invalid()) };
+    if purpose == Purpose::Provisioning && (execution_mode != ExecutionMode::Local
+        || platform != Platform::Ios || stage != Stage::Candidate) { return Err(AssetError::invalid()); }
+    if platform == Platform::Both || purpose == Purpose::VersionInventory {
+        if platform != Platform::Both || purpose != Purpose::VersionInventory || stage != Stage::Candidate
+            || execution_mode != ExecutionMode::Local || object["draft"]["android"]["enabled"] != true
+            || object["draft"]["ios"]["enabled"] != true { return Err(AssetError::invalid()); }
+    }
     Ok(Context { project_id, draft: &object["draft"], platform, stage, purpose, execution_mode })
 }
 pub(crate) fn choose(body: &Value) -> Result<Choose<'_>, AssetError> {

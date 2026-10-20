@@ -33,6 +33,10 @@ pub(crate) use picked::SourceGate;
 mod sources;
 pub(crate) use sources::SourceNomination;
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="saved_command_tool_acquisition_observation.rs"]
+pub(super) mod observation;
+
 // A complete source implementation is not installed-profile qualification.
 // Root's native observation/packaging gate must be exercised before enabling.
 const NATIVE_QUALIFIED: bool = false;
@@ -54,6 +58,8 @@ const _: () = assert!(FUTURE_PUBLIC_BYTES <= PUBLIC_WORK_LIMIT);
 pub(super) struct Binding {
     android: Arc<Inner>,
     document: Weak<()>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation: std::sync::OnceLock<Weak<crate::shell::installed_observation::tool_setup::Control>>,
     #[cfg(all(
         target_os = "macos",
         target_pointer_width = "64",
@@ -219,7 +225,8 @@ pub(super) struct Registry {
     // A later known pre-effect refusal must not discard the earlier actual
     // app-data nomination. This is a second original reference, not a receipt.
     application_observation: Option<Arc<Session>>,
-    // Only accepted Complete Acquire + positive original joins mint this.
+    // Only accepted Complete Acquire/Inspect + positive original joins mint
+    // locations. Discovery never supplies a cache-producer or source role.
     completed_sources: Option<Arc<sources::CompletedSources>>,
 }
 pub(super) struct State {
@@ -240,6 +247,7 @@ struct Expected {
     reference_sha256: String,
     projection_sha256: String,
     components: wire::components::Partition,
+    copied_sdk: Option<wire::sdk::Component>,
 }
 
 /// Native-only census from the SAME owner, original Android state and retained
@@ -326,6 +334,8 @@ impl SavedCommandOwner {
                     android: android.inner.clone(),
                     document: Arc::downgrade(document),
                     location,
+                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                    observation: std::sync::OnceLock::new(),
                 })
                 .map_err(|_| wire::invalid())
         }
@@ -399,6 +409,8 @@ impl SavedCommandOwner {
         {
             return Err(wire::invalid());
         }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if !observation::claim_prepare(&self.inner, &input, &root) { return Err(wire::invalid()); }
         let intent = {
             let r = self
                 .inner
@@ -602,7 +614,13 @@ impl SavedCommandOwner {
 }
 impl Inner {
     pub(super) fn tool_acquisition_selected(&self) -> bool {
-        NATIVE_QUALIFIED
+        let qualified = {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            { NATIVE_QUALIFIED || observation::selected(self) }
+            #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+            { NATIVE_QUALIFIED }
+        };
+        qualified
             && self.domain == SavedCommandDomain::ToolAcquisition
             && cfg!(all(
                 feature = "desktop-shell",
@@ -729,7 +747,8 @@ fn application_root(owner: &Session) -> Result<Option<RegisteredRoot>, BridgeErr
         Err(BridgeError::cleanup_unknown())
     }
 }
-pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
+pub(super) fn after_final(inner: &Inner, r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
+    let _ = inner;
     if owner.domain != SavedCommandDomain::ToolAcquisition {
         return;
     }
@@ -787,14 +806,13 @@ pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &
     {
         observe_protected_tools(owner, active);
         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
-            if t.context.action == wire::Action::Acquire {
-                r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
-            }
+            r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
             if t.context.action == wire::Action::Inspect
                 && t.outcome == wire::Outcome::Complete
                 && t.lifetime.settled()
                 && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
                 && t.components().is_some_and(|parts| parts.needs_download())
+                && !t.discovered_sources().is_some_and(|found| found.needs_selection())
             {
                 r.tool_acquisition.review = Some(Arc::new(Inspection {
                     original: owner.clone(), terminal: t.clone(),
@@ -802,6 +820,8 @@ pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &
             }
         }
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation::returned(inner, r, active, owner);
 }
 fn observe_protected_tools(owner: &Session, active: &mut Active) {
     let (Some(intent), Profile::ToolAcquisition(profile)) = (&owner.tools.intent, owner.profile) else { return; };
@@ -815,7 +835,10 @@ fn observe_protected_tools(owner: &Session, active: &mut Active) {
         wire::ProtectedTools::ReuseSelected => terminal.observe_components(wire::components::Partition::compatible_all()),
         wire::ProtectedTools::NoneInSupportedCatalogue => {
             #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
-            if let Some((parts, _)) = native::picked_finding(owner) { terminal.observe_components(parts); }
+            if let Some((parts, _)) = native::picked_finding(owner) {
+                terminal.observe_components(parts);
+                if let Some(found) = native::discovery(owner) { terminal.observe_discovered_sources(found); }
+            }
         },
         wire::ProtectedTools::ManualCheckRequired => {},
     }
@@ -914,10 +937,12 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, picker
                     .android_registration_retained_heap_bytes(document)?,
             )?;
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    { bytes = bytes.checked_add(observation::charge(inner)?)?; }
     let mut seen = BTreeSet::new();
     let mut queue = r.tool_acquisition.producers.clone();
     if let Some(completed) = &r.tool_acquisition.completed_sources {
-        queue.push(completed.original().clone()); // SAME producer, deduplicated below.
+        queue.push(completed.original().clone()); // SAME original Session, deduplicated below.
         bytes = bytes.checked_add(completed.retained_bytes()?)?;
     }
     if let Some(application) = &r.tool_acquisition.application {
@@ -1019,8 +1044,9 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, picker
                 .checked_add(expected.projection_sha256.capacity())?;
         }
         if let Some(intent) = &owner.tools.intent {
-            // Only missing-tool Inspect/Acquire Sessions are retained as cache
-            // producers or download Reviews. No uncounted old selected loan.
+            // Only empty-catalogue Inspect/Acquire Sessions are retained as
+            // cache producers, discovery locations or download Reviews.
+            // No uncounted old selected loan.
             if intent.known.catalog.empty().is_none() { return None; }
             pickers.record(intent.known.sources.picker_originals())?;
             bytes = bytes
@@ -1200,6 +1226,7 @@ pub(super) fn check_frame(owner: &Session, frame: wire::Frame) -> Result<wire::F
                 || result["referenceSha256"] != expected.reference_sha256
                 || result["projectionSha256"] != expected.projection_sha256
                 || !wire::staged_matches_partition(result, expected.components)
+                || wire::sdk::copied(result) != Ok(expected.copied_sdk)
             {
                 return Err(BridgeError::protocol());
             }

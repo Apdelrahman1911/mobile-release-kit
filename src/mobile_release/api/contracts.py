@@ -1058,6 +1058,7 @@ class SnapshotResult(TypedDict):
     assurance: Assurance
     issues: list[Issue]
     setupAnalysis: NotRequired[dict[str, Any]]
+    scriptDiscovery: NotRequired[dict[str, Any]]
 
 
 def assurance(basis: Literal["static-text", "schema-policy"]) -> Assurance:

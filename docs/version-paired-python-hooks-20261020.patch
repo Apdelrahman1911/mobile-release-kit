@@ -1,0 +1,463 @@
+diff --git a/src/mobile_release/_desktop_store_preflight_control.py b/src/mobile_release/_desktop_store_preflight_control.py
+index 08a318633f449b50dd0e4017710edf24b016f944..4d7c5d83fee5601276795ad673e6bcc50895608f 100644
+--- a/src/mobile_release/_desktop_store_preflight_control.py
++++ b/src/mobile_release/_desktop_store_preflight_control.py
+@@ -13,10 +13,12 @@
+
+ def parse_header(raw: bytes, *, platform="android", stage=None, review_demo=False):
+     require(type(raw) is bytes and 0 < len(raw) <= HEADER_LIMIT and raw.endswith(b"\n")
+-            and platform in ("android", "ios") and type(review_demo) is bool
++            and platform in ("android", "ios", "both") and type(review_demo) is bool
+             and (stage is None and not review_demo or platform == "ios" and stage in ("external-testing", "production-submit")))
+     roles = (("google-service-account", MATERIAL_LIMIT),) if platform == "android" else (
+         ("asc-p8", MATERIAL_LIMIT), ("asc-key-id", 10), ("asc-issuer-id", 36))
++    if platform == "both":
++        roles = (("google-service-account", MATERIAL_LIMIT), *roles)
+     if stage is not None:
+         roles += tuple((role,4096) for role in ("contact-first-name","contact-last-name","contact-email","contact-phone"))
+         roles += (("commitment-key-base64",44),("commitment-version",64))
+@@ -103,6 +105,10 @@
+                 self._require(len(header) < HEADER_LIMIT)
+                 header.extend(take(1))
+             platform = operation.request.context["platform"]
++            if platform == "both":
++                from .desktop_store_preflight import StorePreflightRun
++                from .paired_store_versions import selected_query
++                self._require(type(operation) is StorePreflightRun and selected_query(operation.request.context))
+             options={}
+             from .local_store_prepare import LocalStorePrepareRun
+             from .local_store_execute import LocalStoreExecuteRun
+@@ -117,6 +123,11 @@
+                 self._require(take(len(SUFFIX)) == SUFFIX)
+                 operation.validate_material_shape(self._material)
+                 snapshot = scratch.put("google-adc", self._material)
++            elif platform == "both":
++                self._material = tuple(take(length) for length in lengths)
++                self._require(take(len(SUFFIX)) == SUFFIX)
++                operation.validate_pair_shape(self._material)
++                snapshot = (scratch.put("google-adc", self._material[0]), scratch.put("asc-p8", self._material[1]))
+             else:
+                 self._material = tuple(take(length) for length in lengths)
+                 self._require(take(len(SUFFIX)) == SUFFIX)
+diff --git a/src/mobile_release/_desktop_store_preflight_protocol.py b/src/mobile_release/_desktop_store_preflight_protocol.py
+index 1b80273a1181bd246b1b5d1e03ecbbbe480ad992..916d85cdfe7b3cad376a4bc37f91fb3f059e4ebc 100644
+--- a/src/mobile_release/_desktop_store_preflight_protocol.py
++++ b/src/mobile_release/_desktop_store_preflight_protocol.py
+@@ -10,6 +10,7 @@
+ from . import apple_provisioning_profile_read as profile_read
+ from . import ios_store_versions as store_versions
+ from . import android_store_versions as play_versions
++from . import paired_store_versions as paired_versions
+
+ PROTOCOL = "mrk-local-store-preflight/1"
+ CONSENT = "local-android-store-access-v1"
+@@ -17,8 +18,8 @@
+ APPLE_SCOPE = "local-ios-store-access-no-publishing"
+
+ def command_count(platform):
+-    require(platform in ("android", "ios"))
+-    return 7 if platform == "ios" else 6
++    require(platform in ("android", "ios", "both"))
++    return {"android": 6, "ios": 7, "both": paired_versions.COMMANDS}[platform]
+ REQUEST_LIMIT, RESPONSE_LIMIT = 16 * 1024, 16 * 1024
+ WORK_SECONDS, FINALITY_SECONDS = 1200, 1210
+ PROFILES = {"macos-x86_64": ("macos", "x86_64"), "macos-arm64": ("macos", "arm64")}
+@@ -39,20 +40,27 @@
+ def context(value, *, apple_access=False, bundle_query=False):
+     require(type(apple_access) is bool and type(bundle_query) is bool)
+     query_keys = {"query"} if type(value) is dict and "query" in value else set()
++    paired = type(value) is dict and paired_versions.selected_query(value)
+     # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
+     require(not query_keys or apple_access and bundle_query and (
+         value.get("platform") == "ios" and value["query"] in (bundle_read.QUERY, profile_read.QUERY, store_versions.QUERY)
+-        or value.get("platform") == "android" and value["query"] == play_versions.QUERY))
++        or value.get("platform") == "android" and value["query"] == play_versions.QUERY or paired))
+     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+-                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
++                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"}
++                         | query_keys | ({"iosRecord"} if paired else set()))
++    if paired:
++        ios = _keys(value["iosRecord"], {"recordId", "recordRevision"})
++        require(type(ios["recordId"]) is str and _TOKEN.fullmatch(ios["recordId"]) is not None
++                and integer(ios["recordRevision"], 2**32-2, 1) and ios["recordId"] != value["recordId"])
+     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
+             and integer(value["draftRevision"], 2**32-2) and integer(value["baselineGeneration"], 2**32-2)
+             and integer(value["credentialContextRevision"], 2**32-2, 1)
+             and integer(value["recordRevision"], 2**32-2, 1)
+             and type(value["recordId"]) is str and _TOKEN.fullmatch(value["recordId"]) is not None
+-            and value["executionMode"] == "local" and (value["platform"] == "android" or apple_access and value["platform"] == "ios")
++            and value["executionMode"] == "local" and (value["platform"] == "android" or apple_access and value["platform"] == "ios" or paired)
+             and value["operation"] == "local-store-preflight")
+-    return {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
++    return {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"]),
++            **({"iosRecord": dict(ios)} if paired else {})}
+
+ @dataclass(frozen=True)
+ class StorePreflightRequest:
+@@ -104,6 +112,7 @@
+ def validate_result(value, *, platform="android", query=None):
+     if query is not None:
+         require(platform == "android" and query == play_versions.QUERY and play_versions.valid_result(value)
++                or platform == "both" and query == paired_versions.QUERY and paired_versions.valid_result(value)
+                 or platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
+                 or query == profile_read.QUERY and profile_read.valid_result(value)
+                 or query == store_versions.QUERY and store_versions.valid_result(value)))
+diff --git a/src/mobile_release/_desktop_version_allocation_protocol.py b/src/mobile_release/_desktop_version_allocation_protocol.py
+index 8c3dec8481f44e346adb6f3aadce7677da0528ad..a1289fd1fb6d1aea9d5f1f88745a9d7fb028d8a4 100644
+--- a/src/mobile_release/_desktop_version_allocation_protocol.py
++++ b/src/mobile_release/_desktop_version_allocation_protocol.py
+@@ -125,7 +125,7 @@
+             and request.sha256 == initial.request_sha256 and request.candidate_id == initial.candidate_id
+             and request.project_id == initial.authority.project_id)
+     if initial.source is not None:
+-        require(request.version_policy.schema_version in {2, 3}
++        require(request.version_policy.schema_version in {2, 3, 4}
+                 and initial.source.matches(request.source))  # AllocationRequest pins the exact platform/scope.
+
+
+@@ -163,7 +163,8 @@
+     require(type(go["observations"]) is list and len(go["observations"]) <= 2
+             and len(policy.canonical(go["observations"])) <= OBSERVATIONS_LIMIT)
+     observations = allocation.parse_observations(request, go["observations"])
+-    require(request.version_policy.schema_version == 1 or len(observations) == 1
++    require(request.version_policy.schema_version == 1
++            or len(observations) == (2 if request.version_policy.schema_version == 4 else 1)
+             or (initial.kind == "reconcile" and not observations))
+     return Go(token, request, snapshot, observations)
+
+diff --git a/src/mobile_release/_desktop_version_allocation_runtime.py b/src/mobile_release/_desktop_version_allocation_runtime.py
+index d462cb466588f890fa799d8b06930faa76a12f00..eb0117cdc2248671d622469ecccf91cd54a3eeb4 100644
+--- a/src/mobile_release/_desktop_version_allocation_runtime.py
++++ b/src/mobile_release/_desktop_version_allocation_runtime.py
+@@ -345,7 +345,7 @@
+         # a new reservation. v2 is explicitly current-visible, never silently
+         # promoted to v1's all-history scope. Reconciliation returns DATA only.
+         try:
+-            if go.request.version_policy.schema_version in {2, 3}:
++            if go.request.version_policy.schema_version in {2, 3, 4}:
+                 allocation.current_inventory_policy(go.request).constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
+                             go.request.store_context_revision, go.request.version_policy,
+                             now=math.floor(time.time()))
+diff --git a/src/mobile_release/android_store_versions.py b/src/mobile_release/android_store_versions.py
+index f0a0393905001327b487f9d16d5fbed226c8fa42..0ec2c174530858dba4fa94fab7549442cf4ec2a4 100644
+--- a/src/mobile_release/android_store_versions.py
++++ b/src/mobile_release/android_store_versions.py
+@@ -98,13 +98,16 @@
+     from .reporting import Finding, Status
+     from .stores import _require_fastlane_bundle, _runtime_environment
+     from .tooling import _complete_tooling_root
+-
+-    _need(type(operation) is StorePreflightRun and selected_query(operation.request.context)
++    from . import paired_store_versions as paired
++
++    _need(type(operation) is StorePreflightRun and (selected_query(operation.request.context)
++          or paired.selected_query(operation.request.context))
+           and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial)
+     operation.checkpoint()
+     runtime, invocation = operation.runtime, operation.invocation
+     _need(type(runtime) is StoreRuntimeContext and query_prerequisites(config))
+-    material.require(config=config, platforms=("android",), invocation=invocation)
++    platforms = paired.PLATFORMS if paired.selected_query(operation.request.context) else ("android",)
++    material.require(config=config, platforms=platforms, invocation=invocation)
+     runtime.require(root=config.root, invocation=invocation)
+     package = config.section("android")["applicationId"]
+     context = policy.digest(operation.request.context)
+@@ -124,7 +127,7 @@
+     def current():
+         operation._source_post()
+         operation._received_post()
+-        material.require(config=config, platforms=("android",), invocation=invocation)
++        material.require(config=config, platforms=platforms, invocation=invocation)
+         runtime.require(root=config.root, invocation=invocation)
+         _need(config.section("android")["applicationId"] == package and policy.digest(operation.request.context) == context)
+
+diff --git a/src/mobile_release/apple_provisioning_bundle_read.py b/src/mobile_release/apple_provisioning_bundle_read.py
+index 5e3b014fed316d830b69816ede0e2ce7f0c56c05..834706431d339f01e5a03aeb811db1a76918a522 100644
+--- a/src/mobile_release/apple_provisioning_bundle_read.py
++++ b/src/mobile_release/apple_provisioning_bundle_read.py
+@@ -167,9 +167,11 @@
+     from .tooling import _complete_tooling_root
+     from . import apple_provisioning_profile_read as profiles
+     from . import ios_store_versions as versions
++    from . import paired_store_versions as paired
+
+     api.require(expected_query in {QUERY, profiles.QUERY, versions.QUERY} and type(operation) is StorePreflightRun
+-                and selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
++                and (selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
++                     or expected_query == versions.QUERY and paired.selected_query(operation.request.context))
+                 and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial,
+                 "bundle_read_original_unavailable")
+     operation.checkpoint()
+@@ -177,7 +179,8 @@
+     api.require(type(runtime) is StoreRuntimeContext and query_prerequisites(config), "bundle_read_original_unavailable")
+     inventory = expected_query == versions.QUERY
+     api.require(not inventory or versions.query_prerequisites(config), "bundle_read_original_unavailable")
+-    material.require(config=config, platforms=("ios",), invocation=invocation)
++    platforms = paired.PLATFORMS if paired.selected_query(operation.request.context) else ("ios",)
++    material.require(config=config, platforms=platforms, invocation=invocation)
+     runtime.require(root=config.root, invocation=invocation)
+     bundle_id = config.section("ios")["bundleId"]
+     request = (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
+@@ -206,7 +209,7 @@
+     def current():
+         operation._source_post()
+         operation._received_post()
+-        material.require(config=config, platforms=("ios",), invocation=invocation)
++        material.require(config=config, platforms=platforms, invocation=invocation)
+         runtime.require(root=config.root, invocation=invocation)
+         api.require(config.section("ios")["bundleId"] == bundle_id
+                     and (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
+@@ -228,7 +231,7 @@
+                             "MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT": context_sha256})
+         if inventory:
+             environment["MOBILE_RELEASE_ASC_APP_ID"] = config.section("ios")["appStoreAppId"]
+-        argv = fixed_read_argv(tooling, operation.request.context)
++        argv = versions.fixed_argv(tooling) if paired.selected_query(operation.request.context) else fixed_read_argv(tooling, operation.request.context)
+         with runtime.command(argv, capture=True):
+             completed = run_owned(argv, cwd=runner._path, environ=environment, capture=True, text=False,
+                                   timeout=QUERY_SECONDS, output_limit=versions.FRAME_LIMIT if inventory else FRAME_LIMIT,
+diff --git a/src/mobile_release/credentials.py b/src/mobile_release/credentials.py
+index 97703a3d34365fa108acf8cdbd4b7097f83a4c24..a988ac2184dddaa698ad338242d6f28da69c173c 100644
+--- a/src/mobile_release/credentials.py
++++ b/src/mobile_release/credentials.py
+@@ -1940,8 +1940,19 @@
+         self._owner()
+         if self._state != "selected":
+             raise CredentialError("Store material validation cannot be repeated")
+-        if runtime_context is not None and (self._platforms != ("ios",) or execution_source is not None):
+-            raise CredentialError("Bundled Apple validation requires its exact access selection")
++        if runtime_context is not None:
++            paired = False
++            if self._platforms == ("android", "ios"):
++                from ._desktop_store_preflight_control import StorePreflightInput
++                from .desktop_store_preflight import StorePreflightRun
++                from .paired_store_versions import selected_query
++                source = self._scratch.cancellation._store_preflight_source
++                if type(source) is StorePreflightInput:
++                    operation = source.require_operation()
++                    paired = (type(operation) is StorePreflightRun and selected_query(operation.request.context)
++                              and operation.runtime is runtime_context and operation.invocation is self._invocation)
++            if (self._platforms != ("ios",) and not paired) or execution_source is not None:
++                raise CredentialError("Bundled Apple validation requires its exact access selection")
+         self._state = "validating"
+         findings: list[Finding] = []
+         try:
+diff --git a/src/mobile_release/desktop_store_preflight.py b/src/mobile_release/desktop_store_preflight.py
+index e1d7f916b86a5603167cf8a2dd155842baeb30bb..d3fda86fa0e7c5675d26afb7c7d4d28ce13a60b4 100644
+--- a/src/mobile_release/desktop_store_preflight.py
++++ b/src/mobile_release/desktop_store_preflight.py
+@@ -34,10 +34,11 @@
+ from . import apple_provisioning_profile_read as profile_read
+ from . import ios_store_versions as store_versions
+ from . import android_store_versions as play_versions
++from . import paired_store_versions as paired_versions
+
+
+ def _captured_query(context):
+-    return bundle_read.selected_read(context) or play_versions.selected_query(context)
++    return bundle_read.selected_read(context) or play_versions.selected_query(context) or paired_versions.selected_query(context)
+
+
+ class _Refused(Exception):
+@@ -95,7 +96,9 @@
+
+     def bind_scratch(self, scratch):
+         layouts = ("online-runner", "store-selection", "store-selection", "online-runner", "online-readback")
+-        if _captured_query(self.request.context):
++        if paired_versions.selected_query(self.request.context):
++            layouts = (*layouts[:4], "online-runner")  # Two sequential fixed readers, no readback file.
++        elif _captured_query(self.request.context):
+             layouts = layouts[:4]  # Private capture, never a Store-access output file.
+         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
+                 and len(self.scratches) < len(layouts) and scratch.layout == layouts[len(self.scratches)]
+@@ -134,7 +137,8 @@
+                 raise _Refused("saved-source-changed")
+             config = ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data)
+             spec, saved = config.section("version"), self.request.context["savedVersion"]
+-            if not config.platform_enabled(self.request.context["platform"]) or spec["source"] != saved["source"]:
++            platforms = paired_versions.PLATFORMS if paired_versions.selected_query(self.request.context) else (self.request.context["platform"],)
++            if not all(config.platform_enabled(p) for p in platforms) or spec["source"] != saved["source"]:
+                 raise _Refused("saved-source-invalid")
+             raw = self._read(saved["source"], MAX_VERSION_BYTES)
+             if len(raw) != saved["bytes"] or hashlib.sha256(raw).hexdigest() != saved["sha256"]:
+@@ -199,19 +203,32 @@
+                 and re.fullmatch(rb"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", issuer)):
+             raise _Refused("credentials-unavailable")
+
++    @staticmethod
++    def validate_pair_shape(parts):
++        require(type(parts) is tuple and len(parts) == 4)
++        StorePreflightRun.validate_material_shape(parts[0])
++        StorePreflightRun.validate_apple_shape(parts[1:])
++
+     def _received_post(self):
+         if self._received is not None:
+             scratch, snapshot = self._received
+             require(self.source._material is self._received_material)
+-            scratch.require(snapshot)
++            if paired_versions.selected_query(self.request.context):
++                require(type(snapshot) is tuple and len(snapshot) == 2)
++                for item in snapshot:
++                    scratch.require(item)
++                self.validate_pair_shape(self._received_material)
++            else:
++                scratch.require(snapshot)
+             if self.request.context["platform"] == "ios":
+                 self.validate_apple_shape(self._received_material)
+
+     def apple_material_command(self, material):
+         from .credentials import SelectedStoreMaterial, APPLE_P8_CHECK
+         self.checkpoint()
+-        require(self.request.context["platform"] == "ios" and type(material) is SelectedStoreMaterial
+-                and material._invocation is self.invocation and material._platforms == ("ios",)
++        pair = paired_versions.selected_query(self.request.context)
++        require((self.request.context["platform"] == "ios" or pair) and type(material) is SelectedStoreMaterial
++                and material._invocation is self.invocation and material._platforms == (paired_versions.PLATFORMS if pair else ("ios",))
+                 and len(self.scratches) >= 3 and material._scratch is self.scratches[2]
+                 and material._scratch.cancellation is self.guard and material._state == "validating"
+                 and self._apple_material in (None, material))
+@@ -230,11 +247,17 @@
+         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
+                 and self._next_command <= self._lane_index and type(capture) is bool)
+         query = _captured_query(self.request.context)
+-        final = (play_versions.fixed_argv(runtime.tooling_root) if play_versions.selected_query(self.request.context) else
+-                 bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
+-                 ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
+-        expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
+         index = self._next_command
++        if paired_versions.selected_query(self.request.context):
++            probes = tuple(_fastlane_probe_commands(runtime.tooling_root))
++            expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()),
++                        *probes, store_versions.fixed_argv(runtime.tooling_root),
++                        *probes, play_versions.fixed_argv(runtime.tooling_root))
++        else:
++            final = (play_versions.fixed_argv(runtime.tooling_root) if play_versions.selected_query(self.request.context) else
++                     bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
++                     ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
++            expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
+         if self.request.context["platform"] == "ios":
+             # Only the first command consumes the still-validating material.
+             expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()), *expected)
+@@ -262,9 +285,11 @@
+     def command_limits(self, timeout, capture, output_limit):
+         self.checkpoint()
+         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
+-        query = self._pending == self._lane_index and _captured_query(self.request.context)
++        pair = paired_versions.selected_query(self.request.context)
++        query = (self._pending in (6, 12) if pair else self._pending == self._lane_index) and _captured_query(self.request.context)
+         maximum = 60 if self._pending < self._lane_index or query else 900
+-        limit = (play_versions.FRAME_LIMIT if query and play_versions.selected_query(self.request.context) else
++        limit = (store_versions.FRAME_LIMIT if pair and query else
++                 play_versions.FRAME_LIMIT if query and play_versions.selected_query(self.request.context) else
+                  store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
+                  else bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
+         return min(timeout, maximum), min(output_limit, limit)
+@@ -290,18 +315,36 @@
+                         platform = self.request.context["platform"]
+                         self._received = (received, original)
+                         self._received_material = self.source._material
+-                        if platform == "android":
++                        pair = paired_versions.selected_query(self.request.context)
++                        platforms = paired_versions.PLATFORMS if pair else (platform,)
++                        if pair:
++                            self._received_post()
++                            values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original[0])),
++                                      "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(received.require(original[1])),
++                                      "MOBILE_RELEASE_ASC_KEY_ID": self.source._material[2].decode("ascii"),
++                                      "MOBILE_RELEASE_ASC_ISSUER_ID": self.source._material[3].decode("ascii")}
++                        elif platform == "android":
+                             values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original))}
+                         else:
+                             self._received_post()
+                             values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(received.require(original)),
+                                       "MOBILE_RELEASE_ASC_KEY_ID": self.source._material[1].decode("ascii"),
+                                       "MOBILE_RELEASE_ASC_ISSUER_ID": self.source._material[2].decode("ascii")}
+-                        findings = store_material_prerequisite_findings(values=values, platforms=(platform,))
+-                        with _selected_store_material(config, values=values, platforms=(platform,),
++                        findings = store_material_prerequisite_findings(values=values, platforms=platforms)
++                        with _selected_store_material(config, values=values, platforms=platforms,
+                                                       invocation=invocation, scratch_parent=home._path) as material:
+-                            findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
+-                            if play_versions.selected_query(self.request.context):
++                            findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" or pair else material.validate())
++                            if pair:
++                                observation = paired_versions.unavailable()
++                                if not paired_versions.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
++                                    findings.append(Finding("store.online.gate", Status.BLOCKED,
++                                        "Configure both saved app identities and bind both Store keys in this inventory context.", category="store-access"))
++                                else:
++                                    extra, observation = paired_versions.read_saved_versions(self, config, material)
++                                    findings.extend(extra)
++                                self._source_post(); self._received_post()
++                                self.report = paired_versions.project_result(findings, observation)
++                            elif play_versions.selected_query(self.request.context):
+                                 observation = play_versions.unavailable("not-checked")
+                                 if not play_versions.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                     findings.append(Finding("store.online.gate", Status.BLOCKED,
+diff --git a/src/mobile_release/reserved_version_edit.py b/src/mobile_release/reserved_version_edit.py
+index fc76c1cac0cf0f9139c7e83dbf3a914da8282dbe..6c0db06e92bac8a3188287cfa75067bf4018a80b 100644
+--- a/src/mobile_release/reserved_version_edit.py
++++ b/src/mobile_release/reserved_version_edit.py
+@@ -32,7 +32,7 @@
+     reservation: allocation.Reservation
+     authority: allocation.AuthorityRegistration
+     checkpoint: allocation.Checkpoint
+-    observation: allocation.CurrentInventory
++    observation: allocation.CurrentInventory | tuple[allocation.CurrentInventory, allocation.CurrentInventory]
+     clock: dict
+
+     @classmethod
+@@ -46,20 +46,30 @@
+         request = reservation.request
+         authority = allocation.AuthorityRegistration.parse(row["authority"])
+         checkpoint = allocation.Checkpoint.parse(row["checkpoint"])
+-        observation = allocation.current_inventory_policy(request).CurrentInventory.parse(row["observation"])
+-        wire.require(request.version_policy.schema_version in {2, 3}
++        observation = (allocation.parse_observations(request, row["observation"]) if request.version_policy.schema_version == 4 else
++                       allocation.current_inventory_policy(request).CurrentInventory.parse(row["observation"]))
++        observations = observation if type(observation) is tuple else (observation,)
++        wire.require(request.version_policy.schema_version in {2, 3, 4}
++                     and len(observations) == (2 if request.version_policy.schema_version == 4 else 1)
+                      and source.matches(request.source) and authority.project_id == request.project_id
+                      and authority.protected_branch and checkpoint.sequence >= reservation.sequence
+                      and (checkpoint.sequence != reservation.sequence or checkpoint.head_sha256 == reservation.sha256)
+-                     and observation.identity_revision == request.identity_revision
+-                     and observation.context_revision == request.store_context_revision)
++                     and all(item.identity_revision == request.identity_revision
++                             and item.context_revision == request.store_context_revision for item in observations)
++                     and (len(observations) == 1 or observations[0].observed_at == observations[1].observed_at))
+         return cls(source, Provider.parse(row["provider"], source), reservation, authority, checkpoint,
+                    observation, dialogue_wire._clock(row["clock"]))
+
+     def value(self):
+         return {"schemaVersion": 1, "source": self.source.value(), "provider": self.provider.value(),
+                 "reservation": self.reservation.value(), "authority": self.authority.value(),
+-                "checkpoint": self.checkpoint.value(), "observation": self.observation.value(), "clock": self.clock}
++                "checkpoint": self.checkpoint.value(),
++                "observation": ([item.value() for item in self.observation] if type(self.observation) is tuple else self.observation.value()),
++                "clock": self.clock}
++
++    @property
++    def observations(self):
++        return self.observation if type(self.observation) is tuple else (self.observation,)
+
+
+ class BorrowedReservedVersionInput:
+@@ -373,7 +383,7 @@
+         with self.source("prepare"):
+             self.plan = allocation.prepare_reserved_version_edit(self.lease, checkout, params["revision"],
+                 params["expectedBaseline"], self.data.reservation, self.data.reservation.request,
+-                current_inventory=(self.data.observation,), now=int(time.time()))
++                current_inventory=self.data.observations, now=int(time.time()))
+         return self.plan
+
+     def apply(self, plan):
+@@ -381,7 +391,7 @@
+         allocation.current_inventory_policy(self.data.reservation.request).check_reserved(self.data.reservation.version, self.data.reservation.request.version_policy,
+             enabled=self.data.reservation.request.enabled_platforms, identity_revision=self.data.reservation.request.identity_revision,
+             context_revision=self.data.reservation.request.store_context_revision,
+-            observations=(self.data.observation,), now=int(time.time()))
++            observations=self.data.observations, now=int(time.time()))
+         with self.source("apply") as source:
+             self.outcome = edit.apply_release_version_edit(self.lease, plan)
+             self.engine.outcome = self.outcome  # Preserve real effect BEFORE any source postcheck.

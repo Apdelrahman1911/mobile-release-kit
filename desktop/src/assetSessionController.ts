@@ -212,7 +212,7 @@ export class AssetSessionController {
   }
   private recordIntent(record: AssetRecordRef, change: 'assign' | 'delete'): AssetRecordIntent | null {
     const actual = this.state.status?.records.find((entry) => entry.recordId === record.recordId && entry.revision === record.expectedRevision && entry.availability !== 'mutation-pending');
-    return actual ? { type: 'record', kind: actual.kind, change, record: { ...record } } : null;
+    return actual && actual.kind !== 'apple-distribution-key' ? { type: 'record', kind: actual.kind, change, record: { ...record } } : null;
   }
   private receive(value: unknown, originatingPhase?: IntentPhase): AssetStatus | null {
     if (this.disposed) return null;

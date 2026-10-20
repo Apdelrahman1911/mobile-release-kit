@@ -76,7 +76,7 @@ fn cancellation(reason: Reason) -> bool {
 
 /// `retired` is supplied ONLY by the original observe_final hook after its
 /// already-existing join/ledger checks. There is no exported DTO/finality API.
-fn observation(
+pub(super) fn observation(
     projection: &EditProjection,
     unknown: bool,
     retired: bool,

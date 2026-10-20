@@ -1,4 +1,4 @@
-import { localStoreStageLabel } from '../localStoreStageProtocol.ts';
+import { isLocalStoreStage, localStoreStageLabel } from '../localStoreStageProtocol.ts';
 import { localStorePrepareOwnerReason, type LocalStorePrepareController, type LocalStorePrepareState } from '../localStorePrepare.ts';
 
 export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow }: {
@@ -8,7 +8,7 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
   const op = state.status?.operation, retained = localStorePrepareOwnerReason(state), reason = controller.prepareReason();
   const prepared = op?.result?.preparedIntent, displayedRequest = retained && op ? op.context : state.request;
   const ios = displayedRequest?.platform === 'ios';
-  const stage = displayedRequest && 'stage' in displayedRequest ? displayedRequest.stage : null;
+  const stage = displayedRequest && 'stage' in displayedRequest && isLocalStoreStage(displayedRequest.stage) ? displayedRequest.stage : null;
   const target = stage ? localStoreStageLabel(stage,ios?'ios':'android') : ios ? 'TestFlight internal' : 'Play internal testing';
   const displayedApplication = retained && state.historical ? 'Original retained candidate' : state.applicationId;
   if (compact && !retained) return null;

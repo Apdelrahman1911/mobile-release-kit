@@ -18,7 +18,7 @@ export function createAppleProvisioningApi(mode: string, invoke: Invoke, listen?
   if (mode !== 'native' || !listen) return null;
   const call = (command: AppleProvisioningCommand, value: unknown): Promise<unknown> => {
     const bytes = encodeAppleProvisioningRequest(command, value);
-    if (!bytes) throw { code: 'apple_provisioning_invalid', message: 'The Bundle-ID request is invalid. Nothing was sent.', retryable: false };
+    if (!bytes) throw { code: 'apple_provisioning_invalid', message: 'The Apple setup request is invalid. Nothing was sent.', retryable: false };
     return invoke(command, bytes);
   };
   return Object.freeze({ mode: 'native' as const,

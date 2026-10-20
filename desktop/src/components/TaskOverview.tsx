@@ -9,7 +9,7 @@ export function TaskOverview({ overview, preview, onAction }: {
   onAction: (action: SetupAction) => void;
 }) {
   const current = overview.stages.find((stage) => stage.id === overview.currentStage)!;
-  const activity = overview.currentActivity;
+  const activity = overview.attentionActivity;
   const warning = activity && ['unknown', 'recovery-required', 'failed'].includes(activity.state);
   return <section className="card guided-overview" aria-label="Project release overview">
     <div className="guided-next-grid">
@@ -23,6 +23,8 @@ export function TaskOverview({ overview, preview, onAction }: {
       <div className="guided-next-step" aria-live="polite">
         <Badge tone={warning ? 'warning' : 'info'}>{activity ? warning ? 'Attention needed' : 'Current task' : preview ? 'Explore the example' : 'Your next step'}</Badge>
         <h2>{activity ? activity.task : current.title}</h2>
+        {activity && !overview.attentionIsCurrentProject && <p>{activity.projectId === null
+          ? 'This task is tracked separately from the selected project.' : 'This work belongs to a different project.'} Your selected project has not changed.</p>}
         <p role={warning ? 'alert' : undefined}>{activity ? setupActivitySummary(activity) : current.summary}</p>
         <button type="button" className="button primary" disabled={overview.next.disabledReason !== null}
           aria-describedby={overview.next.disabledReason ? 'guided-next-reason' : undefined} onClick={() => onAction(overview.next.action)}>
@@ -34,7 +36,8 @@ export function TaskOverview({ overview, preview, onAction }: {
     </div>
     <div className="guided-known" aria-label="What is ready and what remains">
       <div><h3>Known so far</h3><p>{overview.known.length ? overview.known.join(' · ') : 'No project checks completed yet.'}</p></div>
-      <div><h3>Still to do</h3><p>{overview.remaining.slice(0, 2).join(' · ')}{overview.remaining.length > 2 ? ` · ${overview.remaining.length - 2} more steps below` : ''}</p></div>
+      <div><h3>Continue locally</h3><p>{overview.remaining.slice(0, 2).join(' · ')}{overview.remaining.length > 2 ? ' · See the steps below' : ''}</p>
+        <p>Signing is needed only for the chosen signed mode. Store setup can wait.</p></div>
     </div>
     <p className="guided-safety">Setup checks are not release approval. Each build and Store action checks its own requirements.</p>
   </section>;

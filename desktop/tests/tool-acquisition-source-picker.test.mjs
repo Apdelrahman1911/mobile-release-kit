@@ -114,7 +114,7 @@ test('context ABA, lost invoke and unknown source never refresh the handoff', ()
   }
 });
 
-async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], staged = report() } = {}) {
+async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], staged = report(), discovered = null } = {}) {
   let ws = workspaceReducer(initialWorkspace, { type: 'select', project: { id: 'p1', name: 'Inert', path: '/never-opened-tools' } });
   ws = workspaceReducer(ws, { type: 'snapshot-start', projectId: 'p1', requestId: 1 });
   ws = workspaceReducer(ws, { type: 'snapshot-done', projectId: 'p1', requestId: 1, observedAt: 1, snapshot: {
@@ -150,7 +150,7 @@ async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk',
         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
     }, start: async () => {
       const op = native.operation;
-      const requirements = { kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
+      const requirements = { ...(discovered ? {discoveredSources:discovered} : {}), kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
         compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((part) => !missing.includes(part)) }, requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
         complete: true, platform: 'android', projectCodeExecuted: false, xcode: { version: '26.3', build: '17C529' }, android: {
           jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' }, sdkPlatform: { state: 'literal', value: 'android-35' },
@@ -162,7 +162,8 @@ async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk',
   tools.setVisible(true); await tools.connect(toolApi);
   const off = android.subscribe(() => tools.syncProject());
   t.after(() => { off(); tools.dispose(); android.dispose(); });
-  await tools.inspect(); await tools.reviewDownload(); tools.setAcknowledged(OP, GEN, true); await tools.download(OP, GEN);
+  await tools.inspect();
+  if (!discovered) { await tools.reviewDownload(); tools.setAcknowledged(OP, GEN, true); await tools.download(OP, GEN); }
   assert.equal(tools.getSnapshot().presentation, 'current-staged');
   const peer = (kind, value) => {
     if (kind === 'catalog') catalogStatus = clone(value); else registrationStatus = clone(value);
@@ -293,4 +294,66 @@ test('ordinary existing-folder selection is still plain and never automatically 
   h.reply(h.calls[0], source(1, 'gradle')); await flow;
   assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
   assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
+});
+
+
+test('assembled SDK goes through the original explicit picker and leaves chosen JDK/Gradle untouched', async (t) => {
+  for (const copied of ['sdk-platform', 'sdk-build-tools']) {
+    const missing = [copied === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform'];
+    const selections = [{ role: 'jdk', displayName: 'Keep JDK' }, { role: 'sdk', displayName: 'Old partial SDK' },
+      { role: 'gradle', displayName: 'Keep Gradle' }];
+    const staged = report(); staged.schemaVersion = 2; staged.copiedSourceComponents = [copied];
+    staged.reusedArchives = []; staged.downloadedArchives = missing;
+    staged.groups = [{ group: 'sdk', components: ['sdk-platform', 'sdk-build-tools'], allRequiredComponentsStaged: true, next: 'choose-native-source' }];
+    const h = await controllers(t, { initialSources: { ...source(3, 'gradle'), selections }, missing, staged });
+    assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles, ['sdk']);
+    assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, false);
+    assert.deepEqual(h.android.getSnapshot().toolSources.selections, selections);
+    await h.choose('jdk'); await h.choose('gradle'); assert.equal(h.calls.length, 0);
+    const picked = h.choose('sdk'); assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.calls[0].input, { schemaVersion: 1, sourceGeneration: 3, projectId: 'p1', role: 'sdk', acquired: { operationId: OP, ownerGeneration: GEN } });
+    const after = [selections[0], { role: 'sdk', displayName: 'New prepared SDK' }, selections[2]];
+    h.reply(h.calls[0], { ...source(4, 'sdk'), selections: after }); await picked;
+    assert.deepEqual(h.android.getSnapshot().toolSources.selections, after);
+    assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
+    assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
+    assert.equal(h.calls.length, 1); // No Inspect, approval, registration or build is automatic.
+  }
+});
+
+const foundExisting = () => ({scope:'fixed-macos-locations-v1',searched:['jdk','sdk','gradle'],present:['jdk','sdk'],
+  compatibleComponents:['jdk','sdk-platform']});
+test('found conventional tools use the SAME explicit picker twice without an acquisition or automatic registration', async (t) => {
+  const h = await controllers(t, {missing:['sdk-build-tools','gradle'],discovered:foundExisting()});
+  assert.equal(h.tools.getSnapshot().preparedFolders.existing, true);
+  assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles, ['jdk','sdk']);
+  assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, true);
+  assert.match(h.tools.reviewReason(), /Found matching existing tools/);
+  await h.tools.reviewDownload(); assert.equal(h.tools.getSnapshot().consent, null);
+  await h.choose('gradle'); assert.equal(h.calls.length, 0);
+  const first = h.choose('jdk'); assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.calls[0].input, {schemaVersion:1,sourceGeneration:0,projectId:'p1',role:'jdk',
+    discovered:{operationId:INSPECT,ownerGeneration:INSPECT_GEN}});
+  assert.equal(h.calls[0].input.acquired, undefined);
+  h.reply(h.calls[0], source(1,'jdk')); await first;
+  const second = h.choose('sdk'); assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[1].input.discovered, {operationId:INSPECT,ownerGeneration:INSPECT_GEN});
+  h.reply(h.calls[1],source(2,'sdk')); await second;
+  assert.equal(h.tools.getSnapshot().presentation,'stale');
+  assert.equal(h.tools.getSnapshot().preparedFolders.continuing,true);
+  assert.equal(h.android.getSnapshot().toolSources.inspection,'not-run');
+  assert.equal(h.android.getSnapshot().toolSources.protectedCopy,'not-created');
+  assert.equal(h.calls.length,2);
+});
+test('found location survives only its own picker relay, not project switch or an unknown original', async (t) => {
+  for (const cut of ['project','unknown','lost']) {
+    const h=await controllers(t,{missing:['sdk-build-tools','gradle'],discovered:foundExisting()});
+    const picking=h.choose('jdk'); assert.equal(h.calls.length,1);
+    if(cut==='project') { h.switch(); h.reply(h.calls[0],source(1,'jdk')); }
+    else if(cut==='unknown') h.reply(h.calls[0],{...source(1,'jdk'),phase:'unknown',reason:'cleanup-unknown',availability:'cleanup-unknown',selections:[]},false);
+    else h.calls[0].reject(new Error('inert lost original picker reply'));
+    await picking; await h.choose('sdk'); assert.equal(h.calls.length,1);
+    assert.equal(h.tools.getSnapshot().preparedFolders,null);
+    if(cut==='lost') assert.equal(h.android.getSnapshot().sourcesUnconfirmed,true);
+  }
 });

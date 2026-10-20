@@ -55,10 +55,15 @@ class AllocationSourceRun:
                  source: BorrowedAllocationInput, *, selected=None) -> None:
         from . import version_allocation as allocation
         from . import _desktop_version_allocation_protocol as dialogue_wire
+        from .reserved_version_edit import BorrowedReservedVersionInput
+        editing = type(source) is BorrowedReservedVersionInput
         wire.require(type(request) is wire.SourceRequest and type(guard) is DefaultCancellation
-                     and type(source) is BorrowedAllocationInput and source.request is request
+                     and (type(source) is BorrowedAllocationInput or editing) and source.request is request
                      and source.guard is guard and guard._version_allocation_source is source)
-        if selected is None:
+        if editing:
+            source.admit_selected(selected)
+            kind = "reserved-edit"
+        elif selected is None:
             wire.require(type(source.dialogue.initial) is wire.Initial and source.dialogue.initial.source is request)
             kind = "probe"
         else:
@@ -73,14 +78,15 @@ class AllocationSourceRun:
         self.configuration_bytes = self.version_bytes = None
         self.readers, self.reader_closes, self.commands = [], [], []
         self.pending = None
+        self.command_base = guard.lifetime_ledger.verdict().commands if editing else 0
         self.phase = "new"
         self.started = self.close_claimed = self.failed = self.pre_put_spent = False
         self.primary = None
         # Original operation retained before environment/root acquisition.
         source.bind_operation(self)
-        if selected is None:
+        if selected is None or source.provider_selection is not None:
             from ._desktop_version_allocation_source_provider import HeldProvider
-            self.provider = HeldProvider(self, source.dialogue.initial.provider)
+            self.provider = HeldProvider(self, source.provider_selection)
 
     def _owner(self):
         self.input._owner()
@@ -91,7 +97,7 @@ class AllocationSourceRun:
         self._owner()
         wire.require(not self.close_claimed and not self.failed and not self.input.borrow_ended)
         self.guard.check()
-        self.input.dialogue._time()
+        self.input.source_time()
 
     def remember(self, error):
         self._owner()
@@ -166,6 +172,16 @@ class AllocationSourceRun:
             raise SourceRefused() from error
         _saved_need(config["version"]["source"] == r.version_path)
         self._read_saved(r.version_path, MAX_VERSION_BYTES, r.version_size, r.version_sha256)
+        if self.selected is not None:
+            from .config import parse_key_value_text, release_version_from_values
+            enabled = tuple(name for name in ("android", "ios") if config.get(name, {}).get("enabled", False))
+            try:
+                values = parse_key_value_text(self.version_bytes.decode("utf-8"))
+                actual = release_version_from_values(values, name_key=config["version"]["nameKey"],
+                    build_key=config["version"]["buildKey"], ios_enabled="ios" in enabled, source_label="saved version")
+            except (ConfigurationError, UnicodeError) as error:
+                raise SourceRefused() from error
+            _saved_need(enabled == self.selected.enabled_platforms and actual == self.selected.base_version)
         # No descriptor credit for a return-lost close. Both preliminary reads
         # must actually close before the continuous LocalSource scope opens.
         for reader in self.readers:
@@ -194,7 +210,7 @@ class AllocationSourceRun:
                          or (index in {6, 7} and self.phase == "final")))
         facts = self.guard.lifetime_ledger.verdict()
         wire.require(facts.complete and facts.cleanup_complete and facts.contained and not facts.fatal
-                     and facts.profile_calls == 0 and facts.commands == index and self.commands_settled())
+                     and facts.profile_calls == 0 and facts.commands == self.command_base + index and self.commands_settled())
         row = {"attempted": False, "settled": False, "slot": None, "command": None, "timeout": timeout, "limit": limit}
         self.commands.append(row)
         self.pending = row
@@ -208,7 +224,6 @@ class AllocationSourceRun:
         self._owner()
         wire.require(source is self.observation and source._composition is self)
         if self.provider is not None:
-            wire.require(self.selected is None)
             return self.provider.executable(source)
         # Existing held allocation composition is not a native SOURCE launch.
         # Its native allocating caller remains unavailable; do not silently
@@ -263,7 +278,7 @@ class AllocationSourceRun:
         actual, facts = self._outcome(row), self.guard.lifetime_ledger.verdict()
         wire.require(actual is not None and actual.result_integrity == "complete" and actual.termination == "normal-exit"
                      and actual.returncode == result.returncode and facts.complete and facts.cleanup_complete
-                     and facts.contained and not facts.fatal and facts.commands == len(self.commands) and facts.profile_calls == 0)
+                     and facts.contained and not facts.fatal and facts.commands == self.command_base + len(self.commands) and facts.profile_calls == 0)
         row["settled"] = True
         self.pending = None
         if result.returncode != 0:
@@ -289,7 +304,7 @@ class AllocationSourceRun:
     def before_put(self, journal):
         from ._desktop_version_allocation_runtime import _Journal
         self.held_checkpoint()
-        wire.require(self.kind == "reserve" and not self.pre_put_spent and type(journal) is _Journal
+        wire.require(type(self.input) is BorrowedAllocationInput and self.kind == "reserve" and not self.pre_put_spent and type(journal) is _Journal
                      and journal._native.dialogue is self.input.dialogue and journal._native.active is None
                      and journal._native.attempted is None and not journal._native.poisoned)
         initial = self.input.dialogue.initial
@@ -313,8 +328,12 @@ class AllocationSourceRun:
                 with invocation.project(signing_lease=None):
                     self._saved()
                     with self.provider.hold() if self.provider is not None else nullcontext():
-                        self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
-                                                                  self.input.work_end, None)
+                        if self.kind == "reserved-edit":
+                            from .reserved_version_edit import ReservedVersionSource
+                            self.observation = ReservedVersionSource(self)
+                        else:
+                            self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
+                                                                      self.input.work_end, None)
                         self.observation._composition = self
                         self.phase = "capture"
                         with _retain_source(self.observation):
@@ -374,7 +393,8 @@ class AllocationSourceRun:
         facts = self.guard.lifetime_ledger.verdict()
         return (self.pending is None and self.commands_settled() and facts.complete and facts.cleanup_complete
                 and facts.contained and not facts.fatal and facts.profile_calls == 0
-                and facts.commands == sum(row["settled"] for row in self.commands)
+                and (self.input.closed_command_count(self, facts.commands) if self.kind == "reserved-edit" else
+                     facts.commands == sum(row["settled"] for row in self.commands))
                 and (self.provider is None or self.provider.originals_closed())
                 and (self.observation is None or self.observation.closed)
                 and (not self.started if self.invocation is None else self.invocation._allocation_source_closed(self)))

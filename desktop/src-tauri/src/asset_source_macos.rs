@@ -357,27 +357,34 @@ impl SourceBook {
     pub(crate) fn retire_application_probe(&mut self) -> bool {
         self.not_started() || self.settled() || self.close_all()
     }
+    // Exact original one-attempt close, shared only with the fixed switch
+    // last-lock retirement. No slot movement, replacement owner or retry.
+    fn close_slot(slot:&mut Descriptor,failed:&mut dyn FnMut(Reason))->bool {
+        let mut known=true;
+        if !slot.acl.iter().all(|call| call.settled()) { known = false; failed(Reason::CleanupUnknown); }
+        match slot.state {
+            OriginalState::Reserved => { slot.state = OriginalState::NoHandle; }
+            OriginalState::NoHandle | OriginalState::Closed => {}
+            OriginalState::Owned => {
+                slot.state = OriginalState::Closing;
+                match slot.fd.take() {
+                    Some(fd) => match unistd::close(fd) {
+                        Ok(()) => { slot.state = OriginalState::Closed; }
+                        Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
+                    },
+                    None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
+                }
+            }
+            OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
+        }
+        known
+    }
     fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
         // Continue independent original closes; never retry EINTR or reconstruct
         // a numeric descriptor, and never equate Drop with known settlement.
         let mut known = true;
         for slot in self.slots.iter_mut().rev() {
-            if !slot.acl.iter().all(|call| call.settled()) { known = false; failed(Reason::CleanupUnknown); }
-            match slot.state {
-                OriginalState::Reserved => { slot.state = OriginalState::NoHandle; }
-                OriginalState::NoHandle | OriginalState::Closed => {}
-                OriginalState::Owned => {
-                    slot.state = OriginalState::Closing;
-                    match slot.fd.take() {
-                        Some(fd) => match unistd::close(fd) {
-                            Ok(()) => { slot.state = OriginalState::Closed; }
-                            Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
-                        },
-                        None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
-                    }
-                }
-                OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
-            }
+            known=Self::close_slot(slot,failed)&&known;
         }
         self.terminal = true; known && self.settled()
     }

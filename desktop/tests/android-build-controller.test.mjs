@@ -14,6 +14,7 @@ import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, ANDROID_BUILD_CORE
 import { ANDROID_TOOL_SERVICE_CONSENT, ANDROID_TOOL_REGISTRATION_CONSENT, parseAndroidToolRegistrationStatus } from '../src/androidToolRegistration.ts';
 import { parseAndroidToolchainCatalogStatus } from '../src/androidToolchainCatalogProtocol.ts';
 import { sourceInspectionContinuation, sourceInspectionProblemText } from '../src/androidToolSourceDiagnostics.ts';
+import { setupResume } from '../src/setupResume.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
@@ -1317,4 +1318,26 @@ test('tool setup view never carries Build consent across navigation or resets a 
   assert.deepEqual(stop.input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
   h.reply(sent.call, status(2, terminal(op))); await sent.done; h.reply(stop, status(2, terminal(op))); await flush();
   assert.equal(h.state.pending, null);
+});
+
+test('Home retains the original build after its terminal event until the actual invoke returns', async (t) => {
+  const h = harness(t), op = await reviewed(h), { call, done } = start(h, op);
+  // The Home helper's other owners are unavailable fixtures, not invented
+  // native successes. Only this real controller has an original pending call.
+  const home = () => setupResume(null, false, null, { platform: 'android', android: h.state,
+    ios: { mode: 'unavailable' }, localChecks: { mode: 'unavailable' }, diagnostics: { mode: 'unavailable' },
+    credentials: { mode: 'unavailable' }, toolPreparation: { native: false },
+    androidSubmissionPending: h.controller.hasPendingGuiSubmission(), iosSubmissionPending: false,
+    localChecksSubmissionPending: false, otherOwnerReason: null });
+  const updates = [], off = h.controller.subscribe(() => updates.push(home().activities.length));
+  t.after(off);
+  const returned = status(2, completed(op));
+  h.emit(returned);
+  assert.equal(h.state.status.operation.phase, 'terminal'); assert.equal(h.state.pending, null);
+  assert.equal(h.controller.hasPendingGuiSubmission(), true);
+  assert.equal(home().activities[0].state, 'running'); assert.equal(updates.at(-1), 1);
+  h.reply(call, returned); await done;
+  assert.equal(h.controller.hasPendingGuiSubmission(), false);
+  assert.deepEqual(home().activities, []); assert.equal(updates.at(-1), 0, 'actual finally publishes the pending-bit transition to Home');
+  assert.equal(h.calls.length, 2, 'view updates neither repeat the build nor start another check');
 });

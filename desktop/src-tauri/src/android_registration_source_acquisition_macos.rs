@@ -2,17 +2,26 @@
 //! proposal, provider, payload pass, install or executable loan is created.
 use super::*;
 use crate::tool_acquisition_protocol::components::Partition;
+#[path = "android_registration_source_acquisition_sdk_macos.rs"]
+mod sdk_copy;
+#[path = "android_registration_source_discovery_macos.rs"]
+mod discovery;
 
 // Present only inside acquisition_read / its bounded walk and XML validation.
 // None of these buffers survive the returned read, unlike every source record,
 // picked metadata byte and original close state, which remain retained.
 const READ_WORKSPACE: usize =
-    18 * BLOCK + 17 * 1024 + crate::android_sdk_metadata_macos::PARSER_WORK_BYTES;
+    18 * BLOCK + 17 * 1024 + crate::android_sdk_metadata_macos::PARSER_WORK_BYTES + discovery::PATH_WORK;
 
 pub(super) struct Work {
     pub(super) gate: crate::saved_command_owner::ToolAcquisitionSourceGate,
     absent: [Option<(usize, &'static str)>; 2],
     finding: Option<(Partition, [u8; 32])>,
+    discovery: discovery::DiscoveryWork,
+}
+impl Work {
+    pub(super) fn discovery_bytes(&self) -> Option<usize> { self.discovery.heap_bytes() }
+    pub(super) fn account_call_settled(&self) -> bool { self.discovery.call_settled() }
 }
 
 fn reservation(checked: supplier::acquisition::PickedRoster) -> Option<SourceReservation> {
@@ -80,7 +89,8 @@ fn reservation(checked: supplier::acquisition::PickedRoster) -> Option<SourceRes
         .checked_add(shape.alias_original_heap)?
         .checked_add(3 * 4096 + 3 * ANCESTORS * size_of::<usize>())?
         .checked_add(READ_WORKSPACE + 16384)? // Actual walk/read/XML workspace + retained ACL frame bound.
-        .checked_add(2 * (SDK_METADATA_BYTES + 512 + 64))?;
+        .checked_add(2 * (SDK_METADATA_BYTES + 512 + 64))?
+        .checked_add(discovery::HEAP_BOUND)?;
     Some(SourceReservation {
         profile: checked.profile,
         phase: SourcePhase::Inspection,
@@ -118,6 +128,7 @@ impl SourceSlots {
             gate,
             absent: [None; 2],
             finding: None,
+            discovery: discovery::DiscoveryWork::new(),
         });
         source
     }
@@ -154,7 +165,6 @@ impl SourceSlots {
         let expected = reservation(checked).ok_or(AdmissionFailure::Bounds)?;
         if self.gate.is_some()
             || self.acquisition.is_none()
-            || !roots.iter().any(Option::is_some)
             || self.reservation.is_none_or(|r| {
                 r.profile != expected.profile
                     || r.phase != SourcePhase::Inspection
@@ -184,6 +194,7 @@ impl SourceSlots {
         }) {
             return Err(AdmissionFailure::Bounds);
         }
+        self.discovery_begin(roots, end, stop)?;
         let mut jdk_home = None;
         for (role, selected) in roots.iter().enumerate() {
             let Some(root) = selected else {
@@ -213,6 +224,12 @@ impl SourceSlots {
                 }
             }
         }
+        if jdk_home.is_none() {
+            if let Some(bundle) = self.roots[0] {
+                let contents = self.child(bundle, "Contents", true, end, stop)?;
+                jdk_home = Some(self.child(contents, "Home", true, end, stop)?);
+            }
+        }
         if let Some(home) = jdk_home {
             let release = self.child(home, "release", false, end, stop)?;
             let bytes = usize::try_from(self.identity(release)?.size).map_err(native_error)?;
@@ -229,7 +246,7 @@ impl SourceSlots {
         for _ in roster.members {
             self.observed.push(None);
         }
-        let mut values = [Some(false); 4]; // Unchosen roles in this declared lookup set ONLY.
+        let mut values = [Some(false); 4]; // Only exact picked/fixed-location ENOENT can remain missing.
         for (component, tree) in roster.trees.iter().enumerate() {
             let role = group_index(tree.group).ok_or(AdmissionFailure::Inventory)?;
             let Some(root) = self.roots[role] else {
@@ -298,6 +315,7 @@ impl SourceSlots {
             }
         }
         let partition = Partition::observed(values).ok_or(AdmissionFailure::Inventory)?;
+        self.discovery_finish(partition, end, stop)?;
         let fingerprint = self.acquisition_fingerprint(partition, checked.reference_sha256)?;
         self.point(end, stop)?;
         self.acquisition
@@ -370,6 +388,7 @@ impl SourceSlots {
             hash.update(name.as_bytes());
             hash.update([0]);
         }
+        self.discovery_fingerprint(&mut hash)?;
         Ok(hash.finalize().into())
     }
 }

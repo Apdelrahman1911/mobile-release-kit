@@ -1,0 +1,801 @@
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -206,6 +206,11 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params", deny_unknown_fields)]
+ pub enum RequestBody {
++    #[serde(rename="git-index.scope")] GitIndexScope(ProjectQuery),
++    #[serde(rename="git-index.prepare")] GitIndexPrepare(crate::service_git_protocol::Prepare),
++    #[serde(rename="git-index.start")] GitIndexStart(crate::service_git_protocol::Start),
++    #[serde(rename="git-index.status")] GitIndexStatus(crate::service_git_protocol::Query),
++    #[serde(rename="git-index.cancel")] GitIndexCancel(crate::service_git_protocol::Query),
+     #[serde(rename = "service.info")] Info(Empty),
+     #[serde(rename = "projects.list")] Projects(Empty),
+     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+@@ -249,6 +254,8 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
++    GitIndexScope(crate::service_git_protocol::Scope),
++    GitIndexRequest(crate::service_git_protocol::Status),
+     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
+     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+     AndroidTools(crate::service_android_tools::View),
+@@ -293,6 +300,7 @@
+     nesting(bytes)?;
+     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
++    if let RequestBody::GitIndexStart(input) = &request.request { input.validate()?; }
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
+@@ -358,6 +366,14 @@
+             let mut seen = std::collections::BTreeSet::new();
+             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
+         }
++        ResponseBody::GitIndexScope(row) => {
++            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
++            crate::service_git_protocol::response_bound(response, true)?;
++        },
++        ResponseBody::GitIndexRequest(row) => {
++            row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
++            crate::service_git_protocol::response_bound(response, false)?;
++        },
+         ResponseBody::Observation(row) => project(row)?,
+         ResponseBody::AndroidTools(row) => row.validate()?,
+         ResponseBody::Repository(row) => row.validate()?,
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -73,8 +73,11 @@
+ mod agent_ios_archive;
+ #[path = "application_service_request_catalogue.rs"]
+ mod request_catalogue;
++#[path="service_git_application.rs"]
++mod git_index;
+ 
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
++    git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+@@ -107,10 +110,11 @@
+         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
+         for operation in &mut saved.operations { operation.stale = true; }
+         let instance = Id::random()?;
++        let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -359,6 +363,11 @@
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
++                p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
++                p::RequestBody::GitIndexPrepare(v) => return self.git_index_prepare(client, v.clone()),
++                p::RequestBody::GitIndexStart(v) => return self.git_index_start(client, v),
++                p::RequestBody::GitIndexStatus(q) => return self.git_index_query(client, q, false),
++                p::RequestBody::GitIndexCancel(q) => return self.git_index_query(client, q, true),
+                 p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
+                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
+                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
+@@ -385,7 +394,8 @@
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+-                p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
++                p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
++                | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_) | p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
+                 | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
+                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
+@@ -425,7 +435,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -16,6 +16,8 @@
+ mod build_requests;
+ #[path="installed_cli_ios_archive.rs"]
+ mod ios_archive;
++#[path="installed_cli_git_index.rs"]
++mod git_index;
+ 
+ const HELP: &str = "Mobile Release Kit agent CLI\n\n\
+ Usage:\n\
+@@ -26,6 +28,11 @@
+   mrk android-tools PROJECT_ID [--json]\n\
+   mrk requests PROJECT_ID [--json]\n\
+   mrk repository PROJECT_ID [--json]\n\
++  mrk git-index-scope PROJECT_ID [--json]\n\
++  mrk git-index-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID [--json]\n\
++  mrk git-index-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
++  mrk git-index-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk git-index-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk operations PROJECT_ID [--json]\n\
+   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
+   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
+@@ -118,6 +125,13 @@
+     CommandCapability { command: "android-build-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
+     CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
+     CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
++];
++const GIT_INDEX_COMMANDS: [CommandCapability;5] = [
++    CommandCapability {command:"git-index-scope",arguments:&["PROJECT_ID"],description:"Read the exact native Desktop-selected Stage/Unstage permission, not a fresh Git inspection."},
++    CommandCapability {command:"git-index-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","GRANT_ID"],description:"Use one explicit Desktop selection to prepare the original local Git review; no Apply."},
++    CommandCapability {command:"git-index-start",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID","PREPARE_OPERATION_ID","REVIEW_ID"],description:"Apply that exact native Stage/Unstage review once; never commit, switch, push or run arbitrary commands."},
++    CommandCapability {command:"git-index-status",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Inspect the same original request without replay; history is not finality."},
++    CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Request STOP of the same original; no cleanup is inferred."},
+ ];
+ const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
+     CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved iOS unsigned archive; no Start or GO." },
+@@ -188,6 +202,10 @@
+                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                 "commands": IDENTITY_ACTION_COMMANDS,
+             },
++            "gitIndex": {"scope":"desktop-selected-stage-or-unstage", "defaultEnabled":false,"oneUse":true,
++                "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
++                "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
++                "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+@@ -215,12 +233,12 @@
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
+-        text.push_str("\nUse the nonzero, 32-character lowercase hexadecimal IDs returned by Desktop.\n");
++        text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
+         text.into_bytes()
+     };
+     if json { bytes.push(b'\n'); }
+@@ -309,6 +327,8 @@
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
++        p::ResponseBody::GitIndexScope(_) | p::ResponseBody::GitIndexRequest(_) =>
++            "Use the named git-index command and its exact original request IDs to inspect this response.\n".into(),
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+         p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
+@@ -332,6 +352,7 @@
+     let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
++    if git_index::recognizes(&args) { return git_index::run(args); }
+     if identity_actions::recognizes(&args) { return identity_actions::run(args); }
+     if local_checks::recognizes(&args) { return local_checks::run(args); }
+     if android_build::recognizes(&args) { return android_build::run(args); }
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -3,6 +3,8 @@
+ #![forbid(unsafe_code)]
+ 
+ mod service_protocol;
++mod service_git_protocol;
++mod service_git_requests;
+ mod service_setup_guidance;
+ mod service_android_tools;
+ mod service_request_catalogue;
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -254,6 +254,8 @@
+     let response = service.dispatch(&client, request);
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
++        p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
++        p::ResponseBody::GitIndexRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
+         p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
+         p::ResponseBody::Repository(view) => service.android_tools_client_current(&client, &view.project_id)?,
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -112,6 +112,8 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod git_local_state;
+ mod service_protocol;
++mod service_git_protocol;
++mod service_git_requests;
+ mod service_setup_guidance;
+ mod service_android_tools;
+ mod service_request_catalogue;
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -52,6 +52,9 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path = "asset_session_agent_ios_archive.rs"]
+ pub(crate) mod agent_ios_archive;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="service_git_document.rs"]
++pub(crate) mod agent_git_index;
+ #[path = "asset_session_android_registration.rs"]
+ mod android_registration;
+ #[path = "asset_session_macos_maintenance.rs"]
+@@ -1097,6 +1100,8 @@
+ struct Inner {
+     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+     session_identity: Arc<()>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_git_index: agent_git_index::NativeState,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_identity_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2022,6 +2027,8 @@
+             self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+@@ -2747,6 +2754,8 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_android_build_service: std::sync::OnceLock::new(),
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_git_index: agent_git_index::NativeState::default(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_ios_archive_service: std::sync::OnceLock::new(),
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+@@ -3438,6 +3447,8 @@
+         self.inner.bridge.application_service.android_tools_relay_lost(); // Memory-only before original STOP.
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         self.agent_android_builds_relay_lost();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.git_index_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+         // owner deletion, a replacement run or permission to reopen the slot.
+         let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+--- a/desktop/src-tauri/src/asset_session_git_read.rs
++++ b/desktop/src-tauri/src/asset_session_git_read.rs
+@@ -17,6 +17,8 @@
+     context: wire::Context,
+     document_revision: u32,
+     action: wire::Action,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_observation: Option<Arc<agent_git_index::Observation>>,
+ }
+ #[derive(Clone)]
+ pub(crate) struct GitReadGate(Arc<Selection>);
+@@ -131,6 +133,12 @@
+         // This is only bounded history after all actual original/native and
+         // management joins. Never demote Unknown or detach a pending ticket.
+         let result = projection(state.git_read.as_ref().expect("original checked"));
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if let Some(Entry::Original {gate,..})=&state.git_read {
++            if let Some(document)=gate.0.document.upgrade() {
++                agent_git_index::observe_returned(&document,gate.0.agent_observation.as_ref(),&result);
++            }
++        }
+         state.git_read = Some(Entry::Finished(result));
+     }
+ }
+@@ -227,12 +235,16 @@
+                 generation,
+                 revision: format!("document-{}", state.revision),
+             };
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            let agent_observation=agent_git_index::observe_admission(&self.inner,&state,&args.project_id,generation,&root,&args.action);
+             let gate = GitReadGate(Arc::new(Selection {
+                 document: Arc::downgrade(&self.inner),
+                 root,
+                 context,
+                 document_revision: state.revision,
+                 action: args.action.clone(),
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                agent_observation,
+             }));
+             let reservation = GitReadAdmission::reserve(gate.clone(), args.action.clone(), admitted)?;
+             let ticket = self.inner.bridge.supervisor.start_git_read(reservation)?;
+@@ -277,6 +289,8 @@
+         };
+         let gate = GitReadGate(Arc::new(Selection {
+             document: Weak::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_observation: None,
+             root,
+             context: wire::Context {
+                 project_id: "project-1".into(),
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -14,6 +14,10 @@
+ pub(super) struct ReadyReview {
+     public:wire::Prepared,action:wire::Action,root:asset_source::RegisteredRoot,
+     stamp:Arc<SavedEditStamp>,epoch:u64,expires:Instant,
++    agent:Option<Arc<crate::service_git_requests::NativeLink>>,
++}
++impl Drop for ReadyReview {
++    fn drop(&mut self) { if let Some(agent)=&self.agent { agent.review_removed(); } }
+ }
+ struct PostPublisher {project:NativeProject,stamp:Arc<SavedEditStamp>}
+ struct PublisherSlot {value:Option<RegistrationPublisher>,entered:bool,joined:bool,finished:bool}
+@@ -32,7 +36,7 @@
+     document_revision:u32,action:wire::Action,phase:wire::Phase,admitted:Instant,
+     stamp:Arc<SavedEditStamp>,epoch:u64,review:Option<wire::Review>,
+     publisher:Option<Arc<Mutex<PublisherSlot>>>,post:OnceLock<PostPublisher>,ready:OnceLock<Arc<NativeStateReady>>,
+-    app_data:Option<PathBuf>,
++    app_data:Option<PathBuf>,agent:Option<Arc<crate::service_git_requests::NativeLink>>,
+ }
+ #[derive(Clone)]
+ pub(crate) struct GitLocalGate(Arc<Selection>);
+@@ -56,6 +60,24 @@
+         &&document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==context.generation&&&r==root)
+ }
+ impl GitLocalGate {
++    pub(crate) fn agent_arm(&self,id:&str)->Result<(),BridgeError> {
++        if let Some(agent)=&self.0.agent {agent.arm(id).map_err(state_error)?;} Ok(())
++    }
++    pub(crate) fn agent_retired(&self,receipt:&GitLocalReceipt) {
++        use crate::service_protocol::OperationState as S;
++        let Some(agent)=&self.0.agent else {return};
++        let state=match receipt {
++            GitLocalReceipt::Pending=>return,
++            GitLocalReceipt::RetainedUnknown|GitLocalReceipt::Settled {was_unknown:true,..}=>S::Unknown,
++            GitLocalReceipt::Settled {outcome,was_unknown:false}=>match outcome {
++                Ok(t) if t.result.get("state").and_then(Value::as_str)==Some("recovery-required")=>S::RecoveryRequired,
++                Ok(t) if t.status==read::Outcome::Ok=>S::Succeeded,
++                Ok(t) if matches!(t.status,read::Outcome::Cancelled|read::Outcome::TimedOut)=>S::Cancelled,
++                Err(e) if matches!(e.code.as_str(),"cancelled"|"shutting_down"|"query_timeout")=>S::Cancelled,
++                _=>S::Failed,
++            },
++        };agent.retired(state);
++    }
+     pub(crate) fn context(&self)->wire::Context {self.0.context.clone()}
+     pub(crate) fn review(&self)->Option<wire::Review> {self.0.review.clone()}
+     pub(crate) fn host(&self)->Result<Arc<ApplicationHost>,BridgeError> {
+@@ -81,6 +103,7 @@
+     }
+     fn current_with_edit_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>)->Result<(),BridgeError> {
+         if !self.original_locked(document,state,id) {return Err(changed())}
++        if let Some(agent)=&self.0.agent {agent.current(id).map_err(state_error)?;}
+         let epoch=if let Some(publisher)=&self.0.publisher {
+             let publisher=publisher.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
+             if publisher.finished {return Err(changed())}
+@@ -88,6 +111,26 @@
+         }else{document.android_registration_control.epoch()?};
+         let (stamp,expected)=self.0.post.get().map_or((&self.0.stamp,self.0.epoch),|p|(&p.stamp,p.project.input_revision));
+         if epoch!=expected||!edit.matches(stamp) {return Err(changed())}
++        if let Some(ready)=self.0.ready.get() {
++            let current=self.project(document,epoch)?;
++            if self.0.post.get().is_none_or(|p|!same_native(&p.project,&current)) {return Err(changed())}
++            document.bridge.application_service.native_state_current(ready,&current).map_err(state_error)?;
++        }
++        Ok(())
++    }
++    /// Advisory relay observation only. All actual native claims keep their
++    /// stricter original gate above. Our accept/finish job owns the publisher
++    /// mutex off Doc; its lock or transitional epoch is not external drift.
++    fn agent_watch_current_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str)->Result<(),BridgeError> {
++        if !self.original_locked(document,state,id) {return Err(changed())}
++        if let Some(agent)=&self.0.agent {agent.current(id).map_err(state_error)?;}
++        let edit=document.bridge.edits.saved_registration_guard(&document.session_identity)?;
++        let (stamp,expected)=self.0.post.get().map_or((&self.0.stamp,self.0.epoch),|p|(&p.stamp,p.project.input_revision));
++        if !edit.matches(stamp) {return Err(changed())}
++        // Genuine identity/stamp/revoke/Unknown checks happen even while the
++        // sole original publisher is in flight. Defer only this epoch sample.
++        let Some(epoch)=agent_watch_epoch(&document.android_registration_control,self.0.publisher.as_deref())? else {return Ok(())};
++        if epoch!=expected {return Err(changed())}
+         if let Some(ready)=self.0.ready.get() {
+             let current=self.project(document,epoch)?;
+             if self.0.post.get().is_none_or(|p|!same_native(&p.project,&current)) {return Err(changed())}
+@@ -230,10 +273,50 @@
+         }
+     }value
+ }
++/// No return value from this advisory probe grants work or finality. A busy
++/// original publisher can only defer the relay's epoch comparison; actual
++/// publisher/Host/GO/publication claims still use the unchanged strict gate.
++fn agent_watch_epoch(control:&crate::saved_command_owner::AndroidRegistrationControl,publisher:Option<&Mutex<PublisherSlot>>)->Result<Option<u64>,BridgeError> {
++    if control.is_unknown() {return Err(BridgeError::cleanup_unknown())}
++    let Some(publisher)=publisher else {return control.epoch().map(Some)};
++    let slot=match publisher.try_lock() {
++        Ok(slot)=>slot,
++        Err(std::sync::TryLockError::WouldBlock)=>return Ok(None),
++        Err(std::sync::TryLockError::Poisoned(_))=>return Err(BridgeError::cleanup_unknown()),
++    };
++    if slot.finished||(slot.entered&&!slot.joined) {return Ok(None)}
++    slot.value.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.git_local_epoch().map(Some)
++}
++fn agent_review_matches(review:Option<&crate::service_git_requests::NativeLink>,incoming:Option<&crate::service_git_requests::NativeLink>)->bool {
++    match (review,incoming) {
++        (None,None)=>true,
++        (Some(a),Some(b))=>a.phase()==crate::service_git_requests::Phase::Prepare&&b.phase()==crate::service_git_requests::Phase::Apply&&a.same_request(b),
++        _=>false,
++    }
++}
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(super) fn agent_running(state:&DocumentState)->bool {
++    matches!(&state.git_local,Some(Entry::Original {gate,..}) if gate.0.agent.is_some())
++}
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(super) fn agent_tick(document:&Arc<Inner>,state:&mut DocumentState) {
++    if let Some(Entry::Original {ticket,gate})=&state.git_local {
++        if let Some(agent)=gate.0.agent.as_ref().filter(|_|!ticket.settled()) {
++            agent.entry().expire(Instant::now());
++            if let Ok(Some((_,at)))=agent.entry().stop_at() {ticket.agent_stop_at(at);}
++            else if gate.agent_watch_current_locked(document,state,ticket.operation_id()).is_err() {
++                let at=Instant::now();agent.entry().cancel(crate::service_git_protocol::Reason::ContextChanged,at);
++                let first=agent.entry().stop_at().ok().flatten().map_or(at,|(_,first)|first);
++                ticket.agent_stop_at(first);
++            }
++        }
++    }
++    reconcile(document,state);
++}
+ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
+     if state.git_local_review.as_ref().is_some_and(|r|Instant::now()>=r.expires
+         ||!scope_current(document,state,&r.public.context,&r.root,state.revision)
+-        ||!document.android_registration_control.matches_epoch(r.epoch)) {state.git_local_review=None;}
++        ||!document.android_registration_control.matches_epoch(r.epoch)||r.agent.as_ref().is_some_and(|a|{a.entry().expire(Instant::now());a.stopped()})) {state.git_local_review=None;}
+     let Some(Entry::Original {ticket,gate})=&state.git_local else {return};
+     if !ticket.settled() {return}
+     let view=projection(state.git_local.as_ref().expect("same original"));
+@@ -245,17 +328,24 @@
+                     let expires=gate.0.admitted.checked_add(REVIEW)?;
+                     if Instant::now()>=expires {return None}
+                     let review=terminal.review().ok()?;
++                    if let Some(agent)=&gate.0.agent {
++                        let wire::Review::Files(details)=&review else {return None};
++                        if !agent.ready(crate::service_git_protocol::Review {review_id:format!("{}-review",ticket.operation_id()),
++                            expected_index:details.expected_index.clone(),review_digest:details.review_digest.clone(),
++                            document_revision:gate.0.document_revision,registration_generation:gate.0.context.generation},expires).ok()? {return None}
++                    }
+                     Some(ReadyReview {public:wire::Prepared {review_id:format!("{}-review",ticket.operation_id()),
+                         context:gate.context(),action:gate.0.action.public(),review,diff:terminal.result.get("diff").cloned()},
+-                        action:gate.0.action.clone(),root:gate.0.root.clone(),stamp:gate.0.stamp.clone(),epoch:gate.0.epoch,expires})
++                        action:gate.0.action.clone(),root:gate.0.root.clone(),stamp:gate.0.stamp.clone(),epoch:gate.0.epoch,expires,agent:gate.0.agent.clone()})
+                 })()
+             },_=>None,
+         }
+     }else{None};
++    if prepared.is_none() {if let Some(agent)=&gate.0.agent {agent.no_review();}}
+     state.git_local_review=prepared;state.git_local=Some(Entry::Finished(view));
+ }
+ impl DocumentBinding {
+-    fn git_local_new_gate(&self,state:&DocumentState)->Result<(),BridgeError> {
++    pub(super) fn git_local_new_gate(&self,state:&DocumentState)->Result<(),BridgeError> {
+         if !state.lifetime.original_bound()||state.lost_observed {return Err(BridgeError::unavailable("The original application document is unavailable."))}
+         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
+         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
+@@ -279,6 +369,9 @@
+         state.git_local_review=None;Ok(self.git_local_snapshot(&state))
+     }
+     pub(crate) fn git_local_prepare(&self,args:wire::Prepare)->Result<wire::StartResult,BridgeError> {
++        self.git_local_prepare_original(args,None)
++    }
++    pub(super) fn git_local_prepare_original(&self,args:wire::Prepare,agent:Option<Arc<crate::service_git_requests::NativeLink>>)->Result<wire::StartResult,BridgeError> {
+         let admitted=Instant::now();let mut state=self.lock();reconcile(&self.inner,&mut state);
+         let request=wire::StartRequest {phase:wire::Phase::Prepare,project_id:args.project_id.clone(),expected_document_revision:args.expected_document_revision,
+             action:Some(args.action.public()),review_id:None};
+@@ -292,10 +385,12 @@
+             let epoch=self.inner.android_registration_control.epoch()?;
+             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+             let stamp=Arc::new(edit.stamp()?);
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Prepare,&root,generation,epoch,&edit,&args.action)?;}
+             let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root,
+                 context:wire::Context {project_id:args.project_id.clone(),generation,revision:format!("document-{}",args.expected_document_revision)},
+                 document_revision:state.revision,action:args.action.clone(),phase:wire::Phase::Prepare,admitted,stamp,epoch,review:None,publisher:None,
+-                post:OnceLock::new(),ready:OnceLock::new(),app_data:None}));
++                post:OnceLock::new(),ready:OnceLock::new(),app_data:None,agent}));
+             let reserved=GitLocalAdmission::reserve(gate.clone(),args.action,wire::Phase::Prepare,admitted)?;
+             let ticket=self.inner.bridge.supervisor.start_git_local(reserved)?;
+             state.git_local=Some(Entry::Original {ticket,gate});drop(edit);Ok(())
+@@ -303,6 +398,9 @@
+         self.git_local_started(&state,request,outcome)
+     }
+     pub(crate) fn git_local_apply(&self,args:wire::Apply,app_data:&Path)->Result<wire::StartResult,BridgeError> {
++        self.git_local_apply_original(args,app_data,None)
++    }
++    pub(super) fn git_local_apply_original(&self,args:wire::Apply,app_data:&Path,agent:Option<Arc<crate::service_git_requests::NativeLink>>)->Result<wire::StartResult,BridgeError> {
+         let request=wire::StartRequest {phase:wire::Phase::Apply,project_id:args.project_id.clone(),expected_document_revision:args.expected_document_revision,
+             action:None,review_id:Some(args.review_id.clone())};
+         // Mandatory ControlSlot ordering: reserve before Doc. No epoch/Store
+@@ -321,6 +419,7 @@
+                 self.git_local_new_gate(&state)?;
+                 if state.revision!=args.expected_document_revision {return Err(changed())}
+                 let review=state.git_local_review.as_ref().ok_or_else(changed)?;
++                if !agent_review_matches(review.agent.as_deref(),agent.as_deref()) {return Err(changed());}
+                 let publisher=held.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                 let epoch=publisher.value.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.git_local_epoch()?;
+                 if review.public.review_id!=args.review_id||review.public.context.project_id!=args.project_id
+@@ -331,11 +430,13 @@
+                 lookup_memory::git_local_admission_bytes(&self.inner,&state,future).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
+                 let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+                 if !edit.matches(&review.stamp) {return Err(changed())}
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Apply,&review.root,review.public.context.generation,epoch,&edit,&review.action)?;}
+                 let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root:review.root.clone(),
+                     context:wire::Context {project_id:args.project_id.clone(),generation:review.public.context.generation,
+                         revision:format!("document-{}",args.expected_document_revision)},document_revision:state.revision,
+                     action:review.action.clone(),phase:wire::Phase::Apply,admitted,stamp:review.stamp.clone(),epoch,review:Some(review.public.review.clone()),
+-                    publisher:Some(held.clone()),post:OnceLock::new(),ready:OnceLock::new(),app_data:Some(app_data.to_owned())}));
++                    publisher:Some(held.clone()),post:OnceLock::new(),ready:OnceLock::new(),app_data:Some(app_data.to_owned()),agent}));
+                 let reserved=GitLocalAdmission::reserve(gate.clone(),review.action.clone(),wire::Phase::Apply,admitted)?;
+                 let ticket=self.inner.bridge.supervisor.start_git_local(reserved)?;
+                 // No fallible operation follows insertion. Consume review and
+@@ -363,3 +464,7 @@
+         Ok(wire::StartResult {schema_version:1,admission,request,status:self.git_local_snapshot(state),reason})
+     }
+ }
++
++#[cfg(test)]
++#[path="service_git_native_tests.rs"]
++mod agent_tests;
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -1576,6 +1576,8 @@
+             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
+             if let Some(source) = &owner.version_allocation_source { source.arm(&owner)?; }
+             if let Some(enrollment) = &owner.version_enrollment { enrollment.arm(&owner)?; }
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Some(local) = &owner.git_local { local.gate.agent_arm(&owner.id)?; }
+             owners.insert(key, owner.clone());
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -90,6 +90,11 @@
+ impl GitLocalTicket {
+     pub(crate) fn operation_id(&self)->&str {&self.owner.id}
+     pub(crate) fn stop(&self) {self.owner.fail(BridgeError::new("cancelled","The original local Git action was stopped."));}
++    pub(crate) fn agent_stop_at(&self,at:Instant) {
++        let mut state=lock(&self.owner.state);if state.terminal {return;}
++        state.fail_at(BridgeError::new("cancelled","The original local Git action was stopped."),at);
++        drop(state);self.owner.stop.send_replace(true);self.owner.changed.notify_waiters();
++    }
+     pub(crate) fn receipt(&self)->GitLocalReceipt {lock(&self.receipt).clone()}
+     pub(crate) fn settled(&self)->bool {matches!(&*lock(&self.receipt),GitLocalReceipt::Settled {was_unknown:false,..})}
+     pub(crate) fn pending_stage(&self)->crate::git_read_protocol::Phase {
+@@ -165,11 +170,13 @@
+     pub(super) fn request(&self)->Result<Arc<wire::Request>,BridgeError> {
+         self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)
+     }
+-    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;}
++    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;
++        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);}
+     pub(super) fn retire(&self,outcome:Result<(),BridgeError>,was_unknown:bool) {
+         let mut receipt=lock(&self.receipt);
+         if was_unknown || !matches!(*receipt,GitLocalReceipt::Pending)
+-            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;return}
++            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;drop(receipt);
++            #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);return}
+         let reply=self.child_reply.lock().ok().and_then(|s|s.clone());
+         let result=match (outcome,reply) {
+             (Ok(()),Some(reply))=>Ok(reply),
+@@ -178,6 +185,7 @@
+             (Err(error),_)=>Err(error),_=>Err(BridgeError::protocol()),
+         };
+         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
++        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
+     }
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+     pub(super) fn inspect(&self,runtime:&RuntimeConfig,owner:&Owner,preparing:Option<&crate::git_local_state::Ack>)
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1584,6 +1584,43 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_git_index_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_git_index_access(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn allow_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++        let args=crate::asset_session::agent_git_index::decode_allow(raw)?;
++        serde_json::to_value(state.document.allow_agent_git_index(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn revoke_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_git_index(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+ }
+ #[tauri::command]
+ async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -2906,6 +2943,10 @@
+     fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
+ }
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
++struct GitIndexRelayGuard { document: DocumentBinding, closed: bool }
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for GitIndexRelayGuard {fn drop(&mut self){if !self.closed {self.document.git_index_relay_lost();}}}
++#[cfg(any(target_os="linux",target_os="macos"))]
+ struct IdentityActionsRelayGuard { document: DocumentBinding, closed: bool }
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ impl Drop for IdentityActionsRelayGuard {
+@@ -2916,6 +2957,8 @@
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let git_index_guard = GitIndexRelayGuard { document: document.clone(), closed: false };
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
+     let mut revisions = edits.subscribe();
+@@ -2951,6 +2994,8 @@
+     let handle = tauri::async_runtime::spawn(async move {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         let mut identity_actions_guard = identity_actions_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut git_index_guard = git_index_guard;
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         let mut repository_summary_guard = repository_summary_guard;
+         let mut local_history_guard = local_history_guard;
+@@ -3014,7 +3059,7 @@
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+         let mut removal_notice_open=removal_notice.is_some();
+         loop {
+-            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
++            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+             document.finish_macos_maintenance(app.clone());
+             // Optional history performs bounded synchronous service IO only
+@@ -3028,6 +3073,8 @@
+             document.service_repository_summary_tick();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             document.service_identity_actions_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            match app.path().app_local_data_dir() {Ok(location)=>document.service_git_index_tick(&location),Err(_)=>document.git_index_relay_lost()};
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !preflight_relay_failed { document.service_local_checks_tick(); }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3367,7 +3414,7 @@
+             };
+             tokio::select! {
+                 biased;
+-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
++                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                 result = revisions.changed() => { if result.is_err() { return; } },
+                 result = assets.changed() => { if result.is_err() { return; } },
+                 result = diagnostics.changed() => { if result.is_err() { return; } },
+@@ -3441,6 +3488,7 @@
+                     // positively joined above. Drain captured terminal facts
+                     // before closing the original service, including on quit.
+                     // A history error remains in Host custody; cleanup MUST run.
++                    document.drain_git_index_for_exit();
+                     document.drain_identity_actions_for_exit();
+                     document.drain_local_checks_for_exit();
+                     document.drain_android_builds_for_exit();
+@@ -4914,6 +4962,7 @@
+             allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
++            agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -21,6 +21,8 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "../src/git_local_state.rs"] mod git_local_state;
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
++#[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
++#[path = "../src/service_git_requests.rs"] mod service_git_requests;
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/service_android_tools.rs"] mod service_android_tools;
+ #[path = "../src/service_request_catalogue.rs"] mod service_request_catalogue;
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -283,6 +283,7 @@
+             "choose_project", "choose_project_path", "project_snapshot", "catalog",
+             "application_read_status", "allow_application_read", "revoke_application_read",
+             "agent_local_check_access", "allow_agent_local_check", "revoke_agent_local_check",
++    "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
+             "environment_requirements", "release_version_observe",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -7,6 +7,9 @@
+   "permissions": [
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
++    "allow-agent-git-index-access",
++    "allow-allow-agent-git-index",
++    "allow-revoke-agent-git-index",
+     "allow-agent-android-build-access",
+     "allow-allow-agent-android-build",
+     "allow-revoke-agent-android-build",
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -86,6 +86,7 @@
+ import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
+ import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
+ import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
++import { createGitIndexApi } from './service_git_permission.ts';
+ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+@@ -408,6 +409,7 @@
+     agentIdentityActions: createAgentIdentityActionApi(mode, invoke),
+     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
+     agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
++    agentGitIndex: createGitIndexApi(mode, invoke),
+     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -43,6 +43,9 @@
+ import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
+ import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
+ import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
++import { GitIndexPermission } from './service_git_permission.ts';
++import { gitReadPathOrder } from './gitReadProtocol.ts';
++import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
+ import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
+ import { AgentIOSArchivePermission } from './agentIOSArchive.ts';
+ import { AgentIOSArchiveAccess } from './components/AgentIOSArchiveAccess.tsx';
+@@ -1091,6 +1094,19 @@
+   gitLocalRef.current = gitLocal;
+   const gitLocalState = useSyncExternalStore(gitLocal.subscribe, gitLocal.getSnapshot, gitLocal.getSnapshot);
+   const gitLocalProjectName = gitLocalState.projectId ? workspace.projects[gitLocalState.projectId]?.project.name : undefined;
++  const [agentGitIndex] = useState(() => new GitIndexPermission((action) => {
++    const service=pathService.current, projectId=workspaceRef.current.selectedId;
++    const repository=gitRepositories.current.find(v=>v.service===service&&v.projectId===projectId)?.controller.getSnapshot();
++    const read=gitReadRef.current?.getSnapshot(), operation=read?.original;
++    const current=!!projectId && !!repository && repository.active && !repository.stale && !repository.blocked && !repository.busy
++      && !!read?.status && !read.stale && !read.uncertain && !read.busy && operation?.action.kind==='observe'
++      && operation.phase==='settled' && operation.outcome==='ok' && operation.context.projectId===projectId;
++    return {api:service.api?.mode==='native'?service.api.agentGitIndex??null:null,
++      project:current&&repository&&read?.status&&operation&&projectId?{projectId,expectedDocumentRevision:read.status.documentRevision,
++        readOperationId:operation.operationId,action,paths:[...repository.selected].sort(gitReadPathOrder)}:null,
++      blocked:!!(gitLocalAdmission.current()??gitLocalRef.current?.ownerReason())};
++  }));
++  useEffect(()=>{agentGitIndex.syncContext();});
+   const requests = useRef(0);
+   const bootGeneration = useRef(0);
+   const [cliReadAccess] = useState(() => new CliReadAccessController({
+@@ -2047,7 +2063,8 @@
+             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
+             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+             localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+-              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /></> : undefined}
++              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
++              <ServiceGitIndexAccess controller={agentGitIndex} /></> : undefined}
+             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
+           </>}

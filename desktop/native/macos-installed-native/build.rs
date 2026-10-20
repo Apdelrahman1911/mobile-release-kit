@@ -165,6 +165,7 @@ fn main() {
         println!("cargo:rustc-cfg=mrk_wrapping_keychain_qualification_native");
     }
     println!("cargo:rerun-if-changed=src/native.m");
+    println!("cargo:rerun-if-changed=src/github_browser.m");
     println!("cargo:rerun-if-changed=src/android_registration.m");
     println!("cargo:rerun-if-changed=src/android_service_management.m");
     println!("cargo:rerun-if-changed=src/install_producer.m");
@@ -338,7 +339,7 @@ fn main() {
         println!("cargo:rerun-if-changed=../macos-installed-entry/fixed_paths.h");
         build.file("../macos-installed-entry/gate.c");
     }
-    build.file("src/native.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
+    build.file("src/native.m").file("src/github_browser.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
         .flag("-mmacosx-version-min=26.0").warnings(true).compile("mrk_macos_installed_native");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=Foundation");

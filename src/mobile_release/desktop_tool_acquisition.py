@@ -18,6 +18,7 @@ from ._tool_acquisition_spec import AcquisitionError
 from ._tool_requirements_capture import Capture
 from .cancellation import DefaultCancellation
 from .owned_process import fatal_lifetime_error
+from ._tool_acquisition_sdk import CopyBinding
 from .tool_acquisition import Admission, LOOKUP_SCOPE, ToolAcquisition
 
 
@@ -86,7 +87,8 @@ class ToolAcquisitionRun:
         return Admission(self.request.operation_id, native["contextSha256"], self.request.native["profile"],
             native["referenceSha256"], native["projectionSha256"], native["generation"], Path(native["root"]),
             (int(identity["device"]), int(identity["inode"]), identity["uid"], identity["gid"], identity["mode"]),
-            missing, compatible, True, LOOKUP_SCOPE, self.source.work_end)
+            missing, compatible, True, LOOKUP_SCOPE, self.source.work_end,
+            CopyBinding.parse(native.get("sdkCopy"), missing, compatible))
 
     def checked_manifest(self):
         require(self._claimed)
@@ -141,7 +143,8 @@ class ToolAcquisitionRun:
     def closed(self):
         capture_closed = self.capture is None or self.capture.closed
         acquisition_closed = self.acquisition is None or (not self.acquisition.unknown
-            and (self.acquisition.files is None or self.acquisition.files.settled))
+            and (self.acquisition.files is None or self.acquisition.files.settled)
+            and (self.acquisition.sdk_copy is None or self.acquisition.sdk_copy.closed))
         return capture_closed and acquisition_closed and not self._unknown
 
     def terminal(self):

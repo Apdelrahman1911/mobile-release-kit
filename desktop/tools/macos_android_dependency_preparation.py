@@ -63,6 +63,8 @@ SOURCE_FILES = (
     'desktop/tools/macos_android_supplier_preparation.py',
     'desktop/tools/macos_android_supplier_correspondence.py',
     'desktop/tools/macos_normal_ui_runner.py',
+    'desktop/tools/macos_tool_setup_inputs.py',
+    'desktop/tools/macos_identity_current_runtime.py',
 )
 ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
 RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [5761, '17aaefbea83fb4b389e10d1ac01f9926562712b95253f7af5f2c6fab546b1dd4'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
@@ -184,7 +186,8 @@ def publish_json(private, name, value):
     """Only two closed diagnostic leaves, through the retained private original."""
     limits = {'sdk-observation.json': 16384, 'observe-sdk-failure.json': 4096,
               'prepare-b-failure.json': 4096, 'acquire-failure.json': 4096, 'cleanup-failure.json': 4096,
-              'prepare-ui-inputs-failure.json': 4096, 'acquire-ui-inputs-failure.json': 4096}
+              'prepare-ui-inputs-failure.json': 4096, 'acquire-ui-inputs-failure.json': 4096,
+              'prepare-tool-setup-inputs-failure.json': 4096, 'acquire-tool-setup-inputs-failure.json': 4096}
     need(name in limits, 'diagnostic-leaf')
     raw = encoded(value)
     need(0 < len(raw) <= limits[name], 'diagnostic-bound')
@@ -226,6 +229,7 @@ def publish_preparation(work, relative, raw, *, clock=None):
         'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
         'credentials/scalars.json': 32768, 'ui-commands.json': 16384,
         'android-input-fixture.json': 16384, 'android-input-status.json': 4096,
+        'tool-setup-origin.json': 16384, 'tool-setup-inputs.json': 16384, 'tool-setup-commands.json': 16384,
         'evidence/failed-commands.json': 16384, 'evidence/gradle-failure.json': 12 << 10,
         'evidence/inventory.json': 1 << 20, 'evidence/inventory-drift.json': 1 << 20,
         'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
@@ -498,9 +502,9 @@ def admit_sdk_current_use(observed):
 
 class Acquisition:
     """One fixed acquisition role budget; not a reusable resolver/owner."""
-    def __init__(self, work):
+    def __init__(self, work, *, clock=None):
         self.work = work
-        self.clock = N.PhaseClock(810)
+        self.clock = N.PhaseClock(810) if clock is None else clock
         self.reads = 0
         self.writes = 0
         self.downloads = 0
@@ -515,6 +519,10 @@ class Acquisition:
         self.archive_path = None
         self.role = None
         self.directories = {}
+
+    @property
+    def tools_root(self):
+        return self.work / 'tools'  # Ordinary preparation is unchanged.
 
     def point(self): self.clock.check()
 
@@ -536,7 +544,7 @@ class Acquisition:
 
     def parent(self, relative):
         parts = P.relative(relative)
-        fds, originals = chain(self.work / 'tools', retained=True)
+        fds, originals = chain(self.tools_root, retained=True)
         prefix = []
         try:
             for part in parts[:-1]:
@@ -868,6 +876,8 @@ def acquire(work, *, private=None):
 
 # This fixed role is deliberately not selected by RUN_SCOPE. It is prepared for
 # the ordinary installed and same-source candidate jobs; A/B keep their original five-archive route.
+TOOL_SCOPE = 'prepare-tool-setup-inputs'
+TOOL_COMMANDS = ('prepare-tool-setup-inputs', 'acquire-tool-setup-inputs')
 UI_SCOPE = 'prepare-ui-inputs'
 UI_WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
 UI_CONSUMER_SCOPE = 'prepare-consumer-ui-inputs'
@@ -1081,7 +1091,7 @@ class UiAcquisition(Acquisition):
                 except BaseException:
                     if primary is None: raise
         for relative in sorted(self.directories, key=lambda path: (-path.count('/'), path)):
-            self.point(); path = self.work / 'tools' / relative
+            self.point(); path = self.tools_root / relative
             held = chain(path.parent, retained=True); fd = None; primary = None
             try:
                 fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1112,16 +1122,22 @@ class UiAcquisition(Acquisition):
 
 
 def ui_tool_post(work, clock, expected):
+    return _ui_tool_post(work, clock, expected, work / 'tools')
+
+
+def _ui_tool_post(work, clock, expected, tools):
+    # Private reuse by the fixed tool observer preparer. Existing entry above
+    # still has no root selector; neither result nominates native authority.
     raw, _ = read(work / 'tool-roster.json', 4 << 20, clock=clock)
     dirs_raw, _ = read(work / 'directory-roster.json', 4 << 20, clock=clock)
     rows = json.loads(raw, object_pairs_hook=N.pairs)
     directories = json.loads(dirs_raw, object_pairs_hook=N.pairs)
     total = ui_roster_match(rows, directories, expected, sealed=True)
     found = set()
-    for root, dirs, files in os.walk(work / 'tools', followlinks=False):
+    for root, dirs, files in os.walk(tools, followlinks=False):
         clock.check()
         for name in dirs + files:
-            path = Path(root) / name; relative = str(path.relative_to(work / 'tools'))
+            path = Path(root) / name; relative = str(path.relative_to(tools))
             need(relative in expected and relative not in found and len(found) < ENTRIES,
                  'ui-source-namespace')
             found.add(relative)
@@ -1129,7 +1145,7 @@ def ui_tool_post(work, clock, expected):
                 need(list(nine(os.lstat(path))) == directories[relative], 'ui-source-directory-post')
     need(found == set(expected), 'ui-source-namespace-incomplete')
     for row in rows:
-        clock.check(); path = work / 'tools' / row['path']
+        clock.check(); path = tools / row['path']
         held = chain(path.parent, retained=True); fd = None; primary = None
         try:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held[0][-1])
@@ -1150,7 +1166,7 @@ def ui_tool_post(work, clock, expected):
                 if primary is None: raise
     for relative, state in directories.items():
         clock.check()
-        need(list(nine(os.stat(work / 'tools' / relative, follow_symlinks=False))) == state,
+        need(list(nine(os.stat(tools / relative, follow_symlinks=False))) == state,
              'ui-source-directory-final-post')
     return digest(raw + dirs_raw), total, len(rows), len(directories)
 
@@ -2491,22 +2507,25 @@ def main():
         # A safe original work directory is required even for early diagnostics.
         candidate = os.environ.get('MRK_ANDROID_PREPARATION_WORK', '')
         ui = RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE)
-        pattern = ('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}' if ui else
+        tool = RUN_SCOPE == TOOL_SCOPE
+        pattern = ('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}' if ui or tool else
                    '/Users/runner/work/_temp/mrk-android-dependencies[.][A-Za-z0-9]{8}')
         need(re.fullmatch(pattern, candidate), 'private-work-name')
         private = admit_work(Path(candidate))
         stage = 'scope-context'
         need(len(sys.argv) == 2 and ((RUN_SCOPE == 'observe-sdk' and sys.argv[1] == 'observe-sdk')
              or (RUN_SCOPE == 'prepare-b' and sys.argv[1] in ('prepare-b', 'acquire', 'cleanup'))
+             or (tool and sys.argv[1] in TOOL_COMMANDS)
              or (ui and sys.argv[1] in (UI_CONSUMER_COMMANDS if RUN_SCOPE == UI_CONSUMER_SCOPE else ('prepare-ui-inputs', 'acquire-ui-inputs')))), 'fixed-source-scope')
-        work, target = ui_context() if ui else (context(), None)
+        fixture = load('_mrk_tool_setup_inputs', 'desktop/tools/macos_tool_setup_inputs.py') if tool else None
+        work, target = fixture.context(sys.modules[__name__]) if tool else (ui_context() if ui else (context(), None))
         need(work == private['path'], 'private-work-context')
         recheck_chain(private['fds'], private['originals'])
         stage = 'normal-helper-load'
         N = load('_mrk_android_preparation_normal', 'desktop/tools/macos_normal_ui_runner.py')
         stage = 'transport-helper-load'
         P = load('_mrk_android_preparation_transport', 'desktop/tools/macos_android_supplier_preparation.py')
-        if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs'):
+        if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs', 'acquire-tool-setup-inputs'):
             stage = 'archive-helper-load'
             C = load('_mrk_android_preparation_correspondence', 'desktop/tools/macos_android_supplier_correspondence.py')
         stage = 'sdk-observation' if sys.argv[1] == 'observe-sdk' else sys.argv[1]
@@ -2514,6 +2533,8 @@ def main():
             report = observe_sdk_current_use(work, private=private)
             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
+        elif tool:
+            final_clock = fixture.run(sys.modules[__name__], work, private, child=sys.argv[1] == TOOL_COMMANDS[1])
         elif ui:
             final_clock = {'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs,
                            'prepare-consumer-ui-inputs': prepare_ui_inputs, 'acquire-consumer-ui-inputs': acquire_ui_inputs}[sys.argv[1]](
@@ -2527,10 +2548,13 @@ def main():
         if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'preparation-original-failure'
         if private is not None:
             try:
-                name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] in ('acquire-ui-inputs', 'acquire-consumer-ui-inputs') else
-                        'prepare-ui-inputs-failure.json') if RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) else (
-                        'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2
-                        and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json')
+                if RUN_SCOPE == TOOL_SCOPE and len(sys.argv)==2 and sys.argv[1] in TOOL_COMMANDS:
+                    name = sys.argv[1] + '-failure.json'
+                else:
+                    name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] in ('acquire-ui-inputs', 'acquire-consumer-ui-inputs') else
+                            'prepare-ui-inputs-failure.json') if RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) else (
+                            'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2
+                            and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json')
                 report = {'status': 'refused', 'stage': stage, 'reason': code,
                     'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False}
                 try:
@@ -2568,7 +2592,9 @@ if __name__ == '__main__':
     # Only these two fixed installed-job entries select the reviewed UI owner.
     # Import/default B and its acquire/cleanup routes remain unchanged; main
     # still admits the exact source, host, current run and original work first.
-    if len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
+    if len(sys.argv) == 2 and sys.argv[1] in TOOL_COMMANDS:
+        RUN_SCOPE = TOOL_SCOPE
+    elif len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
         RUN_SCOPE = UI_SCOPE
     elif len(sys.argv) == 2 and sys.argv[1] in UI_CONSUMER_COMMANDS:
         RUN_SCOPE = UI_CONSUMER_SCOPE

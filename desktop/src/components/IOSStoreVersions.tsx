@@ -1,7 +1,7 @@
 import type { LocalStorePreflightController, LocalStoreState } from '../localStorePreflight.ts';
 import { localStoreOwnerReason } from '../localStorePreflight.ts';
 import { sameOfflineData } from '../offlinePreflightProtocol.ts';
-import { IOS_VERSIONS_QUERY, IOS_VERSIONS_SCOPE, iosVersionDescriptions } from '../iosStoreVersions.ts';
+import { IOS_VERSIONS_QUERY, IOS_VERSIONS_SCOPE, IOS_VERSIONS_COVERAGE, iosVersionDescriptions } from '../iosStoreVersions.ts';
 
 /** The existing Store controller and original native read; no automatic action. */
 export function IOSStoreVersions({ state, controller, compact = false, onCredentials, onShow }: {
@@ -22,7 +22,7 @@ export function IOSStoreVersions({ state, controller, compact = false, onCredent
     ...state.request, platform: state.request.platform ?? 'android', query: IOS_VERSIONS_QUERY, operation: 'local-store-preflight',
   });
   const result = op.result?.scope === IOS_VERSIONS_SCOPE ? op.result : null;
-  const summary = result?.currentVersions, copy = summary ? iosVersionDescriptions[summary.observation] : null;
+  const summary = result?.currentVersions && 'coverage' in result.currentVersions && result.currentVersions.coverage === IOS_VERSIONS_COVERAGE ? result.currentVersions : null, copy = summary ? iosVersionDescriptions[summary.observation] : null;
   return <section className="card" aria-label="Current App Store versions">
     <div className="inline-heading"><h2>Current App Store versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>

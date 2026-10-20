@@ -3,6 +3,7 @@
 //! cache tail runs only AFTER actual child/pipe/driver/manager/runtime joins.
 use super::*;
 use crate::installed_runtime::{ToolAcquisitionRuntimeSlots, AndroidRegistrationSourceSlots};
+use std::path::PathBuf;
 use wire::components::Partition;
 
 pub(in crate::saved_command_owner) struct Original {
@@ -13,7 +14,12 @@ pub(in crate::saved_command_owner) struct Original {
     runtime_closed: bool,
     sources: Option<AndroidRegistrationSourceSlots>,
     picked: Option<(Partition, [u8; 32])>,
+    sdk_copy: Option<wire::sdk::CopyInput>,
     unknown: bool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observed_ca_armed: bool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observed_transfer_attempted: bool,
 }
 impl Original {
     pub(super) fn new() -> Self {
@@ -25,8 +31,26 @@ impl Original {
             runtime_closed: false,
             sources: None,
             picked: None,
+            sdk_copy: None,
             unknown: false,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            observed_ca_armed: false,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            observed_transfer_attempted: false,
         }
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn observation(&self) -> (bool,Option<wire::Reason>,bool,bool,bool,bool,bool,bool) {
+        // No source original is legitimate for protected reuse, but cannot
+        // demonstrate that the drift case actually entered source inspection.
+        let inspected = self.sources.as_ref().is_some_and(|s|s.settled());
+        let first = self.sources.as_ref().filter(|s|s.settled()).and_then(|s|s.first_failure())
+            .and_then(|(failure,_)|match failure {
+                AdmissionFailure::Inventory=>Some(wire::Reason::ExistingToolsIncompatible),
+                AdmissionFailure::Identity=>Some(wire::Reason::Stale), _=>None,
+            });
+        (inspected, first, self.sources.as_ref().is_none_or(|s|s.settled()), self.runtime_closed && self.runtime.settled(),
+            self.cache.settled(), self.cache.observed_application_attempt(), self.observed_ca_armed, self.observed_transfer_attempted)
     }
     pub(super) fn interrupted(&mut self) {
         self.unknown = true;
@@ -57,6 +81,7 @@ impl Original {
             bytes = bytes.checked_add(request.capacity())?;
         }
         if let Some(source) = &self.sources { bytes = bytes.checked_add(source.retained_bytes()?)?; }
+        if let Some(copy) = &self.sdk_copy { bytes = bytes.checked_add(copy.retained_bytes()?)?; }
         Some(bytes)
     }
     fn inspect_picked(&mut self, inner: &Arc<Inner>, owner: &Arc<Session>) -> Result<(), BridgeError> {
@@ -66,10 +91,6 @@ impl Original {
             || !intent.known.sources.matches_project(&context.project_id, owner.registration, &owner.project)
             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
         if intent.known.catalog.empty().is_none() { return Ok(()); } // Existing selected protected tuple wins.
-        if !intent.known.sources.has_picks() {
-            self.picked = Some((Partition::missing_all(), [0; 32]));
-            return Ok(());
-        }
         let Profile::ToolAcquisition(profile) = owner.profile else { return Err(wire::invalid()); };
         let reservation = AndroidRegistrationSourceSlots::acquisition_reservation(profile.android()).ok_or_else(wire::invalid)?;
         let bound = reservation.acquisition_retained_bytes().ok_or_else(wire::invalid)?;
@@ -96,6 +117,22 @@ impl Original {
         if source.retained_bytes().is_none_or(|bytes| bytes > bound)
             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
         self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
+        if context.action == wire::Action::Acquire {
+            // A compatible unchosen conventional source must go through the
+            // ordinary picker first, never be duplicated or silently selected.
+            if source.acquisition_discovery().is_none_or(|finding| finding.needs_selection()) {
+                return Err(wire::invalid());
+            }
+            if let Some(root) = intent.known.sources.roots()[1].as_ref() {
+                // Same actually closed original records; a child will open NEW
+                // read-only originals. No renderer path or revived native loan.
+                self.sdk_copy = source.acquisition_sdk_copy_input(root).map_err(|_| wire::invalid())?;
+            }
+            if self.sdk_copy.as_ref().map(|copy| copy.component)
+                != wire::sdk::Component::for_partition(self.picked.ok_or_else(wire::invalid)?.0) {
+                return Err(wire::invalid());
+            }
+        }
         Ok(())
     }
     fn picked_finding(&self) -> Option<(Partition, [u8; 32])> {
@@ -103,7 +140,6 @@ impl Original {
         let finding = self.picked?;
         match &self.sources {
             Some(source) if source.acquisition_finding() == Some(finding) => Some(finding),
-            None if finding == (Partition::missing_all(), [0; 32]) => Some(finding),
             _ => None,
         }
     }
@@ -163,6 +199,22 @@ pub(super) fn picked_finding(owner: &Session) -> Option<(Partition, [u8; 32])> {
     let resources = owner.resources.try_lock().ok()?;
     let original = resources.tools.original.as_ref()?.try_lock().ok()?;
     original.picked_finding()
+}
+pub(super) fn discovery(owner: &Session) -> Option<wire::discovery::Discovery> {
+    if !original_joined(owner) { return None; }
+    let resources = owner.resources.try_lock().ok()?;
+    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+    if !original.settled() { return None; }
+    original.sources.as_ref()?.acquisition_discovery()
+}
+pub(super) fn discovered_directory(owner: &Session, role: usize) -> Option<PathBuf> {
+    if !original_joined(owner) { return None; }
+    let resources = owner.resources.try_lock().ok()?;
+    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+    if !original.settled() { return None; }
+    let path = original.sources.as_ref()?.acquisition_discovered_directory(role)?;
+    let mut copy = PathBuf::new(); copy.try_reserve_exact(path.as_os_str().len()).ok()?; copy.push(path);
+    (copy.capacity() <= 4096).then_some(copy)
 }
 fn copy_runtime(v: &VerifiedRuntime) -> VerifiedRuntime {
     VerifiedRuntime {
@@ -281,6 +333,8 @@ pub(super) fn inspect(
         if !inspection.matches(context, owner.registration, &owner.project) || !permits(profile, inspection)
             || !parts.0.needs_download() || picked_finding(&inspection.original) != Some(parts)
             || inspection.terminal.components() != Some(parts.0) { return Err(wire::invalid()); }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        { original.observed_ca_armed = true; }
         let armed = original.runtime.arm_public_ca_once();
         original.runtime_failure(owner, armed.as_ref().err().copied());
         armed.map_err(|_| owner.domain.unavailable())?;
@@ -357,9 +411,11 @@ pub(super) fn inspect(
             "projectRoot":wire::native_path(&owner.project.path),"rootIdentity":owner.project.identity.posix().map_err(|_|wire::Reason::Input)?.preflight_identity(),
             "catalogGeneration":intent.known.catalog.generation(),"ownerRevision":intent.known.revision,
             "sourceGeneration":intent.known.source_generation,"registrationGeneration":intent.known.registration_generation,
-            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1)}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
+            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1),
+            "sdkCopy":original.sdk_copy.as_ref().map(|copy|copy.data())}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
         let expected = Expected {
             components,
+            copied_sdk: original.sdk_copy.as_ref().map(|copy| copy.component),
             context_sha256: hash(&context_raw),
             reference_sha256: projection
                 .reference_sha256
@@ -406,13 +462,16 @@ pub(super) fn inspect(
         if !context_current(inner, owner) {
             return Err(wire::Reason::Stale);
         }
-        let cache = original.cache.cache_data(
+        let mut cache = original.cache.cache_data(
             u64::from(intent.generation),
             &expected.context_sha256,
             &expected.reference_sha256,
             &expected.projection_sha256,
             components,
         )?;
+        if let Some(copy) = &original.sdk_copy {
+            cache.as_object_mut().ok_or(wire::Reason::Input)?.insert("sdkCopy".into(),copy.data());
+        }
         let bytes = wire::request(
             &owner.id,
             &owner.generation,
@@ -510,6 +569,8 @@ pub(super) fn transfer(
     if original.request.is_some() || original.unknown || original.runtime_closed {
         return Err(wire::invalid());
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    { original.observed_transfer_attempted = true; }
     let transferred = original.runtime.transfer_once();
     original.runtime_failure(owner, transferred.as_ref().err().copied());
     transferred.map_err(|_| wire::invalid())

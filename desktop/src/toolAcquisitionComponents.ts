@@ -18,7 +18,11 @@ export function parseToolComponentPartition(value: unknown): ToolComponentPartit
 export function stagedMatchesComponents(report: StagedToolSourcesData, partition: ToolComponentPartition | null): boolean {
   if (!partition || !partition.missing.length) return false;
   const all = [...report.reusedArchives, ...report.downloadedArchives];
-  return all.length === partition.missing.length && partition.missing.every((part) => all.includes(part));
+  if (all.length !== partition.missing.length || !partition.missing.every((part) => all.includes(part))) return false;
+  if (report.schemaVersion === 1) return report.copiedSourceComponents === undefined;
+  const copied = report.copiedSourceComponents;
+  return copied.length === 1 && partition.compatible.includes(copied[0]) &&
+    partition.missing.includes(copied[0] === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform');
 }
 const labels: Record<Component, string> = {
   jdk: 'Java JDK', 'sdk-platform': 'Android API 35 platform',

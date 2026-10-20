@@ -4,6 +4,10 @@ import type { StoreCheck } from '../localStorePreflightTypes.ts';
 import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
 import { AppleProvisioning } from './AppleProvisioning.tsx';
 import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
+import { PairedStoreVersions } from './PairedStoreVersions.tsx';
+import { PAIRED_VERSIONS_QUERY } from '../pairedStoreVersions.ts';
+import { AndroidStoreVersions } from './AndroidStoreVersions.tsx';
+import { ANDROID_VERSIONS_QUERY } from '../androidStoreVersions.ts';
 import { IOSStoreVersions } from './IOSStoreVersions.tsx';
 import { IOS_VERSIONS_QUERY } from '../iosStoreVersions.ts';
 const hints:Record<StoreCheck,string>={
@@ -29,6 +33,8 @@ export function LocalStorePreflight({state,controller,compact=false,onCredential
  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+ if(op?.context.query===PAIRED_VERSIONS_QUERY||state.platform==='both'&&(!op||!retained))return <PairedStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+ if(op?.context.query===ANDROID_VERSIONS_QUERY)return <AndroidStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===IOS_VERSIONS_QUERY)return <IOSStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(compact&&!retained)return null;
  return <section className="card" aria-label={`Local ${store} access check`}>
@@ -46,8 +52,9 @@ export function LocalStorePreflight({state,controller,compact=false,onCredential
    {apple&&<AppleProvisioning state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
    {apple&&<AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
    {apple&&<IOSStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   {!apple&&<AndroidStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
   </>}
-  {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
+  {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending||state.callersPending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}
   <button disabled={state.mode!=='native'} onClick={()=>void controller.checkStatus()}>Refresh check status</button>
   {state.error&&<p role="alert">{state.error}</p>}

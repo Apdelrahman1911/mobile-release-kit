@@ -550,12 +550,19 @@ export class AndroidBuildController {
     }
     return status;
   }
+  // Read-only presentation of the original callers; not a native receipt.
+  hasPendingGuiSubmission(): boolean { return this.pendingGuiSubmissions !== 0; }
   private returnedGuiSubmission(): void {
+    const wasPending = this.hasPendingGuiSubmission();
     if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
     const held = this.deferredAgentObservation;
-    if (!held || this.pendingGuiSubmissions !== 0) return;
-    this.deferredAgentObservation = null;
-    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
+    if (held && this.pendingGuiSubmissions === 0) {
+      this.deferredAgentObservation = null;
+      if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
+    }
+    // A terminal event may precede this original invoke's return. Notify only
+    // when the held-caller bit actually changes, using the existing finally.
+    if (wasPending !== this.hasPendingGuiSubmission()) this.update({});
   }
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
   async checkStatus(): Promise<void> {
@@ -674,7 +681,7 @@ export class AndroidBuildController {
     const acquired = prepared?.claim(this.state.project.projectId,role,previous.sourceGeneration);
     if (prepared && !acquired) return;
     const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role,
-      ...(acquired ? { acquired } : {}) };
+      ...(acquired ? prepared?.origin === 'discovered' ? { discovered: acquired } : { acquired } : {}) };
     this.retire(this.advance('contextGeneration'));
     if (prepared && !prepared.stillCurrent()) return;
     const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,

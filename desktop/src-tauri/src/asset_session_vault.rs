@@ -3,6 +3,17 @@
 //! book from inspection until explicit release; keys never become IPC DATA.
 use super::*;
 use crate::{vault_crypto as crypto, vault_format as format, vault_store as store};
+#[path = "credential_apple_distribution_key_native.rs"]
+pub(super) mod distribution_key;
+pub(crate) use distribution_key::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, InventoryPoint as AppleKeyInventoryPoint};
+#[path = "credential_apple_provisioning_native.rs"]
+mod provisioning_native;
+pub(crate) use provisioning_native::{AppleP12Loan, AppleProfileDestination};
+pub(super) use provisioning_native::profile_store as apple_profile;
+#[path="credential_apple_profile_source.rs"]
+pub(super) mod profile_sources;
+#[path="credential_apple_key_source.rs"]
+pub(super) mod key_sources;
 #[path = "credential_assignment_native.rs"]
 mod assignment_native;
 use assignment_native::upload_key;
@@ -83,9 +94,15 @@ pub(super) struct BoundLoan {
 pub(super) const BOUND_LOAN_BYTES: usize = std::mem::size_of::<BoundLoan>();
 impl BoundLoan {
     fn current(&self, state: &DocumentState, session: &Session) -> bool {
+        session.writable() && self.current_original(state, session)
+    }
+    fn current_for_apple_profile(&self, state: &DocumentState, session: &Session, owner: &Arc<OriginalWork>) -> bool {
+        self.current_original(state, session) && apple_profile::owns_current_source(state, session, owner, self)
+    }
+    fn current_original(&self, state: &DocumentState, session: &Session) -> bool {
         !state.session && !state.stopping && !state.unknown && !state.exhausted && !state.lock_pending
             && !state.retiring && !state.quit_pending && state.lifetime.original_bound()
-            && session.writable() && Arc::ptr_eq(&self.store, &session.store)
+            && Arc::ptr_eq(&self.store, &session.store)
             && session.key.as_ref().is_some_and(|key| Arc::ptr_eq(key, &self.key))
             && session.identity == Some(self.reference.identity) && self.key.identity() == self.reference.identity
             && self.context.registry_generation == session.registry_generation
@@ -133,10 +150,13 @@ impl Session {
 pub(super) struct Work {
     store: Option<Arc<Mutex<store::StoreBook>>>, key: Option<Arc<crypto::VaultKey>>, outcome: Option<store::StorageOutcome>,
     first: Option<(Reason, Instant)>, release: bool, release_end: Option<Instant>, release_claimed: bool,
+    apple_clock: Option<Arc<crate::saved_command_owner::AppleProvisioningClock>>,
     // Private input/output remains on this original after producer quiescence.
     // It is not a completed export, a second operation or a reusable slot.
     backup: backup_native::Work,
     upload_key: upload_key::Work,
+    apple_profile: apple_profile::Work,
+    apple_distribution_key: distribution_key::Work,
     upload_key_recovery: upload_key_recovery::Work,
     // The exact first coordinator receipt survives the one cleanup-only
     // continuation. That continuation reuses this OriginalWork/child slot; it
@@ -155,37 +175,57 @@ pub(super) struct Retired {
     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<Box<BoundLoan>>,
     backup: backup_native::Work,
     upload_key: upload_key::Work,
+    apple_profile: apple_profile::Work,
+    apple_distribution_key: distribution_key::Work,
     upload_key_recovery: upload_key_recovery::Work,
 }
 impl Retired {
+    pub(super) fn dispose_private_apple_profile(&mut self) -> bool { self.apple_profile.dispose_private() }
+    pub(super) fn dispose_private_apple_distribution_key(&mut self) -> bool { self.apple_distribution_key.dispose_private() }
     pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() || self.upload_key_recovery.blocks_reuse() }
     pub(super) fn dispose_private_upload_key(&mut self) -> bool { self.upload_key.dispose_private() && self.upload_key_recovery.dispose() }
     pub(super) fn backup_blocks_reuse(&self) -> bool { self.backup.blocks_reuse() }
+    pub(super) fn apple_profile_blocks_reuse(&self) -> bool { self.apple_profile.blocks_reuse() }
+    pub(super) fn apple_distribution_key_blocks_reuse(&self) -> bool { self.apple_distribution_key.blocks_reuse() }
+    pub(super) fn apple_distribution_key_work(&self) -> &distribution_key::Work { &self.apple_distribution_key }
+    pub(super) fn apple_profile_source(&self) -> Option<&Arc<AppleP12Loan>> { self.apple_profile.destination().map(|held| held.census_source()) }
     pub(super) fn empty(&self) -> bool {
         self.session.is_none() && self.keys.iter().all(Option::is_none) && self.loaded.is_none() && self.label.is_none() && self.rows.capacity() == 0
-            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty() && self.upload_key.empty() && self.upload_key_recovery.empty()
+            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty() && self.upload_key.empty() && self.upload_key_recovery.empty() && self.apple_profile.empty() && self.apple_distribution_key.empty()
     }
     pub(super) fn data_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)?
             .checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?
             .checked_add(if self.previous_bound.is_some() { BOUND_LOAN_BYTES } else { 0 })?
-            .checked_add(self.backup.retained_bytes()?)?.checked_add(self.upload_key.retained_bytes()?)?.checked_add(self.upload_key_recovery.retained_bytes()?)
+            .checked_add(self.backup.retained_bytes()?)?.checked_add(self.upload_key.retained_bytes()?)?.checked_add(self.upload_key_recovery.retained_bytes()?)?.checked_add(self.apple_profile.retained_bytes()?)?.checked_add(self.apple_distribution_key.retained_bytes()?)
     }
 }
 impl Work {
+    pub(super) fn attach_apple_distribution_key(&mut self, destination: Arc<AppleDistributionKeyDestination>) -> Result<(),Reason> { self.apple_distribution_key.attach_destination(destination) }
+    pub(super) fn attach_apple_distribution_key_loan(&mut self, loan: Arc<AppleDistributionKeyLoan>) -> Result<(),Reason> { self.apple_distribution_key.attach_loan(loan) }
+    pub(super) fn apple_distribution_key_retained_bytes(&self) -> Option<usize> { self.apple_distribution_key.retained_bytes() }
+    pub(super) fn attach_apple_profile(&mut self, destination: Arc<AppleProfileDestination>) -> Result<(),Reason> { self.apple_profile.attach(destination) }
+    pub(super) fn apple_profile_retained_bytes(&self) -> Option<usize> { self.apple_profile.retained_bytes() }
     pub(super) fn upload_key_retained_bytes(&self) -> Option<usize> { self.upload_key.retained_bytes()?.checked_add(self.upload_key_recovery.retained_bytes()?) }
     pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() || self.upload_key_recovery.blocks_reuse() }
     pub(super) fn store_ref(&self) -> Option<&Arc<Mutex<store::StoreBook>>> { self.store.as_ref() }
     pub(super) fn key_ref(&self) -> Option<&Arc<crypto::VaultKey>> { self.key.as_ref() }
     pub(super) fn backup_retained_bytes(&self) -> Option<usize> { self.backup.retained_bytes() }
     pub(super) fn backup_blocks_reuse(&self) -> bool { self.backup.blocks_reuse() }
+    pub(super) fn apple_profile_blocks_reuse(&self) -> bool { self.apple_profile.blocks_reuse() }
+    pub(super) fn apple_distribution_key_blocks_reuse(&self) -> bool { self.apple_distribution_key.blocks_reuse() }
+    pub(super) fn apple_distribution_key_work(&self) -> &distribution_key::Work { &self.apple_distribution_key }
+    pub(super) fn apple_profile_source(&self) -> Option<&Arc<AppleP12Loan>> { self.apple_profile.destination().map(|held| held.census_source()) }
     pub(super) fn settled(&self) -> bool {
         self.backup.native_settled() && self.upload_key.native_settled()
             && self.store.as_ref().is_none_or(|store| store.try_lock().is_ok_and(|book| book.not_started() || book.settled() || !self.release && book.operation_quiescent()))
     }
     fn store(&self) -> Result<Arc<Mutex<store::StoreBook>>, Reason> { self.store.clone().ok_or(Reason::VaultCorrupt) }
     fn key(&self) -> Result<Arc<crypto::VaultKey>, Reason> { self.key.clone().ok_or(Reason::VaultKeyMissing) }
-    fn fail(&mut self, reason: Reason, at: Instant) { if self.first.is_none() { self.first = Some((reason, at)); } }
+    fn fail(&mut self, reason: Reason, at: Instant) {
+        if self.first.is_none() || self.apple_clock.is_some() && self.first.is_some_and(|(_, earlier)| at < earlier) { self.first = Some((reason, at)); }
+        if let Some(clock)=&self.apple_clock { clock.observe_failure_at(reason,at); }
+    }
 }
 #[derive(Default)]
 pub(super) struct SlotData {
@@ -197,6 +237,7 @@ pub(super) struct SlotData {
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
     upload_key_new_published: bool,
+    apple_profile_new_published: bool,
     upload_key_context: Option<(u32, StoredRef)>,
     upload_key_recovery: Option<Arc<upload_key_recovery::Completion>>,
     // Nonsecret current-display stamp; the ordinary private working reference
@@ -217,7 +258,7 @@ pub(super) fn upload_key_setup_pending(state: &DocumentState) -> bool {
 }
 pub(super) fn backup_pending(state: &DocumentState) -> bool {
     state.slot.as_ref().is_some_and(|slot| slot.owner.vault.try_lock()
-        .map_or(true, |work| work.backup_blocks_reuse() || work.upload_key_blocks_reuse()))
+        .map_or(true, |work| work.backup_blocks_reuse() || work.upload_key_blocks_reuse() || work.apple_profile_blocks_reuse() || work.apple_distribution_key_blocks_reuse()))
 }
 pub(super) fn request_backup_discard(slot: &mut Slot) {
     if matches!(slot.operation, Operation::PrepareBackupExport | Operation::ImportBackup) {
@@ -260,9 +301,10 @@ pub(super) fn summaries(state: &DocumentState) -> Vec<RecordStatus> {
     if vault.revoked || vault.key.is_none() || !matches!(vault.state, State::Unlocked | State::Mutating | State::Interrupted) { return Vec::new(); }
     vault.rows.iter().map(|row| {
         let key = row.key();
-        let assigned = vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
+        let pending_key = row.authenticated.descriptor.kind == Kind::AppleDistributionKey;
+        let assigned = !pending_key && vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
             && assignment_available(state, assignment));
-        let assessed = vault.writable() && record_assessed(state, &key);
+        let assessed = !pending_key && vault.writable() && record_assessed(state, &key);
         RecordStatus { record_id: key.id, revision: key.revision, kind: row.authenticated.descriptor.kind,
             availability: if row.mutation_pending { "mutation-pending" } else if assigned { "assigned" } else { "unassigned" },
             storage: "encrypted", label: row.authenticated.descriptor.label.clone(), payload_state: if assessed { "assessed" } else { "not-checked" } }
@@ -288,7 +330,7 @@ impl Staged {
             Self::Unlocked { rows, .. } => rows_bytes(rows)?,
             Self::DeletedPreview { tokens, .. } => token_bytes(tokens)?,
             Self::Mutated { row, .. } => row.as_ref().map_or(Some(0), |row| row.authenticated.descriptor.retained_bytes().ok())?,
-            Self::BackupPending { .. } | Self::BackupDelivered { .. } => 0,
+            Self::BackupPending { .. } | Self::BackupDelivered { .. } | Self::AppleDistributionKeyLoaded { .. } => 0,
             Self::UploadKeyRecovered(_) => std::mem::size_of::<upload_key_recovery::Completion>() + 2 * std::mem::size_of::<usize>(),
             Self::Released => 0,
         };
@@ -304,6 +346,11 @@ fn token_bytes(tokens: &TokenBatch) -> Option<usize> {
 /// The caller temporarily removed its slot; compare that exact original rather
 /// than trying to recover authority through a status projection/current number.
 pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slot: &mut Slot, staged: Staged) {
+    if slot.operation == Operation::PrepareAppleDistributionKey {
+        // Fixed returned-key preservation; ordinary mutations below retain
+        // their original unconditional STOP/publication refusal.
+        distribution_key::key_store::publish(state, slot, staged); return;
+    }
     let valid = (|| -> Result<(), Reason> {
         if state.stopping || state.unknown || state.lock_pending || state.quit_pending || !state.lifetime.original_bound()
             || slot.cleanup_end.is_some() || slot.reason != Reason::None || slot.owner.interrupted() {
@@ -373,6 +420,13 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                             return Err(Reason::SourceChanged);
                         }
                     },
+                    Operation::AppleProfileSetup => {
+                        let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
+                        if !document.context_matches(state, context).map_err(|error| error.reason)?
+                            || !apple_profile::new_publication(&work, state, session, slot, *record, row.as_ref()) {
+                            return Err(Reason::SourceChanged);
+                        }
+                    },
                     Operation::GenerateUploadKey => {
                         let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
                         if !document.context_matches(state, context).map_err(|error| error.reason)?
@@ -401,6 +455,11 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             },
             Staged::UploadKeyRecovered(completion) => {
                 if !upload_key_recovery::publish_allowed(document, state, slot, &work, completion) { return Err(Reason::SourceChanged); }
+            },
+            Staged::AppleDistributionKeyLoaded { generation: checked } => {
+                if *checked != generation || !distribution_key::load_publication(state, session, slot, &work, *checked) {
+                    return Err(Reason::SourceChanged);
+                }
             },
             Staged::Released => return Err(Reason::UserCancelled), // Cleanup cannot publish work authority.
         }
@@ -472,6 +531,17 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                     },
                 }
             }
+            if slot.operation == Operation::AppleProfileSetup {
+                let published = (|| {
+                    let work = slot.owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?;
+                    apple_profile::mark_published(&work)
+                })();
+                if let Err(reason) = published {
+                    slot.staged = Some(super::Staged::Vault(Staged::Mutated { record, row, generation }));
+                    slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, Instant::now()); return;
+                }
+                slot.vault.apple_profile_new_published = true;
+            }
             // No assessment, Bind, replacement, or automatic backup follows.
             publish_saved_revision(session, slot, record, row, generation);
         },
@@ -505,6 +575,13 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
             slot.selection = None; slot.preview = None; slot.assessment = None;
             slot.assessment_context_revision = None; slot.review_end = None; slot.discard = true;
+        },
+        Staged::AppleDistributionKeyLoaded { .. } => {
+            // Private same-original loan only: no scalar fields, assessment,
+            // Bind, CSR or certificate permission enters renderer records.
+            slot.phase = Phase::Selected; slot.settlement = Settlement::Pending;
+            slot.selection = None; slot.preview = None; slot.assessment = None;
+            slot.assessment_context_revision = None; slot.review_end = None; slot.discard = false;
         },
         Staged::Released => unreachable!("cleanup has no publication authority"),
     }
@@ -643,7 +720,7 @@ pub(super) fn completed_context_receipt(state: &DocumentState) -> bool {
         && slot.owner.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
         && slot.owner.cleanup_end.try_lock().is_ok_and(|end| end.is_none())
         && slot.owner.vault.try_lock().is_ok_and(|work| work.first.is_none() && !work.release && work.release_end.is_none() && work.key.is_none()
-            && !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse()
+            && !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_distribution_key_blocks_reuse()
             && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 fn request_release(state: &mut DocumentState, at: Instant) -> bool {
@@ -652,13 +729,19 @@ fn request_release(state: &mut DocumentState, at: Instant) -> bool {
     release_lease(session, affected, at)
 }
 fn release_lease(session: &mut Session, affected: Option<&Slot>, at: Instant) -> bool {
+    let apple_clock = affected.and_then(|slot| slot.owner.apple_profile_clock.get()).filter(|clock|!clock.completed());
     let generation_clock = affected.and_then(|slot| slot.owner.upload_key_clock.get()).filter(|clock| clock.endpoint().is_some());
     let mut end = affected.map_or(at + CLEANUP, |slot| slot.cleanup_end.unwrap_or_else(||
         generation_clock.map_or_else(|| first_cleanup_end(at, slot.owner.endpoint(), slot.review_end), |clock| clock.cleanup_end(at))));
+    if let Some(clock)=apple_clock {
+        clock.observe_failure_at(Reason::UserCancelled,at); end=end.min(clock.cleanup_end());
+    }
     // Only the generation clock uses its original ten-second/hard cap. Every
     // older role keeps its existing first-failure cleanup interval unchanged.
     if let Ok(book) = session.store.try_lock() { if let Some(first) = book.problem_at() {
-        end = end.min(generation_clock.map_or(first + CLEANUP, |clock| clock.observe_failure(first)));
+        end = end.min(if let Some(clock)=apple_clock {
+            clock.observe_failure_at(Reason::VaultInterrupted,first); clock.cleanup_end()
+        } else { generation_clock.map_or(first + CLEANUP, |clock| clock.observe_failure(first)) });
     } }
     let changed = !session.revoked || session.release_end.is_none_or(|old| end < old);
     session.revoked = true; session.release_end = Some(session.release_end.map_or(end, |old| old.min(end)));
@@ -672,11 +755,13 @@ fn release_lease(session: &mut Session, affected: Option<&Slot>, at: Instant) ->
 }
 pub(super) fn revoke_all(state: &mut DocumentState) { request_release(state, Instant::now()); }
 pub(super) fn observe_stop(state: &mut DocumentState, now: Instant) -> bool {
+    if state.slot.as_ref().is_some_and(|slot| distribution_key::automatic_release_deferred(state, slot)) { return false; }
     let affected = state.vault.as_ref().is_some_and(|session| state.slot.as_ref().is_some_and(|slot|
         owns(slot, session) && (slot.cleanup_end.is_some() || slot.owner.stopped())));
     if affected || state.unknown || state.stopping || state.lock_pending || !state.lifetime.original_bound() { request_release(state, now) } else { false }
 }
 pub(super) fn observe_detached_stop(state: &mut DocumentState, slot: &Slot, now: Instant) {
+    if distribution_key::automatic_release_deferred(state, slot) { return; }
     // Reconciliation temporarily takes the SAME original slot out of state.
     // Reattach its clock before releasing the document gate; status projection
     // or a failed join never substitutes an unrelated observer-now deadline.
@@ -706,7 +791,7 @@ pub(super) fn late_cleanup_install(state: &DocumentState, slot: &Slot) -> bool {
         && work.key.is_none() && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 pub(super) fn preserve_operation(slot: &Slot) -> bool {
-    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey)
+    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
 }
 pub(super) fn controls_released(owner: &OriginalWork) -> bool {
     owner.control_resources_settled() && owner.retired.load(Ordering::SeqCst)
@@ -715,13 +800,21 @@ pub(super) fn controls_released(owner: &OriginalWork) -> bool {
 pub(super) fn retirement_ready(state: &DocumentState, slot: &Slot) -> bool {
     release_pending(state) && operation_attached(slot) && controls_released(&slot.owner)
 }
+pub(super) fn apple_profile_retirement_deferred(slot: &Slot) -> bool {
+    if slot.operation != Operation::AppleProfileSetup { return false; }
+    let retained = slot.owner.vault.try_lock().map_or(true, |work| work.apple_profile.blocks_reuse());
+    retained && !apple_profile::retirement_ready(&slot.owner)
+}
 pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Retired {
+    if super::apple_profile::retirement_deferred(slot) || super::apple_key::retirement_deferred(slot) || apple_profile_retirement_deferred(slot) || distribution_key::retirement_deferred(slot) { return Retired::default(); }
     let closing = release_pending(state);
     // Check actual original joins/native custody before taking the Work lock.
     // A generic failed/Idle slot is not an explicit private-output discard.
     let retire_backup = (slot.vault.backup_discard || slot.vault.backup_new_published || slot.vault.backup_export_published)
         && backup_native::retirement_ready(&slot.owner);
     let retire_upload_key = slot.vault.upload_key_new_published && upload_key::retirement_ready(&slot.owner);
+    let retire_apple_profile = apple_profile::retirement_ready(&slot.owner);
+    let retire_apple_key = distribution_key::retirement_ready(&slot.owner);
     let retire_cancelled_upload_key = upload_key::cancellation::retirement_ready(state, slot);
     let retire_upload_key_recovery = upload_key_recovery::retirement_ready(state, slot);
     let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
@@ -734,6 +827,8 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
     slot.vault.reference = None;
     if let Ok(mut work) = slot.owner.vault.try_lock() {
         retired.keys[0] = work.key.take();
+        if retire_apple_profile { retired.apple_profile = work.apple_profile.take_for_retirement(); }
+        if retire_apple_key { retired.apple_distribution_key = work.apple_distribution_key.take_for_retirement(); }
         if retire_backup { retired.backup = std::mem::take(&mut work.backup); }
         if retire_upload_key { retired.upload_key = work.upload_key.take_for_retirement(); }
         else if retire_cancelled_upload_key { retired.upload_key = work.upload_key.take_cancelled_retirement(); }
@@ -757,7 +852,7 @@ pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut
         if !retired.rows.is_empty() { session.rows = std::mem::take(&mut retired.rows); }
         if retired.keys[1].is_some() { session.key = retired.keys[1].take(); }
     }
-    if retired.keys[0].is_some() || !retired.backup.empty() || !retired.upload_key.empty() || !retired.upload_key_recovery.empty() {
+    if retired.keys[0].is_some() || !retired.backup.empty() || !retired.upload_key.empty() || !retired.upload_key_recovery.empty() || !retired.apple_profile.empty() || !retired.apple_distribution_key.empty() {
         // All original executions were joined before this retirement attempt.
         // Preserve opaque key custody even after a poisoned bookkeeping mutex;
         // the caller records Unknown, never treats this recovery as authority.
@@ -765,6 +860,8 @@ pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut
         if retired.keys[0].is_some() { work.key = retired.keys[0].take(); }
         if !retired.backup.empty() { work.backup = std::mem::take(&mut retired.backup); }
         if !retired.upload_key.empty() { work.upload_key = std::mem::take(&mut retired.upload_key); }
+        if !retired.apple_profile.empty() { work.apple_profile = std::mem::take(&mut retired.apple_profile); }
+        if !retired.apple_distribution_key.empty() { work.apple_distribution_key = std::mem::take(&mut retired.apple_distribution_key); }
         if !retired.upload_key_recovery.empty() { work.upload_key_recovery = std::mem::take(&mut retired.upload_key_recovery); }
     }
 }
@@ -799,7 +896,8 @@ fn header_identity(observation: &store::Observation) -> Result<Option<format::Id
 fn attach(owner: &Arc<OriginalWork>, session: &Session, key: bool, release: bool) -> Result<(), AssetError> {
     let mut work = owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
     if work.store.is_some() { return Err(AssetError::new(Reason::CleanupUnknown)); }
-    work.store = Some(session.store.clone()); work.key = if key { session.key.clone() } else { None }; work.release = release; Ok(())
+    work.store = Some(session.store.clone()); work.key = if key { session.key.clone() } else { None }; work.release = release;
+    work.apple_clock=owner.apple_profile_clock.get().cloned(); Ok(())
 }
 
 #[cfg(feature = "desktop-shell")]
@@ -835,23 +933,28 @@ pub(super) enum Child {
     RecoveryRoot { identity: format::Identity, roster: ProjectRoster },
     Backup(backup_native::Request),
     GenerateUploadKey(upload_key::SaveRequest),
+    SaveAppleProfile(apple_profile::SaveRequest),
+    CheckAppleDistributionKeyInventory(Arc<AppleDistributionKeyInventory>, AppleKeyInventoryPoint),
+    LoadAppleDistributionKey(distribution_key::LoadRequest),
+    SaveAppleDistributionKey(distribution_key::key_store::SaveRequest),
+    CheckAppleProfile(Arc<profile_sources::AppleProfileSources>, profile_sources::CheckPoint),
     Release,
 }
 impl Child {
-    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_)) }
+    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_) | Self::SaveAppleProfile(_) | Self::LoadAppleDistributionKey(_) | Self::SaveAppleDistributionKey(_)) }
     pub(super) fn cleanup(&self) -> bool { matches!(self, Self::Release) }
 }
 pub(super) enum ChildResult {
     Opened(store::Observation), Prepared { root: store::RootWitness, identity: format::Identity, tokens: TokenBatch },
     Reserved(format::Identity), Header, Listed(Vec<Descriptor>), Loaded { payload: Arc<Payload>, reference: StoredRef },
-    Delete { reference: StoredRef, tokens: TokenBatch }, Mutated { record: format::Id, row: Option<Descriptor> }, Checked, BackupPrepared, BackupPublished, Released,
+    Delete { reference: StoredRef, tokens: TokenBatch }, Mutated { record: format::Id, row: Option<Descriptor> }, Checked, AppleDistributionKeyLoaded, BackupPrepared, BackupPublished, Released,
 }
 pub(super) enum Staged {
     Opened { observation: store::Observation, generation: u32 },
     Prepared { root: store::RootWitness, identity: format::Identity, tokens: TokenBatch, generation: u32 },
     Unlocked { rows: Vec<Descriptor>, initialized_header: Option<[u8; format::HEADER_BYTES]> },
     DeletedPreview { reference: StoredRef, tokens: TokenBatch },
-    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, BackupDelivered { generation: u32 }, UploadKeyRecovered(Arc<upload_key_recovery::Completion>), Released,
+    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, BackupDelivered { generation: u32 }, UploadKeyRecovered(Arc<upload_key_recovery::Completion>), AppleDistributionKeyLoaded { generation: u32 }, Released,
 }
 #[cfg(feature = "desktop-shell")]
 pub(super) enum Job {
@@ -862,7 +965,7 @@ pub(super) enum Job {
     Load { reference: StoredRef, roster: ProjectRoster, context: Arc<NativeContext>, allowance: usize },
     Delete { reference: StoredRef, roster: ProjectRoster, allowance: usize },
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
-    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), GenerateUploadKey(upload_key::Request), RecoverUploadKey(upload_key_recovery::Request), Release,
+    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), GenerateUploadKey(upload_key::Request), SaveAppleProfile(apple_profile::SaveRequest), LoadAppleDistributionKey(distribution_key::LoadRequest), SaveAppleDistributionKey(distribution_key::key_store::SaveRequest), RecoverUploadKey(upload_key_recovery::Request), Release,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     BackupPick { app: tauri::AppHandle, purpose: backup_selection::Purpose },
 }
@@ -1041,6 +1144,11 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
         // The fixed child remembers only its own actual NEW mutation, never a
         // previous StoreBook effect after a pre-seal/capture failure.
         Child::GenerateUploadKey(request) => upload_key::execute(owner, &mut book, request),
+        Child::SaveAppleProfile(request) => apple_profile::execute(owner, &mut book, request),
+        Child::CheckAppleDistributionKeyInventory(inventory, point) => distribution_key::execute_inventory(owner, &mut book, &inventory, point),
+        Child::LoadAppleDistributionKey(request) => distribution_key::execute_load(owner, &mut book, request),
+        Child::SaveAppleDistributionKey(request) => distribution_key::key_store::execute(owner, &mut book, request),
+        Child::CheckAppleProfile(sources, point) => profile_sources::execute(owner, &mut book, &sources, point),
         Child::Release => {
             let settled = book.release(&mut || cleanup_expired(owner));
             let mut work = owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?;
@@ -1108,9 +1216,12 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
     Ok(())
 }
 pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
-    let Some((first, outcome, backup_recovery, upload_key_recovery)) = owner.vault.try_lock().ok()
-        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), upload_key::cancellation::report_recovery(&work) || work.upload_key_recovery.unknown())) else { return; };
+    let Some((first, outcome, backup_recovery, upload_key_recovery, apple_profile_recovery, apple_key_retained)) = owner.vault.try_lock().ok()
+        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), upload_key::cancellation::report_recovery(&work) || work.upload_key_recovery.unknown(), work.apple_profile.blocks_reuse() && work.first.is_some(), work.apple_distribution_key.blocks_reuse())) else { return; };
     let mut state = document.lock();
+    let preserve_key = state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)
+        && distribution_key::automatic_release_deferred(&state, slot));
+    let key_cleanup_known = apple_key_retained && distribution_key::known_cleanup_report(owner);
     let mut changed = false;
     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
         if slot.vault.outcome != outcome { slot.vault.outcome = outcome; changed = true; }
@@ -1119,7 +1230,10 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         let operation = slot.operation;
         let backup_recovery = backup_recovery && matches!(operation, Operation::PrepareBackupExport | Operation::ImportBackup);
         let upload_key_recovery = upload_key_recovery && matches!(operation, Operation::GenerateUploadKey | Operation::RecoverUploadKey);
-        if backup_recovery || upload_key_recovery {
+        let apple_profile_recovery = apple_profile_recovery && operation == Operation::AppleProfileSetup;
+        let apple_key_recovery = apple_key_retained && !preserve_key && !key_cleanup_known
+            && matches!(operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey);
+        if backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery {
             // Unknown pair effects are not StoreBook mutation outcomes and do
             // not overwrite the first failure. They still prevent a misleading
             // normal failure/retry/closed projection over retained private data.
@@ -1127,8 +1241,8 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         }
         if let Some(vault) = &mut state.vault {
             vault.reason = reason;
-            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey) { vault.state = State::Interrupted; vault.read_only = true; }
-            if reason == Reason::CleanupUnknown || backup_recovery || upload_key_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
+            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey) && !preserve_key { vault.state = State::Interrupted; vault.read_only = true; }
+            if reason == Reason::CleanupUnknown || backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
         }
         invalidate_all(&mut state); document.bump(&mut state);
     }
@@ -1985,7 +2099,7 @@ pub(super) async fn after_job(document: &DocumentBinding, owner: &Arc<OriginalWo
         let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && operation_attached(slot)) else { return; };
         if let super::Staged::Refused(reason) = staged { if slot.cleanup_end.is_none() { slot.stop(*reason, Instant::now()); } }
         observe_stop(&mut state, Instant::now());
-        let pending = release_pending(&state);
+        let pending = release_pending(&state) && !super::apple_profile::release_deferred(owner) && !super::apple_key::release_deferred(owner);
         if pending { document.bump(&mut state); }
         pending
     };
@@ -2011,6 +2125,7 @@ pub(super) fn start_cleanup(document: &DocumentBinding, state: &mut DocumentStat
     // operation. That retired operation is never relabelled or granted a new
     // deadline; a first explicit lease revocation uses this same single slot.
     let attached = state.slot.as_ref().is_some_and(|slot| owns(slot, session));
+    if state.slot.as_ref().is_some_and(|slot| super::apple_profile::release_deferred(&slot.owner) || super::apple_key::release_deferred(&slot.owner)) { return Ok(None); }
     if !attached {
         if state.slot.as_ref().is_some_and(|slot| !unrelated_retired(session, slot)) { return Ok(None); }
         let storage = session.store.clone(); let generation = session.registry_generation;
@@ -2027,12 +2142,21 @@ pub(super) fn start_cleanup(document: &DocumentBinding, state: &mut DocumentStat
         let start = document.install(state, slot, super::Job::Vault(Job::Release))?;
         return Ok(Some(start));
     }
+    // Only the exact profile destination with a genuine parent no-more-work
+    // proof may retain private Arcs during this SAME cleanup-only continuation.
+    // It is not a Store-closed receipt or permission for another save/read.
+    let retain_profile = state.slot.as_ref().is_some_and(|slot| apple_profile::release_retained_private_ready(state, slot)
+        || super::apple_profile::source_release_ready(slot));
+    let retain_key = state.slot.as_ref().is_some_and(|slot| distribution_key::release_retained_private_ready(state, slot) || super::apple_key::source_release_ready(slot));
     let slot = state.slot.as_mut().ok_or_else(AssetError::invalid)?;
-    if !controls_released(&slot.owner) || slot.candidate.is_some() || slot.staged.is_some() || slot.retired_payload.is_some()
-        || slot.vault.loaded.is_some() || slot.vault.previous_bound.is_some() || slot.context.is_some() { return Ok(None); }
+    if !controls_released(&slot.owner) || slot.candidate.is_some()
+        || !(super::apple_profile::cleanup_staged_allowed(slot, retain_profile)
+            || distribution_key::cleanup_staged_allowed(slot, retain_key)
+            || super::apple_key::cleanup_staged_allowed(slot, retain_key)) || slot.retired_payload.is_some()
+        || slot.vault.loaded.is_some() || slot.vault.previous_bound.is_some() || slot.context.is_some() && !retain_profile && !retain_key { return Ok(None); }
     let mut work = slot.owner.vault.try_lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
     if work.release_claimed { return Ok(None); }
-    if work.key.is_some() || state.vault.as_ref().is_some_and(|session| session.key.is_some() || !session.rows.is_empty() || session.bound.iter().any(Option::is_some)) {
+    if !retain_profile && !retain_key && (work.key.is_some() || state.vault.as_ref().is_some_and(|session| session.key.is_some() || !session.rows.is_empty() || session.bound.iter().any(Option::is_some))) {
         return Ok(None);
     }
     let mut coordinator = slot.owner.coordinator.try_lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
@@ -2138,6 +2262,9 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
         },
         Job::Backup(request) => backup_native::run(document, owner, request).await,
         Job::GenerateUploadKey(request) => upload_key::run(document, owner, request).await,
+        Job::SaveAppleProfile(request) => apple_profile::run(document, owner, request).await,
+        Job::LoadAppleDistributionKey(request) => distribution_key::run_load(document, owner, request).await,
+        Job::SaveAppleDistributionKey(request) => distribution_key::key_store::run(document, owner, request).await,
         Job::RecoverUploadKey(request) => upload_key_recovery::run(document, owner, request).await,
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         Job::BackupPick { app, purpose } => backup_selection::run_selected(document, owner, &app, purpose).await,
@@ -2243,6 +2370,9 @@ impl DocumentBinding {
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
+        // A pending signing key is recovered by its original intent owner,
+        // never by ordinary assessment/Bind or generic removal.
+        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let roster = self.vault_roster(state)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
         let mut slot = self.vault_owner(state, Operation::Prepare, Some(context.clone()), Some(key), Some(Instant::now() + REVIEW), true)?;
@@ -2259,6 +2389,9 @@ impl DocumentBinding {
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
+        // A pending signing key is recovered by its original intent owner,
+        // never by ordinary assessment/Bind or generic removal.
+        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let roster = self.vault_roster(&mut state)?;
         let mut slot = self.vault_owner(&mut state, Operation::PrepareDelete, None, Some(key.clone()), Some(Instant::now() + REVIEW), true)?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference); slot.vault.generation = Some(roster.generation);

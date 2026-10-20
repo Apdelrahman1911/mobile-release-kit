@@ -25,6 +25,7 @@ from ..errors import ConfigurationError
 from ..init_transaction import is_state_name
 from ._json import bounded_json_text
 from ._setup_analysis import analyze_setup
+from ._project_scripts import conventional_script, process_access_identity, project_script_hints
 from .contracts import ApiError, ConfigObservation, Issue, ScanCounts, SnapshotResult, assurance, issue
 
 MAX_DEPTH = 12
@@ -173,6 +174,7 @@ def _close_handles(handles: list[int], *, budget=None) -> None:
 @dataclass
 class _Inventory:
     sources: dict[str, str] = field(default_factory=dict)
+    script_modes: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     directories: set[str] = field(default_factory=set)
     issues: list[Issue] = field(default_factory=list)
     counts: ScanCounts = field(default_factory=lambda: {
@@ -587,7 +589,7 @@ def _config(root: int, relative: str, inventory: _Inventory) -> ConfigObservatio
 
 def _source_candidate(relative: str) -> bool:
     path = PurePosixPath(relative)
-    return (path.name in _SOURCE_NAMES or relative == "gradle/libs.versions.toml"
+    return (conventional_script(relative) or path.name in _SOURCE_NAMES or relative == "gradle/libs.versions.toml"
             or path.suffix in {".xcconfig", ".xcscheme"}
             or (path.suffix == ".properties" and "version" in path.name.lower()))
 
@@ -642,7 +644,17 @@ def _walk(descriptor: int, parts: tuple[str, ...], inventory: _Inventory, config
                         finally:
                             _close_handles([child])
                     elif relative != config_path and _source_candidate(relative):
-                        inventory.sources[relative] = _read_file(descriptor, entry.name, relative, inventory)
+                        if conventional_script(relative):
+                            receipts: list[tuple[int, str, tuple[int, ...] | None]] = []
+                            text = _read_file(descriptor, entry.name, relative, inventory, receipts=receipts)
+                            # The original reader has rechecked AND closed before
+                            # these mode hints can be retained. No second probe.
+                            inventory.sources[relative] = text
+                            original = receipts[0][2]
+                            if original is not None:
+                                inventory.script_modes[relative] = (original[2], original[7], original[8])
+                        else:
+                            inventory.sources[relative] = _read_file(descriptor, entry.name, relative, inventory)
                 except _ReadProblem as error:
                     inventory.note(error.code, error.message)
                 except OSError:
@@ -712,6 +724,9 @@ def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Invento
                                  partial=inventory.partial)
     except ApiError:
         pass
+    scripts = project_script_hints(inventory.sources, inventory.script_modes,
+                                   bounded if isinstance(bounded, dict) else {},
+                                   partial=inventory.partial, identity=process_access_identity()) if inventory.root_settled else None
     # Cooperative parsing over finite input may use the remaining scan allowance.
     inventory.tick()
     result: SnapshotResult = {
@@ -724,4 +739,6 @@ def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Invento
     }
     if analysis is not None and analysis["discoveryPartial"] == inventory.partial:
         result["setupAnalysis"] = analysis
+    if scripts is not None and scripts["sourcePartial"] == inventory.partial:
+        result["scriptDiscovery"] = scripts
     return result

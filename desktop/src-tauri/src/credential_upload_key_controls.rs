@@ -24,12 +24,23 @@ struct Admission {
 }
 #[cfg(feature = "desktop-shell")]
 #[derive(Clone,Copy)]
-pub(in crate::asset_session) enum SelectedAction { Prepare, Create }
+pub(in crate::asset_session) enum SelectedAction { Prepare, Create, Recover }
 impl Admission {
     fn qualified(&self, document: &DocumentBinding) -> bool {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if let Some(control)=&self.installed {return control.permits(&document.inner.session_identity);}
         available(document)
+    }
+    fn recovery_action(&self, action: recovery::Action) -> bool {
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if let Some(control) = &self.installed {
+            use crate::shell::installed_observation::vault::upload_key::Case;
+            return matches!((control.upload.case(control.case), action),
+                (Some(Case::StopBeforeGo), recovery::Action::AcknowledgeUnstarted)
+                | (Some(Case::StopAfterNew), recovery::Action::RememberBound));
+        }
+        let _ = action;
+        true
     }
     fn same(&self, other: &Self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -47,7 +58,9 @@ impl Qualification {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             Self::Installed(selection) => {
                 use crate::shell::installed_observation::vault::upload_key::Action;
-                if !matches!((action,selection.action()),(SelectedAction::Prepare,Action::Prepare))
+                if !matches!((action,selection.action()),
+                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare | Action::BoundPrepare)
+                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted | Action::RememberBound))
                     && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
                 let control=document.installed_upload_consume(selection,path)?;
                 Ok(Admission{installed:Some(control)})

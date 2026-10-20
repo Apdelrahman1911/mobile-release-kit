@@ -393,3 +393,36 @@ test('unobserved picked partition cannot create download consent and stale selec
   next.known(); await next.controller.reviewDownload();
   assert.equal(next.calls.length, 2); assert.equal(next.state.inspection, null); assert.equal(next.state.consent, null);
 });
+
+
+test('assembled result waits for original invoke and fresh status; wrong copied half cannot become current', async (t) => {
+  const missing = ['sdk-build-tools'];
+  const assembled = () => ({ ...subsetStaged(missing), schemaVersion: 2, copiedSourceComponents: ['sdk-platform'],
+    groups: [{ group: 'sdk', components: ['sdk-platform', 'sdk-build-tools'], allRequiredComponentsStaged: true, next: 'choose-native-source' }] });
+  const h = harness(t), op = await subsetReviewed(h, missing);
+  h.controller.setAcknowledged(ACQUIRE, ACQUIRE_OWNER, true);
+  const flow = h.controller.download(ACQUIRE, ACQUIRE_OWNER); await flush(); const start = h.calls.at(-1);
+  const done = terminal(op); done.result = assembled(); h.emit(status(6, done)); await flush();
+  assert.equal(h.state.requestPending, true); assert.notEqual(h.state.presentation, 'current-staged');
+  const read = deferred(); h.readQueue.push(read); start.resolve(status(5, running(op))); await flush();
+  assert.notEqual(h.state.presentation, 'current-staged'); read.resolve(status(6, done)); await flow;
+  assert.equal(h.state.presentation, 'current-staged'); assert.equal(h.state.issue, null);
+  h.known(); assert.notEqual(h.state.presentation, 'current-staged');
+  const other = harness(t), wrongOp = await subsetReviewed(other, missing); await downloadStarted(other, wrongOp);
+  const wrong = terminal(wrongOp); wrong.result = assembled(); wrong.result.copiedSourceComponents = ['sdk-build-tools'];
+  other.emit(status(6, wrong)); await flush();
+  assert.equal(other.state.issue, 'protocol'); assert.equal(other.state.canCancel, true);
+  assert.notEqual(other.state.presentation, 'current-staged');
+});
+
+test('native source refusal keeps incompatible, unreadable and stale distinct without a download review', async (t) => {
+  for (const reason of ['existing-tools-incompatible','existing-tools-unreadable','stale']) {
+    const h=harness(t); await h.ready;
+    const flow=h.controller.inspect(), prepare=h.calls.at(-1), op=operation(prepare.request);
+    h.reply(prepare,status(2,op)); await flush();
+    h.reply(h.calls.at(-1),status(3,{...terminal(op,'refused'),reason})); await flow;
+    assert.equal(h.state.status.operation.reason,reason); assert.equal(h.state.inspection,null);
+    await h.controller.reviewDownload(); assert.equal(h.calls.filter((c)=>c.request.action==='acquire').length,0);
+    assert.equal(h.state.consent,null);
+  }
+});

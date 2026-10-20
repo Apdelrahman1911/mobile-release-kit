@@ -58,6 +58,9 @@ class StoreRuntimeContext:
         self._invocation.require(root=self._invocation.root, cancellation=self._invocation.cancellation)
         self._home._owner()
         self._home._check()
+        self._check_interpreters()
+
+    def _check_interpreters(self) -> None:
         for name in ("ruby", "bundle"):
             path = self.runtime_root / "store/bin" / name
             if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
@@ -80,10 +83,17 @@ class StoreRuntimeContext:
     @contextmanager
     def _checked(self):
         self.check()
+        primary = None
         try:
             yield
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            self.check()
+            from ._desktop_apple_key_control import returned_runtime_check
+            source = getattr(self._invocation.cancellation, "_apple_provisioning_source", None)
+            if not returned_runtime_check(source, self, primary):
+                self.check()
 
     def checked(self):
         # Reuse existing first-primary/cancellation arbitration; this wrapper

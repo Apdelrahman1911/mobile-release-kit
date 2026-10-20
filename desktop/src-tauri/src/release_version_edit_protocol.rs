@@ -243,7 +243,7 @@ impl TerminalReply {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PrivateOpen { root: String, registered_identity: RegisteredIdentity }
+struct PrivateOpen { root: String, registered_identity: RegisteredIdentity, #[serde(default)] reserved_version:Option<Value> }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PrivatePrepare { revision: String, expected_baseline: Baseline, intent: Intent, values: Values }
@@ -253,7 +253,8 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     let legal = match (seq, op) {
         (0, "open") | (1, "prepare") | (2, "apply") if params["intent"] == "recover" => recovery::private_request(seq, op, &params),
         (0, "open") => PrivateOpen::deserialize(&params).is_ok_and(|p| p.root.len() > 1 && p.root.len() <= 4096
-            && !p.root.contains('\0') && p.registered_identity.valid()),
+            && !p.root.contains('\0') && p.registered_identity.valid()
+            && p.reserved_version.as_ref().is_none_or(|v|v["schemaVersion"]==1&&bounded(v,12*1024).is_ok())),
         (1, "prepare") => PrivatePrepare::deserialize(&params).is_ok_and(|p| token(&p.revision)
             && p.expected_baseline.valid() && p.intent == p.expected_baseline.saved_version.intent() && p.values.proposed()),
         (2, "apply") => keys(&params, &["planToken"]) && params["planToken"].as_str().is_some_and(token),

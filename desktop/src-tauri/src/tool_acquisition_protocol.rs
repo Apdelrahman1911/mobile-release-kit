@@ -27,6 +27,10 @@ pub(crate) const CA_LIMIT: usize = 512 * 1024;
 pub(crate) const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
 #[path = "tool_acquisition_components.rs"]
 pub(crate) mod components;
+#[path = "tool_acquisition_sdk.rs"]
+pub(crate) mod sdk;
+#[path = "tool_source_discovery.rs"]
+pub(crate) mod discovery;
 use components::Partition;
 pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
 pub(crate) const FIXED: [&str; 7] = [
@@ -610,6 +614,8 @@ pub(crate) enum Reason {
     Unsupported,
     Stale,
     CensusIncomplete,
+    ExistingToolsIncompatible,
+    ExistingToolsUnreadable,
     RecoveryRequired,
     CacheConflict,
     DiskSpace,
@@ -681,9 +687,21 @@ pub(crate) struct Terminal {
     protected_tools: Option<ProtectedTools>,
     #[serde(skip)]
     components: Option<Partition>,
+    #[serde(skip)]
+    discovered_sources: Option<discovery::Discovery>,
 }
 impl Terminal {
     pub(crate) fn components(&self) -> Option<Partition> { self.components }
+    pub(crate) fn discovered_sources(&self) -> Option<discovery::Discovery> { self.discovered_sources }
+    pub(crate) fn observe_discovered_sources(&mut self, value: discovery::Discovery) {
+        if self.discovered_sources.is_none() && value.searched()
+            && self.context.action == Action::Inspect && self.outcome == Outcome::Complete
+            && self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
+            && self.protected_tools == Some(ProtectedTools::NoneInSupportedCatalogue)
+            && self.components.is_some_and(|parts| value.matches(parts)) {
+            self.discovered_sources = Some(value);
+        }
+    }
     /// Added only by the original native owner after source/child/driver joins.
     /// A child-supplied field is rejected by the closed wire decoder.
     pub(crate) fn observe_components(&mut self, value: Partition) {
@@ -756,7 +774,8 @@ impl Terminal {
         self.result.as_ref().map(|v| match self.context.action {
             Action::Inspect => {
                 json!({"kind":"tool-requirements-observation","requirements":v["requirements"],
-                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data)})
+                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data),
+                    "discoveredSources":self.discovered_sources.map(|value|value.data())})
             }
             Action::Acquire => v.clone(),
         })
@@ -789,9 +808,8 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
         }
         return Ok(());
     }
-    if !keys(
-        v,
-        &[
+    let copied = sdk::copied(v).map_err(|_| invalid())?;
+    let mut fields = vec![
             "schemaVersion",
             "kind",
             "operationId",
@@ -804,8 +822,9 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
             "downloadedArchives",
             "groups",
             "assurance",
-        ],
-    ) || v["schemaVersion"] != 1
+        ];
+    if copied.is_some() { fields.push("copiedSourceComponents"); }
+    if !keys(v, &fields)
         || v["kind"] != "staged-tool-sources"
         || v["operationId"] != operation
         || v["cacheJob"] != format!("tool-{operation}")
@@ -835,6 +854,13 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
         }
     }
     if all.is_empty() || all.len() > COMPONENTS.len() { return Err(invalid()); }
+    if let Some(component) = copied {
+        // Copied is NOT a downloaded/reused archive. Only its opposite SDK
+        // half may be in that original missing-archive set.
+        let other = if component == sdk::Component::Platform { "sdk-build-tools" } else { "sdk-platform" };
+        if all.contains(component.name()) || !all.contains(other) { return Err(invalid()); }
+        all.insert(component.name());
+    }
     let expected: Vec<Value> = [("jdk", &COMPONENTS[..1]), ("sdk", &COMPONENTS[1..3]), ("gradle", &COMPONENTS[3..])]
         .into_iter().filter_map(|(group, parts)| {
             let missing: Vec<_> = parts.iter().copied().filter(|part| all.contains(part)).collect();
@@ -856,7 +882,11 @@ pub(crate) fn staged_matches_partition(value: &Value, partition: Partition) -> b
     COMPONENTS.into_iter().enumerate().all(|(index, name)| {
         let count = reused.iter().chain(downloaded).filter(|v| *v == name).count();
         count == usize::from(!partition.is_compatible(index))
-    })
+    }) && match sdk::copied(value) {
+        Ok(None) => true, // Preserve old schema1 DATA; native Expected may require a copy.
+        Ok(Some(component)) => sdk::Component::for_partition(partition) == Some(component),
+        Err(()) => false,
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1096,6 +1126,54 @@ mod tests {
         changed["groups"][0]["allRequiredComponentsStaged"] = json!(true);
         changed["groups"][0]["next"] = json!("choose-native-source");
         assert!(result_valid(&changed, &operation, &context).is_err());
+    }
+    #[test]
+    fn assembled_sdk_result_keeps_missing_archives_separate_from_exact_copied_half() {
+        let partition = Partition::observed([Some(true),Some(true),Some(false),Some(true)]).unwrap();
+        let operation = "d".repeat(32);
+        let mut context = prepare(&context_value()).unwrap(); context.action=Action::Acquire;
+        context.review=Some(Review { operation_id:"0".repeat(32),owner_generation:"1".repeat(32),requirements_sha256:"b".repeat(64) });
+        let offered=json!({"schemaVersion":2,"kind":"staged-tool-sources","operationId":operation,
+            "contextSha256":"1".repeat(64),"referenceSha256":"2".repeat(64),"projectionSha256":"3".repeat(64),
+            "cacheJob":format!("tool-{operation}"),"lookupScope":"registered-selected-known",
+            "reusedArchives":[],"downloadedArchives":["sdk-build-tools"],"copiedSourceComponents":["sdk-platform"],
+            "groups":[{"group":"sdk","components":["sdk-platform","sdk-build-tools"],"allRequiredComponentsStaged":true,"next":"choose-native-source"}],
+            "assurance":{"nativeFinality":false,"registered":false,"readyToBuild":false}});
+        assert!(result_valid(&offered,&operation,&context).is_ok()); assert!(staged_matches_partition(&offered,partition));
+        assert_eq!(sdk::copied(&offered),Ok(Some(sdk::Component::Platform)));
+        assert!(!staged_matches_partition(&offered,Partition::missing_all()));
+        for (field,value) in [("schemaVersion",json!(1)),("copiedSourceComponents",json!(["jdk"])),
+            ("copiedSourceComponents",json!(["sdk-build-tools"])),("downloadedArchives",json!(["sdk-platform","sdk-build-tools"]))] {
+            let mut changed=offered.clone(); changed[field]=value; assert!(result_valid(&changed,&operation,&context).is_err());
+        }
+        let mut forged=offered.clone(); forged["copiedSourceComponents"]=json!(["sdk-build-tools"]);
+        forged["downloadedArchives"]=json!(["sdk-platform"]);
+        assert!(result_valid(&forged,&operation,&context).is_ok()); // Well-shaped DATA still cannot replace native Expected.
+        assert!(!staged_matches_partition(&forged,partition));
+    }
+    #[test]
+    fn discovered_sources_require_native_postjoin_component_projection_and_reject_child_forgery() {
+        let parts = Partition::observed([Some(true), Some(true), Some(false), Some(false)]).unwrap();
+        let found = discovery::Discovery::observed(7, 3, parts).unwrap();
+        for outer in [false, true] {
+            let mut value = terminal_value();
+            if outer { value["discoveredSources"] = found.data(); }
+            else { value["result"]["discoveredSources"] = found.data(); }
+            assert!(decode_terminal(value).is_err());
+        }
+        let Frame::Terminal(mut terminal) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        terminal.observe_discovered_sources(found);
+        assert_eq!(terminal.discovered_sources(), None);
+        terminal.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
+        terminal.observe_components(parts);
+        let mut stopped = terminal.clone(); stopped.lifetime.stop_observed = CoreStop::Cancelled;
+        stopped.observe_discovered_sources(found); assert_eq!(stopped.discovered_sources(), None);
+        let mut failed = terminal.clone(); failed.outcome = Outcome::Refused;
+        failed.observe_discovered_sources(found); assert_eq!(failed.discovered_sources(), None);
+        terminal.observe_discovered_sources(found);
+        assert_eq!(terminal.public_result().unwrap()["discoveredSources"], found.data());
+        assert!(!terminal.public_result().unwrap().to_string().contains(discovery::JDK));
+        // Setter/serialization DATA only, not a native join or path selection.
     }
     #[test]
     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {

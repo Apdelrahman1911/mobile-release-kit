@@ -64,7 +64,7 @@ pub(crate) fn observation_data(
                     .unwrap_or(0),
             ),
     )?;
-    let summary = original.summary();
+    let summary = original.summary().ios().ok_or_else(|| StateError::from(Error::InvalidRequest))?;
     need(summary.observed())?;
     let context_revision = context_digest(original.context())?;
     Ok(

@@ -170,7 +170,8 @@ class _SavedCommandEngine:
     def write(self, raw: bytes, *, terminal: bool = False) -> None:
         wire = _protocol(self.domain)
         self._require(type(raw) is bytes and not self.terminal_claimed
-                      and self.output_bytes + len(raw) <= wire.RESPONSE_LIMIT)
+                      and self.output_bytes + len(raw) <= (wire.response_limit(self.request.context["mode"])
+                          if self.domain is SavedCommandDomain.AppleProvisioning else wire.RESPONSE_LIMIT))
         if self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             self._require(self.frames == (1 if terminal else 0))
         elif self.domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
@@ -178,7 +179,8 @@ class _SavedCommandEngine:
             phases=request_phases(self.request)
             self._require(1<=self.frames<len(phases)+2 if terminal else self.frames<len(phases)+1)
         elif self.domain is SavedCommandDomain.AppleProvisioning:
-            self._require(1 <= self.frames <= wire.MAX_EVENTS + 1 if terminal else self.frames <= wire.MAX_EVENTS)
+            self._require(1 <= self.frames <= wire.max_events(self.request.context["mode"]) + 1
+                          if terminal else self.frames <= wire.max_events(self.request.context["mode"]))
         elif self.domain is SavedCommandDomain.LocalReleaseHistory:
             self._require(1 <= self.frames < 8 if terminal else self.frames < 7)
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):

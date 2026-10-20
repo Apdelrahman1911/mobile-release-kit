@@ -29,11 +29,27 @@ pub(crate) use crate::local_store_preflight_protocol::{
 
 #[path = "apple_provisioning_recovery_selection.rs"]
 mod recovery_selection;
+#[path = "apple_provisioning_profile_recovery_selection.rs"]
+mod profile_recovery_selection;
+pub(crate) use profile_recovery_selection::{profile_recovery_history, ProfileRecoveryHistory, PROFILE_RECOVERY_LIMIT};
 pub(crate) use recovery_selection::{
     recovery_history, recovery_scope_matches, RecoveryHistory, RECOVERY_LIMIT,
 };
 #[cfg(test)]
 pub(crate) use recovery_selection::tests::sample as recovery_comparison_fixture;
+
+#[path = "apple_provisioning_profile_protocol.rs"]
+mod profile;
+pub(crate) use profile::{ProfileScopeData, ProfileReviewData, ProfilePriorData, ProfileChoice,
+    ProfileObserved, ProfileEvent, ProfileResult, ProfileDecision, ProfileReason,
+    IdentityInput, IdentityComparison, profile_journal_ack, profile_prior, profile_recovery_scope_matches,
+    PROFILE_EVENTS, PROFILE_IDENTITY_LIMIT, PROFILE_JSON_LIMIT};
+
+#[path = "apple_provisioning_key_protocol.rs"]
+mod key;
+pub(crate) use key::{KeyScopeData, KeyReviewData, KeyReviewChoice, KeyVaultInventory,
+    KeyObserved, KeyEvent, KeyNotGenerated, KeyResult, KeyDecision, KeyReason,
+    key_pending_ack, key_retained_ack, KEY_EVENTS, KEY_JSON_LIMIT, KEY_STOP};
 
 pub(crate) const PROTOCOL: &str = "mrk-apple-bundle-provisioning/1";
 pub(crate) const EVENT: &str = "apple-bundle-provisioning-state-changed";
@@ -153,17 +169,64 @@ pub(crate) enum Mode {
     Review,
     Register,
     Reconcile,
+    #[serde(rename = "profile-review")]
+    ProfileReview,
+    #[serde(rename = "profile-reuse")]
+    ProfileReuse,
+    #[serde(rename = "profile-create")]
+    ProfileCreate,
+    #[serde(rename = "profile-reconcile")]
+    ProfileReconcile,
+    #[serde(rename = "key-review")]
+    KeyReview,
+    #[serde(rename = "key-prepare")]
+    KeyPrepare,
+    #[serde(rename = "key-recover")]
+    KeyRecover,
+    #[serde(rename = "certificate-review")]
+    CertificateReview,
+    #[serde(rename = "certificate-create")]
+    CertificateCreate,
+    #[serde(rename = "certificate-reconcile")]
+    CertificateReconcile,
 }
 impl Mode {
+    pub(crate) fn key(self) -> bool {
+        matches!(self, Self::KeyReview | Self::KeyPrepare | Self::KeyRecover | Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile)
+    }
+    pub(crate) fn local_key(self) -> bool { matches!(self, Self::KeyReview | Self::KeyPrepare) }
+    pub(crate) fn profile(self) -> bool {
+        matches!(self, Self::ProfileReview | Self::ProfileReuse | Self::ProfileCreate | Self::ProfileReconcile)
+    }
+    pub(crate) fn profile_save(self) -> bool { matches!(self, Self::ProfileReuse | Self::ProfileCreate) }
+    pub(crate) fn events(self) -> u32 { if self.key() { KEY_EVENTS } else if self.profile() { PROFILE_EVENTS } else { MAX_EVENTS } }
+    pub(crate) fn frame_limit(self) -> usize { if self.key() { EVENT_LIMIT } else if self.profile() { PROFILE_IDENTITY_LIMIT } else { FRAME_LIMIT } }
+    pub(crate) fn response_limit(self) -> usize { if self.key() { KEY_JSON_LIMIT } else if self.profile() { PROFILE_JSON_LIMIT } else { RESPONSE_LIMIT } }
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::Review => "local-ios-bundle-review-v1",
             Self::Register => "local-ios-bundle-register-v1",
             Self::Reconcile => "local-ios-bundle-reconcile-v1",
+            Self::ProfileReview => "local-ios-profile-review-v1",
+            Self::ProfileReuse => "local-ios-profile-reuse-v1",
+            Self::ProfileCreate => "local-ios-profile-create-v1",
+            Self::ProfileReconcile => "local-ios-profile-reconcile-v1",
+            Self::KeyReview => "local-ios-key-review-v1",
+            Self::KeyPrepare => "local-ios-key-prepare-v1",
+            Self::KeyRecover => "local-ios-key-recover-v1",
+            Self::CertificateReview => "local-ios-certificate-review-v1",
+            Self::CertificateCreate => "local-ios-certificate-create-v1",
+            Self::CertificateReconcile => "local-ios-certificate-reconcile-v1",
         }
     }
     pub(crate) fn commands(self) -> u32 {
-        if self == Self::Register {
+        if self == Self::KeyReview {
+            12
+        } else if self.key() {
+            7
+        } else if self.profile() {
+            15
+        } else if self == Self::Register {
             9
         } else {
             7
@@ -210,10 +273,17 @@ pub(crate) struct Context {
     pub(crate) reference: Option<Reference>,
     pub(crate) new_application: bool,
     pub(crate) display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) p12_record_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) p12_record_revision: Option<u32>,
 }
 impl Context {
     pub(crate) fn valid(&self) -> bool {
-        valid_id(&self.project_id)
+        // Fresh stored-key recovery/issuance needs its separate admitted loan;
+        // these reserved vocabulary arms are NOT an executable route yet.
+        (!self.mode.key() || self.mode.local_key())
+            && valid_id(&self.project_id)
             && self.draft_revision < u32::MAX
             && self.baseline_generation < u32::MAX
             && self.saved_config.valid(524288)
@@ -223,11 +293,15 @@ impl Context {
             && (1..u32::MAX).contains(&self.record_revision)
             && display_name(&self.display_name)
             && self.new_application == (self.mode == Mode::Register)
-            && if self.mode == Mode::Review {
+            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview) {
                 self.reference.is_none()
             } else {
                 self.reference.as_ref().is_some_and(Reference::valid)
-            }
+            })
+            && if self.mode.profile() {
+                self.p12_record_id.as_ref().is_some_and(|value| token(value))
+                    && self.p12_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
+            } else { self.p12_record_id.is_none() && self.p12_record_revision.is_none() }
     }
     pub(crate) fn accepts_target(&self, target: &BundleTarget) -> bool {
         bundle_id(&target.bundle_id)
@@ -264,9 +338,9 @@ pub(crate) fn raw_request(bytes: &[u8]) -> Result<Value, BridgeError> {
     strict_json(bytes).map_err(|_| invalid())
 }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    need(keys(
-        value,
-        &[
+    let profile = value.get("mode").and_then(Value::as_str).is_some_and(|mode|
+        matches!(mode, "profile-review" | "profile-reuse" | "profile-create" | "profile-reconcile"));
+    let mut names = vec![
             "projectId",
             "draftRevision",
             "baselineGeneration",
@@ -281,8 +355,9 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
             "reference",
             "newApplication",
             "displayName",
-        ],
-    ))?;
+        ];
+    if profile { names.extend(["p12RecordId", "p12RecordRevision"]); }
+    need(keys(value, &names))?;
     let mut selected = value.clone();
     selected.as_object_mut().ok_or_else(invalid)?.insert(
         "operation".into(),
@@ -301,7 +376,8 @@ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     need(
         token(&input.operation_id)
             && token(&input.owner_generation)
-            && [Mode::Review, Mode::Register, Mode::Reconcile]
+            && [Mode::Review, Mode::Register, Mode::Reconcile, Mode::ProfileReview,
+                Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare]
                 .iter()
                 .any(|mode| input.consent_version == mode.consent()),
     )?;
@@ -324,6 +400,8 @@ pub(crate) struct ScopeData {
     pub(crate) provenance: NativeProvenance,
     pub(crate) target: BundleTarget,
     pub(crate) reviewed_at: Option<String>,
+    pub(crate) signing: Option<ProfileScopeData>,
+    pub(crate) key: Option<KeyScopeData>,
 }
 impl ScopeData {
     fn matches(
@@ -364,15 +442,19 @@ impl ScopeData {
             && n.project_binding.device == n.registered_root.device
             && n.project_binding.inode == n.registered_root.inode
             && context.accepts_target(t)
-            && if context.mode == Mode::Register {
-                !t.existing_application
+            && if context.mode.key() {
+                self.signing.is_none() && self.key.as_ref().is_some_and(|key| key.valid(context, t, self.reviewed_at.as_ref()))
+            } else if context.mode.profile() {
+                self.key.is_none() && self.signing.as_ref().is_some_and(|s| s.valid(context, t, self.reviewed_at.as_ref()))
+            } else if context.mode == Mode::Register {
+                self.key.is_none() && self.signing.is_none() && !t.existing_application
                     && t.team_id == t.app_id_prefix
                     && self
                         .reviewed_at
                         .as_ref()
                         .is_some_and(|value| timestamp_shape(value))
             } else {
-                self.reviewed_at.is_none()
+                self.key.is_none() && self.signing.is_none() && self.reviewed_at.is_none()
             }
     }
 }
@@ -404,10 +486,16 @@ pub(crate) fn request(
     work_end_ns: u64,
     hard_end_ns: u64,
     nonce: String,
-    scope: ScopeData,
+    mut scope: ScopeData,
     account: &AccountSnapshot,
     prior: Option<&JournalRow>,
 ) -> Result<EncodedRequest, BridgeError> {
+    if context.mode == Mode::ProfileReconcile {
+        let prior = profile_prior(account, &scope, context)?;
+        let signing = scope.signing.as_mut().ok_or_else(invalid)?;
+        need(signing.prior.is_none())?;
+        signing.prior = prior;
+    }
     need(
         token(operation)
             && token(generation)
@@ -417,10 +505,10 @@ pub(crate) fn request(
             && credential_config == &context.saved_config
             && scope.matches(context, operation, generation, root)
             && account.account == scope.provisioning.account_ref
-            && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS
+            && account.rows.len().saturating_add(account.profile_rows.len()).saturating_add(account.key_rows.len()).saturating_add(account.certificate_rows.len()) <= ROWS
             // Reserve, up to two attempt writes, then final native CAS. Do not
             // arm a provider write if this fixed whole path can overflow.
-            && account.revision.0 <= u64::MAX - 4
+            && account.revision.0 <= u64::MAX - if context.mode.profile_save() || context.mode == Mode::KeyPrepare { 7 } else { 4 }
             && work_end_ns > 0
             && work_end_ns < hard_end_ns
             && hard_end_ns - work_end_ns <= 10_000_000_000,
@@ -434,6 +522,10 @@ pub(crate) fn request(
         row.intent.context.account_ref == account.account
             && seen.insert(row.intent.context.operation_id.as_str())
     }))?;
+    need(account.key_rows.iter().all(|row| row.intent.context.account_ref == account.account
+        && seen.insert(row.intent.context.operation_id.as_str())))?;
+    need(account.certificate_rows.iter().all(|row| row.intent.context.account_ref == account.account
+        && seen.insert(row.intent.context.operation_id.as_str())))?;
     if context.mode == Mode::Reconcile {
         let reference = context.reference.as_ref().ok_or_else(invalid)?;
         let prior = prior.ok_or_else(invalid)?;
@@ -458,17 +550,35 @@ pub(crate) fn request(
         "action":"profile_setup","status":if row.unresolved(){"unknown"}else{"succeeded"},
         "nativeSettlement":row.native_settlement,
     })));
+    pending.extend(account.key_rows.iter().map(|row| json!({
+        "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
+        "action":"key_prepare","status":if row.unresolved(){"unknown"}else{"succeeded"},
+        "nativeSettlement":row.native_settlement,
+    })));
+    pending.extend(account.certificate_rows.iter().map(|row| json!({
+        "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
+        "action":"create_certificate","status":if row.unresolved(){"unknown"}else{"succeeded"},
+        "nativeSettlement":row.native_settlement,
+    })));
     let identity = root
         .identity
         .posix()
         .map_err(|_| invalid())?
         .preflight_identity();
-    let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
+    let mut value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
         "native":{"profile":profile,"projectRoot":native_path(&root.path).ok_or_else(invalid)?,"rootIdentity":identity,
             "cwd":native_path(cwd).ok_or_else(invalid)?,"credentialConfig":credential_config,
             "clock":{"workEndNs":work_end_ns.to_string(),"hardEndNs":hard_end_ns.to_string()},"nonce":nonce,
             "provisioning":scope.provisioning,"target":scope.target,"reviewedAt":scope.reviewed_at,
             "journalRevision":account.revision.0,"pending":pending,"prior":prior}});
+    if context.mode.profile() {
+        value["native"].as_object_mut().ok_or_else(invalid)?
+            .insert("signing".into(), serde_json::to_value(&scope.signing).map_err(|_| invalid())?);
+    }
+    if context.mode.key() {
+        value["native"].as_object_mut().ok_or_else(invalid)?
+            .insert("key".into(), serde_json::to_value(&scope.key).map_err(|_| invalid())?);
+    }
     let mut bytes = bounded(&value, REQUEST_LIMIT - 1).map_err(|_| invalid())?;
     bytes.push(b'\n');
     let binding = Arc::new(RequestBinding {
@@ -549,7 +659,9 @@ impl Observed {
                     _ => false,
                 },
                 Mode::Reconcile => self.decision == Decision::ComparisonOnly,
-                Mode::Register => false,
+                Mode::Register | Mode::ProfileReview | Mode::ProfileReuse | Mode::ProfileCreate | Mode::ProfileReconcile
+                | Mode::KeyReview | Mode::KeyPrepare | Mode::KeyRecover | Mode::CertificateReview
+                | Mode::CertificateCreate | Mode::CertificateReconcile => false,
             }
     }
 }
@@ -569,6 +681,8 @@ struct Updated {
     update: AttemptUpdate,
 }
 pub(crate) enum EventData {
+    Profile(ProfileEvent),
+    Key(KeyEvent),
     Observed(Observed),
     Pending {
         intent: BundleRegistrationIntent,
@@ -673,7 +787,7 @@ const LIMITATIONS: [Limitation; 7] = [
 ];
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResultData {
+pub(crate) struct BundleResultData {
     schema_version: u32,
     scope: String,
     mode: Mode,
@@ -685,7 +799,7 @@ pub(crate) struct ResultData {
     comparison: Option<Comparison>,
     limitations: Vec<Limitation>,
 }
-impl ResultData {
+impl BundleResultData {
     fn valid(&self, binding: &RequestBinding, last_update: Option<&AttemptUpdate>) -> bool {
         if self.schema_version != 1
             || self.scope != "local-ios-bundle-provisioning"
@@ -757,6 +871,15 @@ impl ResultData {
         }
     }
 }
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum ResultData { Bundle(BundleResultData), Profile(ProfileResult), Key(KeyResult) }
+impl ResultData {
+    pub(crate) fn bundle(&self) -> Option<&BundleResultData> { match self { Self::Bundle(value) => Some(value), _ => None } }
+    pub(crate) fn key(&self) -> Option<&KeyResult> { match self { Self::Key(value) => Some(value), _ => None } }
+    pub(crate) fn profile(&self) -> Option<&ProfileResult> { match self { Self::Profile(value) => Some(value), _ => None } }
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum CoreStop {
@@ -780,12 +903,13 @@ pub(crate) struct Lifetime {
     stop_observed: CoreStop,
 }
 impl Lifetime {
-    pub(crate) fn settled(&self) -> bool {
+    pub(crate) fn settled(&self) -> bool { self.settled_for(Mode::Review) }
+    pub(crate) fn settled_for(&self, mode: Mode) -> bool {
         self.complete
             && !self.fatal
             && self.contained
             && self.command_dispatched.is_some()
-            && self.profile_calls == 0
+            && self.profile_calls <= u32::from(mode.profile())
             && self.input_closed
             && self.handlers_restored
             && self.invocation_closed
@@ -803,41 +927,50 @@ pub(crate) struct Terminal {
     pub(crate) lifetime: Lifetime,
 }
 impl Terminal {
+    /// Original owner dispatch must use this retained mode, not the Bundle-only
+    /// default. This is protocol settlement DATA, never native join authority.
+    pub(crate) fn settled(&self) -> bool {
+        self.lifetime.settled_for(self.context.mode)
+    }
     fn valid(
         &self,
         binding: &RequestBinding,
         last_update: Option<&AttemptUpdate>,
         observed: bool,
+        profile: &profile::ProfileDecoder,
+        key: &key::KeyDecoder,
     ) -> bool {
         let life = &self.lifetime;
         if self.schema_version != 1
             || self.context != binding.context
             || !self.context.valid()
             || life.commands > self.context.mode.commands()
-            || life.profile_calls != 0
+            || life.profile_calls > u32::from(self.context.mode.profile())
+            || !key.lifetime_matches(life)
         {
             return false;
         }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None
-                && life.settled()
+                && life.settled_for(self.context.mode)
                 && life.command_dispatched == Some(true)
                 && (Mode::Review.commands()..=self.context.mode.commands())
                     .contains(&life.commands)
                 && life.stop_observed == CoreStop::None
-                && (self.context.mode == Mode::Register || observed)
-                && self
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.valid(binding, last_update));
+                && (self.context.mode.key() || self.context.mode.profile() || self.context.mode == Mode::Register || observed)
+                && self.result.as_ref().is_some_and(|result| match result {
+                    ResultData::Bundle(result) => !self.context.mode.profile() && !self.context.mode.key() && result.valid(binding, last_update),
+                    ResultData::Profile(result) => self.context.mode.profile() && profile.valid_terminal(result, binding),
+                    ResultData::Key(result) => self.context.mode.key() && key.valid_terminal(result, binding),
+                });
         }
         if self.result.is_some() || self.reason == Reason::None {
             return false;
         }
         if self.outcome == Outcome::Unknown {
-            return self.reason == Reason::CleanupUnknown && !life.settled();
+            return self.reason == Reason::CleanupUnknown && !life.settled_for(self.context.mode);
         }
-        if !life.settled() {
+        if !life.settled_for(self.context.mode) {
             return false;
         }
         match self.outcome {
@@ -884,6 +1017,8 @@ pub(crate) struct Decoder {
     observed: bool,
     plan: Option<String>,
     last_update: Option<AttemptUpdate>,
+    profile: profile::ProfileDecoder,
+    key: key::KeyDecoder,
 }
 impl Decoder {
     pub(crate) fn new(binding: Arc<RequestBinding>) -> Self {
@@ -896,6 +1031,8 @@ impl Decoder {
             observed: false,
             plan: None,
             last_update: None,
+            profile: profile::ProfileDecoder::default(),
+            key: key::KeyDecoder::default(),
         }
     }
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
@@ -909,7 +1046,7 @@ impl Decoder {
         need(
             !self.failed
                 && !self.terminal
-                && (3..=FRAME_LIMIT).contains(&bytes.len())
+                && (3..=self.binding.context.mode.frame_limit()).contains(&bytes.len())
                 && bytes[0] == b'{'
                 && bytes.ends_with(b"}\n")
                 && !bytes[..bytes.len() - 1]
@@ -917,7 +1054,7 @@ impl Decoder {
                     .any(|byte| matches!(byte, b'\r' | b'\n')),
         )?;
         self.total = self.total.checked_add(bytes.len()).ok_or_else(invalid)?;
-        need(self.total <= RESPONSE_LIMIT)?;
+        need(self.total <= self.binding.context.mode.response_limit())?;
         let value = strict_json(&bytes[..bytes.len() - 1]).map_err(|_| invalid())?;
         let envelope = Envelope::deserialize(value).map_err(|_| invalid())?;
         let binding = &self.binding;
@@ -937,16 +1074,16 @@ impl Decoder {
                 Frame::Accepted
             }
             "terminal" => {
-                need(self.next > 0 && self.next <= MAX_EVENTS + 1)?;
+                need(self.next > 0 && self.next <= binding.context.mode.events() + 1)?;
                 let terminal = Terminal::deserialize(envelope.payload).map_err(|_| invalid())?;
-                need(terminal.valid(binding, self.last_update.as_ref(), self.observed))?;
+                need(terminal.valid(binding, self.last_update.as_ref(), self.observed, &self.profile, &self.key))?;
                 self.terminal = true;
                 Frame::Terminal(terminal)
             }
             "observed" => {
                 need(
                     self.next == 1
-                        && binding.context.mode != Mode::Register
+                        && matches!(binding.context.mode, Mode::Review | Mode::Reconcile)
                         && bytes.len() <= EVENT_LIMIT,
                 )?;
                 let observed = Observed::deserialize(envelope.payload).map_err(|_| invalid())?;
@@ -1026,6 +1163,16 @@ impl Decoder {
                     data: EventData::Attempt(update),
                 })
             }
+            kind @ ("key-observed" | "key-pending" | "key-output" | "key-not-generated") => {
+                need(binding.context.mode.local_key() && bytes.len() <= EVENT_LIMIT)?;
+                Frame::Event(EventDataFrame { sequence: self.next,
+                    data: EventData::Key(self.key.event(binding, self.next, kind, envelope.payload)?) })
+            },
+            kind @ ("identity" | "profile-observed" | "profile-pending" | "profile-attempt") => {
+                need(binding.context.mode.profile() && (kind == "identity" || bytes.len() <= EVENT_LIMIT))?;
+                Frame::Event(EventDataFrame { sequence: self.next,
+                    data: EventData::Profile(self.profile.event(binding, self.next, kind, envelope.payload)?) })
+            },
             _ => return Err(invalid()),
         };
         self.next = self.next.checked_add(1).ok_or_else(invalid)?;
@@ -1078,6 +1225,12 @@ pub(crate) struct Projection {
     pub(crate) reason: Reason,
     pub(crate) result: Option<ResultData>,
     pub(crate) recovery: Option<RecoveryHistory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_recovery: Option<ProfileRecoveryHistory>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub(crate) saved_profile: Option<crate::credential_setup::KeyReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) saved_key: Option<crate::credential_setup::KeyReference>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

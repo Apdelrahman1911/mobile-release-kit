@@ -271,15 +271,22 @@ export class OfflinePreflightController {
     }
     return status;
   }
+  // Read-only presentation of the original callers; not a native receipt.
+  hasPendingGuiSubmission(): boolean { return this.pendingGuiSubmissions !== 0; }
   private returnedGuiSubmission(): void {
+    const wasPending = this.hasPendingGuiSubmission();
     // This counter gates only unsolicited CLI display adoption. It does not
     // alter existing GUI retry-after-native-retirement behavior or manufacture
     // native settlement from a Promise. Overflow conservatively stays closed.
     if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
     const held = this.deferredAgentObservation;
-    if (!held || this.pendingGuiSubmissions !== 0) return;
-    this.deferredAgentObservation = null;
-    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
+    if (held && this.pendingGuiSubmissions === 0) {
+      this.deferredAgentObservation = null;
+      if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
+    }
+    // A terminal event may precede this original invoke's return. Notify only
+    // when the held-caller bit actually changes, using the existing finally.
+    if (wasPending !== this.hasPendingGuiSubmission()) this.update({});
   }
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
   async checkStatus(): Promise<void> {

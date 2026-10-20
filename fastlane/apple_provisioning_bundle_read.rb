@@ -27,7 +27,9 @@ module MobileReleaseKit
     def self.supported_input?(input)
       input.instance_of?(Input) ||
         (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input)) ||
-        (defined?(AppleStoreVersions::Input) && input.instance_of?(AppleStoreVersions::Input))
+        (defined?(AppleCertificateIssuance::Input) && input.instance_of?(AppleCertificateIssuance::Input)) ||
+        (defined?(AppleStoreVersions::Input) && input.instance_of?(AppleStoreVersions::Input)) ||
+        (defined?(AppleSigningProvisioning::Input) && input.instance_of?(AppleSigningProvisioning::Input))
     end
 
     class Input
@@ -120,6 +122,8 @@ module MobileReleaseKit
         @request = AppleProvisioning::Request.new(input.request)
         kind = if input.instance_of?(Input) then "list_bundle_ids"
                elsif defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input) then "list_profiles"
+               elsif defined?(AppleCertificateIssuance::Input) && input.instance_of?(AppleCertificateIssuance::Input) then input.step
+               elsif defined?(AppleSigningProvisioning::Input) && input.instance_of?(AppleSigningProvisioning::Input) then input.step
                else "current_app_before"
                end
         AppleBundleRead.require!(@request.kind == kind)
