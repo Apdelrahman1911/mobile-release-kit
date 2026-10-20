@@ -294,7 +294,11 @@ fn original_unjoined_session_cannot_publish_history_or_restore_a_review() {
     retire_review(&mut registry, active, &original);
     assert!(registry.recovery.is_none() && registry.review.is_none());
     assert!(!original.watchdog_joined.load(Ordering::SeqCst));
-    assert!(!original.material_retired.load(Ordering::SeqCst));
+    assert!(!original.driver_joined.load(Ordering::SeqCst));
+    // This inert original selected no private material. Its vacuous material
+    // retirement is not a worker/watchdog/native join or recovery authority.
+    assert!(original.material.lock().is_none());
+    assert!(original.material_retired.load(Ordering::SeqCst));
     assert!(!native_complete(&original));
 }
 
