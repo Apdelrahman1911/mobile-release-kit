@@ -34,6 +34,22 @@ fn unlinked_original(current:FileIdentity,original:FileIdentity,successor:FileId
         && current.mtime==original.mtime && flags==0
         && (successor.common.dev!=current.common.dev || successor.common.ino!=current.common.ino)
 }
+// Comparison-only selection. Actual HEAD hashing, physical parent/absence
+// checks and positive publication custody remain in the original SourceBook.
+fn reference_selection(review:&wire::Review)->Result<(String,String,bool),Reason> {
+    if !review.valid() {return Err(Reason::SourceRefused)}
+    let head = match (review.branch(),review.head()) {
+        (Some(reference),_)=>format!("ref: {reference}\n"),
+        (None,Some(head)) if review.action()==wire::Kind::BranchCreate=>format!("{head}\n"),
+        _=>return Err(Reason::SourceRefused),
+    };
+    let (name,absent) = match review {
+        wire::Review::Branch(v)=>(v.target_ref.clone(),true),
+        wire::Review::Files(v) if v.action==wire::Kind::Commit=>(v.branch.clone().ok_or(Reason::SourceRefused)?,false),
+        _=>return Err(Reason::SourceRefused),
+    };
+    Ok((head,name,absent))
+}
 pub(crate) struct GitLocalSources {
     book: SourceBook,
     account: Account,
@@ -212,26 +228,28 @@ impl GitLocalSources {
     }
     fn capture_reference(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         let review = self.review.as_ref().ok_or(Reason::SourceRefused)?;
-        let name = review.branch.as_deref().ok_or(Reason::SourceRefused)?;
-        if !crate::git_read_protocol::branch(name) || name.split('/').count() > 32 {
+        // HEAD binds the reviewed SOURCE, not the new target. No checkout.
+        let (original_head,name,absent) = reference_selection(review)?;
+        if !crate::git_read_protocol::branch(&name) || name.split('/').count() > 32 {
             return Err(Reason::SourceRefused);
         }
         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
         let sha = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b|format!("{b:02x}")).collect() };
-        if native.files.head.sha256 != sha(format!("ref: {name}\n").as_bytes()) {
+        if native.files.head.sha256 != sha(original_head.as_bytes()) {
             return Err(Reason::SourceChanged);
         }
         let uid = native.uid;
-        let expected = review.head.as_ref().map(|head| sha(format!("{head}\n").as_bytes()));
+        let expected = review.head().map(|head| sha(format!("{head}\n").as_bytes()));
         let parts: Vec<Vec<u8>> = name.split('/').map(|v|v.as_bytes().to_vec()).collect();
         let mut parent = self.git.ok_or(Reason::SourceChanged)?;
-        // Initial slice needs existing physical ref parents. Ordinary unborn
-        // repositories have refs/heads; no invented ref resolver or creation.
+        // Only existing physical parents. No nested-parent creation, custom
+        // resolver or target directory replacement is admitted for branches.
         for part in &parts[..parts.len()-1] { parent = self.book.child(parent, part, false, stop)?; }
         let leaf = parts.last().ok_or(Reason::SourceRefused)?.clone();
         checkpoint(stop)?;
         let original = match stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(&leaf), AtFlags::AT_SYMLINK_NOFOLLOW) {
             Err(nix::errno::Errno::ENOENT) => None,
+            Ok(_) if absent => return Err(Reason::SourceChanged),
             Ok(_) => {
                 let index = self.file(parent, &leaf, uid, 65, false, stop)?;
                 let snapshot = self.snapshot(index, 65, stop)?;
@@ -240,8 +258,8 @@ impl GitLocalSources {
             }
             Err(_) => return Err(Reason::SourceRefused),
         };
-        // Absent loose ref can be unborn or packed. Git's fixed expected-old
-        // CAS and original frozen/core inventory still decide its semantics.
+        // A missing loose ref says nothing about packed refs. The SAME fixed
+        // core inventory and expected-zero (create)/old (commit) CAS decide.
         self.reference = Some(RefEdge { parent, name:leaf, original });
         checkpoint(stop)
     }
@@ -283,14 +301,18 @@ impl GitLocalSources {
                 let intent = publication.intent_for(self.operation_id.as_deref().ok_or(Reason::SourceChanged)?,native,review)?.clone();
                 if self.replacement.is_some() {return Err(Reason::SourceChanged)}
                 let uid = native.uid;
-                let (parent,name,old,old_snapshot,expected,maximum) = if intent.action==wire::Kind::Commit {
-                    let edge = self.reference.as_ref().ok_or(Reason::SourceChanged)?;
-                    let head = intent.candidate_commit.as_ref().ok_or(Reason::SourceChanged)?;
-                    let digest = Sha256::digest(format!("{head}\n").as_bytes()).iter().map(|b|format!("{b:02x}")).collect::<String>();
-                    (edge.parent,edge.name.clone(),edge.original.as_ref().map(|v|v.0),edge.original.as_ref().map(|v|v.1.clone()),digest,65)
-                } else {
-                    (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
-                        intent.candidate_index.clone().ok_or(Reason::SourceChanged)?,wire::INDEX_LIMIT)
+                let (parent,name,old,old_snapshot,expected,maximum) = match intent.action() {
+                    wire::Kind::Commit|wire::Kind::BranchCreate=>{
+                        let edge = self.reference.as_ref().ok_or(Reason::SourceChanged)?;
+                        if intent.action()==wire::Kind::BranchCreate && edge.original.is_some() {return Err(Reason::SourceChanged)}
+                        let head = intent.reference_oid().ok_or(Reason::SourceChanged)?;
+                        let digest = Sha256::digest(format!("{head}\n").as_bytes()).iter().map(|b|format!("{b:02x}")).collect::<String>();
+                        (edge.parent,edge.name.clone(),edge.original.as_ref().map(|v|v.0),edge.original.as_ref().map(|v|v.1.clone()),digest,65)
+                    },
+                    wire::Kind::Stage|wire::Kind::Unstage=>{
+                        (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
+                            intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
+                    },
                 };
                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
@@ -388,7 +410,7 @@ impl GitLocalSources {
                 return Err(Reason::SourceRefused);
             }
             self.native = Some(native);
-            if review.is_some_and(|v| v.action == wire::Kind::Commit) { self.capture_reference(stop)?; }
+            if review.is_some_and(|v| matches!(v.action(),wire::Kind::Commit|wire::Kind::BranchCreate)) { self.capture_reference(stop)?; }
             self.post_inner(stop)
         })();
         self.remember(result)
@@ -460,7 +482,7 @@ impl GitLocalSources {
         ] {
             match (index, expected) {
                 (Some(index), Some(expected)) if self.snapshot_original(index, maximum, stop)? == *expected => {}
-                (None, None) if self.replacement.as_ref().is_some_and(|v|v.intent.action!=wire::Kind::Commit) => {}
+                (None, None) if self.replacement.as_ref().is_some_and(|v|matches!(v.intent.action(),wire::Kind::Stage|wire::Kind::Unstage)) => {}
                 (None, None) => {
                     checkpoint(stop)?;
                     if !matches!(
@@ -481,7 +503,7 @@ impl GitLocalSources {
         if let Some(edge) = &self.reference {
             if let Some((index,expected)) = &edge.original {
                 if self.snapshot_original(*index,65,stop)? != *expected {return Err(Reason::SourceChanged)}
-            } else if !self.replacement.as_ref().is_some_and(|v|v.intent.action==wire::Kind::Commit) {
+            } else if !self.replacement.as_ref().is_some_and(|v|matches!(v.intent.action(),wire::Kind::Commit|wire::Kind::BranchCreate)) {
                 checkpoint(stop)?;
                 if !matches!(stat::fstatat(self.book.fd(edge.parent)?,OsStr::from_bytes(&edge.name),AtFlags::AT_SYMLINK_NOFOLLOW),
                     Err(nix::errno::Errno::ENOENT)) {return Err(Reason::SourceChanged)}
@@ -489,7 +511,7 @@ impl GitLocalSources {
             }
         }
         if let Some(replacement) = &self.replacement {
-            let maximum = if replacement.intent.action==wire::Kind::Commit {65} else {wire::INDEX_LIMIT};
+            let maximum = if matches!(replacement.intent.action(),wire::Kind::Commit|wire::Kind::BranchCreate) {65} else {wire::INDEX_LIMIT};
             if self.snapshot(replacement.successor,maximum,stop)? != replacement.successor_snapshot {return Err(Reason::SourceChanged)}
         }
         Ok(())
@@ -539,3 +561,7 @@ impl GitLocalSources {
 #[cfg(test)]
 #[path="git_local_sources_macos_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="git_branch_source_tests.rs"]
+mod branch_tests;

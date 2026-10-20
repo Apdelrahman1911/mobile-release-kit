@@ -79,6 +79,7 @@ pub(crate) enum Kind {
     Observe,
     Diff,
     History,
+    Branches,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,7 +93,7 @@ impl Action {
     pub(crate) fn valid(&self) -> bool {
         match self.kind {
             Kind::Observe => self.expected_revision.is_none() && self.paths.is_empty() && !self.staged,
-            Kind::History => self.expected_revision.as_deref().is_some_and(digest) && self.paths.is_empty() && !self.staged,
+            Kind::History|Kind::Branches => self.expected_revision.as_deref().is_some_and(digest) && self.paths.is_empty() && !self.staged,
             Kind::Diff => {
                 self.expected_revision.as_deref().is_some_and(digest)
                     && !self.paths.is_empty()
@@ -556,6 +557,7 @@ pub(crate) fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeEr
                         .is_some_and(|s| ["sensitive-content", "untracked", "non-text"].contains(&s))
             })
         }
+        Kind::Branches => crate::git_branch_protocol::validate_list(action.expected_revision.as_deref(),v),
         Kind::History => {
             need(
                 keys(

@@ -3,7 +3,7 @@
 //! IO methods run only in original finite jobs, outside Doc/Edit/Host locks.
 use crate::{application_service::ProjectBinding, application_state_store::{Cleanup,Durability,Effect,Namespace,NativeUse,
     PrivateStateDirectory,Revision,Snapshot,StateError},git_local_protocol as wire,protocol::{strict_json,valid_id},
-    service_protocol::Error,supervisor::GitLocalNativeJoined};
+    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch};
 use serde::{Deserialize,Serialize};
 use std::sync::Arc;
 
@@ -31,22 +31,34 @@ pub(crate) struct Row {
     project_id:String,operation_id:String,action:wire::Kind,review_digest:String,expected_revision:String,
     expected_ref:Option<String>,expected_head:Option<String>,expected_index:String,
     candidate_index:Option<String>,candidate_commit:Option<String>,phase:Phase,outcome:Option<Completion>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    branch:Option<branch::Journal>,
 }
 impl Row {
     fn preparing(project:&ProjectBinding,id:&str,review:&wire::Review)->Result<Self> {
         need(project_id(project.project_id.as_str()) && project.device!=0 && project.inode!=0 && std::path::Path::new(&project.canonical_root).is_absolute()
             && valid_id(id) && review.valid())?;
-        let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action,
-            review_digest:review.review_digest.clone(),expected_revision:review.expected_revision.clone(),expected_ref:review.branch.clone(),
-            expected_head:review.head.clone(),expected_index:review.expected_index.clone(),candidate_index:None,candidate_commit:None,
-            phase:Phase::Preparing,outcome:None};
+        let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action(),
+            review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
+            expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().into(),candidate_index:None,candidate_commit:None,
+            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing)};
         row.validate()?;Ok(row)
     }
-    fn has_candidate(&self)->bool {self.candidate_index.is_some()||self.candidate_commit.is_some()}
-    fn intent(&self)->wire::Intent {
-        wire::Intent {action:self.action,expected_revision:self.expected_revision.clone(),expected_ref:self.expected_ref.clone(),
-            expected_head:self.expected_head.clone(),expected_index:self.expected_index.clone(),candidate_index:self.candidate_index.clone(),
-            candidate_commit:self.candidate_commit.clone()}
+    fn has_candidate(&self)->bool {
+        self.candidate_index.is_some()||self.candidate_commit.is_some()
+            ||self.branch.as_ref().is_some_and(|b|b.candidate_ref_oid.is_some())
+    }
+    fn intent(&self)->Option<wire::Intent> {
+        if let Some(b)=&self.branch {
+            Some(wire::Intent::Branch(branch::Intent {action:branch::Kind::Create,expected_revision:self.expected_revision.clone(),
+                expected_reference_revision:b.expected_reference_revision.clone(),expected_ref:self.expected_ref.clone(),
+                expected_head:self.expected_head.clone()?,expected_index:self.expected_index.clone(),target_ref:b.target_ref.clone(),
+                expected_target_absent:b.expected_target_absent,candidate_ref_oid:b.candidate_ref_oid.clone()?}))
+        } else {
+            Some(wire::Intent::Files(wire::FileIntent {action:self.action,expected_revision:self.expected_revision.clone(),expected_ref:self.expected_ref.clone(),
+                expected_head:self.expected_head.clone(),expected_index:self.expected_index.clone(),candidate_index:self.candidate_index.clone(),
+                candidate_commit:self.candidate_commit.clone()}))
+        }
     }
     fn validate(&self)->Result<()> {
         use crate::git_read_protocol as read;
@@ -55,7 +67,13 @@ impl Row {
             && self.expected_head.as_deref().is_none_or(read::oid) && self.expected_ref.as_deref().is_none_or(read::branch)
             && (self.expected_head.is_some()||self.expected_ref.is_some())
             && (self.action!=wire::Kind::Commit||self.expected_ref.is_some())
-            && (!self.has_candidate()||self.intent().valid()))?;
+            && match self.action {
+                wire::Kind::BranchCreate=>self.candidate_index.is_none() && self.candidate_commit.is_none()
+                    && self.branch.as_ref().is_some_and(|b|b.valid(self.expected_head.as_deref())
+                        && self.expected_ref.as_deref()!=Some(b.target_ref.as_str())),
+                _=>self.branch.is_none(),
+            }
+            && (!self.has_candidate()||self.intent().is_some_and(|v|v.valid())))?;
         need(match self.phase {
             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
@@ -72,12 +90,20 @@ impl Row {
         self.project_id==original.project_id && self.operation_id==original.operation_id && self.action==original.action
             && self.review_digest==original.review_digest && self.expected_revision==original.expected_revision
             && self.expected_ref==original.expected_ref && self.expected_head==original.expected_head && self.expected_index==original.expected_index
+            && match (&self.branch,&original.branch) {
+                (Some(b),Some(o))=>b.same_original(o),(None,None)=>true,_=>false,
+            }
     }
     fn candidate(&mut self,intent:&wire::Intent)->Result<()> {
-        need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action && self.expected_revision==intent.expected_revision
-            && self.expected_ref==intent.expected_ref && self.expected_head==intent.expected_head && self.expected_index==intent.expected_index)?;
-        self.candidate_index=intent.candidate_index.clone();self.candidate_commit=intent.candidate_commit.clone();self.phase=Phase::Candidate;
-        self.validate()
+        need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
+            && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
+            && self.expected_index==intent.expected_index())?;
+        match (&mut self.branch,intent.branch_details()) {
+            (Some(b),Some(i))=>{need(b.accepts(i))?;b.candidate_ref_oid=Some(i.candidate_ref_oid.clone());},
+            (None,None)=>{self.candidate_index=intent.candidate_index().map(str::to_owned);self.candidate_commit=intent.candidate_commit().map(str::to_owned);},
+            _=>return Err(Error::Conflict.into()),
+        }
+        self.phase=Phase::Candidate;self.validate()
     }
     fn finish(&mut self,outcome:Completion)->Result<()> {
         need(self.phase!=Phase::Finished)?;
@@ -94,12 +120,15 @@ struct State {schema_version:u8,protocol:String,rows:Vec<Row>}
 impl State {
     fn empty()->Self {Self {schema_version:1,protocol:PROTOCOL.into(),rows:vec![]}}
     fn bytes(&self)->Result<Vec<u8>> {
-        need(self.schema_version==1 && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
+        need(matches!(self.schema_version,1|2) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
             && self.rows.windows(2).all(|p|p[0].project_id<p[1].project_id))?;
         // Supervisor text is process-local, not a global or durable operation
         // identity. Rows are partitioned by the service's stable project ID;
         // only the retained live Original/NativeUse can amend a pending row.
-        for row in &self.rows {row.validate()?;}
+        for row in &self.rows {
+            need(self.schema_version==2 || row.branch.is_none() && row.action!=wire::Kind::BranchCreate)?;
+            row.validate()?;
+        }
         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
         let mut bytes=serde_json::to_vec(&value).map_err(|_|StateError::from(Error::InvalidRequest))?;
         bytes.push(b'\n');need(bytes.len()<=STATE_LIMIT)?;Ok(bytes)
@@ -116,10 +145,14 @@ impl State {
     }
     fn reserve(&mut self,row:Row)->Result<()> {
         need(row.phase==Phase::Preparing)?;
+        let branch = row.action==wire::Kind::BranchCreate;
         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
             self.rows[index]=row;
         } else {if self.rows.len()>=MAX_ROWS {return Err(Error::Busy.into());}self.rows.push(row);}
+        // Only explicit branch Apply's Preparing CAS upgrades the same document.
+        // Reading schema1 never rewrites it; other pending rows stay exact.
+        if branch {self.schema_version=2;}
         self.rows.sort_by(|a,b|a.project_id.cmp(&b.project_id));self.bytes()?;Ok(())
     }
 }
@@ -222,3 +255,7 @@ impl GitLocalJournal {
 #[cfg(test)]
 #[path="git_local_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="git_branch_state_tests.rs"]
+mod branch_tests;

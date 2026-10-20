@@ -15,6 +15,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
 #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
 #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
+#[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;

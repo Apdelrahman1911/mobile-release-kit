@@ -246,7 +246,7 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
                     if Instant::now()>=expires {return None}
                     let review=terminal.review().ok()?;
                     Some(ReadyReview {public:wire::Prepared {review_id:format!("{}-review",ticket.operation_id()),
-                        context:gate.context(),action:gate.0.action.public(),review,diff:terminal.result["diff"].clone()},
+                        context:gate.context(),action:gate.0.action.public(),review,diff:terminal.result.get("diff").cloned()},
                         action:gate.0.action.clone(),root:gate.0.root.clone(),stamp:gate.0.stamp.clone(),epoch:gate.0.epoch,expires})
                 })()
             },_=>None,

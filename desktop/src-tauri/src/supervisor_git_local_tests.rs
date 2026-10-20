@@ -9,8 +9,8 @@ fn request(phase:wire::Phase)->Arc<wire::Request> {
     let native=wire::Native {uid:1001,gid:1001,root:"/never-opened-git-frame".into(),
         directories:wire::Directories {root:(1,2,0o40700,1001,1001),git:(1,3,0o40700,1001,1001),objects:(1,4,0o40700,1001,1001)},
         tool:file(0,0o100755),files:wire::Files {head:file(1001,0o100600),config:file(1001,0o100600),index:Some(file(1001,0o100600))}};
-    let review=wire::Review {action:wire::Kind::Stage,expected_revision:"a".repeat(64),paths:vec!["a.txt".into()],whole_index:false,
-        head:Some("1".repeat(40)),branch:Some("refs/heads/main".into()),expected_index:"2".repeat(64),review_digest:"b".repeat(64)};
+    let review=wire::Review::Files(wire::FileReview {action:wire::Kind::Stage,expected_revision:"a".repeat(64),paths:vec!["a.txt".into()],whole_index:false,
+        head:Some("1".repeat(40)),branch:Some("refs/heads/main".into()),expected_index:"2".repeat(64),review_digest:"b".repeat(64)});
     Arc::new(wire::Request::from_original("git-local-frame",&action,&wire::Context {project_id:"project-1".into(),generation:1,revision:"document-2".into()},
         &native,wire::Clock {work_end_ns:100_000_000_000,hard_end_ns:110_000_000_000},
         (phase==wire::Phase::Apply).then_some(wire::ApplyBinding {review,journal_revision:4})).unwrap())

@@ -2,14 +2,14 @@
 use super::*;
 
 fn action(kind:Kind) -> Action {
-    Action {kind,expected_revision:"a".repeat(64),paths:if kind==Kind::Commit {vec![]} else {vec!["a.txt".into()]},
+    Action::Files(FileAction {kind,expected_revision:"a".repeat(64),paths:if kind==Kind::Commit {vec![]} else {vec!["a.txt".into()]},
         message:(kind==Kind::Commit).then(||"Reviewed complete staged changes".into()),
-        identity:(kind==Kind::Commit).then(||Identity {name:"Fixture".into(),email:"fixture@example.invalid".into()})}
+        identity:(kind==Kind::Commit).then(||Identity {name:"Fixture".into(),email:"fixture@example.invalid".into()})})
 }
 fn review(kind:Kind) -> Review {
-    Review {action:kind,expected_revision:"a".repeat(64),paths:if kind==Kind::Commit {vec!["a.txt".into(),"b.txt".into()]} else {vec!["a.txt".into()]},
+    Review::Files(FileReview {action:kind,expected_revision:"a".repeat(64),paths:if kind==Kind::Commit {vec!["a.txt".into(),"b.txt".into()]} else {vec!["a.txt".into()]},
         whole_index:kind==Kind::Commit,head:Some("1".repeat(40)),branch:Some("refs/heads/main".into()),
-        expected_index:"2".repeat(64),review_digest:"b".repeat(64)}
+        expected_index:"2".repeat(64),review_digest:"b".repeat(64)})
 }
 fn native() -> Native {
     let file=|uid,mode| Snapshot {identity:(1,2,mode,uid,1001,1,12,123,456),sha256:"2".repeat(64)};
@@ -24,18 +24,18 @@ fn request(kind:Kind, phase:Phase) -> Request {
 }
 fn raw(value:Value) -> Vec<u8> { let mut bytes=serde_json::to_vec(&value).unwrap();bytes.push(b'\n');bytes }
 fn candidate(request:&Request) -> (Value,Candidate) {
-    let review=&request.binding.as_ref().unwrap().review;
-    let intent=Intent {action:review.action,expected_revision:review.expected_revision.clone(),expected_ref:review.branch.clone(),
+    let review=request.binding.as_ref().unwrap().review.file().unwrap();
+    let intent=Intent::Files(FileIntent {action:review.action,expected_revision:review.expected_revision.clone(),expected_ref:review.branch.clone(),
         expected_head:review.head.clone(),expected_index:review.expected_index.clone(),
         candidate_index:(review.action!=Kind::Commit).then(||"3".repeat(64)),
-        candidate_commit:(review.action==Kind::Commit).then(||"4".repeat(40))};
+        candidate_commit:(review.action==Kind::Commit).then(||"4".repeat(40))});
     let value=json!({"protocol":PROTOCOL,"kind":"candidate","id":request.id,"digest":request.digest,
         "reviewDigest":review.review_digest,"intent":intent});
     let parsed=request.candidate(&raw(value.clone())).unwrap();(value,parsed)
 }
 fn terminal(request:&Request) -> Value {
     json!({"protocol":PROTOCOL,"kind":"terminal","id":request.id,"digest":request.digest,"phase":request.phase,
-        "action":request.action.kind,"status":"refused","reason":"unsupported-repository","result":null,
+        "action":request.action.kind(),"status":"refused","reason":"unsupported-repository","result":null,
         "publication":"not-reported","firstFailureNs":99_000_000_000u64,"cleanupEndNs":109_000_000_000u64})
 }
 
@@ -60,7 +60,7 @@ fn strict_local_commands_have_no_provider_or_serialized_plan_route() {
 fn private_request_requires_exact_retained_review_index_and_clock() {
     let r=request(Kind::Stage,Phase::Apply);let data:Value=serde_json::from_slice(r.bytes()).unwrap();
     assert!(data["protocol"]==PROTOCOL && data["journalRevision"]==4 && data["reviewDigest"]=="b".repeat(64));
-    let mut changed=review(Kind::Stage);changed.expected_index="f".repeat(64);
+    let mut changed=review(Kind::Stage);let Review::Files(file)=&mut changed else {panic!()};file.expected_index="f".repeat(64);
     assert!(Request::from_original(&r.id,&r.action,&r.context,&native(),r.clock,Some(ApplyBinding {review:changed,journal_revision:4})).is_err());
     assert!(Request::from_original(&r.id,&r.action,&r.context,&native(),Clock {hard_end_ns:r.clock.hard_end_ns+1,..r.clock},None).is_err());
     let mut changed=native();changed.uid=0;
@@ -101,7 +101,7 @@ fn prepare_terminal_names_all_staged_paths_without_private_draft() {
     let r=request(Kind::Commit,Phase::Prepare);let mut row=terminal(&r);
     row["status"]=json!("ok");row["reason"]=Value::Null;row["firstFailureNs"]=Value::Null;row["cleanupEndNs"]=json!(r.clock.hard_end_ns);
     row["result"]=json!({"review":review(Kind::Commit),"diff":{"revision":"a".repeat(64),"staged":true,"paths":["a.txt","b.txt"],"text":"inert diff","withheld":null}});
-    let parsed=r.terminal(&raw(row.clone()),None).unwrap();assert!(parsed.review().unwrap().paths.len()==2);
+    let parsed=r.terminal(&raw(row.clone()),None).unwrap();assert!(parsed.review().unwrap().file().unwrap().paths.len()==2);
     assert!(!String::from_utf8(raw(row.clone())).unwrap().contains("fixture@example"));
     row["result"]["diff"]["paths"]=json!(["a.txt"]);assert!(r.terminal(&raw(row),None).is_err());
 }

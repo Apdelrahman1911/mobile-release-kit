@@ -2,7 +2,7 @@
 //! Draft author/message stay private; public projections contain only bounded
 //! review/intent facts. Child publication and terminal frames never settle the
 //! original native invocation. No serialized plan is accepted for execution.
-use crate::{error::BridgeError, git_read_protocol as read, protocol::{strict_json, valid_id}};
+use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, protocol::{strict_json, valid_id}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -54,7 +54,7 @@ fn frame(bytes: &[u8], limit: usize) -> Result<Value, BridgeError> {
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
-pub(crate) enum Kind { Stage, Unstage, Commit }
+pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
 pub(crate) enum Phase { Prepare, Apply }
@@ -70,10 +70,14 @@ impl Identity {
     }
 }
 // Serialize is used only for the private child request. No Debug and no public
-// projection containing this type. Core retains its stricter secret heuristic.
+// projection containing the file draft. Exact tagged branch DATA has neither
+// paths/message/identity nor a fabricated empty whole-index review.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum Action { Files(FileAction), Branch(branch::Action) }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct Action {
+pub(crate) struct FileAction {
     pub(crate) kind: Kind,
     pub(crate) expected_revision: String,
     pub(crate) paths: Vec<String>,
@@ -81,21 +85,33 @@ pub(crate) struct Action {
     identity: Option<Identity>,
 }
 impl Action {
+    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate } }
+    pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision } }
     pub(crate) fn valid(&self) -> bool {
-        read::digest(&self.expected_revision) && match self.kind {
-            Kind::Commit => self.paths.is_empty()
-                && self.identity.as_ref().is_some_and(Identity::valid)
-                && self.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
-            _ => paths(&self.paths) && self.message.is_none() && self.identity.is_none(),
+        match self {
+            Self::Branch(v)=>v.valid(),
+            Self::Files(v)=>read::digest(&v.expected_revision) && match v.kind {
+                Kind::Commit => v.paths.is_empty()
+                    && v.identity.as_ref().is_some_and(Identity::valid)
+                    && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
+                Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
+                Kind::BranchCreate => false,
+            },
         }
     }
     pub(crate) fn public(&self) -> PublicAction {
-        PublicAction {kind:self.kind,expected_revision:self.expected_revision.clone(),paths:self.paths.clone()}
+        match self {
+            Self::Files(v)=>PublicAction::Files(PublicFileAction {kind:v.kind,expected_revision:v.expected_revision.clone(),paths:v.paths.clone()}),
+            Self::Branch(v)=>PublicAction::Branch(v.clone()),
+        }
     }
 }
 #[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action) }
+#[derive(Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase")]
-pub(crate) struct PublicAction { pub(crate) kind:Kind, pub(crate) expected_revision:String, pub(crate) paths:Vec<String> }
+pub(crate) struct PublicFileAction { pub(crate) kind:Kind, pub(crate) expected_revision:String, pub(crate) paths:Vec<String> }
 pub(crate) struct Prepare {
     pub(crate) project_id: String, pub(crate) expected_document_revision: u32, pub(crate) action: Action,
 }
@@ -115,7 +131,9 @@ pub(crate) fn decode_command(name: &str, raw: &[u8]) -> Result<Command, BridgeEr
     }
     need(match name {
         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
-            && keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]),
+            && if body["action"]["kind"] == "branch-create" {
+                keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
+            } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
         _ => false,
     })?;
@@ -133,45 +151,96 @@ pub(crate) fn decode_command(name: &str, raw: &[u8]) -> Result<Command, BridgeEr
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum Review { Files(FileReview), Branch(branch::Review) }
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct Review {
+pub(crate) struct FileReview {
     pub(crate) action: Kind, pub(crate) expected_revision: String, pub(crate) paths: Vec<String>,
     pub(crate) whole_index: bool, pub(crate) head: Option<String>, pub(crate) branch: Option<String>,
     pub(crate) expected_index: String, pub(crate) review_digest: String,
 }
 impl Review {
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate} }
+    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision} }
+    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head)} }
+    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref()} }
+    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index, Self::Branch(v)=>&v.expected_index} }
+    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest} }
+    pub(crate) fn file(&self) -> Option<&FileReview> { match self {Self::Files(v)=>Some(v),_=>None} }
+    pub(crate) fn branch_details(&self) -> Option<&branch::Review> { match self {Self::Branch(v)=>Some(v),_=>None} }
     pub(crate) fn valid(&self) -> bool {
-        read::digest(&self.expected_revision) && read::digest(&self.expected_index) && read::digest(&self.review_digest)
-            && paths(&self.paths) && self.whole_index == (self.action == Kind::Commit)
-            && self.head.as_deref().is_none_or(read::oid) && self.branch.as_deref().is_none_or(read::branch)
-            && (self.head.is_some() || self.branch.is_some()) && (self.action != Kind::Commit || self.branch.is_some())
+        match self {
+            Self::Branch(v)=>v.valid(),
+            Self::Files(v)=>v.action != Kind::BranchCreate && read::digest(&v.expected_revision)
+                && read::digest(&v.expected_index) && read::digest(&v.review_digest)
+                && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
+                && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
+                && (v.head.is_some() || v.branch.is_some()) && (v.action != Kind::Commit || v.branch.is_some()),
+        }
     }
     fn matches(&self, action: &Action) -> bool {
-        self.valid() && self.action == action.kind && self.expected_revision == action.expected_revision
-            && (action.kind == Kind::Commit || self.paths == action.paths)
+        self.valid() && action.valid() && match (self,action) {
+            (Self::Branch(v),Action::Branch(a))=>v.matches(a),
+            (Self::Files(v),Action::Files(a))=>v.action == a.kind && v.expected_revision == a.expected_revision
+                && (a.kind == Kind::Commit || v.paths == a.paths),
+            _=>false,
+        }
+    }
+    fn decode(value:&Value) -> Result<Self,BridgeError> {
+        need(if value["action"] == "branch-create" {
+            keys(value,&["action","name","targetRef","expectedRevision","expectedReferenceRevision","head","branch","expectedIndex","reviewDigest"])
+        } else { keys(value,&["action","expectedRevision","paths","wholeIndex","head","branch","expectedIndex","reviewDigest"]) })?;
+        serde_json::from_value(value.clone()).map_err(|_|BridgeError::protocol())
     }
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent) }
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct Intent {
+pub(crate) struct FileIntent {
     pub(crate) action: Kind, pub(crate) expected_revision: String, pub(crate) expected_ref: Option<String>,
     pub(crate) expected_head: Option<String>, pub(crate) expected_index: String,
     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
 }
 impl Intent {
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate} }
+    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision} }
+    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref()} }
+    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head)} }
+    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index,Self::Branch(v)=>&v.expected_index} }
+    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)=>None} }
+    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)=>None} }
+    pub(crate) fn reference_oid(&self) -> Option<&str> { match self {Self::Files(v) if v.action==Kind::Commit=>v.candidate_commit.as_deref(),Self::Branch(v)=>Some(&v.candidate_ref_oid),_=>None} }
+    pub(crate) fn branch_details(&self) -> Option<&branch::Intent> { match self {Self::Branch(v)=>Some(v),_=>None} }
     pub(crate) fn valid(&self) -> bool {
-        read::digest(&self.expected_revision) && read::digest(&self.expected_index)
-            && self.expected_head.as_deref().is_none_or(read::oid) && self.expected_ref.as_deref().is_none_or(read::branch)
-            && (self.expected_head.is_some() || self.expected_ref.is_some()) && match self.action {
-                Kind::Commit => self.expected_ref.is_some() && self.candidate_index.is_none()
-                    && self.candidate_commit.as_deref().is_some_and(|v|read::oid(v)
-                        && self.expected_head.as_ref().is_none_or(|h|h.len() == v.len())),
-                _ => self.candidate_commit.is_none() && self.candidate_index.as_deref().is_some_and(read::digest),
-            }
+        match self {
+            Self::Branch(v)=>v.valid(),
+            Self::Files(v)=>read::digest(&v.expected_revision) && read::digest(&v.expected_index)
+                && v.expected_head.as_deref().is_none_or(read::oid) && v.expected_ref.as_deref().is_none_or(read::branch)
+                && (v.expected_head.is_some() || v.expected_ref.is_some()) && match v.action {
+                    Kind::Commit => v.expected_ref.is_some() && v.candidate_index.is_none()
+                        && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
+                            && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
+                    Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
+                    Kind::BranchCreate=>false,
+                },
+        }
     }
     pub(crate) fn matches(&self, review: &Review) -> bool {
-        self.valid() && self.action == review.action && self.expected_revision == review.expected_revision
-            && self.expected_ref == review.branch && self.expected_head == review.head && self.expected_index == review.expected_index
+        self.valid() && review.valid() && match (self,review) {
+            (Self::Branch(v),Review::Branch(r))=>v.matches(r),
+            (Self::Files(v),Review::Files(r))=>v.action == r.action && v.expected_revision == r.expected_revision
+                && v.expected_ref == r.branch && v.expected_head == r.head && v.expected_index == r.expected_index,
+            _=>false,
+        }
+    }
+    fn decode(value:&Value) -> Result<Self,BridgeError> {
+        need(if value["action"] == "branch-create" {
+            keys(value,&["action","expectedRevision","expectedReferenceRevision","expectedRef","expectedHead","expectedIndex","targetRef","expectedTargetAbsent","candidateRefOid"])
+        } else { keys(value,&["action","expectedRevision","expectedRef","expectedHead","expectedIndex","candidateIndex","candidateCommit"]) })?;
+        serde_json::from_value(value.clone()).map_err(|_|BridgeError::protocol())
     }
 }
 pub(crate) struct ApplyBinding { pub(crate) review: Review, pub(crate) journal_revision: u64 }
@@ -188,12 +257,12 @@ impl Request {
             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
         let phase = if let Some(selected) = &binding {
             let index = native.files.index.as_ref().map(|v|v.sha256.clone()).unwrap_or_else(||hash(b"absent"));
-            need(selected.review.matches(action) && selected.review.expected_index == index
+            need(selected.review.matches(action) && selected.review.expected_index() == index
                 && (1..=u64::MAX-2).contains(&selected.journal_revision))?;
             Phase::Apply
         } else { Phase::Prepare };
         let mut bytes = serde_json::to_vec(&json!({"protocol":PROTOCOL,"id":id,"phase":phase,"action":action,
-            "reviewDigest":binding.as_ref().map(|s|&s.review.review_digest),
+            "reviewDigest":binding.as_ref().map(|s|s.review.review_digest()),
             "journalRevision":binding.as_ref().map(|s|s.journal_revision),"context":context,"native":native,"clock":clock}))
             .map_err(|_|BridgeError::protocol())?;
         bytes.push(b'\n'); need(bytes.len() <= REQUEST_LIMIT)?;
@@ -211,8 +280,8 @@ impl Request {
         let row = frame(bytes,CANDIDATE_LIMIT)?;
         need(keys(&row,&["protocol","kind","id","digest","reviewDigest","intent"]) && row["protocol"] == PROTOCOL
             && row["kind"] == "candidate" && row["id"] == self.id && row["digest"] == self.digest
-            && row["reviewDigest"] == binding.review.review_digest)?;
-        let intent:Intent = serde_json::from_value(row["intent"].clone()).map_err(|_|BridgeError::protocol())?;
+            && row["reviewDigest"] == binding.review.review_digest())?;
+        let intent = Intent::decode(&row["intent"])?;
         need(intent.matches(&binding.review))?;
         Ok(Candidate {request_digest:self.digest.clone(),digest:hash(bytes),intent})
     }
@@ -233,51 +302,58 @@ impl Request {
         need(keys(&row,&["protocol","kind","id","digest","phase","action","status","reason","result","publication","firstFailureNs","cleanupEndNs"])
             && row["protocol"] == PROTOCOL && row["kind"] == "terminal" && row["id"] == self.id && row["digest"] == self.digest)?;
         let terminal:Terminal = serde_json::from_value(row).map_err(|_|BridgeError::protocol())?;
-        need(terminal.phase == self.phase && terminal.action == self.action.kind && terminal.cleanup_end_ns > 0
+        need(terminal.phase == self.phase && terminal.action == self.action.kind() && terminal.cleanup_end_ns > 0
             && terminal.cleanup_end_ns <= self.clock.hard_end_ns)?;
         if let Some(first) = terminal.first_failure_ns {
             need(first > 0 && first <= terminal.cleanup_end_ns && terminal.cleanup_end_ns-first <= 10_000_000_000)?;
         }
         if terminal.status != read::Outcome::Ok {
-            need(terminal.reason.as_deref().is_some_and(read::reason) && terminal.result.is_null()
+            need(terminal.reason.as_deref().is_some_and(|v|self.reason(v)) && terminal.result.is_null()
                 && terminal.publication == Publication::NotReported
                 && (terminal.first_failure_ns.is_some() || terminal.status == read::Outcome::CleanupUnknown))?;
         } else {
             need(terminal.reason.is_none())?;
             if self.phase == Phase::Prepare {
                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
-                    && terminal.publication == Publication::NotReported && keys(&terminal.result,&["review","diff"]))?;
-                let review:Review = serde_json::from_value(terminal.result["review"].clone()).map_err(|_|BridgeError::protocol())?;
+                    && terminal.publication == Publication::NotReported
+                    && keys(&terminal.result,if self.action.kind()==Kind::BranchCreate {&["review"]} else {&["review","diff"]}))?;
+                let review = Review::decode(&terminal.result["review"])?;
                 need(review.matches(&self.action))?;
-                read::validate_result(&read::Action {kind:read::Kind::Diff,expected_revision:Some(review.expected_revision),
-                    paths:review.paths,staged:self.action.kind != Kind::Stage},&terminal.result["diff"])?;
+                if let Some(review) = review.file() {
+                    read::validate_result(&read::Action {kind:read::Kind::Diff,expected_revision:Some(review.expected_revision.clone()),
+                        paths:review.paths.clone(),staged:self.action.kind() != Kind::Stage},&terminal.result["diff"])?;
+                }
             } else { self.validate_applied(&terminal,candidate)?; }
         }
         Ok(terminal)
     }
+    fn reason(&self,value:&str)->bool {read::reason(value) || self.action.kind()==Kind::BranchCreate && branch::reason(value)}
     fn validate_applied(&self, terminal:&Terminal, candidate:Option<&Candidate>) -> Result<(),BridgeError> {
         let r = &terminal.result;
         need(keys(r,&["operationId","action","state","settlement","reason","observation","intent"])
-            && r["operationId"] == self.id && r["action"] == json!(self.action.kind) && r["settlement"] == "settled")?;
+            && r["operationId"] == self.id && r["action"] == json!(self.action.kind()) && r["settlement"] == "settled")?;
         let state = r["state"].as_str().ok_or_else(BridgeError::protocol)?;
         need(matches!(state,"succeeded"|"failed"|"recovery-required"))?;
         if r["intent"].is_null() { need(candidate.is_none() && terminal.publication == Publication::NotReported)?; }
         else {
             let candidate = candidate.ok_or_else(BridgeError::protocol)?;
-            let intent:Intent = serde_json::from_value(r["intent"].clone()).map_err(|_|BridgeError::protocol())?;
+            let intent = Intent::decode(&r["intent"])?;
             need(candidate.request_digest == self.digest && intent == candidate.intent)?;
         }
         if terminal.publication != Publication::NotReported {
-            need(candidate.is_some() && terminal.publication == if self.action.kind == Kind::Commit {Publication::RefReturned} else {Publication::IndexReturned})?;
+            need(candidate.is_some() && terminal.publication == match self.action.kind() {
+                Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
+                Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
+            })?;
         }
         if state == "succeeded" {
             need(terminal.publication != Publication::NotReported && r["reason"].is_null() && read::observation(&r["observation"])
                 && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns)?;
             let candidate = candidate.ok_or_else(BridgeError::protocol)?;
-            need(r["observation"]["branch"] == json!(candidate.intent.expected_ref)
-                && r["observation"]["head"] == json!(if self.action.kind == Kind::Commit {&candidate.intent.candidate_commit} else {&candidate.intent.expected_head}))?;
+            need(r["observation"]["branch"] == json!(candidate.intent.expected_ref())
+                && r["observation"]["head"] == json!(if self.action.kind() == Kind::Commit {candidate.intent.candidate_commit()} else {candidate.intent.expected_head()}))?;
         } else {
-            need(r["reason"].as_str().is_some_and(read::reason) && r["observation"].is_null() && terminal.first_failure_ns.is_some())?;
+            need(r["reason"].as_str().is_some_and(|v|self.reason(v)) && r["observation"].is_null() && terminal.first_failure_ns.is_some())?;
         }
         Ok(())
     }
@@ -285,7 +361,7 @@ impl Request {
 pub(crate) struct Candidate { request_digest:String, pub(crate) digest:String, pub(crate) intent:Intent }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
-pub(crate) enum Publication { NotReported, IndexReturned, RefReturned }
+pub(crate) enum Publication { NotReported, IndexReturned, RefReturned, BranchRefReturned }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct Terminal {
@@ -300,7 +376,7 @@ impl Terminal {
     }
     pub(crate) fn review(&self) -> Result<Review,BridgeError> {
         need(self.phase == Phase::Prepare && self.status == read::Outcome::Ok)?;
-        serde_json::from_value(self.result["review"].clone()).map_err(|_|BridgeError::protocol())
+        Review::decode(&self.result["review"])
     }
 }
 
@@ -316,7 +392,9 @@ pub(crate) struct Projection {
 #[serde(rename_all="camelCase")]
 pub(crate) struct Prepared {
     pub(crate) review_id:String, pub(crate) context:Context, pub(crate) action:PublicAction,
-    pub(crate) review:Review, pub(crate) diff:Value,
+    pub(crate) review:Review,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub(crate) diff:Option<Value>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]

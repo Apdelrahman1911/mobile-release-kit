@@ -6,14 +6,15 @@ fn project(number: u8) -> ProjectBinding {
     ProjectBinding { project_id:crate::service_protocol::Id::parse(&format!("{number:032x}")).unwrap(), canonical_root:"/inert/project".into(), device:1, inode:2 }
 }
 fn review(kind:wire::Kind) -> wire::Review {
-    wire::Review { action:kind, expected_revision:"a".repeat(64), paths:vec!["a.txt".into()],
+    wire::Review::Files(wire::FileReview { action:kind, expected_revision:"a".repeat(64), paths:vec!["a.txt".into()],
         whole_index:kind==wire::Kind::Commit, head:Some("1".repeat(40)), branch:Some("refs/heads/main".into()),
-        expected_index:"2".repeat(64), review_digest:"b".repeat(64) }
+        expected_index:"2".repeat(64), review_digest:"b".repeat(64) })
 }
 fn row(number:u8, kind:wire::Kind) -> Row { Row::preparing(&project(number),&format!("operation-{number}"),&review(kind)).unwrap() }
 fn intent(row:&Row) -> wire::Intent {
-    wire::Intent { candidate_index:(row.action!=wire::Kind::Commit).then(||"3".repeat(64)),
-        candidate_commit:(row.action==wire::Kind::Commit).then(||"4".repeat(40)), ..row.intent() }
+    let wire::Intent::Files(original)=row.intent().unwrap() else {panic!()};
+    wire::Intent::Files(wire::FileIntent { candidate_index:(row.action!=wire::Kind::Commit).then(||"3".repeat(64)),
+        candidate_commit:(row.action==wire::Kind::Commit).then(||"4".repeat(40)), ..original })
 }
 fn snapshot(state:&State) -> Snapshot { Snapshot {revision:Revision(3),bytes:state.bytes().unwrap()} }
 
@@ -59,7 +60,7 @@ fn same_row_candidate_binds_all_reviewed_old_fields_and_is_once_only() {
     }
     let mut value=original.clone();value.candidate(&good).unwrap();assert!(value.same_original(&original));
     assert!(value.candidate(&good).is_err());assert!(value.has_candidate());
-    let mut wrong=good;wrong.candidate_commit=Some("4".repeat(40));assert!(original.clone().candidate(&wrong).is_err());
+    let mut wrong=good;let wire::Intent::Files(file)=&mut wrong else {panic!()};file.candidate_commit=Some("4".repeat(40));assert!(original.clone().candidate(&wrong).is_err());
 }
 
 #[test]
