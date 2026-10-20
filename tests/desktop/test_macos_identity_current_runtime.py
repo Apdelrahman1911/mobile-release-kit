@@ -1,0 +1,358 @@
+"""Inert routing + real bounded public-file readers, never Mac qualification.
+
+The lifetime tests keep the existing run_cases control flow but explicitly fake
+the process result, precursor, native report and independent readback. No core
+owner, native command, installed path, key, signing or provider is used.
+"""
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).absolute().parents[2]
+
+
+def load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "desktop/tools" / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+M = load("_identity_current_test", "macos_identity_current_runtime.py")
+A = load("_identity_current_aqua_test", "macos_aqua_qualification.py")
+STAGE = load("_identity_current_stage_test", "stage_macos_installed.py")
+PACKAGE = load("_identity_current_package_test", "macos_android_helper_package.py")
+BINDING = A.Binding("a" * 40, "123", "1")
+
+
+def environment():
+    return {
+        "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REPOSITORY": M.REPOSITORY, "GITHUB_REF": M.REF,
+        "GITHUB_WORKSPACE": str(M.CHECKOUT), "GITHUB_WORKFLOW_REF": M.WORKFLOW,
+        "GITHUB_SHA": BINDING.source, "GITHUB_WORKFLOW_SHA": BINDING.source,
+        "MRK_EXPECTED_SHA": BINDING.source, "MRK_MACOS_INSTALL_SOURCE_COMMIT": BINDING.source,
+        "GITHUB_RUN_ID": BINDING.run, "GITHUB_RUN_ATTEMPT": BINDING.attempt,
+        "MRK_MACOS_NATIVE_SCOPE": M.SCOPE, "MRK_MACOS_PACKAGE_ROLE": M.ROLE,
+        "MRK_MACOS_STORE_RUNTIME": "signed-component",
+        "MRK_MACOS_WORK": "/Users/runner/work/_temp/mrk-macos-installed.Abc12345",
+        "RUSTUP_TOOLCHAIN": "1.98.1", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
+        "MACOSX_DEPLOYMENT_TARGET": "26.0",
+    }
+
+
+class InertOnly(unittest.TestCase):
+    def setUp(self):
+        no_process = patch("subprocess.Popen", side_effect=AssertionError("native/process execution forbidden"))
+        no_process.start()
+        self.addCleanup(no_process.stop)
+
+
+class CurrentRouteTests(InertOnly):
+    def test_only_explicit_current_arm_scope_and_fixed_preparation_phases(self):
+        env = environment()
+        for phase in M.PACKAGE_PHASES + M.DATA_PHASES:
+            self.assertEqual(M.package_role(env, phase, M.TARGET), M.ROLE)
+        for phase in (None, "finalize-image", "sign-desktop-image", "sign-store-runtime", "sign-applications-launcher", "run", "xcode-setup-verify"):
+            with self.subTest(phase=phase), self.assertRaises(M.Refused):
+                M.package_role(env, phase, M.TARGET)
+        for key, value in (("MRK_MACOS_NATIVE_SCOPE", "all"), ("MRK_MACOS_NATIVE_SCOPE", ""),
+                           ("GITHUB_REF", "refs/heads/verify/desktop-macos-aqua"),
+                           ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image")):
+            with self.subTest(key=key, value=value), self.assertRaises(M.Refused):
+                M.package_role({**env, key: value}, "package-install", M.TARGET)
+        with self.assertRaises(M.Refused):
+            M.package_role(env, "prepare", A.INTEL_TARGET)
+        for value in (None, "disabled"):
+            ordinary = {**env, "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}
+            if value is None:
+                ordinary.pop("MRK_MACOS_NATIVE_SCOPE")
+            else:
+                ordinary["MRK_MACOS_NATIVE_SCOPE"] = value
+            self.assertIsNone(M.package_role(ordinary, "any-original-decision", A.INTEL_TARGET))
+
+    def test_current_context_has_no_ref_source_supplier_or_prepared_fallback(self):
+        env = environment()
+        self.assertEqual(M.current_context(env, M.TARGET),
+                         (BINDING.source, BINDING.run, BINDING.attempt, Path(env["MRK_MACOS_WORK"])))
+        for key, value in (("GITHUB_WORKFLOW_SHA", "b" * 40), ("GITHUB_SHA", "0" * 40),
+                           ("MRK_MACOS_INSTALL_SOURCE_COMMIT", "b" * 40),
+                           ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+                           ("MRK_MACOS_STORE_RUNTIME", "historical"), ("MRK_MACOS_AQUA_SCOPE", M.SCOPE),
+                           ("MRK_MACOS_WORK", env["MRK_MACOS_WORK"] + "/../other")):
+            with self.subTest(key=key), self.assertRaises(M.Refused):
+                M.current_context({**env, key: value}, M.TARGET)
+
+    def test_actual_package_hooks_keep_default_role_and_validate_native_and_data_routes(self):
+        # DATA-only host observations, not Darwin, signatures or a native entry.
+        with ExitStack() as stack:
+            for name, value in (("getuid", 501), ("geteuid", 501), ("getgid", 20), ("getegid", 20)):
+                stack.enter_context(patch.object(PACKAGE.os, name, return_value=value))
+            stack.enter_context(patch.object(PACKAGE.os, "uname", return_value=SimpleNamespace(machine="arm64")))
+            stack.enter_context(patch.object(PACKAGE.sys, "platform", "darwin"))
+            stack.enter_context(patch.object(PACKAGE, "__file__", str(PACKAGE.CHECKOUT / "desktop/tools/macos_android_helper_package.py")))
+            loader = stack.enter_context(patch.object(PACKAGE, "load_data", return_value=M))
+            ordinary = {**environment(), "MRK_MACOS_NATIVE_SCOPE": "disabled", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}
+            self.assertEqual(PACKAGE.admit(ordinary, phase="prepare"), Path(ordinary["MRK_MACOS_WORK"]))
+            PACKAGE.tool_data_context(ordinary, M.DATA_PHASES[0], M.TARGET)
+            loader.assert_not_called()
+            self.assertEqual(PACKAGE.admit(environment(), phase="prepare"), Path(ordinary["MRK_MACOS_WORK"]))
+            self.assertEqual(loader.call_args.args[1], "macos_identity_current_runtime.py")
+            PACKAGE.tool_data_context(environment(), M.DATA_PHASES[0], M.TARGET)
+            for method in (lambda env: PACKAGE.admit(env, phase="prepare"),
+                           lambda env: PACKAGE.tool_data_context(env, M.DATA_PHASES[0], M.TARGET)):
+                with self.assertRaises(M.Refused):
+                    method({**environment(), "MRK_MACOS_NATIVE_SCOPE": "unknown"})
+                with self.assertRaises(PACKAGE.Refused):
+                    method({**environment(), "GITHUB_WORKFLOW_SHA": "b" * 40})
+            with self.assertRaises(M.Refused):
+                PACKAGE.admit(environment(), phase="finalize-image")
+
+    def test_rejected_entry_never_imports_or_prepares_an_original_owner(self):
+        with patch.dict(os.environ, {**environment(), "GITHUB_REF": "refs/heads/other"}, clear=True), \
+             patch.object(sys, "argv", ["entry", "--target", M.TARGET]), \
+             patch.object(M, "_native_user") as native, patch.object(M, "_load_observer") as owner, \
+             redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(M.main(), 1)
+        native.assert_not_called()
+        owner.assert_not_called()
+        self.assertEqual(json.loads(stderr.getvalue())["reason"], "entry-refused")
+
+
+class CurrentBindingFilesTests(InertOnly):
+    def setUp(self):
+        super().setUp()
+        self.temp = tempfile.TemporaryDirectory(prefix="mrk-identity-current-data-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.checkout, self.work = self.root / "checkout", self.root / "work"
+        for name in ("checkout", "work", "installed", "checkout/.git", "checkout/desktop",
+                     "checkout/desktop/macos-installed-inputs", "checkout/desktop/packaging"):
+            (self.root / name).mkdir(mode=0o700)
+        self.fixtures = A.Fixtures(BINDING, os.getuid(), os.getgid(), M.SCOPE)
+        self.addCleanup(self.fixtures.close)
+        self.admissions = []
+        # Only the installed-owner/platform seam is inert; every new reader and
+        # selected/composed binding parser below is the actual implementation.
+        self.fixtures.admit_normal_account_runtime = lambda *args, **kw: self.admissions.append((args, kw))
+        self.fixtures.recovery_runtime_paths = lambda: ("INERT", "INERT")
+        self.fixtures.normal_stager_registrations = [STAGE]
+        self.put(self.checkout / ".git/HEAD", (BINDING.source + "\n").encode())
+        manifest = b"INERT installed manifest bytes; no installed/native authority\n"
+        self.put(self.root / "installed/manifest.json", manifest)
+        parent = self.fixtures._open(str(self.root / "installed"), directory=True)
+        fd = self.fixtures._open("manifest.json", parent)
+        self.manifest_fd = fd
+        self.fixtures.recovery_runtime_originals = [(parent, "manifest.json", fd, A.signature(os.fstat(fd)))]
+        producer = ("schema=1\nstate=configured\nteam-identifier=TESTTEAM01\nrsa-bits=2048\n"
+                    + "leaf-certificate-sha1=" + "1" * 40 + "\nleaf-certificate-sha256=" + "2" * 64
+                    + "\nissuer-certificate-sha256=" + "3" * 64 + "\nroot-certificate-sha256=" + "4" * 64
+                    + "\npublic-key-pkcs1-sha256=" + "5" * 64 + "\n").encode()
+        service = ("schema=1\napp-identifier=" + STAGE.BUNDLE_ID + "\nhelper-identifier=" + STAGE.ANDROID_SERVICE_LABEL
+                   + "\nteam-identifier=TESTTEAM01\ndeveloper-id-certificate-sha1=" + "1" * 40 + "\n").encode()
+        for name, body in (("macos-install-producer-signing.profile", producer),
+                           ("macos-android-service-signing.profile", service)):
+            self.put(self.checkout / "desktop/packaging" / name, body)
+        python = dict(state="configured", signedPythonSha256="6" * 64, signingReceiptSha256="7" * 64,
+            sourceInputsSha256="8" * 64, runtimeManifestSha256="9" * 64,
+            producerProfileSha256=STAGE.digest(producer), serviceProfileSha256=STAGE.digest(service),
+            signingSourceCommit="b" * 40, signingRunId="234", signingRunAttempt="1", signingArtifactId="567")
+        self.put(self.checkout / "desktop" / STAGE.SIGNED_RUNTIME_BINDING, STAGE.canonical({"schemaVersion": 1,
+            "targets": {M.TARGET: python, A.INTEL_TARGET: {"state": "unconfigured"}}}))
+        store = dict(schemaVersion=1, state="configured", source="c" * 40, runId="345", runAttempt="1",
+                     artifacts={M.TARGET: "678", A.INTEL_TARGET: "679"})
+        store_body = STAGE.canonical(store)
+        self.put(self.checkout / "desktop" / STAGE.SIGNED_STORE_SELECTION, store_body)
+        store = dict(STAGE.signed_store_selection_data(store_body), receiptSha256="a" * 64,
+                     archiveSha256="b" * 64, artifactDigest="sha256:" + "c" * 64)
+        self.runtime = dict(schemaVersion=1, kind="current-signed-store-runtime", target=M.TARGET,
+            sourceInputsSha256="d" * 64, runtimeManifestSha256=STAGE.digest(manifest), store=store,
+            python={key: value for key, value in python.items() if key not in ("state", "sourceInputsSha256", "runtimeManifestSha256")})
+        self.env = environment()
+        info = self.work.stat()
+        self.source = dict(source=BINDING.source, workflowSource=BINDING.source, runId=BINDING.run,
+            runAttempt=BINDING.attempt, target=M.TARGET, packageRole=M.ROLE,
+            workDirectory=[info.st_dev, info.st_ino, info.st_uid])
+        self.bind()
+
+    def put(self, path, body):
+        path.write_bytes(body)
+        path.chmod(0o600)
+
+    def bind(self):
+        body = STAGE.canonical(self.runtime)
+        self.source.update(runtimeBindingSha256=STAGE.digest(body),
+            runtimeManifestSha256=self.runtime["runtimeManifestSha256"],
+            runtimeSourceInputsSha256=self.runtime["sourceInputsSha256"], signedStoreDerivation=self.runtime["store"])
+        self.env.update(MRK_MACOS_RUNTIME_BINDING_SHA256=STAGE.digest(body),
+            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=self.runtime["runtimeManifestSha256"],
+            MRK_BUNDLED_RUNTIME_SOURCE_SHA256=self.runtime["sourceInputsSha256"])
+        self.put(self.work / "runtime-binding.json", body)
+        self.put(self.work / "source-binding.json", STAGE.canonical(self.source))
+
+    def admit(self):
+        with patch.object(M, "CHECKOUT", self.checkout):
+            M._admit_runtime(A, self.fixtures, BINDING, self.work, self.env)
+
+    def test_real_readers_join_computed_m_to_same_manifest_fd_not_legacy_nomination(self):
+        self.admit()
+        self.assertEqual(self.admissions, [((self.checkout, self.work), {"application_source": BINDING.source})])
+        records = [row for row in self.fixtures.gate_files if row["name"] == "manifest.json"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["fd"], self.manifest_fd)
+        self.assertEqual(records[0]["sha256"], self.runtime["runtimeManifestSha256"])
+        M._current(A, self.fixtures)
+        self.fixtures.close()
+        self.assertFalse(self.fixtures.fds)
+
+    def test_self_consistent_but_different_manifest_is_not_installed_authority(self):
+        self.runtime["runtimeManifestSha256"] = "e" * 64
+        self.bind()
+        with self.assertRaisesRegex(A.Refused, "identity-native-current-manifest"):
+            self.admit()
+
+    def test_different_source_work_or_ordinary_role_refuses(self):
+        for key, wrong in (("source", "b" * 40), ("workDirectory", [1, 2, 3]), ("packageRole", "ordinary-image")):
+            original = self.source[key]
+            self.source[key] = wrong
+            self.bind()
+            with self.subTest(key=key), self.assertRaises((A.Refused, STAGE.Refused)):
+                self.admit()
+            self.source[key] = original
+
+    def test_post_case_binding_replacement_preserves_foreign_file_and_refuses(self):
+        self.admit()
+        path = self.work / "source-binding.json"
+        body = path.read_bytes()
+        replacement = self.work / "replacement"
+        self.put(replacement, body)
+        replacement.replace(path)
+        with self.assertRaises(A.Refused):
+            M._current(A, self.fixtures)
+        self.assertEqual(path.read_bytes(), body)
+
+    def test_source_binding_bound_is_before_parse(self):
+        self.put(self.work / "source-binding.json", b"x" * 65537)
+        with patch.object(STAGE, "composed_source_binding_data", side_effect=AssertionError("oversize parsed")), \
+             self.assertRaisesRegex(A.Refused, "gate-original-file"):
+            self.admit()
+
+
+class OriginalCallFlowTests(InertOnly):
+    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None):
+        events, errors = [], []
+        fixtures = A.Fixtures(BINDING, 501, 20, M.SCOPE)
+        fixtures.prepare = lambda: events.append("prepare")
+        fixtures.recovery_runtime_paths = lambda: events.append("runtime-post")
+        fixtures.before_call = lambda case: (events.append(("before", case)), setattr(fixtures, "case", case))
+
+        def close():
+            events.append("close")
+            if close_failure:
+                raise close_failure
+
+        fixtures.close = close
+
+        def admit(*args):
+            events.append("admit-current-runtime")
+            if admission_failure:
+                raise admission_failure
+
+        def original(argv, **options):
+            self.assertTrue(fixtures.inflight)
+            self.assertIn("admit-current-runtime", events)
+            self.assertEqual(argv, [A.EXECUTABLE, fixtures.case])
+            self.assertEqual(options["timeout"], A.case_timeout(fixtures.case))
+            self.assertEqual(options["environ"], A.app_environment(options["cwd"], 501, "runner"))
+            events.append(("original-inert-call", fixtures.case))
+            if failure:
+                raise failure
+            return subprocess.CompletedProcess(argv, 0, b"INERT REPORT", b"")
+
+        def readback(_fixtures, case, report):
+            self.assertFalse(fixtures.inflight)
+            self.assertTrue(fixtures.last_returned)
+            events.append(("inert-readback", case))
+            return {"inertOnly": True}
+
+        def diagnose(error, owner, current):
+            errors.append(error)
+            return {"inertOnly": True, "unknown": current.inflight}
+
+        owner = SimpleNamespace(run_owned=original)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(A, "Fixtures", return_value=fixtures))
+            stack.enter_context(patch.object(M, "_admit_runtime", side_effect=admit))
+            owner_load = stack.enter_context(patch.object(A, "load_owner", return_value=owner))
+            stack.enter_context(patch.object(A.identity_qualification, "before_invocation", return_value=None))
+            stack.enter_context(patch.object(A.identity_qualification, "readback", side_effect=readback))
+            stack.enter_context(patch.object(A, "parse_result", return_value={"projectIdentity": {"inertOnly": True}}))
+            stack.enter_context(patch.object(A, "diagnostic", side_effect=diagnose))
+            if run_cases:
+                stack.enter_context(patch.object(A, "run_cases", side_effect=run_cases))
+            out, err = io.StringIO(), io.StringIO()
+            stack.enter_context(redirect_stdout(out)); stack.enter_context(redirect_stderr(err))
+            status = M._run(A, BINDING, 501, 20, "runner", Path(environment()["MRK_MACOS_WORK"]), environment())
+        return status, events, [json.loads(line) for line in out.getvalue().splitlines()], errors, fixtures, owner_load
+
+    def test_same_run_cases_dispatches_exact_four_after_admission_and_close_precedes_complete(self):
+        status, events, rows, errors, fixtures, _ = self.execute()
+        self.assertEqual(status, 0)
+        self.assertEqual(errors, [])
+        self.assertEqual([row[1] for row in events if type(row) is tuple and row[0] == "original-inert-call"], list(A.identity_qualification.CASES))
+        self.assertEqual(events[:2], ["prepare", "admit-current-runtime"])
+        self.assertEqual(events[-1], "close")
+        self.assertEqual([row["case"] for row in rows[:-1]], list(A.identity_qualification.CASES))
+        self.assertEqual(rows[-1]["type"], "macos-identity-current-complete")
+        self.assertFalse(rows[-1]["shippingBinaryQualified"])
+        self.assertFalse(rows[-1]["processLossEvidence"])
+        self.assertFalse(fixtures.inflight)
+
+    def test_unreturned_original_stops_later_calls_readbacks_and_close(self):
+        first = RuntimeError("INERT pending original")
+        status, events, rows, errors, fixtures, _ = self.execute(failure=first)
+        self.assertEqual(status, 1)
+        self.assertTrue(fixtures.inflight)
+        self.assertEqual(errors, [first])
+        self.assertEqual(rows, [])
+        self.assertNotIn("close", events)
+        self.assertEqual(len([row for row in events if type(row) is tuple and row[0] == "original-inert-call"]), 1)
+        self.assertFalse(any(type(row) is tuple and row[0] == "inert-readback" for row in events))
+
+    def test_current_runtime_refusal_does_not_load_owner_and_close_cannot_mask_it(self):
+        first = RuntimeError("INERT runtime refusal")
+        status, events, rows, errors, _, owner = self.execute(admission_failure=first, close_failure=OSError("INERT close"))
+        self.assertEqual(status, 1)
+        owner.assert_not_called()
+        self.assertEqual(errors, [first])
+        self.assertEqual(events, ["prepare", "admit-current-runtime", "close"])
+        self.assertEqual(rows, [])
+
+    def test_missing_reordered_or_close_failed_observations_never_emit_complete(self):
+        def reordered(binding, fixtures, owner, uid, username, emit, scope):
+            emit({"case": A.identity_qualification.CASES[1]})
+            return ()
+        for kwargs in ({"run_cases": lambda *args, **kw: ()}, {"run_cases": reordered},
+                       {"close_failure": OSError("INERT close failure")}):
+            with self.subTest(kind=next(iter(kwargs))):
+                status, events, rows, errors, _, _ = self.execute(**kwargs)
+                self.assertEqual(status, 1)
+                self.assertTrue(errors)
+                self.assertIn("close", events)
+                self.assertFalse(any(row.get("type") == "macos-identity-current-complete" for row in rows))
+
+
+if __name__ == "__main__":
+    unittest.main()
