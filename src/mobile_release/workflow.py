@@ -1058,11 +1058,18 @@ class GitHub:
             self._attempts, self._artifacts, self._trees, self._comparisons)
         return view
 
-    def json(self, endpoint: str) -> Any:
+    def json(self, endpoint: str, *, maximum: int | None = None, timeout: int | None = None) -> Any:
         prefix = f"repos/{self.context.repository['fullName']}/"
         compare = bool(re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", endpoint))
-        _require(endpoint.startswith(prefix) and (".." not in endpoint or compare) and "#" not in endpoint and "\\" not in endpoint, "GitHub endpoint is outside the application repository")
-        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint], cancellation=self.cancellation, **({"history": self.history} if self.history is not None else {}))
+        _require((endpoint == prefix[:-1] or endpoint.startswith(prefix)) and (".." not in endpoint or compare) and "#" not in endpoint and "\\" not in endpoint, "GitHub endpoint is outside the application repository")
+        _require(maximum is None or type(maximum) is int and 0 < maximum <= MAX_JSON, "GitHub response limit is invalid")
+        _require(timeout is None or type(timeout) is int and 0 < timeout <= 120, "GitHub read timeout is invalid")
+        limits = {}  # Omitted bounds keep all existing callers/history unchanged.
+        if maximum is not None:
+            limits["maximum"] = maximum
+        if timeout is not None:
+            limits["timeout"] = timeout
+        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint], cancellation=self.cancellation, **limits, **({"history": self.history} if self.history is not None else {}))
         if self.history is not None:
             return self.history.decode(data)
         try:
@@ -1809,6 +1816,7 @@ class Resolver:
         """
         execute_name = "Execute or reconcile the exact authorized Store operation"
         guards = {
+            "Verify the existing version reservation before new work",
             "Prepare immutable Store operation without mutation",
             "Bind durable intent to its actual workflow attempt and job",
             "Attest exact signed candidate before any Store mutation",
@@ -1936,6 +1944,18 @@ def authenticate_operation_intent(intent_path: Path, *, stage: str, platform: st
         return verified
 
 
+def verify_version_reservation(app_root: Path, context: Context, github: GitHub | None = None, *,
+                               cancellation: DefaultCancellation | None = None):
+    """Fresh candidate gate only; original authenticated recovery stays separate."""
+    from .version_ci import Refused, verify_reserved_source
+    try:
+        return verify_reserved_source(app_root, context, github=github, cancellation=cancellation)
+    except Refused as error:
+        # Preserve fixed diagnostics when this entry runs as __main__ and the
+        # consumer imports the canonical workflow module. No raw error echo.
+        raise WorkflowError(str(error)) from None
+
+
 def seal_intent(app_root: Path, context: Context, github: GitHub | None = None, *,
                 cancellation: DefaultCancellation | None = None) -> None:
     github = github or GitHub(context)
@@ -1984,6 +2004,14 @@ def seal_intent(app_root: Path, context: Context, github: GitHub | None = None, 
                     staging.check()
             _require(github.tree(intent["operationSource"]["commit"]) == intent["operationSource"]["tree"], "intent operation source tree differs from GitHub")
             github.source_policy(context.stage, intent["candidateSource"], intent["operationSource"])
+            if context.stage == "candidate":
+                checked = verify_version_reservation(app_root, context, github,
+                                                     cancellation=owner.cancellation)
+                if checked is not None:
+                    source = {"commit": checked.source_commit, "tree": checked.source_tree,
+                              "ref": context.authority["ref"]}
+                    _require(intent["operationSource"] == source and intent["candidateSource"] == source,
+                             "prepared intent differs from the exact reserved version commit; no fallback is permitted")
             _create_proof(operation, context, "intent", github, app_root=app_root,
                           cancellation=owner.cancellation)
             original.check()
@@ -2053,6 +2081,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolve = commands.add_parser("resolve", help="authenticate existing immutable evidence before deciding whether work remains")
     stage = commands.add_parser("stage", help="copy a private authenticated resolution into a clean application checkout")
     seal_parser = commands.add_parser("seal-intent", help="create the protected job's complete intent inventory; does not sign or upload")
+    version_gate = commands.add_parser("verify-version-reservation", help="read-only check of an existing shared version reservation; never allocates")
+    version_gate.add_argument("--stage", required=True, choices=("candidate",))
+    version_gate.add_argument("--platform", required=True, choices=PLATFORMS)
+    version_gate.add_argument("--app-root", type=Path, required=True)
     final = commands.add_parser("package-final", help="validate and package final evidence; does not sign, upload, or call Stores")
     private = commands.add_parser("prepare-app-private", help="locally admit only the fixed empty application-private root")
     deferred = commands.add_parser("write-deferred-report", help="locally publish the fixed private dependency-build deferral report")
@@ -2097,7 +2129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             context = Context.current(selected_stage, selected_platform)
         else:
             context = Context.current(args.stage, args.platform)
-        if args.command == "resolve":
+        if args.command == "verify-version-reservation":
+            checked = verify_version_reservation(args.app_root, context)
+            print("Existing reservation matches this exact version-only commit; no number was allocated." if checked else
+                  "CI shared versions are unconfigured; continuing the existing manual-version workflow.")
+        elif args.command == "resolve":
             _outputs(Resolver(context).resolve(args.destination, recovery_run_id=args.recovery_run_id, handoff_digest=args.handoff_digest, candidate_run_id=args.candidate_run_id, external_run_id=args.external_run_id))
         elif args.command == "stage":
             stage_resolution(args.resolution, args.app_root, context)

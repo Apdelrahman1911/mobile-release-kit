@@ -151,6 +151,7 @@ fn reserve_transport_uses_existing_closed_envelope_and_bounded_final_snapshot() 
             candidate_id: "12345678-1234-4234-9234-123456789abc".into(),
             name: "1.2.3".into(),
             build: 9,
+            ci: None,
         }),
         do_not_replay: true,
     };
@@ -166,4 +167,28 @@ fn reserve_transport_uses_existing_closed_envelope_and_bounded_final_snapshot() 
     let mut wrong = response;
     wrong.service_instance = id(9);
     assert!(s::encode_response(&wrong).is_err());
+}
+
+#[test]
+fn ci_copy_data_has_fixed_candidate_binding_and_fits_the_existing_service_reply() {
+    // Output grammar only: CI must still parse the protected settings and read
+    // the full ledger. No native result is created by this DATA fixture.
+    let candidate = "12345678-1234-4234-9234-123456789abc";
+    let copy = CiReference { authority_settings:"x".repeat(CI_SETTINGS_LIMIT),
+        commit_trailer:format!("MRK-Version-Reservation: {candidate} {}","a".repeat(64)) };
+    assert!(copy.valid(candidate));
+    assert!(!copy.valid("12345678-1234-4234-9234-123456789abd"));
+    let mut bad = copy.clone(); bad.authority_settings.push('x'); assert!(!bad.valid(candidate));
+    bad = copy.clone(); bad.authority_settings = "unsafe\ntext".into(); assert!(!bad.valid(candidate));
+    bad = copy.clone(); bad.commit_trailer.push('\n'); assert!(!bad.valid(candidate));
+    let row = Status { origin:Query {project_id:id(1),service_instance:id(2),request_id:id(3)},
+        grant_id:id(4),review_id:id(5),revision:2,state:State::Reserved,operation_id:Some(id(7)),
+        settlement:Settlement::Settled,reason:None,reservation:Some(Reservation {
+            candidate_id:candidate.into(),name:"1".repeat(32),build:2_100_000_000,ci:Some(copy) }),do_not_replay:true };
+    let response = crate::service_protocol::Response { version:crate::service_protocol::VERSION,
+        request_id:id(6),service_instance:id(2),client_id:id(10),session_id:id(11),
+        response:crate::service_protocol::ResponseBody::VersionReserveRequest(row) };
+    let encoded = crate::service_protocol::encode_response(&response).unwrap();
+    assert!(encoded.len() < STATUS_LIMIT);
+    assert_eq!(crate::service_protocol::decode_response(&encoded, &id(6), &id(2)).unwrap(),response);
 }

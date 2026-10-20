@@ -104,3 +104,25 @@ fn lost_ack_keeps_exact_public_request_and_catalogue_stays_bounded_without_readi
     assert_eq!(cap["maxReviewMs"], 120000);
     assert_eq!(cap["maxRetainedRequests"], 32);
 }
+
+#[test]
+fn completed_ci_copy_output_is_preparation_data_not_an_apply_or_hosted_reservation() {
+    let q = reserve::Query { project_id:id(1),service_instance:id(2),request_id:id(3) };
+    let candidate = "12345678-1234-4234-9234-123456789abc";
+    let copied = reserve::CiReference {authority_settings:"{\"schemaVersion\":1}".into(),
+        commit_trailer:format!("MRK-Version-Reservation: {candidate} {}","a".repeat(64))};
+    let status = reserve::Status { origin:q.clone(),grant_id:id(4),review_id:id(5),revision:2,
+        state:reserve::State::Reserved,operation_id:Some(id(7)),settlement:p::Settlement::Settled,
+        reason:None,reservation:Some(reserve::Reservation { candidate_id:candidate.into(),name:"1.2.3".into(),
+            build:8,ci:Some(copied.clone()) }),do_not_replay:true };
+    let response = p::Response { version:1,request_id:id(6),service_instance:id(2),client_id:id(10),session_id:id(11),
+        response:p::ResponseBody::VersionReserveRequest(status) };
+    let (_,bytes) = output(&response,&q,None,false).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains(&copied.commit_trailer) && text.contains(&copied.authority_settings));
+    assert!(text.contains("not configured by this output") && text.contains("not hosted allocation"));
+    assert!(text.contains("nothing has been applied") && !text.contains("version-reserve-submit"));
+    let (_,bytes) = output(&response,&q,None,true).unwrap();
+    let value:serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["response"]["value"]["reservation"]["ci"]["commitTrailer"],copied.commit_trailer);
+}

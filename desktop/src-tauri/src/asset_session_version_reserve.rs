@@ -939,6 +939,13 @@ impl DocumentBinding {
             lane.control.unknown();
             return Err(BridgeError::cleanup_unknown());
         }
+        // Pure bounded DATA from the original typed state AFTER real joins and
+        // retirement. Publish only after the existing final currentness gate.
+        let ci = if outcome.is_ok() {
+            Some(invocation.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.state
+                .ci_reference(data.as_ref().ok_or_else(BridgeError::protocol)?)
+                .map_err(|_| BridgeError::protocol())?)
+        } else { None };
         let edit_data = if outcome.is_ok() {
             Some(
                 invocation
@@ -1004,6 +1011,7 @@ impl DocumentBinding {
                 build: v["version"]["build"]
                     .as_u64()
                     .ok_or_else(BridgeError::protocol)?,
+                ci: ci.ok_or_else(BridgeError::protocol)?,
             });
             state.version_reserve.view.phase = p::Phase::Reserved;
             state.version_reserve.view.reason = "none";

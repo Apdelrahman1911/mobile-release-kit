@@ -639,6 +639,7 @@ impl DocumentBinding {
                 candidate_id: v.candidate_id,
                 name: v.name,
                 build: v.build,
+                ci: Some(v.ci),
             }),
             None => requests::Final::Refused,
         };

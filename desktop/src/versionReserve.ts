@@ -6,7 +6,9 @@ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 export type VersionIncrement = 'build' | 'patch' | 'minor' | 'major';
 export interface VersionReserveOptions { readonly reference: string; readonly increment: VersionIncrement;
   readonly newCandidate: boolean; readonly acknowledgeLimitations: boolean }
-export interface ReservedVersion { readonly id: string; readonly candidateId: string; readonly name: string; readonly build: number }
+export interface VersionCiReference { readonly authoritySettings: string; readonly commitTrailer: string }
+export interface ReservedVersion { readonly id: string; readonly candidateId: string; readonly name: string; readonly build: number;
+  readonly ci?: VersionCiReference }
 export interface VersionReserveStatus {
   readonly schemaVersion: 1; readonly revision: number; readonly projectId: string | null; readonly operationId: string | null;
   readonly phase: 'idle' | 'reading' | 'reviewed' | 'reserving' | 'reserved' | 'refused' | 'cleanup-unknown';
@@ -37,11 +39,29 @@ export function parseReserveOptions(raw: unknown): VersionReserveOptions | null 
 }
 export function parseReservedVersion(raw: unknown): ReservedVersion | null {
   try {
-    const v = copyBoundedComparisonData(raw, 1024, 16);
-    return exact(v, ['id', 'candidateId', 'name', 'build']) && reserveId(v.id) && typeof v.candidateId === 'string' &&
+    const v = copyBoundedComparisonData(raw, 2048, 24);
+    if (!(exact(v, ['id', 'candidateId', 'name', 'build']) || exact(v, ['id', 'candidateId', 'name', 'build', 'ci']))) return null;
+    const ci = Object.hasOwn(v, 'ci') ? parseVersionCiReference(v.ci, v.candidateId) : undefined;
+    if (Object.hasOwn(v, 'ci') && !ci) return null;
+    return reserveId(v.id) && typeof v.candidateId === 'string' &&
       v.candidateId.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v.candidateId) &&
       typeof v.name === 'string' && v.name.length <= 64 && !/[^0-9.]/.test(v.name) && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v.name) &&
-      integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build }) : null;
+      integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build,
+        ...(ci ? { ci } : {}) }) : null;
+  } catch { return null; }
+}
+export function parseVersionCiReference(raw: unknown, candidateId: unknown): VersionCiReference | null {
+  try {
+    const v = copyBoundedComparisonData(raw, 1536, 8);
+    // Display/copy grammar only. No renderer JSON decoder or native grant: the
+    // fixed workflow replays the full ledger against these protected settings.
+    return exact(v, ['authoritySettings', 'commitTrailer']) && typeof candidateId === 'string' && candidateId.length === 36 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(candidateId) &&
+      typeof v.authoritySettings === 'string' && v.authoritySettings.length > 0 && v.authoritySettings.length <= 768 &&
+      !/[^\x20-\x7e]/.test(v.authoritySettings) && typeof v.commitTrailer === 'string' &&
+      v.commitTrailer === `MRK-Version-Reservation: ${candidateId} ${v.commitTrailer.slice(-64)}` &&
+      /^[0-9a-f]{64}$/.test(v.commitTrailer.slice(-64)) ?
+      Object.freeze({ authoritySettings: v.authoritySettings, commitTrailer: v.commitTrailer }) : null;
   } catch { return null; }
 }
 export const reserveActive = (s: VersionReserveStatus | null): boolean => !!s && ['reading', 'reserving', 'cleanup-unknown'].includes(s.phase);

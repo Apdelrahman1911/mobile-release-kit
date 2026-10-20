@@ -60,6 +60,7 @@ fn data() -> Final {
         candidate_id: "12345678-1234-4234-9234-123456789abc".into(),
         name: "1.2.3".into(),
         build: 7,
+        ci: None,
     })
 }
 #[test]

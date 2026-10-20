@@ -303,7 +303,10 @@ class Lifecycle:
             private_fixture_copy_tree(self.handoff, app / ".mobile-release" / "artifacts" / self.platform, app_root=app)
             metadata = app / ".mobile-release" / "staging" / "candidate" / self.platform / "store-metadata.zip"
             private_fixture_copy_file(self.config.root / "store-metadata.zip", metadata, app_root=app)
-        seal_intent(app, selected, self.api.client(selected))
+        # This older recovery fixture has synthetic source OIDs, no checkout.
+        # The real reservation gate has separate fixed Git/HTTP DATA tests.
+        with patch("mobile_release.workflow.verify_version_reservation", return_value=None):
+            seal_intent(app, selected, self.api.client(selected))
         proof = json.loads((operation / "intent-provenance.json").read_bytes())
         self.api.sign(operation / "intent-provenance.json")
         if stage == "candidate":
