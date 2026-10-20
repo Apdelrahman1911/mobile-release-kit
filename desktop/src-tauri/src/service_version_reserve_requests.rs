@@ -575,7 +575,8 @@ impl Inbox {
         Ok(value)
     }
     pub(crate) fn access(&self) -> Result<p::Access, Error> {
-        self.access_locked(&self.lock()?)
+        let book = self.lock()?;
+        self.access_locked(&book)
     }
     pub(crate) fn blocks_review(&self) -> Result<bool, Error> {
         let book = self.lock()?;
