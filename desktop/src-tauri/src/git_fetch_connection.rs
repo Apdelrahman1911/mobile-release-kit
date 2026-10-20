@@ -220,7 +220,7 @@ impl ConnectionState {
         gate: &GitLocalGate,
         id: &str,
     ) -> Result<(), BridgeError> {
-        if self.fetch.is_some() || !original.matches(gate, id) {
+        if self.fetch.is_some() || self.push.is_some() || !original.matches(gate, id) {
             return Err(BridgeError::cleanup_unknown());
         }
         self.fetch = Some(Hold { pins, original });
@@ -266,6 +266,7 @@ impl ConnectionState {
             || self.actions_retry.native_work_pending()
             || self.enrollment.is_some()
             || self.version_reserve_pending()
+            || self.push.is_some()
         {
             return Err(refused(Reason::TargetChanged));
         }

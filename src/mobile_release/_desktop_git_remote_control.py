@@ -81,6 +81,9 @@ class GitRemoteInput(_SavedCommandInput):
     def helper_returned(self, channel, value):
         """Merge this original helper's earlier F, never receipt-time renew it."""
         from ._git_remote_private_protocol import Returned
+        from ._desktop_git_push_control import GitPushInput
+        if type(self) is GitPushInput:
+            from ._git_push_private_protocol import Returned
         self._owner()
         wire.require(channel is self.channel and channel.source is self and channel.helper_return is value
                      and type(value) is Returned and self.initial is not None

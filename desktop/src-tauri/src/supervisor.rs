@@ -55,7 +55,7 @@ mod git_read;
 pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt};
 #[path = "supervisor_git_local.rs"]
 mod git_local;
-pub(crate) use git_local::{GitLocalAdmission, GitLocalTicket, GitLocalReceipt, GitLocalPublication, GitLocalFetchHold};
+pub(crate) use git_local::{GitLocalAdmission, GitLocalTicket, GitLocalReceipt, GitLocalPublication, GitLocalFetchHold, GitLocalPushHold};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use git_local::GitLocalNativeJoined;
 use crate::github_repository_create_protocol as repository_create_protocol;

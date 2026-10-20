@@ -36,8 +36,8 @@ export class GitHubActivityController {
   private listeners=new Set<()=>void>();private desired:GitHubActivityPort|null=null;private original:Original|null=null;private work=new Set<Work>();
   private attempt:Attempt|null=null;private result:BoundResult|null=null;private current:Context|null=null;private epoch:object={};private unknown=false;private disposed=false;private cancelledId:string|null=null;
   private browserToken:object|null=null;
-  private connection:()=>GitHubConnectionViewState;private peer:()=>string|null;
-  constructor(connection:()=>GitHubConnectionViewState,peer:()=>string|null=()=>null){this.connection=connection;this.peer=peer;}
+  private connection:()=>GitHubConnectionViewState;private peer:(selection?:ActivitySelection)=>string|null;
+  constructor(connection:()=>GitHubConnectionViewState,peer:(selection?:ActivitySelection)=>string|null=()=>null){this.connection=connection;this.peer=peer;}
   getSnapshot=():GitHubActivityView=>this.state;
   subscribe=(f:()=>void):(()=>void)=>{this.listeners.add(f);return()=>{this.listeners.delete(f);};};
   private update(p:Partial<GitHubActivityView>={}):void{this.state=immutable({...this.state,...p,pending:this.attempt!==null,browserPending:[...this.work].some(w=>w.kind==='browser'),
@@ -121,7 +121,7 @@ export class GitHubActivityController {
     if(this.ownerReason())return ACTIVITY_HELP.busy;
     if(!c||this.connection().observing)return ACTIVITY_HELP['not-connected'];
     if(!s||!o.fresh||s.sessionId!==c.sessionId)return 'Check current activity status first.';
-    if(!s.available)return ACTIVITY_HELP[s.reason];return this.peer();
+    if(!s.available)return ACTIVITY_HELP[s.reason];return this.peer(selected);
   }
   matchesContext(expected:unknown):boolean {return same(expected,context(this.connection()));}
   refreshResult(expected:ActivityObservation):void {if(this.currentResult()===expected)this.read(expected.selection);}
@@ -157,6 +157,19 @@ export class GitHubActivityController {
     if(selected.kind==='pull-request'&&current.data.pullRequests.rows.some(r=>r.number===selected.number)||
       selected.kind==='workflow-run'&&current.data.workflowRuns.rows.some(r=>r.id===selected.runId&&r.attempt===selected.attempt))this.read(selected);
   }
+  readPushRecovery(branch:string,stillCurrent:()=>boolean):{result:()=>ActivityObservation|null}|null {
+    const selected=parseActivitySelection({kind:'overview',branch});
+    if(!selected||selected.kind!=='overview'||selected.branch===null||this.readReason(selected))return null;
+    const previous=this.attempt;
+    this.read(selected,stillCurrent);
+    const a=this.attempt;
+    if(!a||a===previous||!a.sent||!same(a.selection,selected))return null;
+    return Object.freeze({result:()=>{
+      let current=false;try{current=stillCurrent();}catch{/* A failed comparison is only a veto. */}
+      const s=a.owner.status,r=this.currentResult();
+      return current&&a.work.ended&&a.operationId!==null&&s?.operation?.id===a.operationId&&this.origin(a,s)&&r===s.result?r:null;
+    }});
+  }
   read(selected:ActivitySelection={kind:'overview',branch:this.state.branchDraft||null},stillCurrent:()=>boolean=()=>true):void{
     const parsed=parseActivitySelection(selected);if(!parsed)return;selected=parsed;
     if(this.readReason(selected))return;
@@ -166,7 +179,7 @@ export class GitHubActivityController {
     const a:Attempt={owner:o,work:w,context:c,epoch,selection:immutable(structuredClone(selected)),revision:s.revision,previousId:s.operation?.id??null,operationId:null,sent:false,stopWanted:false,stopSent:false};
     this.attempt=a;this.result=null;this.browserToken=null;this.update({error:null,browserState:'idle',originalRepository:c.repository});
     let sourceCurrent=false;try{sourceCurrent=stillCurrent();}catch{/* Veto only; never invoke on a thrown binding check. */}
-    const peer=this.peer();
+    const peer=this.peer(selected);
     if(!sourceCurrent||this.attempt!==a||a.stopWanted||epoch!==this.epoch||o!==this.original||o.port!==this.desired||this.disposed||this.unknown||o.status!==s||!o.fresh||peer||
       !same(c,context(this.connection()))||revision!==this.connection().status?.revision){this.attempt=null;this.update({error:a.stopWanted?'cancelled':'target-changed'});this.finish(w);return;}
     a.sent=true;

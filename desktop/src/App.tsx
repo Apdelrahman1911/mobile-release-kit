@@ -1,3 +1,4 @@
+import { GitPush } from './components/GitPush.tsx';
 import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
 import { LocalStoreReconcile } from './components/LocalStoreReconcile.tsx';
 import { LocalStoreExecuteController, localStoreExecuteOwnerReason } from './localStoreExecute.ts';
@@ -17,6 +18,7 @@ import { GitHubPublicationController, githubPublicationOwnerReason } from './git
 import { GitHubPublication } from './components/GitHubPublication.tsx';
 import { GitHubRepositoryCreateController } from './githubRepositoryCreateController.ts';
 import { GitHubActivityController } from './githubActivityController.ts';
+import type { ActivitySelection } from './githubActivityProtocol.ts';
 import { GitHubActivity } from './components/GitHubActivity.tsx';
 import { GitHubPullRequestController } from './githubPullRequestController.ts';
 import { GitHubActionsRetryController } from './githubActionsRetryController.ts';
@@ -102,6 +104,9 @@ import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from './Git
 import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
 import { GitReadController } from './gitReadController.ts';
 import { GitLocalController } from './gitLocalController.ts';
+import type { GitLocalAdmissionScope } from './gitLocalController.ts';
+import { gitConnectionBlocksSavedWork } from './gitPushSelection.ts';
+import type { GitConnectedAdmission } from './gitPushSelection.ts';
 import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
 import { GitBranches } from './components/GitBranches.tsx';
 import { GitInitialization } from './components/GitInitialization.tsx';
@@ -257,7 +262,7 @@ export function App() {
   const repositoryCreateAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const repositoryCreateBusy = useCallback(() => repositoryCreateRef.current?.ownerReason() ?? null, []);
   const activityRef = useRef<GitHubActivityController | null>(null);
-  const activityAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+  const activityAdmission = useRef<(selection?: ActivitySelection) => string | null>(() => 'Wait for the native service.');
   const activityBusy = useCallback(() => activityRef.current?.ownerReason() ?? null, []);
   const pullRequestRef = useRef<GitHubPullRequestController | null>(null);
   const pullRequestAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
@@ -268,7 +273,7 @@ export function App() {
   // One read coordinator owns the original promises across all pages. Local
   // commit drafts belong to immutable native-service/project ports, not rows.
   const gitLocalRef = useRef<GitLocalController | null>(null);
-  const gitLocalAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+  const gitLocalAdmission = useRef<(scope?: GitLocalAdmissionScope) => string | null>(() => 'Wait for the native service.');
   const gitReadRef = useRef<GitReadController | null>(null);
   const gitReadAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const gitReadEpoch = useRef(0);
@@ -549,7 +554,7 @@ export function App() {
   repositoryCreateRef.current = repositoryCreate;
   const repositoryCreateState = useSyncExternalStore(repositoryCreate.subscribe, repositoryCreate.getSnapshot, repositoryCreate.getSnapshot);
   const [githubActivity] = useState(() => new GitHubActivityController(
-    githubConnection.getSnapshot, () => activityAdmission.current()));
+    githubConnection.getSnapshot, (selection) => activityAdmission.current(selection)));
   activityRef.current = githubActivity;
   const activityState = useSyncExternalStore(githubActivity.subscribe, githubActivity.getSnapshot, githubActivity.getSnapshot);
   const [githubPullRequest] = useState(() => new GitHubPullRequestController(
@@ -720,7 +725,7 @@ export function App() {
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
-  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false): string | null => {
+  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false, gitScope?: GitConnectedAdmission): string | null => {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
@@ -741,9 +746,10 @@ export function App() {
     const remoteSetupReason = githubRemoteSetupOwnerReason(githubRemoteSetup.getSnapshot());
     if (remoteSetupReason) return remoteSetupReason;
     const connection = githubConnection.getSnapshot();
-    // History is read-only work inside this original connected session, not a
-    // saved-code grant. Busy/unknown/retirement checks are never exempted.
-    if (!forGhEntry && (connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || !forHistoryRead && (connection.status ?? connection.retained)?.session))
+    // A fixed Git read/Fetch/Push may coexist with the same idle selected
+    // connection; this is not a saved-code grant. In particular gitScope does
+    // NOT set forHistoryRead or skip history/any other original peer above.
+    if (!forGhEntry && gitConnectionBlocksSavedWork(connection, projectId, forHistoryRead ? 'history-read' : gitScope))
       return 'Finish or disconnect the original GitHub session before starting saved project code.';
     if (passivePending.current > 0 || Object.values(workspaceRef.current.projects).some((project) => project.snapshotRequest !== null || project.validationRequest || project.reviewRequest || project.suggestionRequest) ||
         environment.getSnapshot().pending || environment.passiveBusyReason() || releaseVersion.getSnapshot().pending || releaseVersion.passiveBusyReason() ||
@@ -769,8 +775,13 @@ export function App() {
   };
   // Read-only metadata borrows this same account/repository connection. It
   // excludes only itself; no code, publication or release consent is borrowed.
-  activityAdmission.current = () => {
-    const blocked = savedCommandBusy(false, false, false, false, false, false, false, false, false, true) ??
+  activityAdmission.current = (selection) => {
+    // Only an exact branch GET after this original Push really returned may
+    // coexist with its retained recovery DATA. All other peers are unchanged;
+    // native GitLocal::pending and Connection gates still decide admission.
+    const blocked = versionEnrollmentBusy() ?? gitLocalRef.current?.pushActivityReason(selection) ?? gitReadRef.current?.ownerReason() ??
+      githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(false, false, false, false, false, false, false, false, false, true) ??
+      externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
       savedOwnersPrerequisiteReason(false, false, undefined, false, true);
     if (blocked) return blocked;
     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
@@ -1078,7 +1089,7 @@ export function App() {
     releaseVersion.saveIntent(); releaseInputs.saveIntent();
     assetSession.savedProjectChanged(projectId);
   };
-  gitReadAdmission.current = () => versionEnrollmentBusy() ?? gitLocalRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+  gitReadAdmission.current = () => versionEnrollmentBusy() ?? gitLocalRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, false, false, 'git-read') ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before reading local project files.' : null);
@@ -1114,18 +1125,18 @@ export function App() {
     }, 1000);
     return () => window.clearInterval(timer); // Stops observation only, not the original native read.
   }, [gitRead]);
-  gitLocalAdmission.current = () => versionEnrollmentBusy() ?? gitReadRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
-    savedOwnersPrerequisiteReason() ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+  gitLocalAdmission.current = (scope) => versionEnrollmentBusy() ?? gitReadRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+    savedOwnersPrerequisiteReason(false, false, undefined, false, false, false, scope) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before reviewing local Git changes.' : null);
   const [gitLocal] = useState(() => new GitLocalController({
-    current: () => {
+    current: (scope) => {
       const service = pathService.current, projectId = workspaceRef.current.selectedId;
       const entry = gitRepositories.current.find((value) => value.service === service && value.projectId === projectId);
       return { api: service.api?.gitLocal ?? null,
         session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
         projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, reader: gitReadRef.current,
-        fetchConnection: githubConnection.getSnapshot(), blocked: gitLocalAdmission.current() };
+        fetchConnection: githubConnection.getSnapshot(), pushConnection: githubConnection.getSnapshot(), blocked: gitLocalAdmission.current(scope) };
     },
     onMutationSubmitted: (projectId) => {
       // After actual Apply entry, including a lost/throwing acknowledgement.
@@ -2199,6 +2210,7 @@ export function App() {
               <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
+              <GitPush controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />

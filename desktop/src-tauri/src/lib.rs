@@ -113,6 +113,9 @@ mod git_fast_forward_protocol;
 mod git_rename_protocol;
 mod git_init_protocol;
 mod git_fetch_protocol;
+mod git_push_protocol;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod git_push_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_fetch_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

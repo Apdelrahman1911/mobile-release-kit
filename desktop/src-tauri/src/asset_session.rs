@@ -2210,7 +2210,9 @@ mod lookup_memory {
     }
     pub(super) fn git_local_admission_bytes_for(document:&Arc<Inner>,state:&DocumentState,future:usize,kind:crate::git_local_protocol::Kind)->Result<usize,Problem>{
         let retained=retained_document_bytes(document,state)?;
-        if kind==crate::git_local_protocol::Kind::Fetch {
+        if kind==crate::git_local_protocol::Kind::Push {
+            crate::git_local_protocol::push_worker::admission_bytes(retained,future)
+        } else if kind==crate::git_local_protocol::Kind::Fetch {
             crate::git_local_protocol::fetch_worker::admission_bytes(retained,future)
         } else {crate::git_local_protocol::admission_bytes(retained,future)}.ok_or(Problem::Capacity)
     }

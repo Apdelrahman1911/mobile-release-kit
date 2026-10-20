@@ -174,9 +174,10 @@ class OriginalChannel:
         # is composed.  Never replace this with a duck-typed caller callback.
         try:
             from ._desktop_git_remote_control import GitRemoteInput
+            from ._desktop_git_push_control import GitPushInput
         except ImportError:
             _require(False)
-        _require(type(self.source) is GitRemoteInput)
+        _require(type(self.source) in (GitRemoteInput, GitPushInput))
         self.source._owner()
         _require(self.source.guard is guard and guard._saved_command_input() is self.source
                  and self.source.credential_channel is self)

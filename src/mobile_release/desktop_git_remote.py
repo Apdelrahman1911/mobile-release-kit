@@ -126,8 +126,14 @@ class GitRemoteOperation:
         wire.require(not self.remote_entered and self.source.channel is None)
         self.remote_entered = True  # One command even when acquisition fails.
         pending = self._pending(argv, **options, network=True)
-        channel = self.source.channel = OriginalInputChannel.__new__(OriginalInputChannel)
-        OriginalInputChannel.__init__(channel, self.source)
+        channel_type = OriginalInputChannel
+        if type(self) is not GitRemoteOperation:
+            from .desktop_git_push import GitPushOperation
+            from ._git_push_input_channel import PushInputChannel
+            wire.require(type(self) is GitPushOperation)
+            channel_type = PushInputChannel
+        channel = self.source.channel = channel_type.__new__(channel_type)
+        channel_type.__init__(channel, self.source)
         primary = result = None
         try:
             channel.acquire()
@@ -321,7 +327,12 @@ class _Engine:
         self._acquire_output(self.error_output)
         self.guard.activate()
         self.request = self.input.request()
-        self.operation = GitRemoteOperation(self.request, self.input, self.guard, self)
+        if type(self) is _Engine:
+            self.operation = GitRemoteOperation(self.request, self.input, self.guard, self)
+        else:
+            from .desktop_git_push import GitPushOperation, _Engine as PushEngine
+            wire.require(type(self) is PushEngine)
+            self.operation = GitPushOperation(self.request, self.input, self.guard, self)
         self.operation.admit()
         self.write(self.input.ready(), phase="ready")
         self.input.go()
@@ -375,7 +386,13 @@ class _Engine:
 
 
 def main(*, started, launch):
-    engine = _Engine(started, launch)
+    return _run_engine(_Engine(started, launch))
+
+
+def _run_engine(engine):
+    if type(engine) is not _Engine:
+        from .desktop_git_push import _Engine as PushEngine
+        wire.require(type(engine) is PushEngine)
     scope = CleanupScope(engine.guard, engine.cleanup, owns_cancellation=True, first_primary=True)
     status = 0
     try:

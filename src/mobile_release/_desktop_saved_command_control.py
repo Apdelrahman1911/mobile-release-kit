@@ -134,7 +134,8 @@ def source_domain(source: object) -> SavedCommandDomain:
     if type(source) is HistoryInput and source.domain is SavedCommandDomain.GitHubHistory:
         return SavedCommandDomain.GitHubHistory
     from ._desktop_git_remote_control import GitRemoteInput
-    if type(source) is GitRemoteInput and source.domain is SavedCommandDomain.GitRemote:
+    from ._desktop_git_push_control import GitPushInput
+    if type(source) in (GitRemoteInput, GitPushInput) and source.domain is SavedCommandDomain.GitRemote:
         return SavedCommandDomain.GitRemote
     from ._desktop_git_local_control import GitLocalInput
     if type(source) is GitLocalInput and source.domain is SavedCommandDomain.GitLocal:

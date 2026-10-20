@@ -117,9 +117,16 @@ class _SocketIO:
 
 class OriginalInputChannel:
     """One private command, one credential get, actual all-copy EOF."""
+    returned_type = wire.Returned
+    refusal_type = RemoteRefusal
+
     def __init__(self, source):
         from ._desktop_git_remote_control import GitRemoteInput
-        _require(type(source) is GitRemoteInput)
+        if type(source) is GitRemoteInput:
+            _require(type(self) is OriginalInputChannel)
+        else:
+            from ._git_push_input_channel import is_original
+            _require(is_original(self, source))
         source._owner()
         _require(source.channel is self and source.go_returned and source.guard is not None)
         self.source, self.pid, self.thread = source, os.getpid(), threading.current_thread()
@@ -187,8 +194,7 @@ class OriginalInputChannel:
                 stamp = info.st_uid, info.st_dev, info.st_ino
                 lease._git_remote_binding = mapping.SocketBinding(self.source, nonce, stamp, _key=mapping._KEY)
                 self.io.configure(lease)
-            self.binding = wire.Binding(initial.id, initial.digest, initial.action.remote, initial.target,
-                initial.work_end_ns, initial.hard_end_ns, nonce, self.client._git_remote_binding._identity)
+            self.binding = self._binding(initial, nonce, self.client._git_remote_binding._identity)
             self.outgoing.extend(self.binding.challenge())
             self.command = mapping.OriginalChannel(self.source, self.client, self.source.guard, _key=mapping._KEY)
             self._current()
@@ -200,6 +206,10 @@ class OriginalInputChannel:
                     self.acquisition._remember("git_remote_socket_publication", error)
             self.unknown |= self.acquisition.cleanup_unknown
             raise
+
+    def _binding(self, initial, nonce, identity):
+        return wire.Binding(initial.id, initial.digest, initial.action.remote, initial.target,
+            initial.work_end_ns, initial.hard_end_ns, nonce, identity)
 
     def poll(self):
         self._origin()
@@ -336,7 +346,7 @@ class OriginalInputChannel:
         self.return_checked = True
         if (not self.closed or not self.eof or not self.producer_returned or not operation.remote_returned
                 or self.unknown or self.acquisition.cleanup_unknown
-                or type(self.helper_return) is not wire.Returned or self.helper_return.status == "unknown"
+                or type(self.helper_return) is not self.returned_type or self.helper_return.status == "unknown"
                 or type(getattr(result, "returncode", None)) is not int):
             self.unknown = operation.unknown = operation.repository._unknown = True
             error = ProcessCleanupError("The original private Git helper did not settle.", dispatched=True)
@@ -345,7 +355,7 @@ class OriginalInputChannel:
         if self.helper_return.status == "refused":
             self.failed = True
             self.source.failure_observed()
-            raise RemoteRefusal(self.helper_return)
+            raise self.refusal_type(self.helper_return)
 
     def close_unused(self, operation):
         """Only the positively unexported original pair; not child cleanup.

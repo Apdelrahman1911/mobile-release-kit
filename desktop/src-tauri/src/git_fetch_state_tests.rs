@@ -105,7 +105,7 @@ fn fetch_rows_refuse_wrong_schema_foreign_kind_and_erased_original_bindings() {
     let mut state = State::empty();
     state.reserve(row(1)).unwrap();
     let good: Value = serde_json::from_slice(&state.bytes().unwrap()).unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 8, 255] {
+    for version in [0, 1, 2, 3, 4, 5, 9, 255] {
         let mut v = good.clone();
         v["schemaVersion"] = json!(version);
         assert!(State::decode(&Snapshot {

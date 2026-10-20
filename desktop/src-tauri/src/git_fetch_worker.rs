@@ -263,6 +263,7 @@ impl Request {
             rename_sources: None,
             fast_forward_sources: None,
             fetch_target: Some(target),
+            push_target: None,
             bytes,
         })
     }

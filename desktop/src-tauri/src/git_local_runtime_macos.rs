@@ -4,10 +4,17 @@
 use super::*;
 
 impl GitLocalRuntimeSlots {
+    pub(crate) fn arm_push_once(&mut self)->Result<()> {
+        if !self.never_started(){return Err(AdmissionFailure::AlreadyUsed)}
+        let book=self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
+        if book.tool_ca_required||book.tool_ca.is_some()||book.fetch_helper_required||book.fetch_helper.is_some()
+            ||book.push_helper_required||book.push_helper.is_some(){return Err(AdmissionFailure::AlreadyUsed)}
+        book.tool_ca_required=true;book.push_helper_required=true;Ok(())
+    }
     pub(crate) fn arm_fetch_once(&mut self)->Result<()> {
         if !self.never_started(){return Err(AdmissionFailure::AlreadyUsed)}
         let book=self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
-        if book.tool_ca_required||book.tool_ca.is_some()||book.fetch_helper_required||book.fetch_helper.is_some(){return Err(AdmissionFailure::AlreadyUsed)}
+        if book.tool_ca_required||book.tool_ca.is_some()||book.fetch_helper_required||book.fetch_helper.is_some()||book.push_helper_required||book.push_helper.is_some(){return Err(AdmissionFailure::AlreadyUsed)}
         book.tool_ca_required=true;book.fetch_helper_required=true;Ok(())
     }
     pub(crate) fn working_reservation_bytes() -> Option<usize> {

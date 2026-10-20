@@ -109,6 +109,9 @@ class _PipeIO:
 
 
 class _Entry:
+    binding_type = private.Binding
+    pipe_io_type = _PipeIO
+
     def __init__(self, remote, url, runtime_dir, started):
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.remote, self.url, self.runtime_dir = remote, url, runtime_dir
@@ -137,7 +140,7 @@ class _Entry:
         transport.require(self.thread is threading.current_thread())
 
     def _bridge(self, binding):
-        transport.require(type(binding) is private.Binding and self.binding is None)
+        transport.require(type(binding) is self.binding_type and self.binding is None)
         raw_clock = getattr(time, "CLOCK_UPTIME_RAW", None)
         transport.require(type(raw_clock) is int)
         before, raw = time.monotonic(), time.clock_gettime_ns(raw_clock)
@@ -227,6 +230,20 @@ class _Entry:
             self.sent += count; offset += count
             transport.require(self.sent <= private.FRAME_LIMIT)
 
+    def _acquire_pipes(self):
+        for number, access in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
+            # Closed helper-only originals. This does NOT widen adopt_fd's
+            # public 3..7 map or claim the borrowed FD8 for close.
+            lease = self.acquisition._new_lease()
+            self.pipes.append(lease)
+            lease._publish(number, self.io.runtime, access, "pipe")
+            lease._validate(require_cloexec=False)
+            self.acquisition._invoke("git_remote_helper_cloexec", os.set_inheritable, number, False, roots=(lease,))
+            if number != 2:  # Never write or alter shared stderr status flags.
+                self.acquisition._invoke("git_remote_helper_nonblocking", os.set_blocking, number, False, roots=(lease,))
+            lease._validate()
+        self.pipe_io = self.pipe_io_type(self)
+
     def acquire(self):
         self.origin(); transport.require(not self.entered)
         self.entered = True
@@ -244,18 +261,7 @@ class _Entry:
                           and self.url == "https://github.com/" + binding.target.repository + ".git")
         self._bridge(binding)
         self.current()
-        for number, access in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
-            # Closed helper-only originals. This does NOT widen adopt_fd's
-            # public 3..7 map or claim the borrowed FD8 for close.
-            lease = self.acquisition._new_lease()
-            self.pipes.append(lease)
-            lease._publish(number, self.io.runtime, access, "pipe")
-            lease._validate(require_cloexec=False)
-            self.acquisition._invoke("git_remote_helper_cloexec", os.set_inheritable, number, False, roots=(lease,))
-            if number != 2:  # Never write or alter shared stderr status flags.
-                self.acquisition._invoke("git_remote_helper_nonblocking", os.set_blocking, number, False, roots=(lease,))
-            lease._validate()
-        self.pipe_io = _PipeIO(self)
+        self._acquire_pipes()
         self.get_entered = True  # Before send or currentness callback.
         self._private_write(binding.request())
         token = binding.accept_grant(self._private_read())

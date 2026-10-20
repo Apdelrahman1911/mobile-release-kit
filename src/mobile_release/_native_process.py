@@ -965,6 +965,14 @@ class FDLease:
             _require(type(self._git_remote_binding) is SocketBinding,
                      "Git credential socket issuer differs")
             self._git_remote_binding._check_descriptor(info, self._access)
+        elif self._kind == "git_push_directory":
+            _require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() > 0
+                     and stat.S_IMODE(info.st_mode) == 0o700 and self._access == os.O_RDONLY,
+                     "native Push directory differs")
+        elif self._kind == "git_push_body":
+            _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() > 0
+                     and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+                     and self._access == os.O_RDWR, "native Push body differs")
         elif self._kind == "account_hold":
             binding = self._account_binding
             _require(type(binding) is AccountHoldBinding and binding._pid == os.getpid()

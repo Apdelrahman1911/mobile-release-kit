@@ -5,7 +5,7 @@ use crate::git_switch_protocol::tests as data;
 
 fn witness()->GitLocalPublication {
     let request=Arc::new(data::request(wire::Phase::Apply));let candidate=Arc::new(data::candidate(&request));
-    GitLocalPublication {request,candidate,publication:wire::Publication::SwitchIndexReturned,fetch_keep:None,fetch_returned:None}
+    GitLocalPublication {request,candidate,publication:wire::Publication::SwitchIndexReturned,fetch_keep:None,fetch_returned:None,push_returned:None}
 }
 
 #[test]

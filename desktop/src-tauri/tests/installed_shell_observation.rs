@@ -22,6 +22,9 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/git_rename_protocol.rs"] mod git_rename_protocol;
 #[path = "../src/git_init_protocol.rs"] mod git_init_protocol;
 #[path = "../src/git_fetch_protocol.rs"] mod git_fetch_protocol;
+#[path = "../src/git_push_protocol.rs"] mod git_push_protocol;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/git_push_state.rs"] mod git_push_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_fetch_state.rs"] mod git_fetch_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -1,3 +1,4 @@
+import { GitPushRecovery } from './GitPush.tsx';
 import { GitFastForwardRecovery } from './GitFastForward.tsx';
 import { useId, useSyncExternalStore } from 'react';
 import type { GitLocalController } from '../gitLocalController.ts';
@@ -31,20 +32,22 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
-      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
     <div><h3>{title}</h3>
       {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
+      {result?.action === 'push' && <GitPushRecovery result={result} />}
       {result?.action === 'fast-forward' && <GitFastForwardRecovery result={result} />}
       {result?.action === 'fetch' && <GitFetchRecovery result={result} />}
       {result?.action === 'branch-rename' && <GitRenameRecovery result={result} />}
       {result?.action === 'branch-switch' && <GitSwitchRecovery result={result} />}
       {state.issue && !state.uncertain && !state.recovery && <p className="review-caution" role="status">{gitLocalIssueHelp(state.issue)}</p>}
       {result?.action === 'initialize' && result.state === 'succeeded' && !active && <p>No files were staged or committed. Git is local only; no remote was configured.</p>}
-      {result?.state === 'succeeded' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
+      {result?.state === 'succeeded' && result.action !== 'push' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
+      {result?.action === 'push' && result.state === 'succeeded' && !active && <p>This records the original reviewed push, not the current state of GitHub. Working files, staging and local refs were kept; refresh and fetch separately when needed.</p>}
       {!active && (!state.status || !state.status.available) && <p className="save-note">{state.status ?
         'Local Git changes are not enabled in this installed session. You can still keep a draft and use your Git client; a read-only view does not enable writes.' :
         'Check local Git actions first. This checks native availability; it does not stage files or create a commit.'}</p>}
@@ -58,7 +61,7 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
       {!active && controller.checkReason() && <p className="save-note">{controller.checkReason()}</p>}
       {op && <details><summary>Original action details</summary><p>{op.phase === 'prepare' ? 'Read-only review' : 'Submitted change'} · {op.action.kind} · {op.stage}.</p>
         <p>Original operation: <code>{op.operationId}</code>. Native outcome: {op.outcome ?? 'not settled'}.</p>
-        {result && <p>Git result: {result.state}. This is not a fresh file observation or a remote update.</p>}</details>}
+        {result && <p>Git result: {result.state}. This is not a fresh file or remote observation.</p>}</details>}
     </div>
   </section>;
 }

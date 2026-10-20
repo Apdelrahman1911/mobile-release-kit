@@ -60,6 +60,7 @@ class _ExchangeProfile(Enum):
     PULL_REQUEST = "pull-request"
     ACTIONS_RETRY = "actions-retry"
     GIT_REMOTE = "git-remote"
+    GIT_PUSH = "git-push"
 
 
 class _ResponseRole(Enum):
@@ -68,6 +69,10 @@ class _ResponseRole(Enum):
     HOSTED_VERSION_JOURNAL_READ = "hosted-version-journal-read"
     HOSTED_VERSION_JOURNAL_WRITE = "hosted-version-journal-write"
     HOSTED_VERSION_LEDGER_WRITE = "hosted-version-ledger-write"
+    GIT_PUSH_ACCOUNT = "git-push-account"
+    GIT_PUSH_REPOSITORY = "git-push-repository"
+    GIT_PUSH_ADVERTISEMENT = "git-push-advertisement"
+    GIT_PUSH_SEND = "git-push-send"
     GIT_REMOTE_ACCOUNT = "git-remote-account"
     GIT_REMOTE_REPOSITORY = "git-remote-repository"
     GIT_REMOTE_ADVERTISEMENT = "git-remote-advertisement"
@@ -121,6 +126,11 @@ _HOSTED_VERSION_ROLES = frozenset({_ResponseRole.HOSTED_VERSION_READ, _ResponseR
     _ResponseRole.HOSTED_VERSION_JOURNAL_READ, _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE,
     _ResponseRole.HOSTED_VERSION_LEDGER_WRITE})
 
+_GIT_PUSH_ROLES = frozenset({_ResponseRole.GIT_PUSH_ACCOUNT, _ResponseRole.GIT_PUSH_REPOSITORY,
+    _ResponseRole.GIT_PUSH_ADVERTISEMENT, _ResponseRole.GIT_PUSH_SEND})
+_GIT_PUSH_BINARY = frozenset({_ResponseRole.GIT_PUSH_ADVERTISEMENT, _ResponseRole.GIT_PUSH_SEND})
+
+
 _GIT_REMOTE_ROLES = frozenset({_ResponseRole.GIT_REMOTE_ACCOUNT, _ResponseRole.GIT_REMOTE_REPOSITORY,
     _ResponseRole.GIT_REMOTE_ADVERTISEMENT, _ResponseRole.GIT_REMOTE_LS_REFS, _ResponseRole.GIT_REMOTE_FETCH})
 _GIT_REMOTE_BINARY = frozenset({_ResponseRole.GIT_REMOTE_ADVERTISEMENT,
@@ -155,6 +165,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         if profile is not _ExchangeProfile.HOSTED_VERSION:
             raise ValueError("Fixed hosted version role belongs to another action")
         return MAX_BODY_BYTES, 1024
+    if role in _GIT_PUSH_ROLES:
+        if profile is not _ExchangeProfile.GIT_PUSH:
+            raise ValueError("Fixed Push role belongs to another action")
+        return MAX_BODY_BYTES, 256
     if role in _GIT_REMOTE_ROLES:
         if profile is not _ExchangeProfile.GIT_REMOTE:
             raise ValueError("Fixed Git remote role belongs to another action")
@@ -200,6 +214,10 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
     limits = _role_limits(profile, role)
     if profile is _ExchangeProfile.HOSTED_VERSION:
         from .version_hosted import validate_endpoint
+        validate_endpoint(role.value, method, path)
+        return limits
+    if profile is _ExchangeProfile.GIT_PUSH:
+        from .git_push_transport import validate_endpoint
         validate_endpoint(role.value, method, path)
         return limits
     if profile is _ExchangeProfile.GIT_REMOTE:
@@ -395,7 +413,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (45.0 if _profile is _ExchangeProfile.GIT_REMOTE else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
+        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -403,6 +421,7 @@ class _Budget:
         self.profile = _profile
         self.requests = 0
         self.body_total_limit = (10 * 1024 * 1024 if _profile is _ExchangeProfile.HOSTED_VERSION else
+                                 2 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_PUSH else
                                  34 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else
                                  4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
                                  2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else MAX_BODY_TOTAL)
@@ -412,9 +431,9 @@ class _Budget:
     def claim_request(self) -> None:
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
+        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
             self.remaining()
-            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile is _ExchangeProfile.GIT_REMOTE else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 
@@ -503,7 +522,11 @@ def _framing(head: _Head, maximum: int = MAX_BODY_BYTES, *,
             head.error = "response-limit"
     if head.status == 200:
         media, present, valid = _single(head.headers, "content-type")
-        if _role in _GIT_REMOTE_BINARY:
+        if _role in _GIT_PUSH_BINARY:
+            from .git_push_transport import response_media
+            if not present or not valid or media != response_media(_role.value):
+                head.error = "response-invalid"
+        elif _role in _GIT_REMOTE_BINARY:
             from .git_remote_transport import response_media
             if not present or not valid or media != response_media(_role.value):
                 head.error = "response-invalid"
@@ -845,21 +868,32 @@ def _header_control(head: _Head, budget: _Budget, *,
     return _control(reason, delay, blocked)
 
 
-def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delivery=None, _remote_failure=None) -> ReadResult:
+def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delivery=None, _remote_failure=None, _push_delivery=None) -> ReadResult:
     head = response.head
     # GitRemote's original FixedResponse parses this before stdlib can close
     # inside getresponse. Reuse that exact wall-clock sample, not a later one.
-    control = (response.control if budget.profile is _ExchangeProfile.GIT_REMOTE and response.control is not None
+    control = (response.control if budget.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and response.control is not None
                else _header_control(head, budget, _role=response.role))
     response.control = control  # Retain a validated hint if a later IO read fails.
     if head.error is not None:
         return _failed(head.error, control)
     if control["reason"] == "response-invalid":
         return _failed("response-invalid", control)
-    if budget.profile is _ExchangeProfile.GIT_REMOTE and control["reason"] != "none":
+    if budget.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and control["reason"] != "none":
         # The same Entry has already observed its first failure. No error body
         # read may use a failed work clock or turn a known limit into new work.
         return _failed(control["reason"], control)
+    if response.role in _GIT_PUSH_BINARY:
+        from .git_push_transport import stream_response
+        if control["reason"] != "none":
+            if control["reason"] == "rate-limited":
+                return _failed("rate-limited", control)
+            return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
+        if head.status != 200:
+            return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
+        return stream_response(response, budget, _push_delivery, failure=_remote_failure)
+    if _push_delivery is not None:
+        raise ValueError("Push response sink belongs to another role")
     if response.role in _GIT_REMOTE_BINARY:
         # This private delegate streams only inside THIS original exchange.
         # No full pack body, response generator or socket can escape finally.
@@ -1190,9 +1224,12 @@ def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int,
         raise ReadFailure("tls-failed")
     fixed_host = "api.github.com"
     if _git_remote_role is not None:
-        if type(_git_remote_role) is not _ResponseRole or _git_remote_role not in _GIT_REMOTE_ROLES:
+        if type(_git_remote_role) is not _ResponseRole or _git_remote_role not in (_GIT_REMOTE_ROLES | _GIT_PUSH_ROLES):
             raise ValueError("Invalid fixed Git remote TLS role")
-        from .git_remote_transport import host
+        if _git_remote_role in _GIT_PUSH_ROLES:
+            from .git_push_transport import host
+        else:
+            from .git_remote_transport import host
         fixed_host = host(_git_remote_role.value)
     return context.wrap_socket(source, server_hostname=fixed_host, suppress_ragged_eofs=False)
 
@@ -1219,9 +1256,9 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             raise ValueError("Pinned hosted GitHub trust is unavailable")
     elif _hosted_ca_sha256 is not None:
         raise ValueError("Hosted trust belongs to another profile")
-    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
-    if _profile is _ExchangeProfile.GIT_REMOTE:
+    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
         from .git_remote_transport import _LOGIN
         if (_setup_budget is None or type(_git_remote_login) is not str
                 or _LOGIN.fullmatch(_git_remote_login) is None or not callable(_git_remote_current)
@@ -1231,11 +1268,11 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     elif _git_remote_login is not None or _git_remote_current is not None or _git_remote_failure is not None or _git_remote_control is not None:
         raise ValueError("Git remote inputs belong to another action")
     if _setup_budget is not None:
-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
+        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
                 or _setup_budget.profile is not _profile
                 or _setup_budget.started != started
-                or (_profile is _ExchangeProfile.GIT_REMOTE and not started < _setup_budget.end <= started + 45.0
-                    or _profile is not _ExchangeProfile.GIT_REMOTE and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS))
+                or (_profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and not started < _setup_budget.end <= started + 45.0
+                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS))
                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
             raise ValueError("Invalid same-original Setup budget")
         _setup_budget._secret_exchange_claimed = True
@@ -1256,7 +1293,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     context.keylog_filename = None
     context.set_alpn_protocols(["http/1.1"])
     fixed_ca = (_fixed_ca(runtime_dir, budget, _failure=_git_remote_failure)
-        if _profile is _ExchangeProfile.GIT_REMOTE else _fixed_ca(runtime_dir, budget))
+        if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else _fixed_ca(runtime_dir, budget))
     if _profile is _ExchangeProfile.HOSTED_VERSION:
         import hashlib
         if hashlib.sha256(fixed_ca.encode("ascii")).hexdigest() != _hosted_ca_sha256:
@@ -1266,9 +1303,24 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     # never urllib, proxies, netrc, environment credentials or workflow clients.
 
     def exchange(method: str, path: str, body: bytes | None = None, *,
-                 _role: _ResponseRole = _ResponseRole.STANDARD, _remote_delivery=None) -> ReadResult:
+                 _role: _ResponseRole = _ResponseRole.STANDARD, _remote_delivery=None,
+                 _push_body=None, _push_delivery=None) -> ReadResult:
         _, path_limit = _request_limits(_profile, _role, method, path)
         fixed_host = "api.github.com"
+        if _profile is _ExchangeProfile.GIT_PUSH:
+            from .git_push_transport import _Delivery, host, private_headers, validate_body
+            validate_body(_role.value, body, _push_body)
+            fixed_host = host(_role.value)
+            if _remote_delivery is not None:
+                raise ValueError("Fetch response sink belongs to another action")
+            if _role in _GIT_PUSH_BINARY:
+                if type(_push_delivery) is not _Delivery:
+                    raise ValueError("Original Push response sink is unavailable")
+                _push_delivery.claim(_role.value, _push_body)
+            elif _push_delivery is not None:
+                raise ValueError("Invalid Push response sink role")
+        elif _push_body is not None or _push_delivery is not None:
+            raise ValueError("Push body/response belongs to another action")
         if _profile is _ExchangeProfile.GIT_REMOTE:
             from .git_remote_transport import _Delivery, host, private_headers, validate_body
             validate_body(_role.value, body)
@@ -1309,7 +1361,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 or len(path) > path_limit or any(not 0x21 <= ord(c) <= 0x7e for c in path)
                 or "#" in path or "\\" in path
                 or method == "GET" and body is not None
-                or method == "POST" and _profile is not _ExchangeProfile.SETUP
+                or method == "POST" and _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.GIT_PUSH}
                 and (type(body) is not bytes or not 1 <= len(body) <= (64 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else 384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 32 * 1024 if _profile is _ExchangeProfile.PULL_REQUEST else 2048))):
             raise ValueError("Invalid fixed GitHub transport request")
         budget.claim_request()  # Before any native/socket send, including a failed one.
@@ -1322,7 +1374,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
         def observe_failure(reason: str) -> None:
             # GitRemote alone carries the SAME Entry's first-F recorder. A
             # callback cannot replace cleanup or prevent a claimed close.
-            if _profile is not _ExchangeProfile.GIT_REMOTE:
+            if _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
                 return
             if observing[0]:
                 close_failed[0] = True
@@ -1338,7 +1390,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
         def observe_control(control: dict[str, Any] | None) -> None:
             # Same private owner, before any original response/socket close.
             # Unknown closure cannot erase a known cooldown/credential refusal.
-            if _profile is not _ExchangeProfile.GIT_REMOTE or control is None:
+            if _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} or control is None:
                 return
             if control_observing[0]:
                 close_failed[0] = True
@@ -1362,6 +1414,9 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 reason = "response-invalid"
             elif isinstance(error, OSError):
                 reason = "network-unavailable"
+            elif _profile is _ExchangeProfile.GIT_PUSH:
+                from .git_push_transport import failure_reason
+                reason = failure_reason(error)
             elif _profile is _ExchangeProfile.GIT_REMOTE:
                 from .git_remote_transport import failure_reason
                 reason = failure_reason(error)
@@ -1370,7 +1425,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             observe_failure(reason)
 
         def timeout(remaining: float) -> None:
-            if _profile is _ExchangeProfile.GIT_REMOTE:
+            if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
                 _git_remote_current()
             if original_socket[0] is None:
                 raise ReadFailure("network-unavailable")
@@ -1392,7 +1447,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                     return
                 try:
                     self.bounded = _ResponseBody(self.fp, budget, before_read=timeout, _role=_role)
-                    if _profile is _ExchangeProfile.GIT_REMOTE:
+                    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
                         self.bounded.control = _header_control(self.bounded.head, budget, _role=_role)
                         observe_control(self.bounded.control)
                         if self.bounded.control["reason"] != "none":
@@ -1447,13 +1502,13 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 # HTTPSConnection's default wrap suppresses ragged EOF.
                 # Use the ordinary base TCP connect, then one explicit TLS
                 # wrap. No tunnel/host override or second owner is added.
-                if _profile is _ExchangeProfile.GIT_REMOTE:
+                if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
                     _git_remote_current()
                 http.client.HTTPConnection.connect(self)
                 self.sock.settimeout(budget.remaining())
                 self.sock = _wrap_fixed_tls(context, self.sock,
                                            ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0),
-                                           _git_remote_role=_role if _profile is _ExchangeProfile.GIT_REMOTE else None)
+                                           _git_remote_role=_role if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else None)
 
             def close(self) -> None:
                 if self._close_claimed:
@@ -1479,7 +1534,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             timeout(budget.remaining())
             connection.auto_open = 0  # No implicit reconnect after our connect.
             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
-            headers = private_headers(_role.value, token, _git_remote_login, api_version) if _profile is _ExchangeProfile.GIT_REMOTE else (
+            headers = private_headers(_role.value, token, _git_remote_login, api_version) if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else (
                 ("Host", "api.github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
                 ("Accept", "application/vnd.github+json"), ("X-GitHub-Api-Version", api_version),
                 ("Accept-Encoding", "identity"), ("Connection", "close"),
@@ -1488,15 +1543,24 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             for name, value in headers:
                 connection.putheader(name, value)
             timeout(budget.remaining())
-            if body is not None:
-                connection.putheader("Content-Type", "application/x-git-upload-pack-request" if _role in _GIT_REMOTE_BINARY else "application/json")
-                connection.putheader("Content-Length", str(len(body)))
-            connection.endheaders(body)
+            if _push_body is not None:
+                # Exact concrete original body, already consumed for this
+                # single send. No file-like/generic iterable body is enabled.
+                connection.putheader("Content-Type", "application/x-git-receive-pack-request")
+                connection.putheader("Content-Length", str(_push_body.digest.body_bytes))
+                connection.endheaders()
+                _push_body.send(connection.send, lambda: timeout(budget.remaining()))
+            else:
+                if body is not None:
+                    connection.putheader("Content-Type", "application/x-git-upload-pack-request" if _role in _GIT_REMOTE_BINARY else "application/json")
+                    connection.putheader("Content-Length", str(len(body)))
+                connection.endheaders(body)
             timeout(budget.remaining())
             response = connection.getresponse()
             result = _response_result(response.bounded, budget, _remote_delivery=_remote_delivery,
-                _remote_failure=observe_failure if _profile is _ExchangeProfile.GIT_REMOTE else None)
-            if _profile is _ExchangeProfile.GIT_REMOTE:
+                _remote_failure=observe_failure if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else None,
+                _push_delivery=_push_delivery)
+            if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
                 reason = result.control["reason"]
                 if reason == "none":
                     reason = result.observation["failure"]

@@ -102,6 +102,7 @@ impl GitReadAdmission {
         {
             crate::installed_runtime::GitReadRuntimeSlots::working_reservation_bytes()?
                 .checked_add(std::mem::size_of::<Self>() + std::mem::size_of::<Owner>() + std::mem::size_of::<Resources>())
+                .and_then(|n| n.checked_add(std::mem::size_of::<crate::github_connection_session::LocalGitReadSession>()))
         }
         #[cfg(not(all(
             target_os = "macos",

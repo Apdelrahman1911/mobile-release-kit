@@ -16,6 +16,7 @@ struct Selection {
     root: asset_source::RegisteredRoot,
     context: wire::Context,
     document_revision: u32,
+    connection: crate::github_connection_session::LocalGitReadSession,
     action: wire::Action,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_observation: Option<Arc<agent_git_index::Observation>>,
@@ -39,6 +40,8 @@ impl GitReadGate {
             && !state.maintenance.closed()
             && !version_allocation::pending(state)
             && !version_enrollment::pending(state)
+            && state.github.local_git_read_session(&self.0.context.project_id, self.0.context.generation, Instant::now())
+                == Some(self.0.connection)
             && state.revision == self.0.document_revision
             && matches!(&state.git_read, Some(Entry::Original { ticket, gate })
                 if ticket.operation_id() == id && Arc::ptr_eq(&gate.0, &self.0))
@@ -163,7 +166,6 @@ impl DocumentBinding {
                 .as_ref()
                 .is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.native_work_pending()
-            || state.github.registration().is_some()
         {
             return Err(BridgeError::new(
                 "busy",
@@ -219,6 +221,8 @@ impl DocumentBinding {
             let (generation, root) = self
                 .registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None)
                 .map_err(|_| BridgeError::unavailable("Choose an original registered project before reading Git changes."))?;
+            let connection = state.github.local_git_read_session(&args.project_id, generation, Instant::now())
+                .ok_or_else(|| BridgeError::new("busy", "Finish the original connection work or select its current project before reading local Git."))?;
             let future = GitReadAdmission::reservation_bytes().ok_or_else(BridgeError::invalid)?;
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -242,6 +246,7 @@ impl DocumentBinding {
                 root,
                 context,
                 document_revision: state.revision,
+                connection,
                 action: args.action.clone(),
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_observation,
@@ -298,6 +303,8 @@ mod tests {
                 revision: "document-1".into(),
             },
             document_revision: 1,
+            connection: crate::github_connection_session::ConnectionState::new()
+                .local_git_read_session("project-1", 1, Instant::now()).unwrap(),
             action: wire::Action {
                 kind: wire::Kind::Observe,
                 expected_revision: None,

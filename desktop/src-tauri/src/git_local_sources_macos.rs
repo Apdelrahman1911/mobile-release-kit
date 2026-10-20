@@ -23,6 +23,8 @@ mod fast_forward_sources;
 mod init_sources;
 #[path="git_fetch_sources_macos.rs"]
 mod fetch_sources;
+#[path="git_push_sources_macos.rs"]
+mod push_sources;
 
 const SOURCE_LIMIT: usize = 128;
 struct RefEdge {
@@ -83,6 +85,7 @@ pub(crate) struct GitLocalSources {
     fast_forward:Option<fast_forward_sources::State>,
     initialization:Option<init_sources::State>,
     fetch:Option<fetch_sources::State>,
+    push:Option<push_sources::State>,
 }
 impl Drop for GitLocalSources {
     fn drop(&mut self) {
@@ -108,7 +111,7 @@ impl GitLocalSources {
             git: None,
             indices: [None; 4],
             operation_id: None, review: None, reference: None, replacement: None,
-            post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,
+            post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,
         }
     }
     pub(crate) fn not_started(&self) -> bool {
@@ -122,7 +125,8 @@ impl GitLocalSources {
             .checked_add(switch_sources::State::working_bytes()?)?
             .checked_add(rename_sources::State::working_bytes()?)?
             .checked_add(fast_forward_sources::State::working_bytes()?)?
-            .checked_add(fetch_sources::State::working_bytes()?)
+            .checked_add(fetch_sources::State::working_bytes()?)?
+            .checked_add(push_sources::State::working_bytes()?)
     }
     pub(crate) fn first_failure(&self) -> Option<(Failure, Instant)> {
         self.acl.as_ref().and_then(SnapshotBook::first_failure)
@@ -329,6 +333,7 @@ impl GitLocalSources {
             if let Some(publication) = publication {
                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
+                if review.action()==wire::Kind::Push {self.push_returned(publication,stop)?;return self.post_inner(stop)}
                 if review.action()==wire::Kind::Fetch {
                     self.fetch_returned(publication,stop)?;return self.post_inner(stop)
                 }
@@ -356,7 +361,7 @@ impl GitLocalSources {
                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
                     },
-                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch=>return Err(Reason::SourceChanged),
+                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push=>return Err(Reason::SourceChanged),
                 };
                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
@@ -395,7 +400,8 @@ impl GitLocalSources {
                 .and_then(|n|rename_sources::State::extra(review).and_then(|s|n.checked_add(s)))
                 .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s)))
                 .and_then(|n|n.checked_add(init_sources::State::extra(kind)))
-                .and_then(|n|fetch_sources::State::extra(kind,review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
+                .and_then(|n|fetch_sources::State::extra(kind,review).and_then(|s|n.checked_add(s)))
+                .and_then(|n|push_sources::State::extra(kind,review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
             let capacity = roster_limit([project_parts.len(), parent_parts.len()], extra)?;
             if capacity > SOURCE_LIMIT
                 || capacity
@@ -473,6 +479,7 @@ impl GitLocalSources {
             }
             self.native = Some(native);
             if kind==wire::Kind::Fetch {self.capture_fetch(objects,stop)?;}
+            if kind==wire::Kind::Push {self.capture_push(stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::FastForward) {self.capture_fast_forward(project,stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::BranchRename) {self.capture_rename(stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}
@@ -594,7 +601,8 @@ impl GitLocalSources {
         self.post_fast_forward(stop)?;
         self.post_switch(stop)?;
         self.post_rename(stop)?;
-        self.post_fetch(stop)
+        self.post_fetch(stop)?;
+        self.post_push(stop)
     }
     pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         if self.finished || self.first.is_some() || self.post_claimed {

@@ -9,6 +9,9 @@ pub(super) enum ReadyReview {}
 pub(crate) struct GitLocalGate {context:wire::Context}
 impl GitLocalGate {
     pub(crate) fn same_original(&self,_:&Self)->bool {false}
+    pub(crate) fn push_go(&self,_:&str,_:&wire::Request,_:impl FnOnce()->bool)->Result<zeroize::Zeroizing<Vec<u8>>,BridgeError> {
+        Err(BridgeError::unavailable("Selected-account Git Push is unavailable on this platform."))
+    }
     pub(crate) fn fetch_go(&self,_:&str,_:&wire::Request,_:impl FnOnce()->bool)->Result<zeroize::Zeroizing<Vec<u8>>,BridgeError> {
         Err(BridgeError::unavailable("Selected-account Git Fetch is unavailable on this platform."))
     }
