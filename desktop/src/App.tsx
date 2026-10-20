@@ -51,6 +51,9 @@ import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
 import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
 import { GitIndexPermission } from './service_git_permission.ts';
 import { GitCommitPermission } from './service_git_commit_permission.ts';
+import { GitRepositoryPermission } from './service_git_repository_permission.ts';
+import { gitRepositoryPermissionContext } from './gitRepositoryPermissionSelection.ts';
+import { ServiceGitRepositoryAccess } from './components/ServiceGitRepositoryAccess.tsx';
 import { ServiceGitCommitAccess } from './components/ServiceGitCommitAccess.tsx';
 import { gitReadPathOrder } from './gitReadProtocol.ts';
 import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
@@ -102,6 +105,7 @@ import { GitLocalController } from './gitLocalController.ts';
 import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
 import { GitBranches } from './components/GitBranches.tsx';
 import { GitInitialization } from './components/GitInitialization.tsx';
+import { GitFetch } from './components/GitFetch.tsx';
 import { GitRepositoryController } from './gitRepositoryController.ts';
 import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
@@ -1120,7 +1124,8 @@ export function App() {
       const entry = gitRepositories.current.find((value) => value.service === service && value.projectId === projectId);
       return { api: service.api?.gitLocal ?? null,
         session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
-        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, reader: gitReadRef.current, blocked: gitLocalAdmission.current() };
+        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, reader: gitReadRef.current,
+        fetchConnection: githubConnection.getSnapshot(), blocked: gitLocalAdmission.current() };
     },
     onMutationSubmitted: (projectId) => {
       // After actual Apply entry, including a lost/throwing acknowledgement.
@@ -1160,6 +1165,19 @@ export function App() {
       blocked:!!(gitLocalAdmission.current()??gitLocalRef.current?.ownerReason())};
   }));
   useEffect(()=>{agentGitCommit.syncContext();});
+  const [agentGitRepository] = useState(() => new GitRepositoryPermission((kind) => {
+    const service = pathService.current, projectId = workspaceRef.current.selectedId;
+    const repository = gitRepositories.current.find(v => v.service === service && v.projectId === projectId)?.controller ?? null;
+    return gitRepositoryPermissionContext(kind, {
+      api: service.api?.mode === 'native' ? service.api.agentGitRepository ?? null : null,
+      session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
+      projectId, epoch: gitReadEpoch.current, repository, reader: gitReadRef.current, local: gitLocalRef.current,
+      blocked: connectionPicking.current ? 'Finish selecting the original native project first.' :
+        gitLocalAdmission.current() ?? gitLocalRef.current?.ownerReason() ?? null,
+    });
+  }));
+  // Display/currentness only; the retained Permission owns every actual call.
+  useEffect(() => { agentGitRepository.syncContext(); });
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const [cliReadAccess] = useState(() => new CliReadAccessController({
@@ -2106,7 +2124,7 @@ export function App() {
               navigate('credentials');
             }}
             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
-          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}
@@ -2180,9 +2198,12 @@ export function App() {
                 originalProjectName={gitLocalProjectName} />
               <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+              <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+            <ServiceGitRepositoryAccess controller={agentGitRepository} repository={gitRepository} reader={gitRead} local={gitLocal}
+              projectName={session?.project.name ?? 'No project selected'} />
             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
           </>}
           activityView={<><GitHubActivity controller={githubActivity} state={activityState}

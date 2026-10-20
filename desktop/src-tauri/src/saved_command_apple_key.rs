@@ -20,6 +20,9 @@ use std::sync::{atomic::AtomicU8, OnceLock, Weak};
 
 #[path = "saved_command_apple_key_private.rs"]
 mod private;
+#[path = "saved_command_apple_certificate.rs"]
+pub(in crate::saved_command_owner) mod certificate;
+pub(crate) use certificate::AppleDistributionCertificateBinding;
 
 /// Pre-final-CAS fact. The final journal CAS and NativeUse retirement are
 /// deliberately later original jobs, and are not claimed by this token.
@@ -71,6 +74,7 @@ pub(crate) struct AppleKeySession {
     owner: Weak<Session>,
     clock: Arc<super::apple_signing::AppleProvisioningClock>,
     mode: wire::Mode,
+    certificate: Option<certificate::State>,
     original: OnceLock<Weak<OriginalWork>>,
     destination: OnceLock<Weak<AppleDistributionKeyDestination>>,
     loan: OnceLock<Weak<AppleDistributionKeyLoan>>,
@@ -128,6 +132,7 @@ pub(super) fn initialize(owner: &Arc<Session>) -> Result<(), BridgeError> {
         owner: Arc::downgrade(owner),
         clock: super::apple_signing::AppleProvisioningClock::for_session(owner)?,
         mode: context.mode,
+        certificate: context.mode.certificate().then(certificate::State::default),
         original: OnceLock::new(),
         destination: OnceLock::new(),
         loan: OnceLock::new(),
@@ -168,7 +173,8 @@ pub(super) fn backing_bytes(mode: wire::Mode) -> Option<usize> {
         .checked_add(std::mem::size_of::<AppleKeySavePermit>())?
         .checked_add(std::mem::size_of::<AppleKeyNeverGeneratedJoined>())?
         .checked_add(std::mem::size_of::<AppleKeyUseJoined>())?
-        .checked_add(2 * (4 * 32) + 3 * 64)
+        .checked_add(2 * (4 * 32) + 3 * 64)?
+        .checked_add(if mode.certificate() { certificate::backing_bytes()? } else { 0 })
 }
 
 pub(super) fn stopped(owner: &Session, reason: Reason, at: Instant) {
@@ -1162,7 +1168,7 @@ pub(super) async fn finish_private(owner: &Arc<Session>) -> bool {
             if loan.accept_joined(&asset, proof).is_err() {
                 return false;
             }
-        } else if key.mode == wire::Mode::KeyReview {
+        } else if key.mode == wire::Mode::KeyReview || key.mode.certificate() {
             // Inventory-only operation has no generated/loaded private body.
             // Its original source/store still closes in retire_key_asset.
             key.private_drained.store(true, Ordering::SeqCst);

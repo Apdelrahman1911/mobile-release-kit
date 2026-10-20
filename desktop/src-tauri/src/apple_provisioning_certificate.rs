@@ -40,6 +40,16 @@ const SPKI_BYTES: usize = 16 * 1024;
 const PUBLIC_KEY_BYTES: usize = 8192;
 const SIGNATURE_BYTES: usize = 8192;
 
+#[path = "apple_distribution_certificate_policy.rs"]
+mod distribution_policy;
+pub(crate) use distribution_policy::inspect_distribution_certificate_candidate;
+
+#[derive(Clone, Copy)]
+enum Purpose {
+    ProfileScopedComparison,
+    UnifiedDistributionComparison,
+}
+
 // Standard X.509 syntax identifiers, NOT an Apple distribution-purpose policy.
 const TEAM_OU: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.11");
 const BASIC_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
@@ -281,6 +291,7 @@ fn inspect_inner<'a>(
     expected_team: &[u8; 10],
     expected_spki_sha256: &[u8; 32],
     at: SystemTime,
+    purpose: Purpose,
     stop: &mut dyn FnMut() -> bool,
 ) -> Result<UntrustedCertificateCandidate<'a>, CertificateCandidateFailure> {
     use CertificateCandidateFailure as E;
@@ -349,7 +360,10 @@ fn inspect_inner<'a>(
     if comparison < before || comparison >= after {
         return Err(E::NotCurrentAtComparison);
     }
-    signing_facts(tbs.extensions.as_deref(), stop)?;
+    match purpose {
+        Purpose::ProfileScopedComparison => signing_facts(tbs.extensions.as_deref(), stop)?,
+        Purpose::UnifiedDistributionComparison => distribution_policy::signing_facts(&certificate, stop)?,
+    }
     let spki = &tbs.subject_public_key_info;
     let public_key = spki
         .subject_public_key
@@ -402,7 +416,8 @@ pub(crate) fn inspect_certificate_candidate<'a>(
     stop: &mut dyn FnMut() -> bool,
 ) -> Result<UntrustedCertificateCandidate<'a>, CertificateCandidateFailure> {
     checkpoint(stop)?;
-    let result = inspect_inner(captured_der, expected_team, expected_spki_sha256, at, stop);
+    let result = inspect_inner(captured_der, expected_team, expected_spki_sha256, at,
+        Purpose::ProfileScopedComparison, stop);
     checkpoint(stop)?;
     result
 }
@@ -444,7 +459,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> Certificate {
+    pub(super) fn fixture() -> Certificate {
         let signature = AlgorithmIdentifierOwned {
             oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
             parameters: Some(Any::null()),
@@ -502,7 +517,7 @@ mod tests {
         }
     }
 
-    fn inputs(certificate: &Certificate) -> (Vec<u8>, [u8; 32]) {
+    pub(super) fn inputs(certificate: &Certificate) -> (Vec<u8>, [u8; 32]) {
         (
             certificate.to_der().unwrap(),
             Sha256::digest(

@@ -693,6 +693,8 @@ _LAYOUTS = {
     # Fixed input for bundled Apple PKCS8/CSR/SPKI verification only. Existing
     # private _FD/FiniteScratch publication, identity checks and cleanup apply.
     "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
+    # One fixed public leaf+binding frame, not a general certificate/path API.
+    "apple-distribution-certificate": {"certificate": _ScratchSpec("apple-distribution-certificate.mrk", 65843)},
     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
                         for platform in ("android", "ios")},
 }
@@ -2059,6 +2061,25 @@ class InvocationCustody:
               and operation.guard is self.cancellation and operation.source.operation is operation,
               "Bundle-ID closure requires its original invocation")
         return self._store_online_closed()
+
+    def _apple_certificate_returned_runtime(self, operation) -> None:
+        """Only close this claimed certificate POST's still-active environment."""
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        self._owner(cleanup=True)
+        _need(type(operation) is AppleProvisioningRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation
+              and self.cancellation._apple_provisioning_source is operation.source
+              and operation.request.context["mode"] == "certificate-create"
+              and operation._certificate is not None and operation._pending is not None
+              and operation._wire_request is operation.plan.request and operation._wire_request.method == "POST"
+              and self.root == operation.root and self.mode == "online" and self.lane_evidence is None
+              and self.active and self.reserved and not self.claimed and not self._cleanup_complete
+              and self.reservation_state == "ACQUIRED" and self.lock_result is True
+              and self.environment_lock is _ENV_LOCK and _ENV_OWNER is self and not _ENV_TAINTED
+              and self.child is None and not self.frames and not self.project_started
+              and self.project_owner is None and self._original_project is None
+              and self.signing_lease is None and self.store_namespace is None,
+              "returned certificate command requires its same active online environment")
 
     def _store_online_closed(self) -> bool:
         return (self.mode == "online" and self.lane_evidence is None and self.claimed

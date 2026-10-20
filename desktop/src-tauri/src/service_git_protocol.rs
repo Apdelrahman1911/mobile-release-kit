@@ -172,51 +172,53 @@ impl Start {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Access {
+pub struct Access<S = Selection> {
     pub enabled: bool,
     pub remaining_ms: u64,
     pub consumed: bool,
     pub project_id: Option<Id>,
     pub grant_id: Option<Id>,
-    pub selection: Option<Selection>,
+    pub selection: Option<S>,
 }
 impl Access {
-    pub(crate) fn empty() -> Self {
-        Self {
-            enabled: false,
-            remaining_ms: 0,
-            consumed: false,
-            project_id: None,
-            grant_id: None,
-            selection: None,
-        }
-    }
+    pub(crate) fn empty() -> Self { Self::empty_shared() }
     pub fn validate(&self) -> Result<(), Error> {
         if self.selection.as_ref().is_some_and(|s| s.summary.action == Action::Commit) { return Err(Error::InvalidRequest); }
         self.validate_shared()
     }
     pub(crate) fn validate_shared(&self) -> Result<(), Error> {
-        if self.remaining_ms > 900_000
-            || self.enabled && (self.consumed || self.remaining_ms == 0)
-            || !self.enabled && self.remaining_ms != 0
-            || self.project_id.is_some() != self.grant_id.is_some()
-            || self.grant_id.is_some() != self.selection.is_some()
-            || (self.enabled || self.consumed) && self.grant_id.is_none()
-        {
-            return Err(Error::InvalidRequest);
-        }
+        access_shape(self.enabled, self.remaining_ms, self.consumed,
+            self.project_id.is_some(), self.grant_id.is_some(), self.selection.is_some())?;
         if let Some(v) = &self.selection {
             v.validate_shared()?;
         }
         encoded_bound(self, SCOPE_BYTES - 1024)
     }
 }
+// Shared DATA containers only; the fixed family facades validate their exact
+// selection/review union. No lifecycle, owner or execution method is generic.
+impl<S> Access<S> {
+    pub(crate) fn empty_shared() -> Self {
+        Self { enabled: false, remaining_ms: 0, consumed: false,
+            project_id: None, grant_id: None, selection: None }
+    }
+    pub(crate) fn with_selection<T>(self, selection: Option<T>) -> Access<T> {
+        Access { enabled:self.enabled,remaining_ms:self.remaining_ms,consumed:self.consumed,
+            project_id:self.project_id,grant_id:self.grant_id,selection }
+    }
+}
+pub(crate) fn access_shape(enabled:bool, remaining_ms:u64, consumed:bool,
+    project:bool, grant:bool, selection:bool)->Result<(),Error> {
+    if remaining_ms > 900_000 || enabled && (consumed || remaining_ms == 0)
+        || !enabled && remaining_ms != 0 || project != grant || grant != selection
+        || (enabled || consumed) && !grant { Err(Error::InvalidRequest) } else { Ok(()) }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Scope {
+pub struct Scope<S = Selection> {
     pub service_instance: Id,
     pub project_id: Id,
-    pub access: Access,
+    pub access: Access<S>,
 }
 impl Scope {
     pub fn validate(&self) -> Result<(), Error> {
@@ -292,15 +294,15 @@ impl Review {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Status {
+pub struct Status<S = Summary, R = Review> {
     pub origin: Query,
     pub grant_id: Id,
-    pub selection: Summary,
+    pub selection: S,
     pub revision: u32,
     pub state: State,
     pub prepare_operation_id: Option<String>,
     pub apply_operation_id: Option<String>,
-    pub review: Option<Review>,
+    pub review: Option<R>,
     pub outcome: Option<OperationState>,
     pub settlement: Settlement,
     pub reason: Option<Reason>,
@@ -313,8 +315,22 @@ impl Status {
         self.validate_shared()
     }
     pub(crate) fn validate_shared(&self) -> Result<(), Error> {
-        use State as S;
         self.selection.validate()?;
+        if let Some(review) = &self.review { review.validate()?; }
+        self.validate_progress()?;
+        encoded_bound(self, STATUS_BYTES - 512)
+    }
+}
+impl<SelectionData, ReviewData> Status<SelectionData, ReviewData> {
+    pub(crate) fn with_data<T, U>(self, selection:T, review:Option<U>)->Status<T,U> {
+        Status { origin:self.origin,grant_id:self.grant_id,selection,revision:self.revision,
+            state:self.state,prepare_operation_id:self.prepare_operation_id,
+            apply_operation_id:self.apply_operation_id,review,outcome:self.outcome,
+            settlement:self.settlement,reason:self.reason,history_available:self.history_available,
+            do_not_replay:self.do_not_replay }
+    }
+    pub(crate) fn validate_progress(&self) -> Result<(), Error> {
+        use State as S;
         if self.revision == 0
             || !self.do_not_replay
             || self
@@ -332,8 +348,7 @@ impl Status {
         {
             return Err(Error::InvalidRequest);
         }
-        if let Some(review) = &self.review {
-            review.validate()?;
+        if self.review.is_some() {
             if self.prepare_operation_id.is_none()
                 || !matches!(self.state, S::Prepared | S::StartQueued)
             {
@@ -403,13 +418,13 @@ impl Status {
         if !valid {
             return Err(Error::InvalidRequest);
         }
-        encoded_bound(self, STATUS_BYTES - 512)
+        Ok(())
     }
 }
 
 // Fixed reply counting only, not a new JSON traversal/parser. Serde performs
 // escaping into a counter; encoded output is allocated only after this passes.
-fn encoded_bound(value: &impl Serialize, limit: usize) -> Result<(), Error> {
+pub(crate) fn encoded_bound(value: &impl Serialize, limit: usize) -> Result<(), Error> {
     struct Count {
         count: usize,
         limit: usize,

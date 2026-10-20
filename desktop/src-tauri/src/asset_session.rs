@@ -2075,6 +2075,7 @@ mod lookup_memory {
             if !self.secret_loans.insert(sources)? { return Ok(()); }
             self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.vault_loan(sources.loan())?;
+            if let Some(payload)=sources.certificate_payload() { self.payload(&payload)?; }
             if let Some(inventory)=sources.inventory() {
                 if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
                 self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
@@ -2200,8 +2201,13 @@ mod lookup_memory {
     // Storage arithmetic only; GitLocal retains its OWN publisher, sources,
     // NativeUse and fixed runtime. The read facet supplies no mutation grant.
     pub(super) fn git_local_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        git_local_admission_bytes_for(document,state,future,crate::git_local_protocol::Kind::Stage)
+    }
+    pub(super) fn git_local_admission_bytes_for(document:&Arc<Inner>,state:&DocumentState,future:usize,kind:crate::git_local_protocol::Kind)->Result<usize,Problem>{
         let retained=retained_document_bytes(document,state)?;
-        crate::git_local_protocol::admission_bytes(retained,future).ok_or(Problem::Capacity)
+        if kind==crate::git_local_protocol::Kind::Fetch {
+            crate::git_local_protocol::fetch_worker::admission_bytes(retained,future)
+        } else {crate::git_local_protocol::admission_bytes(retained,future)}.ok_or(Problem::Capacity)
     }
     pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
         history_admission_bytes(document,state,future)
@@ -5210,6 +5216,10 @@ fn cleanup_child(_job: &ChildJob) -> bool {
     { false }
 }
 fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::CheckAppleCertificateSources(sources, point)) = _job {
+        return vault::key_sources::certificate::child_admitted(_owner, sources, *point);
+    }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_))) = _job {
         return vault::distribution_key::child_admitted(_owner, job);

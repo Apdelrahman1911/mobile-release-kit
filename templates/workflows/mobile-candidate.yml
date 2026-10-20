@@ -3,6 +3,14 @@ run-name: ${{ inputs.desktop_request != '' && format('MRK Desktop candidate [{0}
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Build an internal candidate, or reserve an iOS version only (no build/upload)
+        required: false
+        default: candidate
+        type: choice
+        options:
+        - candidate
+        - reserve-version
       platform:
         description: Platform to build once and upload to internal testing
         required: true
@@ -12,7 +20,7 @@ on:
         - ios
         - both
       confirmation:
-        description: candidate:<platform>:<version>:<build>
+        description: candidate:<platform>:<version>:<build>, or reserve-version:ios
         required: true
         type: string
       recovery_run_id:
@@ -43,6 +51,7 @@ on:
 permissions: {}
 jobs:
   candidate:
+    if: inputs.operation == 'candidate'
     permissions:
       actions: read
       artifact-metadata: write
@@ -51,6 +60,7 @@ jobs:
       id-token: write
     uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__
     with:
+      operation: candidate
       tooling_sha: __MOBILE_RELEASE_KIT_SHA__
       source_sha: ${{ github.sha }}
       platform: ${{ inputs.platform }}
@@ -60,3 +70,23 @@ jobs:
       desktop_request: ${{ inputs.desktop_request }}
       desktop_source_sha: ${{ inputs.desktop_source_sha }}
       desktop_expected_ref: ${{ inputs.desktop_expected_ref }}
+  reserve_version:
+    if: inputs.operation == 'reserve-version'
+    permissions:
+      actions: read
+      contents: read
+    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__
+    with:
+      operation: reserve-version
+      tooling_sha: __MOBILE_RELEASE_KIT_SHA__
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      desktop_request: ${{ inputs.desktop_request }}
+      desktop_source_sha: ${{ inputs.desktop_source_sha }}
+      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}
+    secrets:
+      version_allocation_app_id: ${{ secrets.MOBILE_RELEASE_VERSION_APP_ID }}
+      version_allocation_app_private_key: ${{ secrets.MOBILE_RELEASE_VERSION_APP_PRIVATE_KEY }}

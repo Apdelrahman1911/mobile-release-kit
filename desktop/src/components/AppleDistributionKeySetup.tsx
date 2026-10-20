@@ -48,7 +48,7 @@ export function AppleDistributionKeySetup({ controller, state, onKeyCredentials,
     </div>}
     <details><summary>What this local-key step does</summary>
       <p>Use the current App Store Connect P8, Key ID and Issuer ID in the dedicated This Mac · iOS · Candidate · Set up Apple signing context. No P12 is needed for this check. Changing the saved app, API key or display name invalidates the review.</p>
-      <p>A new key is kept only in encrypted storage. Its private bytes and certificate request are not shown here. Certificate issuance, P12 association and signing assignment are separate, unfinished steps. No certificate is requested by these buttons.</p>
+      <p>A new key is kept only in encrypted storage. Its private bytes and certificate request are not shown here. Certificate issuance below, P12 association and signing assignment are separate steps. No certificate is requested by these buttons.</p>
       <p>An independent encrypted backup is a separate action in saved credentials. Keep its recovery code separately. A displayed saved reference does not mean the key was backed up or can already sign a release.</p>
       {state.savedKey && <p>Saved record: <code>{state.savedKey.recordId}</code> · revision {state.savedKey.revisionCounter}. This is historical saved-record information, not a current assignment.</p>}
     </details>

@@ -268,8 +268,8 @@ mod tests {
         let git_scope = Arc::new(git_requests::NativeScope {
             project_id: project.clone(), runtime_id: "project-1".into(), root,
             device: point.device, inode: point.inode, registration: 1, document_revision: 1,
-            input_revision: 1, read_operation_id: "git-read-1".into(), document: Arc::downgrade(&document),
-            selection: git::Selection::new(git::Action::Stage, "d".repeat(64), vec!["private/sentinel".into()]).unwrap(),
+            input_revision: 1, read_operation_id: Some("git-read-1".into()), document: Arc::downgrade(&document),
+            selection: git::Selection::new(git::Action::Stage, "d".repeat(64), vec!["private/sentinel".into()]).unwrap().into(),
             commit: None, changes: tokio::sync::watch::channel(0).0,
         });
         let git_access = service.git_index_requests.allow(git_scope).unwrap();

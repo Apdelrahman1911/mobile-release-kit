@@ -25,6 +25,7 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.material_pending = self.material_receiving = self._material_read = False
         self._material = None
         self._profile_material = self._profile_parts = None
+        self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
         self.reply_step = self.read_remaining = 0
         self.reading = self.audit_writing = False
         self.raw_clock = self.raw_work_end = self.raw_hard_end = None
@@ -43,6 +44,9 @@ class AppleProvisioningInput(_SavedCommandInput):
 
     _request_material = StorePreflightInput._request_material
     def receive_material(self, operation, scratch):
+        if operation.request.context["mode"] in wire.CERTIFICATE_MODES:
+            from ._desktop_apple_certificate_private import receive_material
+            return receive_material(self, operation, scratch)
         from .apple_provisioning_signing import MODES
         if operation.request.context["mode"] in MODES:
             from ._desktop_apple_profile_private import receive_material
@@ -52,6 +56,10 @@ class AppleProvisioningInput(_SavedCommandInput):
     def profile_material(self, operation):
         from ._desktop_apple_profile_private import profile_material
         return profile_material(self, operation)
+
+    def distribution_key_material(self, operation):
+        from ._desktop_apple_certificate_private import distribution_key_material
+        return distribution_key_material(self, operation)
 
     def request(self):
         request = super().request()
@@ -126,7 +134,7 @@ class AppleProvisioningInput(_SavedCommandInput):
     def audit_point(self):
         """Only the already-armed attempt may report under original F/W/H."""
         operation = self.require_operation()
-        self._require(self.initial.context["mode"] in {"register", "profile-reuse", "profile-create"} and self._pending_ack is not None
+        self._require(self.initial.context["mode"] in {"register", "profile-reuse", "profile-create", "certificate-create"} and self._pending_ack is not None
                       and not operation._close_claimed and operation._request_bytes == operation._request_data()
                       and not self.custody_unknown and not self.guard.lifetime_ledger.fatal
                       and self.guard.handler_state != "UNKNOWN" and self.fd is not None and not self.close_claimed)
@@ -190,6 +198,9 @@ class AppleProvisioningInput(_SavedCommandInput):
             self.read_remaining = 0
 
     def exchange(self, kind, payload):
+        if self.initial.context["mode"] in wire.CERTIFICATE_MODES:
+            from ._desktop_apple_certificate_control import exchange
+            return exchange(self, kind, payload)
         if self.initial.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_control import exchange
             return exchange(self, kind, payload)
@@ -233,6 +244,9 @@ class AppleProvisioningInput(_SavedCommandInput):
         return consume_pending(self, operation, child)
 
     def consume_pending_ack(self, operation, request):
+        if self.initial.context["mode"] in wire.CERTIFICATE_MODES:
+            from ._desktop_apple_certificate_control import consume_pending
+            return consume_pending(self, operation, request)
         if self.initial.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_control import consume_pending
             return consume_pending(self, operation, request)
@@ -257,7 +271,9 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.buffer.clear()
         self._material = None  # No process-wide secure-erasure claim.
         self._profile_material = self._profile_parts = None
+        self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
 
     def material_closed(self):
         return (StorePreflightInput.material_closed(self)
-                and self._profile_material is None and self._profile_parts is None)
+                and self._profile_material is None and self._profile_parts is None
+                and self._certificate_material is None and self._certificate_parts is None and self._certificate_key_parts is None)

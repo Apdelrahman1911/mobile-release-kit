@@ -22,9 +22,9 @@ fn links(document: &Arc<()>) -> (Arc<requests::NativeLink>, Arc<requests::Native
         registration: 1,
         document_revision: 1,
         input_revision: 0,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(document),
-        selection,
+        selection: selection.into(),
         commit: None,
         changes: tokio::sync::watch::channel(0).0,
     });

@@ -56,6 +56,10 @@ class AppleProvisioningRun:
         self.target = wire.target(request.native["target"])
         self._profile = self._p12_extraction = self._profile_output = None
         self._key_steps = self._distribution_key = self._key_output = None
+        self._certificate = None
+        if request.context["mode"] in wire.CERTIFICATE_MODES:
+            from ._desktop_apple_certificate_protocol import target
+            self.target = target(request)
         if request.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_protocol import target
             self.target = target(request)
@@ -68,6 +72,9 @@ class AppleProvisioningRun:
         self._post_receipt = None
         self._last_persisted = None
         source.bind_operation(self)  # Before the first filesystem/process effect.
+        if request.context["mode"] in wire.CERTIFICATE_MODES:
+            from ._desktop_apple_certificate_worker import CertificateSteps
+            CertificateSteps(self)
         if request.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_worker import ProfileSteps
             ProfileSteps(self)
@@ -92,11 +99,18 @@ class AppleProvisioningRun:
             self._p12_extraction.retire(self)
         if self._key_output is not None:
             self._key_output.retire_worker()
+        if self._certificate is not None and self._distribution_key is not None:
+            # A fresh verification loan never generates a new private key.
+            # Its actual original command/scratch/Invocation closures are still
+            # required; this does not borrow local generation's no-save path.
+            self._distribution_key.retire_non_generated(self)
         self.material = None
 
     def remember(self, error):
         if self.request.context["mode"] == "key-prepare" and not isinstance(error, KeyboardInterrupt):
             self.source._key_body_failed = True  # Every later ordinary failure also vetoes the custody tail.
+        if self._certificate is not None and not isinstance(error, KeyboardInterrupt):
+            self._certificate._body_failed = True
         StorePreflightRun.remember(self, error)
         if self.source.stop_reason == "cancelled" and self.attempt is not None:
             self.attempt.request_cancel()
@@ -114,6 +128,8 @@ class AppleProvisioningRun:
             raise
 
     def bind_scratch(self, scratch):
+        if self._certificate is not None and len(self.scratches) >= 3:
+            return self._certificate.bind_scratch(scratch)
         layouts = ("online-runner", "store-selection", "store-selection")
         if self._profile is not None:
             layouts += ("apple-provisioning-p12",) + ("online-runner",) * 8
@@ -133,6 +149,8 @@ class AppleProvisioningRun:
             self._distribution_key.bind_scratch(scratch)
 
     def _helper_argv(self):
+        if self._certificate is not None:
+            return self._certificate.helper_argv()
         if self._key_steps is not None:
             return self._key_steps.helper_argv()
         if self._profile is not None:
@@ -146,6 +164,8 @@ class AppleProvisioningRun:
         return environment
 
     def _helper_environment(self):
+        if self._certificate is not None:
+            return self._certificate.helper_environment()
         if self._key_steps is not None:
             return self._key_steps.helper_environment()
         if self._profile is not None:
@@ -177,12 +197,15 @@ class AppleProvisioningRun:
             expected = self.apple_material_command(self._apple_material)
         elif index < 6:
             expected = _fastlane_probe_commands(runtime.tooling_root)[index - 1]
-        elif index == 6 and self.request.context["mode"] == "key-prepare":
+        elif index == 6 and (self.request.context["mode"] == "key-prepare" or self._certificate is not None):
             wire.require(self._distribution_key is not None and self._wire_request is None)
             expected = self._distribution_key.argv(runtime)
         elif index == 6 and self._profile is not None:
             wire.require(self._p12_extraction is not None and self._wire_request is None)
             expected = self._p12_extraction.argv(runtime)
+        elif self._certificate is not None and self._wire_request is None:
+            wire.require(self._certificate.policy is not None)
+            expected = self._certificate.policy.argv()
         else:
             wire.require(self._wire_request is not None and self._wire_runner is not None)
             expected = self._helper_argv()
@@ -209,17 +232,24 @@ class AppleProvisioningRun:
             expected_env, expected_cwd, limit, expected_text = self.runtime.environment(), self.runtime.tooling_root, 4096, True
         elif self._pending < 6:
             expected_env, expected_cwd, limit, expected_text = self._base_environment(), self.runtime.tooling_root, PRIVATE_OUTPUT_LIMIT, True
-        elif self._pending == 6 and self.request.context["mode"] == "key-prepare":
-            from ._desktop_apple_distribution_key import PRIVATE_LIMIT
+        elif self._pending == 6 and (self.request.context["mode"] == "key-prepare" or self._certificate is not None):
+            from ._desktop_apple_distribution_key import PRIVATE_LIMIT, PUBLIC_LIMIT
             self._private_current()
             self._distribution_key.admit_command(self.runtime, argv, environ=environ)
-            expected_env, expected_cwd, limit, expected_text = self._base_environment(), self._distribution_key._scratch._path, PRIVATE_LIMIT, False
+            expected_env, expected_cwd, limit, expected_text = self._base_environment(), self._distribution_key._scratch._path, (
+                PUBLIC_LIMIT if self._certificate is not None else PRIVATE_LIMIT), False
         elif self._pending == 6 and self._profile is not None:
             self._p12_extraction.admit_command(self.runtime, argv, environ=environ)
             expected_env, expected_cwd, limit, expected_text = self._base_environment(), self.runtime.tooling_root, PRIVATE_OUTPUT_LIMIT, False
+        elif self._certificate is not None and self._wire_request is None:
+            from ._desktop_apple_certificate_private import OUTPUT_LIMIT
+            self._private_current()
+            self._certificate.policy.admit(argv, environ)
+            expected_env, expected_cwd, limit, expected_text = self._base_environment(), self._certificate.policy.scratch._path, OUTPUT_LIMIT, False
         else:
             self._private_current()
             expected_env, expected_cwd, limit, expected_text = self._helper_environment(), self._wire_runner._path, (
+                self._certificate.frame_limit() if self._certificate is not None else
                 PRIVATE_OUTPUT_LIMIT if self._profile is not None else self._key_steps.frame_limit() if self._key_steps is not None else bundles.FRAME_LIMIT), False
         wire.require(type(environ) is dict and environ == expected_env and cwd == expected_cwd
                      and type(output_limit) is int and output_limit == limit and text is expected_text)
@@ -230,6 +260,11 @@ class AppleProvisioningRun:
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         wire.require(self._pending is not None and self._command_claimed and capture is True)
+        if self._certificate is not None and self._pending >= 6:
+            from ._desktop_apple_distribution_key import PUBLIC_LIMIT
+            from ._desktop_apple_certificate_private import OUTPUT_LIMIT
+            limit = PUBLIC_LIMIT if self._pending == 6 else OUTPUT_LIMIT if self._wire_request is None else self._certificate.frame_limit()
+            return min(timeout, 60), min(output_limit, limit)
         if self._pending == 6 and self.request.context["mode"] == "key-prepare":
             from ._desktop_apple_distribution_key import PRIVATE_LIMIT
             return min(timeout, 60), min(output_limit, PRIVATE_LIMIT)
@@ -265,6 +300,8 @@ class AppleProvisioningRun:
         self._private_current()
 
     def send(self, request):
+        if self._certificate is not None:
+            return self._certificate.send(request)
         if self._key_steps is not None:
             return self._key_steps.send(request)
         if self._profile is not None:
@@ -317,6 +354,8 @@ class AppleProvisioningRun:
             self._wire_request = self._wire_runner = None
 
     def authorize(self, plan, approval):
+        if self._certificate is not None:
+            return self._certificate.authorize(plan, approval)
         if self._profile is not None:
             return self._profile.authorize(plan, approval)
         wire.require(self.plan is plan and self.approval is approval and self.request.context["mode"] == "register"
@@ -326,6 +365,8 @@ class AppleProvisioningRun:
         wire.require(datetime.now(timezone.utc) < plan.valid_until)
 
     def persist(self, record):
+        if self._certificate is not None:
+            return self._certificate.persist(record)
         if self._profile is not None:
             return self._profile.persist(record)
         wire.require(self.attempt is not None and record.context == self.context and record.plan_sha256 == self.plan.sha256)
@@ -345,6 +386,8 @@ class AppleProvisioningRun:
             raise
 
     def transport_settled(self, record):
+        if self._certificate is not None:
+            return self._certificate.transport_settled(record)
         if self._profile is not None:
             return self._profile.transport_settled(record)
         wire.require(self.attempt is not None and record.context == self.context and record.plan_sha256 == self.plan.sha256)
@@ -354,6 +397,8 @@ class AppleProvisioningRun:
                 and verdict.profile_calls == 0 and self._pending is None)
 
     def reconciliation_current(self, plan, record):
+        if self._certificate is not None:
+            return self._certificate.reconciliation_current(plan, record)
         if self._profile is not None:
             return self._profile.reconciliation_current(plan, record)
         wire.require(self.plan is plan and self.attempt is not None and record.context == self.context
@@ -429,7 +474,7 @@ class AppleProvisioningRun:
         try:
             self.config, _ = self._saved()
             self._target_current()
-            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create", "key-prepare"} and any(
+            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create", "key-prepare", "certificate-create"} and any(
                     row.unresolved for row in wire.pending(self.request.native["pending"], self.context.account_ref)):
                 raise _Refused("journal-unavailable")
             with invocation_custody(self.root, mode="online", cancellation=self.guard) as invocation:
@@ -450,6 +495,8 @@ class AppleProvisioningRun:
                             if any(row.status in FAILING_STATUSES for row in findings):
                                 raise _Refused("credentials-unavailable")
                             needed = ("apple_provisioning.rb", "apple_provisioning_bundle_read.rb") + (
+                                ("apple_distribution_key.rb", "apple_distribution_certificate_policy.rb", "apple_distribution_certificate_prepare.rb",
+                                 "apple_distribution_certificate_verify.rb", "apple_provisioning_certificate_issuance.rb") if self._certificate is not None else
                                 ("apple_distribution_key.rb",) if self.request.context["mode"] == "key-prepare" else
                                 ("apple_provisioning_signing.rb",) if self.request.context["mode"] == "key-review" else
                                 ("apple_provisioning_p12.rb", "apple_provisioning_signing.rb") if self._profile is not None else
@@ -460,7 +507,9 @@ class AppleProvisioningRun:
                                 raise _Refused("query-prerequisites")
                             self.check(self.context)
                             _require_fastlane_bundle(tooling, cancellation=self.guard, runtime_context=self.runtime)
-                            if self._key_steps is not None:
+                            if self._certificate is not None:
+                                self._certificate.run()
+                            elif self._key_steps is not None:
                                 self._key_steps.run()
                             elif self._profile is not None:
                                 self._profile.run()

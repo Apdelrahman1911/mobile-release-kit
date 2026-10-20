@@ -21,6 +21,9 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/git_fast_forward_protocol.rs"] mod git_fast_forward_protocol;
 #[path = "../src/git_rename_protocol.rs"] mod git_rename_protocol;
 #[path = "../src/git_init_protocol.rs"] mod git_init_protocol;
+#[path = "../src/git_fetch_protocol.rs"] mod git_fetch_protocol;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/git_fetch_state.rs"] mod git_fetch_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
@@ -30,6 +33,7 @@ mod service_version_reserve_protocol;
 mod service_version_reserve_requests;
 #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
 #[path = "../src/service_git_commit_protocol.rs"] mod service_git_commit_protocol;
+#[path = "../src/service_git_repository_protocol.rs"] mod service_git_repository_protocol;
 #[path = "../src/service_git_requests.rs"] mod service_git_requests;
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
 #[path = "../src/service_android_tools.rs"] mod service_android_tools;

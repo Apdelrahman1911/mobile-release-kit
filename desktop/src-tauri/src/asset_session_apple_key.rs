@@ -25,6 +25,7 @@ pub(super) struct Request {
     sources: Arc<AppleKeySources>,
     receive: oneshot::Receiver<Option<AppleKeySavePermit>>,
     prepare: bool,
+    certificate: bool,
 }
 impl Work {
     fn parent(&self) -> Option<Arc<AppleKeySession>> {
@@ -61,7 +62,11 @@ impl OriginalWork {
         self.apple_key.get()?.parent()
     }
     pub(crate) fn apple_key_source_checked(&self, parent: &AppleKeySession) -> bool {
-        self.apple_key_checked(parent, InventoryPoint::Initial)
+        self.apple_key.get().is_some_and(|work| work.same_parent(parent) && work.sources().is_ok_and(|sources|
+            sources.owner().is_some_and(|owner| std::ptr::eq(owner.as_ref(), self) &&
+                if sources.selected_certificate_key().is_some() {
+                    sources.certificate_checked(&owner, key_sources::certificate::CheckPoint::Initial)
+                } else { sources.checked(&owner, InventoryPoint::Initial) })))
     }
     pub(crate) fn apple_key_before_pending_checked(&self, parent: &AppleKeySession) -> bool {
         self.apple_key_checked(parent, InventoryPoint::BeforePending)
@@ -110,7 +115,7 @@ fn known_controls(owner: &Arc<OriginalWork>, allow_not_started: bool) -> bool {
         && owner.installation.is_none()
 }
 pub(super) fn current_slot(slot: &Slot, sources: &Arc<AppleKeySources>) -> bool {
-    slot.operation == Operation::PrepareAppleDistributionKey
+    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
         && slot.target.is_none()
         && slot.reason == Reason::None
         && slot.cleanup_end.is_none()
@@ -133,7 +138,7 @@ pub(super) fn release_deferred(owner: &Arc<OriginalWork>) -> bool {
         .is_some_and(|work| !work.no_more_work(owner))
 }
 pub(super) fn source_release_ready(slot: &Slot) -> bool {
-    slot.operation == Operation::PrepareAppleDistributionKey
+    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
         && slot.owner.apple_key.get().is_some_and(|work| {
             work.destination.get().is_none()
                 && !work.save_received.load(Ordering::SeqCst)
@@ -144,7 +149,7 @@ pub(super) fn source_release_ready(slot: &Slot) -> bool {
 pub(super) fn cleanup_staged_allowed(slot: &Slot, retained: bool) -> bool {
     slot.staged.is_none()
         || retained
-            && slot.operation == Operation::PrepareAppleDistributionKey
+            && matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
             && matches!(
                 slot.staged.as_ref(),
                 Some(Staged::Refused(_)) | Some(Staged::Committed { bind: None })
@@ -193,7 +198,7 @@ impl DocumentBinding {
         input: &Arc<AppleProvisioningDocumentInput>,
         parent: &Arc<AppleKeySession>,
     ) -> Result<oneshot::Sender<()>, BridgeError> {
-        if !input.context().mode.local_key() {
+        if !(input.context().mode.local_key() || input.context().mode.certificate()) {
             return Err(crate::apple_provisioning_protocol::invalid());
         }
         let sources = input
@@ -231,9 +236,10 @@ impl DocumentBinding {
             return Err(key_error(reason));
         }
         let prepare = input.context().mode == crate::apple_provisioning_protocol::Mode::KeyPrepare;
+        let certificate = input.context().mode.certificate();
         let mut slot = Slot::new(
             owner.clone(),
-            Operation::PrepareAppleDistributionKey,
+            if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },
             Some(sources.native().clone()),
             None,
             None,
@@ -246,7 +252,7 @@ impl DocumentBinding {
                 parent: parent.clone(),
                 sources: sources.clone(),
                 receive,
-                prepare,
+                prepare, certificate,
             }),
         ) {
             Ok(start) => start,
@@ -275,6 +281,10 @@ impl DocumentBinding {
             .ok_or_else(BridgeError::cleanup_unknown)?
             .installed
             .store(true, Ordering::SeqCst);
+        if certificate {
+            sources.attach_certificate_loan(self, state, &owner).map_err(key_error)?;
+            return Ok(start);
+        }
         // This captures DATA only; Initial runs the actual original full-EOF,
         // ACL/read-witness check after this coordinator's GO. No destination
         // is reserved until that genuine initial child has joined.
@@ -313,12 +323,12 @@ pub(super) async fn run(
                 .unwrap_or(Reason::Deadline),
         );
     }
-    let Some(inventory) = request.sources.inventory() else {
-        return refused(&request.parent, Reason::CleanupUnknown);
-    };
-    if let Err(reason) =
+    let initial = if request.certificate {
+        key_sources::certificate::load(document, owner, &request.sources).await
+    } else if let Some(inventory) = request.sources.inventory() {
         distribution_key::check_inventory(document, owner, inventory, InventoryPoint::Initial).await
-    {
+    } else { Err(Reason::CleanupUnknown) };
+    if let Err(reason) = initial {
         request
             .parent
             .clock()
@@ -326,6 +336,7 @@ pub(super) async fn run(
         return Staged::Refused(reason);
     }
     if request.prepare {
+        let Some(inventory)=request.sources.inventory() else { return refused(&request.parent,Reason::CleanupUnknown); };
         let reserved = (|| {
             let mut state = document.lock();
             if !request.sources.current(document, &state) || !inventory.generation_empty(owner) {
@@ -441,6 +452,13 @@ pub(super) async fn run(
         Ok(staged) => staged,
         Err(reason) => refused(&request.parent, reason),
     }
+}
+
+#[cfg(feature = "desktop-shell")]
+pub(in crate::asset_session) async fn recheck_certificate_before_pending(document: &DocumentBinding, owner: &Arc<OriginalWork>) -> Result<(), BridgeError> {
+    let work=owner.apple_key.get().ok_or_else(BridgeError::cleanup_unknown)?;
+    let sources=work.sources().map_err(key_error)?;
+    key_sources::certificate::check(document,owner,&sources,key_sources::certificate::CheckPoint::BeforePending).await.map_err(key_error)
 }
 
 #[cfg(feature = "desktop-shell")]
@@ -573,6 +591,11 @@ mod tests {
             assert!(slot.owner.stopped());
             assert!(!source_release_ready(&slot)); // No original parent/joins.
             slot.operation = Operation::UseAppleDistributionKey;
+            assert!(cleanup_staged_allowed(&slot, true));
+            assert!(!cleanup_staged_allowed(&slot, false));
+            assert!(!source_release_ready(&slot)); // Still no native use proof.
+            assert_eq!(retained, slot.staged.as_ref().unwrap() as *const Staged);
+            slot.operation = Operation::AppleProfileSetup;
             assert!(!cleanup_staged_allowed(&slot, true));
         }
     }

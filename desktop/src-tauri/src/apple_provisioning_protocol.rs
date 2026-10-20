@@ -51,6 +51,17 @@ pub(crate) use key::{KeyScopeData, KeyReviewData, KeyReviewChoice, KeyVaultInven
     KeyObserved, KeyEvent, KeyNotGenerated, KeyResult, KeyDecision, KeyReason,
     key_pending_ack, key_retained_ack, KEY_EVENTS, KEY_JSON_LIMIT, KEY_STOP};
 
+#[path = "apple_provisioning_certificate_protocol.rs"]
+mod certificate;
+#[path = "apple_provisioning_certificate_recovery_selection.rs"]
+mod certificate_recovery;
+pub(crate) use certificate_recovery::{CertificateRecoveryHistory, CertificateRecoveryAttempt, certificate_recovery_history, certificate_recovery_scope_matches, certificate_prior, certificate_key_preparation, CERTIFICATE_RECOVERY_LIMIT};
+pub(crate) use certificate::{CertificateChoice, CertificateReviewData, CertificateKeyPreparation,
+    CertificatePriorData, CertificateScopeData, CertificateKeyInput, CertificateCandidateInput,
+    CertificateIdentityInput, CertificatePolicyInput, CertificateObserved, CertificateEvent, CertificateResult,
+    certificate_reply, certificate_journal_ack, CERTIFICATE_EVENTS, CERTIFICATE_IDENTITY_LIMIT,
+    CERTIFICATE_IDENTITIES_LIMIT, CERTIFICATE_JSON_LIMIT, CERTIFICATE_BATCH_DER};
+
 pub(crate) const PROTOCOL: &str = "mrk-apple-bundle-provisioning/1";
 pub(crate) const EVENT: &str = "apple-bundle-provisioning-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
@@ -194,14 +205,15 @@ impl Mode {
     pub(crate) fn key(self) -> bool {
         matches!(self, Self::KeyReview | Self::KeyPrepare | Self::KeyRecover | Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile)
     }
+    pub(crate) fn certificate(self) -> bool { matches!(self, Self::CertificateReview | Self::CertificateCreate | Self::CertificateReconcile) }
     pub(crate) fn local_key(self) -> bool { matches!(self, Self::KeyReview | Self::KeyPrepare) }
     pub(crate) fn profile(self) -> bool {
         matches!(self, Self::ProfileReview | Self::ProfileReuse | Self::ProfileCreate | Self::ProfileReconcile)
     }
     pub(crate) fn profile_save(self) -> bool { matches!(self, Self::ProfileReuse | Self::ProfileCreate) }
-    pub(crate) fn events(self) -> u32 { if self.key() { KEY_EVENTS } else if self.profile() { PROFILE_EVENTS } else { MAX_EVENTS } }
-    pub(crate) fn frame_limit(self) -> usize { if self.key() { EVENT_LIMIT } else if self.profile() { PROFILE_IDENTITY_LIMIT } else { FRAME_LIMIT } }
-    pub(crate) fn response_limit(self) -> usize { if self.key() { KEY_JSON_LIMIT } else if self.profile() { PROFILE_JSON_LIMIT } else { RESPONSE_LIMIT } }
+    pub(crate) fn events(self) -> u32 { if self.certificate() { CERTIFICATE_EVENTS } else if self.key() { KEY_EVENTS } else if self.profile() { PROFILE_EVENTS } else { MAX_EVENTS } }
+    pub(crate) fn frame_limit(self) -> usize { if self.certificate() { CERTIFICATE_IDENTITY_LIMIT } else if self.key() { EVENT_LIMIT } else if self.profile() { PROFILE_IDENTITY_LIMIT } else { FRAME_LIMIT } }
+    pub(crate) fn response_limit(self) -> usize { if self.certificate() { CERTIFICATE_JSON_LIMIT } else if self.key() { KEY_JSON_LIMIT } else if self.profile() { PROFILE_JSON_LIMIT } else { RESPONSE_LIMIT } }
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::Review => "local-ios-bundle-review-v1",
@@ -220,7 +232,9 @@ impl Mode {
         }
     }
     pub(crate) fn commands(self) -> u32 {
-        if self == Self::KeyReview {
+        if self.certificate() {
+            if self == Self::CertificateCreate { 21 } else { 14 }
+        } else if self == Self::KeyReview {
             12
         } else if self.key() {
             7
@@ -277,12 +291,16 @@ pub(crate) struct Context {
     pub(crate) p12_record_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) p12_record_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key_record_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key_record_revision: Option<u32>,
 }
 impl Context {
     pub(crate) fn valid(&self) -> bool {
-        // Fresh stored-key recovery/issuance needs its separate admitted loan;
-        // these reserved vocabulary arms are NOT an executable route yet.
-        (!self.mode.key() || self.mode.local_key())
+        // KeyRecover still has no executable route. Certificate modes use a
+        // separately admitted fresh native key loan, never a keySaved DTO.
+        self.mode != Mode::KeyRecover
             && valid_id(&self.project_id)
             && self.draft_revision < u32::MAX
             && self.baseline_generation < u32::MAX
@@ -293,11 +311,15 @@ impl Context {
             && (1..u32::MAX).contains(&self.record_revision)
             && display_name(&self.display_name)
             && self.new_application == (self.mode == Mode::Register)
-            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview) {
+            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview | Mode::CertificateReview) {
                 self.reference.is_none()
             } else {
                 self.reference.as_ref().is_some_and(Reference::valid)
             })
+            && (if self.mode.certificate() {
+                self.key_record_id.as_ref().is_some_and(|value| token(value))
+                    && self.key_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
+            } else { self.key_record_id.is_none() && self.key_record_revision.is_none() })
             && if self.mode.profile() {
                 self.p12_record_id.as_ref().is_some_and(|value| token(value))
                     && self.p12_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
@@ -357,6 +379,10 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
             "displayName",
         ];
     if profile { names.extend(["p12RecordId", "p12RecordRevision"]); }
+    if value.get("mode").and_then(Value::as_str).is_some_and(|mode|
+        matches!(mode, "certificate-review" | "certificate-create" | "certificate-reconcile")) {
+        names.extend(["keyRecordId", "keyRecordRevision"]);
+    }
     need(keys(value, &names))?;
     let mut selected = value.clone();
     selected.as_object_mut().ok_or_else(invalid)?.insert(
@@ -377,7 +403,8 @@ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
         token(&input.operation_id)
             && token(&input.owner_generation)
             && [Mode::Review, Mode::Register, Mode::Reconcile, Mode::ProfileReview,
-                Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare]
+                Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare,
+                Mode::CertificateReview, Mode::CertificateCreate, Mode::CertificateReconcile]
                 .iter()
                 .any(|mode| input.consent_version == mode.consent()),
     )?;
@@ -402,6 +429,7 @@ pub(crate) struct ScopeData {
     pub(crate) reviewed_at: Option<String>,
     pub(crate) signing: Option<ProfileScopeData>,
     pub(crate) key: Option<KeyScopeData>,
+    pub(crate) certificate: Option<CertificateScopeData>,
 }
 impl ScopeData {
     fn matches(
@@ -442,7 +470,10 @@ impl ScopeData {
             && n.project_binding.device == n.registered_root.device
             && n.project_binding.inode == n.registered_root.inode
             && context.accepts_target(t)
-            && if context.mode.key() {
+            && if context.mode.certificate() {
+                self.signing.is_none() && self.key.is_none() && self.certificate.as_ref().is_some_and(|scope| scope.valid(context, self))
+            } else if self.certificate.is_some() { false
+            } else if context.mode.key() {
                 self.signing.is_none() && self.key.as_ref().is_some_and(|key| key.valid(context, t, self.reviewed_at.as_ref()))
             } else if context.mode.profile() {
                 self.key.is_none() && self.signing.as_ref().is_some_and(|s| s.valid(context, t, self.reviewed_at.as_ref()))
@@ -469,6 +500,9 @@ pub(crate) struct RequestBinding {
     nonce: String,
     sha256: String,
     pub(crate) revision: crate::application_state_store::Revision,
+}
+impl RequestBinding {
+    pub(crate) fn certificate_digest(&self) -> &str { &self.sha256 }
 }
 pub(crate) struct EncodedRequest {
     pub(crate) bytes: Vec<u8>,
@@ -575,7 +609,10 @@ pub(crate) fn request(
         value["native"].as_object_mut().ok_or_else(invalid)?
             .insert("signing".into(), serde_json::to_value(&scope.signing).map_err(|_| invalid())?);
     }
-    if context.mode.key() {
+    if context.mode.certificate() {
+        value["native"].as_object_mut().ok_or_else(invalid)?
+            .insert("certificate".into(), serde_json::to_value(&scope.certificate).map_err(|_| invalid())?);
+    } else if context.mode.key() {
         value["native"].as_object_mut().ok_or_else(invalid)?
             .insert("key".into(), serde_json::to_value(&scope.key).map_err(|_| invalid())?);
     }
@@ -683,6 +720,7 @@ struct Updated {
 pub(crate) enum EventData {
     Profile(ProfileEvent),
     Key(KeyEvent),
+    Certificate(CertificateEvent),
     Observed(Observed),
     Pending {
         intent: BundleRegistrationIntent,
@@ -873,10 +911,11 @@ impl BundleResultData {
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum ResultData { Bundle(BundleResultData), Profile(ProfileResult), Key(KeyResult) }
+pub(crate) enum ResultData { Bundle(BundleResultData), Profile(ProfileResult), Key(KeyResult), Certificate(CertificateResult) }
 impl ResultData {
     pub(crate) fn bundle(&self) -> Option<&BundleResultData> { match self { Self::Bundle(value) => Some(value), _ => None } }
     pub(crate) fn key(&self) -> Option<&KeyResult> { match self { Self::Key(value) => Some(value), _ => None } }
+    pub(crate) fn certificate(&self) -> Option<&CertificateResult> { match self { Self::Certificate(value) => Some(value), _ => None } }
     pub(crate) fn profile(&self) -> Option<&ProfileResult> { match self { Self::Profile(value) => Some(value), _ => None } }
 }
 
@@ -939,6 +978,7 @@ impl Terminal {
         observed: bool,
         profile: &profile::ProfileDecoder,
         key: &key::KeyDecoder,
+        certificate: &certificate::CertificateDecoder,
     ) -> bool {
         let life = &self.lifetime;
         if self.schema_version != 1
@@ -961,7 +1001,8 @@ impl Terminal {
                 && self.result.as_ref().is_some_and(|result| match result {
                     ResultData::Bundle(result) => !self.context.mode.profile() && !self.context.mode.key() && result.valid(binding, last_update),
                     ResultData::Profile(result) => self.context.mode.profile() && profile.valid_terminal(result, binding),
-                    ResultData::Key(result) => self.context.mode.key() && key.valid_terminal(result, binding),
+                    ResultData::Key(result) => self.context.mode.local_key() && key.valid_terminal(result, binding),
+                    ResultData::Certificate(result) => self.context.mode.certificate() && certificate.valid_terminal(result, binding),
                 });
         }
         if self.result.is_some() || self.reason == Reason::None {
@@ -1019,6 +1060,7 @@ pub(crate) struct Decoder {
     last_update: Option<AttemptUpdate>,
     profile: profile::ProfileDecoder,
     key: key::KeyDecoder,
+    certificate: certificate::CertificateDecoder,
 }
 impl Decoder {
     pub(crate) fn new(binding: Arc<RequestBinding>) -> Self {
@@ -1033,6 +1075,7 @@ impl Decoder {
             last_update: None,
             profile: profile::ProfileDecoder::default(),
             key: key::KeyDecoder::default(),
+            certificate: certificate::CertificateDecoder::default(),
         }
     }
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
@@ -1076,7 +1119,7 @@ impl Decoder {
             "terminal" => {
                 need(self.next > 0 && self.next <= binding.context.mode.events() + 1)?;
                 let terminal = Terminal::deserialize(envelope.payload).map_err(|_| invalid())?;
-                need(terminal.valid(binding, self.last_update.as_ref(), self.observed, &self.profile, &self.key))?;
+                need(terminal.valid(binding, self.last_update.as_ref(), self.observed, &self.profile, &self.key, &self.certificate))?;
                 self.terminal = true;
                 Frame::Terminal(terminal)
             }
@@ -1163,6 +1206,11 @@ impl Decoder {
                     data: EventData::Attempt(update),
                 })
             }
+            kind @ ("certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-observed" | "certificate-pending" | "certificate-attempt") => {
+                need(binding.context.mode.certificate() && (kind == "certificate-identities" || bytes.len() <= EVENT_LIMIT))?;
+                Frame::Event(EventDataFrame { sequence: self.next, data: EventData::Certificate(
+                    self.certificate.event(binding, self.next, kind, envelope.payload)?) })
+            },
             kind @ ("key-observed" | "key-pending" | "key-output" | "key-not-generated") => {
                 need(binding.context.mode.local_key() && bytes.len() <= EVENT_LIMIT)?;
                 Frame::Event(EventDataFrame { sequence: self.next,
@@ -1227,6 +1275,8 @@ pub(crate) struct Projection {
     pub(crate) recovery: Option<RecoveryHistory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) profile_recovery: Option<ProfileRecoveryHistory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) certificate_recovery: Option<CertificateRecoveryHistory>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub(crate) saved_profile: Option<crate::credential_setup::KeyReference>,
     #[serde(skip_serializing_if = "Option::is_none")]

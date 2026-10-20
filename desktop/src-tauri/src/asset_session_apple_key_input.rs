@@ -13,7 +13,7 @@ impl AppleProvisioningDocumentInput {
         &self,
         original: &Arc<OriginalWork>,
     ) -> Result<(), BridgeError> {
-        if !self.context.mode.local_key() || self.key_sources().is_none() {
+        if !(self.context.mode.local_key() || self.context.mode.certificate()) || self.key_sources().is_none() {
             return Err(wire::invalid());
         }
         let mut held = self
@@ -51,6 +51,15 @@ impl AppleProvisioningDocumentInput {
         let document = self.key_document(&original)?;
         self.current()?;
         super::super::apple_key::recheck_before_pending(&document, &original).await?;
+        self.current()
+    }
+    #[cfg(feature = "desktop-shell")]
+    pub(crate) async fn check_certificate_before_pending(&self) -> Result<(), BridgeError> {
+        if self.context.mode != wire::Mode::CertificateCreate { return Err(wire::invalid()); }
+        let original=self.key_asset.try_lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)?;
+        let document=self.key_document(&original)?;
+        self.current()?;
+        super::super::apple_key::recheck_certificate_before_pending(&document,&original).await?;
         self.current()
     }
     #[cfg(feature = "desktop-shell")]
@@ -106,6 +115,22 @@ impl AppleProvisioningDocumentInput {
                 records: u32::try_from(records).map_err(|_| wire::invalid())?,
                 keys: u32::try_from(keys).map_err(|_| wire::invalid())?,
             },
+        })
+    }
+    pub(crate) fn certificate_scope(
+        &self,
+        review: Option<wire::CertificateReviewData>,
+    ) -> Result<wire::CertificateScopeData, BridgeError> {
+        if !self.context.mode.certificate() { return Err(wire::invalid()); }
+        let sources = self.key_sources().ok_or_else(wire::invalid)?;
+        let original = sources.owner().ok_or_else(wire::invalid)?;
+        if !sources.certificate_checked(&original, vault::key_sources::certificate::CheckPoint::Initial) {
+            return Err(wire::invalid());
+        }
+        let loan = sources.certificate_loan().ok_or_else(wire::invalid)?;
+        Ok(wire::CertificateScopeData {
+            source_p8: sources.reference(), source_key: loan.reference(),
+            entitlements: serde_json::json!({}), review, key_preparation: None, prior: None,
         })
     }
     /// The sole key-prepare preservation check. Called OFF native IO books,
@@ -190,6 +215,9 @@ impl AppleProvisioningDocumentInput {
 // No original lookup or Option::None is presented as native closure.
 #[cfg(not(feature = "desktop-shell"))]
 impl AppleProvisioningDocumentInput {
+    pub(crate) async fn check_certificate_before_pending(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::unavailable("Certificate requests require the desktop application."))
+    }
     pub(crate) async fn check_key_before_pending(&self) -> Result<(), BridgeError> {
         Err(BridgeError::unavailable(
             "Apple key preparation requires the desktop application.",

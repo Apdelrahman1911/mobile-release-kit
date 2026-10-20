@@ -91,8 +91,10 @@ class StoreRuntimeContext:
             raise
         finally:
             from ._desktop_apple_key_control import returned_runtime_check
+            from ._desktop_apple_certificate_control import returned_post_runtime_check
             source = getattr(self._invocation.cancellation, "_apple_provisioning_source", None)
-            if not returned_runtime_check(source, self, primary):
+            if not (returned_runtime_check(source, self, primary)
+                    or returned_post_runtime_check(source, self, primary)):
                 self.check()
 
     def checked(self):

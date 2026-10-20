@@ -97,7 +97,7 @@ impl CredentialReference {
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
-    GitCommit, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+    GitCommit, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
 }
 
 /// Future operation-specific adapters may compare this DATA with a genuine
@@ -219,6 +219,11 @@ pub enum RequestBody {
     #[serde(rename="git-commit.start")] GitCommitStart(crate::service_git_commit_protocol::Start),
     #[serde(rename="git-commit.status")] GitCommitStatus(crate::service_git_commit_protocol::Query),
     #[serde(rename="git-commit.cancel")] GitCommitCancel(crate::service_git_commit_protocol::Query),
+    #[serde(rename="git-repository.scope")] GitRepositoryScope(ProjectQuery),
+    #[serde(rename="git-repository.prepare")] GitRepositoryPrepare(crate::service_git_repository_protocol::Prepare),
+    #[serde(rename="git-repository.start")] GitRepositoryStart(crate::service_git_repository_protocol::Start),
+    #[serde(rename="git-repository.status")] GitRepositoryStatus(crate::service_git_repository_protocol::Query),
+    #[serde(rename="git-repository.cancel")] GitRepositoryCancel(crate::service_git_repository_protocol::Query),
     #[serde(rename = "service.info")] Info(Empty),
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
@@ -267,6 +272,8 @@ pub enum ResponseBody {
     GitIndexRequest(crate::service_git_protocol::Status),
     GitCommitScope(crate::service_git_commit_protocol::Scope),
     GitCommitRequest(crate::service_git_commit_protocol::Status),
+    GitRepositoryScope(crate::service_git_repository_protocol::Scope),
+    GitRepositoryRequest(crate::service_git_repository_protocol::Status),
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     AndroidTools(crate::service_android_tools::View),
@@ -313,7 +320,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
-    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) = &request.request { input.validate()?; }
+    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) = &request.request { input.validate()?; }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -399,6 +406,14 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         },
         ResponseBody::GitCommitRequest(row) => {
             row.validate()?; if row.0.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, false)?;
+        },
+        ResponseBody::GitRepositoryScope(row) => {
+            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::encoded_bound(response, crate::service_git_repository_protocol::ACCESS_LIMIT)?;
+        },
+        ResponseBody::GitRepositoryRequest(row) => {
+            row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
             crate::service_git_protocol::response_bound(response, false)?;
         },
         ResponseBody::Observation(row) => project(row)?,

@@ -14,10 +14,10 @@ fn scope(document: &Arc<()>) -> Arc<NativeScope> {
         registration: 1,
         document_revision: 1,
         input_revision: 1,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(document),
         selection: p::Selection::new(p::Action::Stage, "d".repeat(64), vec!["app/a.txt".into()])
-            .unwrap(),
+            .unwrap().into(),
         commit: None,
         changes,
     })

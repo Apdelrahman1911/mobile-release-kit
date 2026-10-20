@@ -5,6 +5,12 @@
 use super::*;
 use crate::credential_setup::KeyReference;
 
+/// Comparison-only certificate phase hash using the SAME canonical encoder.
+/// The phase decoder independently limits two fixed batches and their fields.
+pub(crate) fn certificate_phase_sha256(value: &Value) -> Result<String> {
+    Ok(hex(&Sha256::digest(canonical(value, 256 * 1024)?)))
+}
+
 pub(crate) const KEY_PROTOCOL: &str = "mrk-apple-provisioning-journal/3";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

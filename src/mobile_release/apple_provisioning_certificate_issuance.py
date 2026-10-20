@@ -32,7 +32,11 @@ RAW_LIMIT = 128 * 1024
 FRAME_LIMIT = 192 * 1024
 RECEIPT_LIMIT = 1024
 _READS = frozenset({"list_bundle_ids", "list_certificates", "list_profiles"})
-_ATTRIBUTES = frozenset({"certificateType", "platform", "expirationDate", "certificateContent"})
+# Apple's public Certificate.Attributes schema (2026-10-20) also defines these
+# informational properties. They are bounded/typed and then discarded, never
+# used to infer a native identity, certificate purpose or account permission.
+_INFORMATION = frozenset({"displayName", "name", "serialNumber"})
+_ATTRIBUTES = frozenset({"certificateType", "platform", "expirationDate", "certificateContent", "activated"}) | _INFORMATION
 
 
 def validate_request(request: api.AppleRequest, target: ProvisioningTarget, *, csr: PublicCSR | None) -> None:
@@ -178,6 +182,12 @@ class CertificateCreationReceipt:
         api.require(resource_id not in {row.resource_id for row in before.certificates}, "creation_returned_existing_resource")
         attributes = data.get("attributes", {})
         api.require(type(attributes) is dict and set(attributes) <= _ATTRIBUTES, "invalid_provider_response")
+        for name in _INFORMATION & attributes.keys():
+            value = attributes[name]
+            api.require(type(value) is str and len(value) <= 1024 and len(value.encode("utf-8")) <= 4096
+                        and all(ord(character) >= 32 and ord(character) != 127 for character in value),
+                        "invalid_provider_response")
+        api.require("activated" not in attributes or type(attributes["activated"]) is bool, "invalid_provider_response")
         api.require("certificateType" not in attributes or attributes["certificateType"] == "DISTRIBUTION",
                     "wrong_certificate_type")
         api.require("platform" not in attributes or attributes["platform"] is None or
@@ -201,6 +211,7 @@ class CertificateCreationAttempt(ProvisioningAttempt):
         api.require(plan.action == "create_certificate", "invalid_certificate_plan")
         validate_request(plan.request, plan.target, csr=plan.csr)
         self.receipt: CertificateCreationReceipt | None = None
+        self._receipt_conflict = False
         super().__init__(plan, before)
 
     @classmethod
@@ -217,9 +228,56 @@ class CertificateCreationAttempt(ProvisioningAttempt):
         result.receipt = receipt
         return result
 
-    def _response_identity(self, response: api.AppleResponse) -> tuple[str, str]:
+    def retain_returned_response(self, response: api.AppleResponse) -> CertificateCreationReceipt:
+        """Keep DATA from the same genuinely returned 201 before late checks.
+
+        The fixed provider calls this only after its actual C/A/W return and
+        raw-response binding. It does not authorize a write or supply those
+        native facts. In particular a restored row, absent/unsettled result or
+        pre-send/failed-ACK attempt cannot acquire a receipt through this cut.
+        """
+        api.require(type(response) is api.AppleResponse and response.settled is True
+                    and self._action_gate.locked(), "original_transport_unsettled")
         receipt = CertificateCreationReceipt.parse(response, self.before)
-        self.receipt = receipt  # Retain BEFORE any later journal callback.
+        with self._state_gate:
+            api.require(self._entered and self.record.possible_send
+                        and self.record.context == self.plan.context and self.record.plan_sha256 == self.plan.sha256
+                        and self.record.status not in {"prepared", "failed", "succeeded", "cancelled"},
+                        "operation_not_reconcilable")
+            if self.receipt is not None and self.receipt != receipt:
+                self._receipt_conflict = True
+            api.require(not self._receipt_conflict, "conflicting_creation_receipt")
+            if self.receipt is None:
+                self.receipt = receipt
+            return self.receipt
+
+    def _save(self, owner, record: AttemptRecord) -> AttemptRecord:
+        # Same state/cancellation gate as the base implementation. Do not call
+        # the base while holding its non-reentrant lock. Only this certificate
+        # child merges the already-returned immutable receipt; Bundle/Profile
+        # paths and their original persistence/first-failure behavior are intact.
+        with self._state_gate:
+            if self.receipt is not None:
+                if record.response_resource_id is not None and (
+                        record.response_resource_id != self.receipt.resource_id or record.response_resource_sha256 != self.receipt.sha256):
+                    self._receipt_conflict = True
+                record = replace(record, possible_send=True, response_resource_id=self.receipt.resource_id,
+                                 response_resource_sha256=self.receipt.sha256)
+            if self._receipt_conflict:
+                record = replace(record, status="unknown", reason="provider_result_requires_reconciliation")
+            record = replace(record, cancel_requested=record.cancel_requested or self._cancel.is_set())
+            if record.status == "succeeded" and record.cancel_requested:
+                record = replace(record, status="cancelled", reason="cancelled_after_settlement")
+            self.record = record
+        try:
+            owner.persist(record)
+        except Exception:
+            with self._state_gate:
+                self.record = replace(self.record, status="recovery_required", reason="journal_settlement_required")
+        return self.record
+
+    def _response_identity(self, response: api.AppleResponse) -> tuple[str, str]:
+        receipt = self.retain_returned_response(response)
         return receipt.resource_id, receipt.sha256
 
     def _response_matches(self, resource: api.Certificate) -> bool:

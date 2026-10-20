@@ -52,8 +52,8 @@ export function parseAppleDistributionKeySavedReference(value: unknown): AppleDi
 }
 
 export type AppleDistributionKeyInputBase = Omit<PrepareAppleProvisioning,
-  'mode' | 'reference' | 'newApplication' | 'displayName' | 'p12RecordId' | 'p12RecordRevision'>;
-function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: boolean): AppleDistributionKeyInputBase | null {
+  'mode' | 'reference' | 'newApplication' | 'displayName' | 'p12RecordId' | 'p12RecordRevision' | 'keyRecordId' | 'keyRecordRevision'>;
+function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: false | 'prepare-apple-distribution-key' | 'use-apple-distribution-key'): AppleDistributionKeyInputBase | null {
   const s = assets?.status, c = s?.context;
   if (!project || project.inputIssue || project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired ||
       !parseSavedConfigContent(project.savedConfig) || !parseAndroidBuildSavedVersion(project.savedVersion) ||
@@ -66,7 +66,7 @@ function selectedBase(project: LocalStoreProject | null, assets: AssetDisplaySta
   if (retained) {
     // Correlate only the already-started original while its own vault slot
     // temporarily hides assignment availability. This never admits a command.
-    if (s.operation?.operation !== 'prepare-apple-distribution-key' || s.operation.phase === 'unknown' ||
+    if (s.operation?.operation !== retained || s.operation.phase === 'unknown' ||
         ['unknown', 'late-known'].includes(s.operation.settlement) ||
         !s.persistence || !['unlocked', 'mutating'].includes(s.persistence.state)) return null;
   } else if (assets.busy || !assets.contextCurrent || !assetStorageWritable(s) ||
@@ -85,7 +85,14 @@ function selectedBase(project: LocalStoreProject | null, assets: AssetDisplaySta
 }
 export const appleDistributionKeyInputBase = (project: LocalStoreProject | null, assets: AssetDisplayState | null): AppleDistributionKeyInputBase | null => selectedBase(project, assets, false);
 export function retainedAppleDistributionKeyInput(project: LocalStoreProject | null, assets: AssetDisplayState | null, original: unknown): AppleDistributionKeyInputBase | null {
-  const current = selectedBase(project, assets, true);
+  const current = selectedBase(project, assets, 'prepare-apple-distribution-key');
+  return current && sameOfflineData(current, original) ? current : null;
+}
+
+// Only the already-started certificate attempt may use this correlation path.
+// It is never passed to Prepare/Start admission.
+export function retainedAppleDistributionCertificateKeyInput(project: LocalStoreProject | null, assets: AssetDisplayState | null, original: unknown): AppleDistributionKeyInputBase | null {
+  const current = selectedBase(project, assets, 'use-apple-distribution-key');
   return current && sameOfflineData(current, original) ? current : null;
 }
 

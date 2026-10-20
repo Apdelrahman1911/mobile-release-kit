@@ -25,14 +25,14 @@ fn same_service_requires_read_and_commit_grants_and_reconnect_cannot_replay() {
         registration: 1,
         document_revision: 1,
         input_revision: 1,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(&doc),
         selection: git::Selection::new_shared(
             git::Action::Commit,
             "a".repeat(64),
             vec!["app/a".into()],
         )
-        .unwrap(),
+        .unwrap().into(),
         commit: Some(
             Draft::new(
                 "Desktop-only private message".into(),

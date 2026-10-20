@@ -21,9 +21,9 @@ fn scope(doc: &Arc<()>) -> requests::NativeScope {
         registration: 1,
         document_revision: 1,
         input_revision: 1,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(doc),
-        selection: whole_selection(&observed()).unwrap(),
+        selection: whole_selection(&observed()).unwrap().into(),
         commit: Some(draft("approved")),
         changes: tokio::sync::watch::channel(0).0,
     }
@@ -68,11 +68,11 @@ fn only_exact_private_draft_and_real_whole_index_review_match_common_native_scop
     let mut scope = scope(&doc);
     let original = action(&scope).unwrap();
     assert!(original.valid() && original.kind() == local::Kind::Commit);
-    assert!(!same_action(&original, &scope.selection)); // Index matcher stays index-only.
+    assert!(!same_action(&original, scope.selection.files().unwrap())); // Index matcher stays index-only.
     let mut review = local::FileReview {
         action: local::Kind::Commit,
-        expected_revision: scope.selection.summary.repository_revision.clone(),
-        paths: scope.selection.paths.clone(),
+        expected_revision: scope.selection.files().unwrap().summary.repository_revision.clone(),
+        paths: scope.selection.files().unwrap().paths.clone(),
         whole_index: true,
         head: Some("b".repeat(40)),
         branch: Some("refs/heads/main".into()),

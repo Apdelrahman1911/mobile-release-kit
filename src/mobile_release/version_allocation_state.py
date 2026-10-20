@@ -276,34 +276,12 @@ class VersionAllocationsPort(Protocol):
     def replace_version_allocations(self, expected_revision: int, payload: bytes) -> NativeStateWriteAck: ...
 
 
-class NativeAllocationJournal:
-    """AllocationJournal with whole-slot native revision CAS and durable acks.
+class _AllocationTransitions:
+    """Closed pure transitions shared by the native and fixed hosted journals.
 
-    Methods are controller-internal transitions, not new mutation/recovery
-    permissions. In particular mark_rejected requires the controller's positive
-    no-claim/conditional-rejection fact; absence during reconciliation cannot
-    clear an intent. Opening reads only; enrollment is a separate explicit setup
-    action after the original native owner verifies the approved remote genesis.
-    The native owner derives local_project_id from its original registered-root
-    binding; accepting an ID here is DATA, not a substitute for that admission.
-    Shared AllocationRequest.project_id always remains the authority's ID.
+    No transport or durability lives here. Each original caller owns _store,
+    poisoning, its bound consumer/selection and exact acknowledgement.
     """
-    def __init__(self, port: VersionAllocationsPort, *, local_project_id: str) -> None:
-        self._local_project_id = _local_project_id(local_project_id)
-        self._port = port
-        self._poisoned = False
-        try:
-            snapshot = port.read_version_allocations()
-            _need(type(snapshot) is NativeStateSnapshot)
-            self._state = (AllocationState() if snapshot.revision == 0 and snapshot.payload == b""
-                           else AllocationState.parse(snapshot.payload))
-            self._snapshot = snapshot
-            selected = self._state.candidate(self._local_project_id)
-            self._bound_request = None if selected is None else selected.request
-        except Exception:
-            self._poisoned = True
-            raise allocation.VersionAllocationError("journal-unavailable") from None
-
     def _usable(self) -> None:
         _need(not self._poisoned)
 
@@ -325,27 +303,6 @@ class NativeAllocationJournal:
         candidate = self._state.candidate(self._local_project_id)
         _need(candidate is not None)
         return candidate
-
-    def _store(self, state: AllocationState) -> None:
-        self._usable()
-        _need(self._snapshot.revision < MAX_REVISION)
-        raw = state.to_bytes()
-        # Latch BEFORE the original call. BaseException/cancellation and a
-        # reentrant port callback must not leave another usable write path.
-        self._poisoned = True
-        try:
-            ack = self._port.replace_version_allocations(self._snapshot.revision, raw)
-            _need(type(ack) is NativeStateWriteAck and type(ack.snapshot) is NativeStateSnapshot
-                  and ack.effect == "committed" and ack.durability == "durable" and ack.cleanup == "settled"
-                  and ack.snapshot.revision == self._snapshot.revision + 1 and ack.snapshot.payload == raw)
-            selected = state.candidate(self._local_project_id)
-            self._state, self._snapshot, self._bound_request = (
-                state, ack.snapshot, None if selected is None else selected.request)
-        except Exception:
-            # The write might have happened. Never retry, issue HTTP, erase an
-            # intent or reconstruct a new native owner based on an exception.
-            raise allocation.VersionAllocationError("journal-unavailable") from None
-        self._poisoned = False  # Only the exact acknowledged state was adopted.
 
     def enroll_authority(self, authority: allocation.AuthorityRegistration,
                          checkpoint: allocation.Checkpoint) -> None:
@@ -476,3 +433,53 @@ class NativeAllocationJournal:
         selected = self._selected(pending.authority)
         _need(selected.pending == pending and pending.reservation.request == self._bound_request)
         self._store(self._state.replacing(replace(selected, pending=None)))
+
+
+class NativeAllocationJournal(_AllocationTransitions):
+    """AllocationJournal with whole-slot native revision CAS and durable acks.
+
+    Methods are controller-internal transitions, not new mutation/recovery
+    permissions. In particular mark_rejected requires the controller's positive
+    no-claim/conditional-rejection fact; absence during reconciliation cannot
+    clear an intent. Opening reads only; enrollment is a separate explicit setup
+    action after the original native owner verifies the approved remote genesis.
+    The native owner derives local_project_id from its original registered-root
+    binding; accepting an ID here is DATA, not a substitute for that admission.
+    Shared AllocationRequest.project_id always remains the authority's ID.
+    """
+    def __init__(self, port: VersionAllocationsPort, *, local_project_id: str) -> None:
+        self._local_project_id = _local_project_id(local_project_id)
+        self._port = port
+        self._poisoned = False
+        try:
+            snapshot = port.read_version_allocations()
+            _need(type(snapshot) is NativeStateSnapshot)
+            self._state = (AllocationState() if snapshot.revision == 0 and snapshot.payload == b""
+                           else AllocationState.parse(snapshot.payload))
+            self._snapshot = snapshot
+            selected = self._state.candidate(self._local_project_id)
+            self._bound_request = None if selected is None else selected.request
+        except Exception:
+            self._poisoned = True
+            raise allocation.VersionAllocationError("journal-unavailable") from None
+
+    def _store(self, state: AllocationState) -> None:
+        self._usable()
+        _need(self._snapshot.revision < MAX_REVISION)
+        raw = state.to_bytes()
+        # Latch BEFORE the original call. BaseException/cancellation and a
+        # reentrant port callback must not leave another usable write path.
+        self._poisoned = True
+        try:
+            ack = self._port.replace_version_allocations(self._snapshot.revision, raw)
+            _need(type(ack) is NativeStateWriteAck and type(ack.snapshot) is NativeStateSnapshot
+                  and ack.effect == "committed" and ack.durability == "durable" and ack.cleanup == "settled"
+                  and ack.snapshot.revision == self._snapshot.revision + 1 and ack.snapshot.payload == raw)
+            selected = state.candidate(self._local_project_id)
+            self._state, self._snapshot, self._bound_request = (
+                state, ack.snapshot, None if selected is None else selected.request)
+        except Exception:
+            # The write might have happened. Never retry, issue HTTP, erase an
+            # intent or reconstruct a new native owner based on an exception.
+            raise allocation.VersionAllocationError("journal-unavailable") from None
+        self._poisoned = False  # Only the exact acknowledged state was adopted.

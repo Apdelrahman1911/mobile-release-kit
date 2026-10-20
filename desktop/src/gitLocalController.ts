@@ -16,12 +16,17 @@ import type { GitBranchAction, GitBranches } from './gitBranchesProtocol.ts';
 import type { GitSwitchAction } from './gitSwitchProtocol.ts';
 import { sameRenameParent } from './gitRenameProtocol.ts';
 import type { GitRenameAction } from './gitRenameProtocol.ts';
+import { fetchReviewMatchesAccount, gitFetchAccount, gitFetchDraftReady, gitFetchLocalSource, sameGitFetchAccount } from './gitFetchSelection.ts';
+import type { GitFetchAccount, GitFetchDraft } from './gitFetchSelection.ts';
+import type { GitFetchAction } from './gitFetchProtocol.ts';
+import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
 
 export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
-  readonly reader?: GitReadController | null }
+  readonly reader?: GitReadController | null; readonly fetchConnection?: GitHubConnectionViewState | null }
 interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
+  readonly fetch?: { readonly local: GitReadObservation; readonly account: GitFetchAccount; readonly draft: GitFetchDraft };
   readonly tracking: GitReadObservation | null; readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string } }
 interface HeldReview { readonly api: GitLocalApi; readonly binding: GitLocalBinding; readonly prepared: GitLocalPrepared; readonly capture: Capture | null;
   stale: boolean; consumed: boolean; discardSent: boolean; discardConfirmed: boolean; uncertain: boolean }
@@ -40,6 +45,11 @@ const same = (a: GitLocalBinding, b: GitLocalBinding) => a.api === b.api && a.se
   a.epoch === b.epoch && a.repository === b.repository && a.reader === b.reader;
 const rank = { starting: 0, running: 1, stopping: 2, settled: 3, 'cleanup-unknown': 4 } as const;
 const appliedResult = (o: GitLocalOperation | null): GitLocalMutationResult | null => o?.phase === 'apply' && o.result ? o.result as GitLocalMutationResult : null;
+// Defensive only: the native writer normally puts cleanup uncertainty on the
+// outer operation with result:null. Never free a caller if contradictory core
+// Fetch DATA nevertheless labels its cleanup unknown.
+const fetchUnknown = (o: GitLocalOperation | null): boolean => o?.action.kind === 'fetch' &&
+  (o.reason === 'cleanup-unknown' || appliedResult(o)?.reason === 'unknown' || appliedResult(o)?.reason === 'cleanup-unknown');
 
 export class GitLocalController {
   private readonly source: { current(): GitLocalBinding; onMutationSubmitted(projectId: string): void };
@@ -79,6 +89,14 @@ export class GitLocalController {
   }
   syncContext(): void {
     const now = this.current();
+    const fetch = this.attempt?.capture?.fetch ?? this.held?.capture?.fetch;
+    if (fetch && (this.approved || this.attempt && !this.attempt.retired || this.held && !this.held.stale) &&
+        !sameGitFetchAccount(fetch.account, now.fetchConnection, now.projectId ?? '')) {
+      this.approved = null;
+      if (this.attempt) this.attempt.retired = true;
+      if (this.held) this.held.stale = true;
+      this.publish();
+    }
     if (!this.context || !same(this.context, now)) {
       this.context = now; this.observed = null; this.approved = null;
       if (this.attempt) this.attempt.retired = true;
@@ -97,6 +115,15 @@ export class GitLocalController {
     if (c.action.kind === 'initialize') return same(c.binding, now) && (!peers || !now.blocked) &&
       r.projectId === now.projectId && r.active && !r.blocked && r.busy === null && !r.checkingStatus &&
       r.observation === null && c.observation === null && r === c.initialization;
+    if (c.action.kind === 'fetch') {
+      const f = c.fetch, local = gitFetchLocalSource(now.reader?.getSnapshot(), r, now.projectId ?? '');
+      const matched = same(c.binding, now) && (!peers || !now.blocked) && !!f && local === f.local && r.observation === c.observation &&
+        r.fetchDraft === f.draft && sameGitFetchAccount(f.account, now.fetchConnection, now.projectId ?? '');
+      // Parsing a supplied descriptor can synchronously reenter the host.
+      const after = this.current();
+      return matched && same(now, after) && (!peers || !after.blocked) && after.fetchConnection === now.fetchConnection &&
+        c.repository.getSnapshot() === r && gitFetchLocalSource(after.reader?.getSnapshot(), r, after.projectId ?? '') === local;
+    }
     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
       (c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
@@ -299,6 +326,34 @@ export class GitLocalController {
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
   }
+  prepareFetchReason(): GitLocalIssue | null {
+    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+    const reason = this.currentReason(); if (reason) return reason;
+    const binding = this.current(), files = binding.repository!.getSnapshot();
+    if (!gitFetchLocalSource(binding.reader?.getSnapshot(), files, binding.projectId!)) return 'fetch-read-required';
+    if (!gitFetchAccount(binding.fetchConnection, binding.projectId!)) return 'fetch-connection-required';
+    return gitFetchDraftReady(files.fetchDraft, files.observation!.remotes) ? null : 'fetch-selection-required';
+  }
+  async prepareFetch(): Promise<boolean> {
+    const reason = this.prepareFetchReason(); if (reason) return this.report(reason);
+    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot();
+    const local = gitFetchLocalSource(binding.reader?.getSnapshot(), r, binding.projectId!);
+    const account = gitFetchAccount(binding.fetchConnection, binding.projectId!);
+    if (!local || !account || !r.observation) return this.report('review-changed');
+    const action: GitFetchAction = Object.freeze({ kind: 'fetch', expectedRevision: r.observation.revision,
+      expectedReferenceRevision: local.referenceRevision, remote: r.fetchDraft.remote, reference: `refs/heads/${r.fetchDraft.branch}`,
+      connectionSessionId: account.sessionId, expectedConnectionRevision: account.revision });
+    const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
+      expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
+    const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+    if (!raw) return this.report('invalid-input');
+    const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, tracking: null, branches: null, paths: Object.freeze([]),
+      fetch: Object.freeze({ local, account, draft: r.fetchDraft }) });
+    const attempt = this.newAttempt(binding, request, action, capture, null);
+    this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+  }
   private preparedMatchesCapture(prepared: GitLocalPrepared, capture: Capture): boolean {
     const r = prepared.review;
     if (capture.action.kind === 'initialize') return r.action === 'initialize' && capture.observation === null && !!capture.initialization;
@@ -306,13 +361,15 @@ export class GitLocalController {
     if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
       r.targetRef === capture.action.targetRef && r.targetOid === capture.action.targetOid &&
       r.expectedReferenceRevision === capture.tracking.referenceRevision;
+    if (capture.action.kind === 'fetch') return r.action === 'fetch' && !!capture.fetch &&
+      r.expectedReferenceRevision === capture.fetch.local.referenceRevision && fetchReviewMatchesAccount(r, capture.fetch.account);
     if (capture.action.kind === 'branch-rename') return r.action === 'branch-rename' && r.name === capture.action.name &&
       r.expectedReferenceRevision === capture.branches?.referenceRevision;
     if (capture.action.kind === 'branch-switch') return r.action === 'branch-switch' && r.name === capture.action.name && !!capture.branches &&
       r.expectedReferenceRevision === capture.branches.referenceRevision &&
       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
+      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fetch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
   }
   reviewReason(): GitLocalIssue | null {
     const h = this.held;
@@ -324,6 +381,7 @@ export class GitLocalController {
     if (h.stale || !h.capture || !this.captureCurrent(h.capture) || !this.observed || !same(h.binding, this.observed) ||
         this.state.status?.review?.reviewId !== h.prepared.reviewId || !sameGitLocalData(this.state.status.review, h.prepared) ||
         h.prepared.context.revision !== `document-${this.state.status.documentRevision}`) return 'review-changed';
+    if (h.prepared.review.action === 'fetch' && h.prepared.review.expectedTarget === h.prepared.review.candidateRefOid) return 'fetch-up-to-date';
     return h.prepared.action.kind === 'initialize' ? this.initializationReason() : this.currentReason();
   }
   approve(checked: boolean): boolean {
@@ -447,7 +505,7 @@ export class GitLocalController {
       // A discard/status read can confirm absence of THIS unused review, never
       // infer that a pending mutation settled or manufacture a new review.
       const op = status.operation;
-      if (op && (op.stage !== 'settled' || appliedResult(op)?.state === 'recovery-required')) {
+      if (op && (op.stage !== 'settled' || appliedResult(op)?.state === 'recovery-required' || fetchUnknown(op))) {
         this.observeOriginal(status, binding); return;
       }
       if (status.review && !sameGitLocalData(status.review, h.prepared)) { this.uncertain(null, h); return; }
@@ -478,11 +536,11 @@ export class GitLocalController {
       this.uncertain(a, null, true); return;
     }
     this.originalBinding = binding;
-    if (op && (op.stage !== 'settled' || recovery)) {
+    if (op && (op.stage !== 'settled' || recovery || fetchUnknown(op))) {
       const request: GitLocalStartRequest = Object.freeze({ phase: op.phase, projectId: op.context.projectId,
         expectedDocumentRevision: Number(op.context.revision.slice(9)), action: op.phase === 'prepare' ? op.action : null, reviewId: null });
       const a = this.newAttempt(binding, request, op.action, null, null);
-      a.operation = op; a.entered = true; a.returned = true; a.hardUnknown = op.stage === 'cleanup-unknown'; a.uncertain = a.hardUnknown; a.recovery = recovery;
+      a.operation = op; a.entered = true; a.returned = true; a.hardUnknown = op.stage === 'cleanup-unknown' || fetchUnknown(op); a.uncertain = a.hardUnknown; a.recovery = recovery;
       this.attempt = a; this.approved = null; this.held = null;
       this.publish({ status, original: op, issue: a.hardUnknown ? 'unknown' : recovery ? 'recovery-required' : op.reason,
         uncertain: a.hardUnknown, recovery }); return;
@@ -521,7 +579,7 @@ export class GitLocalController {
         a.capture && !this.preparedMatchesCapture(prepared, a.capture))) { this.uncertain(a, null, true); return; }
     const result = appliedResult(op), originalReview = a.applied?.prepared.review;
     if (result?.intent && originalReview && !gitLocalIntentMatchesReview(result.intent, originalReview)) { this.uncertain(a, null, true); return; }
-    a.operation = op; a.hardUnknown = op.stage === 'cleanup-unknown'; a.recovery = result?.state === 'recovery-required';
+    a.operation = op; a.hardUnknown = op.stage === 'cleanup-unknown' || fetchUnknown(op); a.recovery = result?.state === 'recovery-required';
     this.originalBinding = a.binding;
     if (op.reason === 'stale-observation' || result?.reason === 'stale-observation') a.capture?.repository.invalidate();
     a.uncertain = a.hardUnknown;

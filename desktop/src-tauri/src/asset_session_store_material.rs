@@ -67,6 +67,7 @@ impl SelectedStoreMaterial {
     // Payload/Fields originals are counted separately, never copied here.
     pub(super) fn supplemental_frame_bytes(&self)->usize {
         if self.paired_context().is_some() { return paired_material::FRAME_BYTES; }
+        if self.certificate_material() { return std::mem::size_of::<apple_key::CertificateMaterial<'_>>()+2*6*std::mem::size_of::<(&str,&[u8])>()+1024+6*std::mem::size_of::<(&str,usize)>(); }
         if self.profile_sources.is_some() { return 2*5*std::mem::size_of::<(&str,&[u8])>()+1024+5*std::mem::size_of::<(&str,usize)>(); }
         if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
             2*11*std::mem::size_of::<(&str,&[u8])>()+1024+11*std::mem::size_of::<(&str,usize)>()
@@ -94,7 +95,7 @@ impl SelectedStoreMaterial {
         if let Some(StoreCommand::Execute(c))=&self.command {if let Some(id)=&c.stage_operation_id{bytes=bytes.checked_add(id.capacity())?;}}
         for (key,_) in self.supplemental.iter().flatten(){bytes=bytes.checked_add(key.id.0.capacity())?;}
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
-        if let Some(StoreCommand::Provisioning(c))=&self.command { bytes=bytes.checked_add(c.p12_record_id.as_ref().map_or(0,String::capacity))?; }
+        if let Some(StoreCommand::Provisioning(c))=&self.command { bytes=bytes.checked_add(c.p12_record_id.as_ref().map_or(0,String::capacity))?.checked_add(c.key_record_id.as_ref().map_or(0,String::capacity))?; }
         Some(bytes)
     }
     fn apple_material(&self)->bool {self.command.as_ref().is_some_and(StoreCommand::apple_material)}
@@ -117,6 +118,9 @@ impl SelectedStoreMaterial {
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
         if self.paired_context().is_some() { return self.pair_parts(); }
         if self.profile_sources.is_some() { return self.profile_parts(); }
+        // Certificate private fields require the fixed writer-local borrow;
+        // a retained review/source must not own another loaded payload Arc.
+        if self.certificate_material() { return Err(refused()); }
         if self.command.is_none() { return Err(refused()); }
         let assignments=self.command.as_ref().and_then(StoreCommand::assignments);
         let count=if self.apple_material(){if let Some(a)=assignments{if a.review_demo.is_some(){11}else{9}}else{3}}else{1};

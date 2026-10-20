@@ -77,6 +77,7 @@ pub(crate) use apple_signing::{AppleProfileNativeJoined, AppleProfileSession, Ap
     AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
 pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
+pub(crate) use apple_key::AppleDistributionCertificateBinding;
 pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
 
 #[path = "saved_command_android_catalog.rs"]
@@ -266,7 +267,7 @@ impl Context {
     fn signing_check_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signing_check()) }
     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
-    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
+    fn frame_limit(&self) -> usize { match self { Self::AppleProvisioning(context) if context.mode.certificate() => context.mode.events() as usize + 2, Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
         Self::GenerateUploadKey(_) => SavedCommandDomain::GenerateUploadKey,
         Self::AppleProvisioning(_) => SavedCommandDomain::AppleProvisioning,
@@ -3531,7 +3532,18 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         Ok(material) => material.clone(),
         Err(_) => { failed = true; None },
     } };
-    let header = material.as_ref().map(|value| value.header()).transpose();
+    // One fixed key borrow spans both header and every body part. Keep it
+    // outside the STOP select: partial/failed writes do not release it until
+    // this original writer returns; Unknown still retains the original loan.
+    let certificate = match material.as_ref() {
+        Some(PrivateSigningMaterial::Store(value)) => value.certificate_input(),
+        _ => Ok(None),
+    };
+    let header = match &certificate {
+        Ok(Some(value)) => value.header().map(Some),
+        Ok(None) => material.as_ref().map(|value| value.header()).transpose(),
+        Err(_) => Err(BridgeError::protocol()),
+    };
     if owner.context.requires_private_material() != material.is_some() || header.is_err()
         || material.as_ref().is_some_and(|value| !value.matches(&owner.context, owner.registration, &owner.project)) { failed = true; }
     if !*stop.borrow() {
@@ -3544,7 +3556,11 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                         if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()&&!owner.candidate_ios()&&!matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStoreExecute)) {
                             let header = header.as_ref().ok().and_then(Option::as_ref)
                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                            write_material(writer,material,header).await?;
+                            if let Some(certificate)=certificate.as_ref().ok().and_then(Option::as_ref) {
+                                let parts=certificate.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                                writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
+                                for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await?;
+                            } else { write_material(writer,material,header).await?; }
                         }
                         Ok::<(), std::io::Error>(())
                     } => Some(result),
@@ -3795,6 +3811,12 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
         Some(true) => {}, other => { guard.complete = other.is_some(); return ReadEnd { frames: 0, eof: false, closed: false,
             failed: other.is_none(), decoder_settled: false }; }
     }
+    // Only certificate mode enlarges the original JSON reader's aggregate.
+    // Profile/key private receivers and every other domain retain their limits.
+    let response_limit = match &owner.context {
+        Context::AppleProvisioning(context) if context.mode.certificate() => context.mode.response_limit(),
+        _ => owner.domain.response_limit(),
+    };
     let mut pipe = slot.lock().await; let mut buffer = [0u8; 4096]; let mut bytes = Vec::new();
     let mut frames = 0usize; let mut failed = false; let mut eof = false; let mut discard = false;
     let mut decoder = if stderr { None } else { OutputDecoder::new(&owner).ok() };
@@ -3813,7 +3835,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                 // framing. Continue draining after refusal without retaining raw text.
                 let previous = owner.output_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
                     |value| Some(value.saturating_add(n))).unwrap_or(usize::MAX);
-                if previous.saturating_add(n) > owner.domain.response_limit() || stderr { failed = true; discard = true; bytes.clear(); }
+                if previous.saturating_add(n) > response_limit || stderr { failed = true; discard = true; bytes.clear(); }
                 if discard { inner.stop(&owner, Reason::ProtocolError); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner); continue; }
                 for byte in &buffer[..n] {
                     if discard { break; }

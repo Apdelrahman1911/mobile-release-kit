@@ -128,12 +128,13 @@ pub(super) fn whole_selection(value: &read::Projection) -> Result<wire::Selectio
 }
 
 pub(super) fn action(scope: &requests::NativeScope) -> Result<local::Action, BridgeError> {
-    match (&scope.commit, scope.selection.summary.action) {
+    let selection = scope.selection.files().map_err(public)?;
+    match (&scope.commit, selection.summary.action) {
         (Some(draft), wire::Action::Commit) => local::Action::approved_commit(
-            scope.selection.summary.repository_revision.clone(),
+            selection.summary.repository_revision.clone(),
             draft,
         ),
-        (None, wire::Action::Stage | wire::Action::Unstage) => native_action(&scope.selection),
+        (None, wire::Action::Stage | wire::Action::Unstage) => native_action(selection),
         _ => Err(BridgeError::invalid()),
     }
 }
@@ -147,10 +148,11 @@ pub(in crate::asset_session) fn review_matches(
     let Ok(action) = action(scope) else {
         return false;
     };
+    let Ok(selection) = scope.selection.files() else { return false; };
     review.action == action.kind()
-        && review.expected_revision == scope.selection.summary.repository_revision
-        && review.paths == scope.selection.paths
-        && review.whole_index == (scope.selection.summary.action == wire::Action::Commit)
+        && review.expected_revision == selection.summary.repository_revision
+        && review.paths == selection.paths
+        && review.whole_index == (selection.summary.action == wire::Action::Commit)
 }
 
 #[cfg(test)]

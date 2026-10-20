@@ -19,7 +19,7 @@ export function ServiceGitCommitAccess({ controller, repository }: { controller:
       <button className="button secondary" disabled={state.revokePending} onClick={() => void controller.revoke()}>Stop</button>
       <button className="button secondary" disabled={!!state.pending || state.revokePending} onClick={() => void controller.status()}>Refresh</button>
     </div>
-    <p>{access?.enabled ? 'Last checked: one commit allowed.' : access?.consumed ? 'Permission used. Follow the original Git operation above.' : 'Commit permission is not confirmed active.'} This shares one permission with Stage/Unstage. Stop in either panel revokes that shared permission and asks its running task to stop. Only an explicit Allow replaces an unused permission; running or unknown work cannot be replaced.</p>
+    <p>{access?.enabled ? 'Last checked: one commit allowed.' : access?.consumed ? 'Permission used. Follow the original Git operation above.' : 'Commit permission is not confirmed active.'} This shares one permission with Stage/Unstage and local repository actions. Stop in any Git permission panel revokes that shared permission and asks its running task to stop. Only an explicit Allow replaces an unused permission; running or unknown work cannot be replaced.</p>
     <details><summary>CLI details</summary>
       <p><code>mrk git-commit-scope PROJECT_ID --json</code> shows the approved paths, never the private message or author. Prepare returns the original review and separate one-use Start command. Keep its instance/request IDs after a lost reply; do not repeat the commit.</p>
       {access?.projectId && <p>Project <code>{access.projectId}</code> · {access.selection?.summary.pathCount} staged paths</p>}

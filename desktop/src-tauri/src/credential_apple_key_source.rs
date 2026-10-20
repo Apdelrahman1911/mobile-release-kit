@@ -6,11 +6,15 @@ use super::*;
 use crate::{credential_setup::KeyReference, saved_command_owner::AppleKeySession};
 use std::sync::{OnceLock, Weak};
 
+#[path = "credential_apple_certificate_source.rs"]
+pub(in crate::asset_session) mod certificate;
+
 pub(crate) struct AppleKeySources {
     p8: BoundLoan,
     roster: ProjectRoster,
     owner: OnceLock<Weak<OriginalWork>>,
     inventory: OnceLock<Arc<AppleDistributionKeyInventory>>,
+    certificate: Option<certificate::CertificateSource>,
 }
 impl AppleKeySources {
     pub(in crate::asset_session) fn capture(
@@ -19,6 +23,7 @@ impl AppleKeySources {
         native: &Arc<NativeContext>,
         key: &RecordKey,
         payload: &Arc<Payload>,
+        selected_key: Option<&RecordKey>,
     ) -> Result<Arc<Self>, Reason> {
         if !document.native_qualified()
             || !document.persistence_qualified()
@@ -53,6 +58,7 @@ impl AppleKeySources {
         {
             return Err(Reason::ContextStale);
         }
+        let certificate = selected_key.map(|key| certificate::CertificateSource::capture(state, key, loan)).transpose()?;
         Ok(Arc::new(Self {
             p8: BoundLoan {
                 context: loan.context.clone(),
@@ -64,6 +70,7 @@ impl AppleKeySources {
             roster,
             owner: OnceLock::new(),
             inventory: OnceLock::new(),
+            certificate,
         }))
     }
     pub(in crate::asset_session) fn native(&self) -> &Arc<NativeContext> {
@@ -96,6 +103,7 @@ impl AppleKeySources {
             && left.record == right.record
             && left.revision == right.revision
             && left.original == right.original
+            && match (&self.certificate, &other.certificate) { (None,None)=>true,(Some(a),Some(b))=>a.same(b),_=>false }
             && self.roster.generation == other.roster.generation
             && self.roster.roots == other.roster.roots
     }
@@ -108,6 +116,7 @@ impl AppleKeySources {
             .vault
             .as_ref()
             .is_some_and(|session| self.p8.current(state, session))
+            && self.certificate.as_ref().is_none_or(|source| source.current(self, document, state))
             && document.inner.bridge.registry_generation() == self.roster.generation
             && document
                 .context_matches(state, &self.p8.context)
@@ -222,6 +231,9 @@ impl AppleKeySources {
             )?;
         for root in &self.roster.roots {
             bytes = bytes.checked_add(root.path.capacity())?;
+        }
+        if self.certificate.is_some() {
+            bytes=bytes.checked_add(certificate::CertificateSource::weak_backing_bytes()?)?;
         }
         // The existing Arc-deduplicating census visits the Inventory/BoundLoan
         // context/key/store backing separately (also held by a destination).

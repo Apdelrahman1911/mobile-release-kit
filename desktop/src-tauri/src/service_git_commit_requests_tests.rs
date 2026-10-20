@@ -15,7 +15,7 @@ fn scope(doc: &Arc<()>, family: Family) -> Arc<NativeScope> {
         registration: 1,
         document_revision: 1,
         input_revision: 1,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(doc),
         selection: p::Selection::new_shared(
             if family == Family::Commit {
@@ -26,7 +26,7 @@ fn scope(doc: &Arc<()>, family: Family) -> Arc<NativeScope> {
             "d".repeat(64),
             vec!["app/a".into()],
         )
-        .unwrap(),
+        .unwrap().into(),
         commit: if family == Family::Commit {
             Some(
                 Draft::new(

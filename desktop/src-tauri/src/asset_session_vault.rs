@@ -942,6 +942,7 @@ pub(super) enum Child {
     LoadAppleDistributionKey(distribution_key::LoadRequest),
     SaveAppleDistributionKey(distribution_key::key_store::SaveRequest),
     CheckAppleProfile(Arc<profile_sources::AppleProfileSources>, profile_sources::CheckPoint),
+    CheckAppleCertificateSources(Arc<key_sources::AppleKeySources>, key_sources::certificate::CheckPoint),
     Release,
 }
 impl Child {
@@ -1153,6 +1154,7 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
         Child::LoadAppleDistributionKey(request) => distribution_key::execute_load(owner, &mut book, request),
         Child::SaveAppleDistributionKey(request) => distribution_key::key_store::execute(owner, &mut book, request),
         Child::CheckAppleProfile(sources, point) => profile_sources::execute(owner, &mut book, &sources, point),
+        Child::CheckAppleCertificateSources(sources, point) => key_sources::certificate::execute(owner, &mut book, &sources, point),
         Child::Release => {
             let settled = book.release(&mut || cleanup_expired(owner));
             let mut work = owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?;

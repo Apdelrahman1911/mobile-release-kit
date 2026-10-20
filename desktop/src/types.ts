@@ -429,6 +429,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;
   readonly agentGitCommit?: import('./service_git_commit_permission.ts').GitCommitApi | null;
+  readonly agentGitRepository?: import('./service_git_repository_permission.ts').GitRepositoryPermissionApi | null;
   readonly agentGitIndex?: import('./service_git_permission.ts').PermissionApi<import('./service_git_permission.ts').GitIndexApproval> | null;
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;

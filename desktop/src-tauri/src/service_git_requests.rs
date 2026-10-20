@@ -3,6 +3,7 @@
 use crate::{
     service_git_protocol as p,
     service_git_commit_protocol::{Draft, Family},
+    service_git_repository_protocol::{self as repository, shared},
     service_protocol::{Error, Id, OperationState, Settlement},
 };
 use std::{
@@ -17,12 +18,15 @@ use std::{
 // Thirty-two metadata rows, ONE selected pathset (plus one old handoff stack),
 // and the SAME eight IPC workers' typed/encoded responses. The existing native
 // Git owner separately charges its action/review/runtime/source/job originals.
-// No diff, file bytes, branch draft or raw native result is retained here.
+// No diff, file bytes or raw native result is retained here. Repository rows
+// add <=2KiB selection + TWO <=2.5KiB review summaries; charge 8KiB per row
+// instead of the old 4KiB, inside the unchanged global Document limit. The
+// existing scope/8-worker reserves already exceed the bounded repository DTOs.
 // One private Commit draft is retained only with the active scope/handoff,
 // never in the 32 metadata tombstones or public IPC responses.
 const SCOPE_BACKING: usize = p::PATH_LIMIT * (1024 + std::mem::size_of::<String>()) + 8192;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT
-    * (4096 + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
+    * (8192 + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
     + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING)
     + 8 * (p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096);
 
@@ -35,19 +39,24 @@ pub(crate) struct NativeScope {
     pub(crate) registration: u32,
     pub(crate) document_revision: u32,
     pub(crate) input_revision: u64,
-    pub(crate) read_operation_id: String,
+    pub(crate) read_operation_id: Option<String>,
     pub(crate) document: Weak<()>,
-    pub(crate) selection: p::Selection,
+    pub(crate) selection: shared::Selected,
     pub(crate) commit: Option<Draft>,
     pub(crate) changes: tokio::sync::watch::Sender<u32>,
 }
 impl NativeScope {
     fn valid(&self) -> bool {
-        self.selection.validate_shared().is_ok()
-            && match (&self.commit, self.selection.summary.action) {
-                (Some(draft), p::Action::Commit) => draft.valid(),
-                (None, p::Action::Stage | p::Action::Unstage) => true,
+        self.selection.validate().is_ok()
+            && match (&self.commit, &self.selection) {
+                (Some(draft), shared::Selected::Files(v)) if v.summary.action == p::Action::Commit => draft.valid(),
+                (None, shared::Selected::Files(v)) => matches!(v.summary.action,p::Action::Stage|p::Action::Unstage),
+                (None, shared::Selected::Repository(_)) => true,
                 _ => false,
+            }
+            && match &self.selection {
+                shared::Selected::Repository(v) if matches!(v.action,repository::Action::Initialize) => self.read_operation_id.is_none(),
+                _ => self.read_operation_id.as_deref().is_some_and(p::native_id),
             }
             && (1..=64).contains(&self.runtime_id.len())
             && self.root.is_absolute()
@@ -56,7 +65,6 @@ impl NativeScope {
             && (1..u32::MAX).contains(&self.registration)
             && (1..u32::MAX).contains(&self.document_revision)
             && self.input_revision != u64::MAX
-            && p::native_id(&self.read_operation_id)
             && self.document.strong_count() != 0
     }
 }
@@ -92,13 +100,13 @@ pub(crate) enum Phase {
 }
 struct Row {
     lease: Option<Arc<Lease>>,
-    status: p::Status,
+    status: shared::Status,
     claimed: Option<Phase>,
     prepare_joined: bool,
     apply_joined: bool,
     // Only actual native reconcile supplies this. It is removed by the SAME
     // original ReadyReview's retirement, never a status/EOF/socket assumption.
-    review: Option<(p::Review, Instant)>,
+    review: Option<(shared::Reviewed, Instant)>,
     start: Option<p::Start>,
     stop: Option<(p::Reason, Instant)>,
     history_claim: Option<(u32, OperationState, Settlement)>,
@@ -236,7 +244,7 @@ impl Entry {
         self.lock()
             .map_or(true, |r| !ended(&r) || r.claimed.is_some())
     }
-    pub(crate) fn status(&self) -> Result<p::Status, Error> {
+    pub(crate) fn status(&self) -> Result<shared::Status, Error> {
         self.expire(Instant::now());
         let row = self.lock()?;
         let mut status = row.status.clone();
@@ -268,7 +276,7 @@ impl Entry {
             scope.changes.send_modify(|_| {});
         }
     }
-    fn request_start(&self, input: &p::Start) -> Result<p::Status, Error> {
+    fn request_start(&self, input: &p::Start) -> Result<shared::Status, Error> {
         input.validate()?;
         self.expire(Instant::now());
         {
@@ -286,7 +294,7 @@ impl Entry {
                     || row
                         .review
                         .as_ref()
-                        .is_none_or(|(r, end)| r.review_id != input.review_id || now >= *end)
+                        .is_none_or(|(r, end)| r.id() != input.review_id || now >= *end)
                 {
                     return Err(Error::Conflict);
                 }
@@ -434,9 +442,10 @@ impl NativeLink {
     pub(crate) fn same_request(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.entry, &other.entry) && Arc::ptr_eq(&self.lease, &other.lease)
     }
-    pub(crate) fn ready(&self, review: p::Review, expires: Instant) -> Result<bool, Error> {
-        review.validate()?;
+    pub(crate) fn ready(&self, review: impl Into<shared::Reviewed>, expires: Instant) -> Result<bool, Error> {
+        let review = review.into();
         let mut row = self.entry.lock()?;
+        if !review.matches(&row.status.selection) { return Err(Error::InvalidRequest); }
         if self.phase != Phase::Prepare
             || !self.armed.load(Ordering::Acquire)
             || !row.prepare_joined
@@ -696,6 +705,7 @@ impl Inbox {
                     family: match entry.family {
                         Family::Index => AdditionalFamily::GitIndex,
                         Family::Commit => AdditionalFamily::GitCommit,
+                        Family::Repository => AdditionalFamily::GitRepository,
                     },
                     request_id: entry.input.origin.request_id.clone(),
                 });
@@ -712,10 +722,10 @@ impl Inbox {
         body()
     }
     pub(crate) fn allow(&self, scope: Arc<NativeScope>) -> Result<p::Access, Error> {
-        self.allow_for(scope, Family::Index)
+        self.allow_for(scope, Family::Index)?.files()
     }
-    fn allow_for(&self, scope: Arc<NativeScope>, family: Family) -> Result<p::Access, Error> {
-        if !scope.valid() || !family.matches(scope.selection.summary.action) {
+    fn allow_for(&self, scope: Arc<NativeScope>, family: Family) -> Result<shared::Access, Error> {
+        if !scope.valid() || scope.selection.family() != family {
             return Err(Error::InvalidRequest);
         }
         let mut book = self.lock()?;
@@ -743,20 +753,20 @@ impl Inbox {
     }
     pub(crate) fn access(&self) -> Result<p::Access, Error> {
         let book = self.lock()?;
-        access(&book, None, Family::Index)
+        access(&book, None, Family::Index)?.files()
     }
     pub(crate) fn scope(&self, project: &Id) -> Result<p::Scope, Error> {
         let book = self.lock()?;
         Ok(p::Scope {
             service_instance: self.instance.clone(),
             project_id: project.clone(),
-            access: access(&book, Some(project), Family::Index)?,
+            access: access(&book, Some(project), Family::Index)?.files()?,
         })
     }
     pub(crate) fn revoke(&self) -> Result<p::Access, Error> {
-        self.revoke_for(Family::Index)
+        self.revoke_for(Family::Index)?.files()
     }
-    fn revoke_for(&self, family: Family) -> Result<p::Access, Error> {
+    fn revoke_for(&self, family: Family) -> Result<shared::Access, Error> {
         let book = self.lock()?;
         if let Some(lease) = &book.lease {
             lease.revoked.store(true, Ordering::Release);
@@ -790,9 +800,9 @@ impl Inbox {
             .ok_or(Error::Conflict)
     }
     pub(crate) fn prepare(&self, input: p::Prepare) -> Result<p::Status, Error> {
-        self.prepare_for(input, Family::Index)
+        self.prepare_for(input, Family::Index)?.files()
     }
-    fn prepare_for(&self, input: p::Prepare, family: Family) -> Result<p::Status, Error> {
+    fn prepare_for(&self, input: p::Prepare, family: Family) -> Result<shared::Status, Error> {
         let mut book = self.lock()?;
         if input.origin.service_instance != self.instance || book.closed {
             return Err(Error::Conflict);
@@ -812,7 +822,7 @@ impl Inbox {
             return Err(Error::Busy);
         }
         let lease = book.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
-        if !family.matches(lease.scope.selection.summary.action)
+        if lease.scope.selection.family() != family
             || lease.id != input.grant_id
             || lease.scope.project_id != input.origin.project_id
             || !lease.live(Instant::now())
@@ -823,7 +833,7 @@ impl Inbox {
         let status = p::Status {
             origin: input.origin.clone(),
             grant_id: input.grant_id.clone(),
-            selection: lease.scope.selection.summary.clone(),
+            selection: lease.scope.selection.summary(),
             revision: 1,
             state: p::State::Queued,
             prepare_operation_id: None,
@@ -861,7 +871,7 @@ impl Inbox {
     }
     pub(crate) fn start(&self, input: &p::Start) -> Result<p::Status, Error> {
         let book = self.lock()?;
-        self.find(&book, &input.origin, Family::Index)?.request_start(input)
+        self.find(&book, &input.origin, Family::Index)?.request_start(input)?.files()
     }
     pub(crate) fn query(&self, input: &p::Query, cancel: bool) -> Result<p::Status, Error> {
         let book = self.lock()?;
@@ -869,7 +879,7 @@ impl Inbox {
         if cancel {
             entry.cancel(p::Reason::UserCancelled, Instant::now());
         }
-        entry.status()
+        entry.status()?.files()
     }
     pub(crate) fn claim(&self) -> Result<Option<Claim>, Error> {
         let book = self.lock()?;
@@ -910,14 +920,14 @@ impl Inbox {
         Ok(self.lock()?.entries.clone())
     }
 }
-fn access(book: &Book, project: Option<&Id>, family: Family) -> Result<p::Access, Error> {
+fn access(book: &Book, project: Option<&Id>, family: Family) -> Result<shared::Access, Error> {
     let Some(lease) = book
         .lease
         .as_ref()
-        .filter(|l| family.matches(l.scope.selection.summary.action)
+        .filter(|l| l.scope.selection.family() == family
             && project.is_none_or(|id| id == &l.scope.project_id))
     else {
-        return Ok(p::Access::empty());
+        return Ok(shared::Access::empty_shared());
     };
     let now = Instant::now();
     let consumed = lease.used.load(Ordering::Acquire);
@@ -938,6 +948,9 @@ fn access(book: &Book, project: Option<&Id>, family: Family) -> Result<p::Access
     value.validate_shared()?;
     Ok(value)
 }
+
+#[path = "service_git_repository_requests.rs"]
+mod repository_requests;
 
 #[path = "service_git_commit_requests.rs"]
 mod commit;

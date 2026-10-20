@@ -245,7 +245,7 @@ pub(crate) struct IdentityInput {
     pub(crate) chain_checked_at: u64,
 }
 
-fn unbase64(value: &str, limit: usize) -> Result<Vec<u8>, BridgeError> {
+pub(super) fn unbase64(value: &str, limit: usize) -> Result<Vec<u8>, BridgeError> {
     let bytes = value.as_bytes();
     need(!bytes.is_empty() && bytes.len() % 4 == 0 && bytes.len() <= (limit + 2) / 3 * 4)?;
     let digit = |b| match b {

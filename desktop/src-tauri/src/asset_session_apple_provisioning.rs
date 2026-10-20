@@ -102,6 +102,8 @@ impl AppleProvisioningDocumentInput {
             && self.context.saved_config == other.context.saved_config
             && self.context.saved_version == other.context.saved_version
             && self.context.display_name == other.context.display_name
+            && self.context.key_record_id == other.context.key_record_id
+            && self.context.key_record_revision == other.context.key_record_revision
     }
     fn project(&self, document: &Arc<Inner>) -> Result<NativeProject, BridgeError> {
         let (device, inode) = self
@@ -271,7 +273,7 @@ impl AppleProvisioningDocumentInput {
             target: self.target.clone(),
             reviewed_at,
             signing: None,
-            key: None,
+            key: None, certificate: None,
         })
     }
     fn own_backing_bytes(&self) -> Option<usize> {

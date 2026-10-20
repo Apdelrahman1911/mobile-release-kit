@@ -3,6 +3,9 @@
 //! the same Resources and genuinely joined before public retirement.
 use super::*;
 use crate::git_local_protocol as wire;
+#[path="supervisor_git_fetch.rs"]
+mod fetch;
+pub(crate) use fetch::GitLocalFetchHold;
 #[cfg(any(target_os="linux",target_os="macos"))]
 use crate::git_local_state::{Completion,Original};
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -34,6 +37,9 @@ pub(super) struct Invocation {
     request:Mutex<Option<Arc<wire::Request>>>,child_reply:Mutex<Option<wire::Terminal>>,
     candidate:Mutex<Option<Arc<wire::Candidate>>>,ack_returned:AtomicBool,control_closed:Mutex<Option<ControlClosed>>,
     publication:Mutex<Option<GitLocalPublication>>,
+    fetch_keep:Mutex<Option<wire::fetch_worker::Keep>>,
+    fetch_go_claimed:AtomicBool,
+    fetch_joined:Arc<std::sync::OnceLock<fetch::JoinedControl>>,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) sources:Arc<Mutex<crate::asset_source::GitLocalSources>>,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
@@ -46,8 +52,20 @@ pub(super) struct Invocation {
 /// it is deliberately NOT journal finality or a successful operation receipt.
 pub(crate) struct GitLocalPublication {
     request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
+    fetch_keep:Option<wire::fetch_worker::Keep>,fetch_returned:Option<wire::fetch_worker::Returned>,
 }
 impl GitLocalPublication {
+    pub(crate) fn fetch_for(&self,id:&str,native:&wire::Native,review:&wire::Review,keep:&wire::fetch_worker::Keep)
+        ->Result<(&crate::git_fetch_protocol::Intent,&wire::fetch_worker::Returned),crate::asset_commands::Reason> {
+        let bad=crate::asset_commands::Reason::SourceChanged;
+        let intent=self.candidate.intent.fetch_details().ok_or(bad)?;
+        let returned=self.fetch_returned.as_ref().ok_or(bad)?;
+        if self.request.action.kind()!=wire::Kind::Fetch || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+            || self.request.initialization.is_some() || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            || !self.candidate.intent.matches(review) || self.publication!=wire::Publication::FetchReturned
+            || self.fetch_keep.as_ref()!=Some(keep) || !keep.valid(intent,native) || !returned.valid(intent,native) {return Err(bad)}
+        Ok((intent,returned))
+    }
     pub(crate) fn init_for(&self,id:&str,native:&crate::git_init_protocol::Native,review:&wire::Review)
         ->Result<&crate::git_init_protocol::Intent,crate::asset_commands::Reason> {
         if self.request.action.kind()!=wire::Kind::Initialize || self.request.id!=id || self.request.native.is_some()
@@ -60,7 +78,7 @@ impl GitLocalPublication {
 
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
@@ -105,6 +123,7 @@ pub(crate) struct GitLocalNativeJoined {
     switch_final:Option<crate::git_switch_protocol::FinalData>,
     rename_final:Option<crate::git_rename_protocol::FinalData>,
     fast_forward_final:Option<crate::git_fast_forward_protocol::FinalData>,
+    fetch_final:Option<crate::git_fetch_state::FinalData>,
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl GitLocalNativeJoined {
@@ -112,6 +131,7 @@ impl GitLocalNativeJoined {
         Arc::ptr_eq(&self.native_use,native_use)&&Arc::ptr_eq(&self.original,original)
     }
     pub(crate) fn completion(&self)->Completion {self.completion}
+    pub(crate) fn fetch_final(&self)->Option<&crate::git_fetch_state::FinalData> {self.fetch_final.as_ref()}
     pub(crate) fn rename_final(&self)->Option<&crate::git_rename_protocol::FinalData> {self.rename_final.as_ref()}
     pub(crate) fn fast_forward_final(&self)->Option<&crate::git_fast_forward_protocol::FinalData> {self.fast_forward_final.as_ref()}
     pub(crate) fn switch_final(&self)->Option<&crate::git_switch_protocol::FinalData> {self.switch_final.as_ref()}
@@ -149,6 +169,7 @@ impl GitLocalAdmission {
             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
+                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),fetch_joined:Arc::new(std::sync::OnceLock::new()),
                 sources:Arc::new(Mutex::new(crate::asset_source::GitLocalSources::new())),slots:slots.clone(),clock:Mutex::new(None)},
                 endpoints,slots})
         }
@@ -159,17 +180,19 @@ impl GitLocalAdmission {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {crate::installed_runtime::GitLocalRuntimeSlots::working_reservation_bytes()?
             .checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>())?
-            .checked_add(if kind==wire::Kind::Initialize {crate::git_init_protocol::MANIFEST_BACKING}else{0})}
+            .checked_add(if kind==wire::Kind::Initialize {crate::git_init_protocol::MANIFEST_BACKING}else{0})?
+            .checked_add(if kind==wire::Kind::Fetch {wire::fetch_worker::REMOTE_BACKING}else{0})}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {let _=kind;None}
     }
 }
 impl Supervisor {
+    pub(crate) fn git_fetch_profile_available(&self)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_fetch_profile_available()}
     pub(crate) fn git_local_profile_available(&self)->bool {
         selected(Profile::GitLocal)&&self.inner.runtime.git_local_profile_available()
     }
     pub(crate) fn start_git_local(&self,admission:GitLocalAdmission)->Result<GitLocalTicket,BridgeError> {
-        if !self.git_local_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer runtime is unavailable."))}
+        if !self.git_local_profile_available() || admission.invocation.action.kind()==wire::Kind::Fetch && !self.inner.runtime.git_fetch_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer or selected Fetch runtime is unavailable."))}
         let receipt=admission.invocation.receipt.clone();
         let owner=self.admit(AdmissionRequest::GitLocal(admission),CompletionTarget::GitLocal)?;
         Ok(GitLocalTicket {owner,receipt})
@@ -213,6 +236,13 @@ impl Invocation {
             || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;drop(receipt);
             #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);return}
         let reply=self.child_reply.lock().ok().and_then(|s|s.clone());
+        if self.action.kind()==wire::Kind::Fetch {
+            let control=reply.as_ref().and_then(|v|v.fetch_control.clone()).or_else(||
+                (!self.fetch_go_claimed.load(Ordering::SeqCst)).then_some(crate::github_connection_protocol::GitHubReadControl {
+                    reason:crate::github_connection_protocol::Reason::None,credential_expires_at:None,cooldown_seconds:None,cooldown_blocked:false }));
+            let Some(control)=control.filter(|v|v.valid()) else {*receipt=GitLocalReceipt::RetainedUnknown;return};
+            if self.fetch_joined.set(fetch::joined_control(Instant::now(),control)).is_err() {*receipt=GitLocalReceipt::RetainedUnknown;return}
+        }
         let result=match (outcome,reply) {
             (Ok(()),Some(reply))=>Ok(reply),
             (Err(error),Some(reply)) if error.code=="git_local_refused" && reply.child_declared_settled()
@@ -227,9 +257,10 @@ impl Invocation {
         ->Result<VerifiedRuntime,BridgeError> {
         let root=self.gate.check_current(&owner.id)?;let stop=owner.stop.subscribe();
         let selected={let mut native=self.slots.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            if self.action.kind()==wire::Kind::Fetch {native.arm_fetch_once().map_err(|_|BridgeError::cleanup_unknown())?;}
             let armed=native.arm_acl_once(owner.endpoint(),&stop);owner.observe_native_failure(native.first_failure());
             armed.map_err(|_|BridgeError::cleanup_unknown())?;
-            let result=runtime.resolve_git_local_installed(&mut native,owner.endpoint(),&stop);
+            let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
             owner.observe_native_failure(native.first_failure());result?};
         let review=self.gate.review();
         // Initialization's exclusive private mkdir is an effect. Refuse the
@@ -256,6 +287,9 @@ impl Invocation {
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
         let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
             wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
+        } else if self.action.kind()==wire::Kind::Fetch {
+            wire::Request::from_fetch_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,
+                clock_data,binding,self.gate.fetch_target(&owner.id)?)?
         } else if self.action.kind()==wire::Kind::FastForward {
             wire::Request::from_fast_forward_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,fast_forward_sources)?
         } else if self.action.kind()==wire::Kind::BranchSwitch {
@@ -282,6 +316,17 @@ impl Invocation {
                 {let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
                     let result=sources.capture_init(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
                     observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;}
+            }
+            if self.action.kind()==wire::Kind::Fetch {
+                self.gate.check_current(&owner.id)?;
+                let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
+                let stop=owner.stop.subscribe();
+                let keep={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                    let result=sources.prepare_fetch_keep(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+                    observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
+                    sources.fetch_keep().map_err(source_error)?.cloned().ok_or_else(BridgeError::cleanup_unknown)?};
+                let mut slot=self.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if slot.is_some(){return Err(BridgeError::cleanup_unknown())}*slot=Some(keep);
             }
             self.post_before_effect(owner)
         }
@@ -331,7 +376,9 @@ impl Invocation {
             }
             let mut slot=self.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             if slot.is_some() {return Err(BridgeError::cleanup_unknown())}
-            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication});
+            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication,
+                fetch_keep:self.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone(),
+                fetch_returned:terminal.fetch_publication.clone()});
         }
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         if let Some(first)=terminal.first_failure_ns {
@@ -402,7 +449,11 @@ pub(super) async fn candidate_returned(r:&mut Resources,inner:&Inner,owner:&Arc<
         // CAS is not permission if its consent/currentness changed meanwhile.
         invocation.gate.check_current(&owner.id)?;
         if owner.failed()||Instant::now()>=owner.endpoint() {return Err(BridgeError::timeout())}
-        invocation.request()?.ack(&candidate,ack.revision.0)
+        let request=invocation.request()?;
+        if invocation.action.kind()==wire::Kind::Fetch {
+            let keep=invocation.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            request.fetch_ack(&candidate,ack.revision.0,keep.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)
+        } else {request.ack(&candidate,ack.revision.0)}
     }.await;
     if let Err(error)=&result {owner.fail(error.clone());if error.code=="cleanup_unknown" {owner.unknown(inner)}}
     if !local.ack_send.take().is_some_and(|s|s.send(result).is_ok()) {
@@ -468,7 +519,15 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
                 None=>None,
             }
         } else {None};
-        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final}))
+        let fetch_final=if invocation.action.kind()==wire::Kind::Fetch {
+            let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            match publication.as_ref() {
+                Some(p)=>Some(crate::git_fetch_state::FinalData::from_returned(&p.request,&p.candidate,
+                    reply.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,p.fetch_returned.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)?),
+                None=>None,
+            }
+        } else {None};
+        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final,fetch_final}))
     })();
     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
@@ -536,9 +595,9 @@ pub(super) fn settle(owner:&Owner,slots:&Arc<Mutex<crate::installed_runtime::Git
     // are known too. All old actions keep their original order. This body is
     // already after process/pipe joins; later management/journal/NativeUse
     // joins are still mandatory, never inferred from a positive publication.
-    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward) {
+    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Fetch) {
         let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
-        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
+        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::Fetch {sources.retain_fetch_unknown();} else if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
         (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
     } else {
         let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
@@ -591,10 +650,18 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
     let posted=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=returned=>v};
     if !matches!(posted,Ok(Ok(()))) {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}}
     let Some(local)=owner.git_local.as_ref() else {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}};
-    if let Err(error)=local.gate.claim(&owner.id,||claim_preflight_go(&inner,&owner,Profile::GitLocal)
-        .then_some(()).ok_or_else(BridgeError::cleanup_unknown)) {owner.fail(error);return WriteEnd {complete:false}}
-    let go=request.go();
+    let go=if request.action.kind()==wire::Kind::Fetch {
+        match local.gate.fetch_go(&owner.id,&request,|| {
+            if local.fetch_go_claimed.swap(true,Ordering::SeqCst) {return false}
+            claim_preflight_go(&inner,&owner,Profile::GitLocal)
+        }) {Ok(bytes)=>bytes,Err(error)=>{owner.fail(error);return WriteEnd {complete:false}}}
+    } else {
+        if let Err(error)=local.gate.claim(&owner.id,||claim_preflight_go(&inner,&owner,Profile::GitLocal)
+            .then_some(()).ok_or_else(BridgeError::cleanup_unknown)) {owner.fail(error);return WriteEnd {complete:false}}
+        zeroize::Zeroizing::new(request.go())
+    };
     let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&go)=>v.is_ok()};
+    drop(go); // Private Fetch token copy is zeroized after the sole write attempt.
     if !sent {owner.fail(BridgeError::new("io_error","The original Git GO write failed."));return WriteEnd {complete:false}}
     let mut wait=wait;let mut ack=ack;let mut ack_pending=request.phase==wire::Phase::Apply;
     let completed=loop {
@@ -611,7 +678,7 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
                     Err(_)=>{},
                     Ok(Err(error))=>{owner.fail(error);break None},
                     Ok(Ok(bytes))=>{
-                        if bytes.len()>512||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
+                        if bytes.len()>if request.action.kind()==wire::Kind::Fetch {wire::fetch_worker::ACK_LIMIT}else{512}||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
                             owner.fail(BridgeError::cleanup_unknown());break None
                         }
                         let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&bytes)=>v.is_ok()};
@@ -645,7 +712,8 @@ pub(super) async fn read<T:AsyncRead+Unpin>(mut stdout:T,request:Arc<wire::Reque
             Ok(0)=>{eof=true;break},
             Ok(count)=>{
                 total=total.saturating_add(count);
-                if total>wire::RESPONSE_LIMIT {overflow=true;let _=faults.try_send(BridgeError::protocol());continue}
+                let limit=if request.action.kind()==wire::Kind::Fetch {wire::fetch_worker::OUTPUT_LIMIT}else{wire::RESPONSE_LIMIT};
+                if total>limit {overflow=true;let _=faults.try_send(BridgeError::protocol());continue}
                 bytes.extend_from_slice(&buffer[..count]);
                 if ready.is_some() {
                     if let Some(index)=bytes.iter().position(|b|*b==b'\n') {

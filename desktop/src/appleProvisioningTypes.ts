@@ -1,12 +1,13 @@
 // Public comparison/status DATA. Native owns the selected P8, issuer-wide
 // journal, consent, single provider write and every original cleanup join.
+import type { AppleDistributionCertificateMode, AppleDistributionCertificateResult, AppleCertificateRecoveryHistory } from './appleDistributionCertificateSetupProtocol.ts';
 import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
 import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
 import type { SavedConfigContent, OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
 import type { AppleDistributionKeyMode, AppleDistributionKeyResult, AppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
 import type { AppleProfileMode, AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
-export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode | AppleDistributionKeyMode;
+export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode | AppleDistributionKeyMode | AppleDistributionCertificateMode;
 export interface AppleProvisioningIdentity { operationId: string; ownerGeneration: string }
 export interface PrepareAppleProvisioning {
   projectId: string; draftRevision: number; baselineGeneration: number;
@@ -15,9 +16,10 @@ export interface PrepareAppleProvisioning {
   executionMode: 'local'; platform: 'ios'; mode: AppleProvisioningMode;
   reference: AppleProvisioningIdentity | null; newApplication: boolean; displayName: string;
   p12RecordId?: string; p12RecordRevision?: number;
+  keyRecordId?: string; keyRecordRevision?: number;
 }
 export interface AppleProvisioningContext extends PrepareAppleProvisioning { operation: 'apple-bundle-provisioning' }
-export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1';
+export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1' | 'local-ios-certificate-review-v1' | 'local-ios-certificate-create-v1' | 'local-ios-certificate-reconcile-v1';
 export interface StartAppleProvisioning extends AppleProvisioningIdentity { consentVersion: AppleProvisioningConsent }
 export type AppleProvisioningReason = 'none' | 'cancelled' | 'context-changed' | 'document-lost' | 'shutdown' | 'timed-out' |
   'protocol-error' | 'runtime-unavailable' | 'intent-expired' | 'stale-intent' | 'saved-source-changed' | 'saved-source-invalid' |
@@ -54,10 +56,11 @@ export interface AppleRecoveryHistory {
 }
 export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
-  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | AppleDistributionKeyResult | null;
+  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | AppleDistributionKeyResult | AppleDistributionCertificateResult | null;
   savedProfile?: AppleProfileSavedReference;
   savedKey?: AppleDistributionKeySavedReference;
   profileRecovery?: AppleProfileRecoveryHistory;
+  certificateRecovery?: AppleCertificateRecoveryHistory;
   recovery: AppleRecoveryHistory | null;
 }
 export interface AppleProvisioningStatus {

@@ -1700,6 +1700,43 @@ async fn revoke_agent_git_commit(webview: Webview, request: tauri::ipc::Request<
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git commits are not supported on this platform.")) }
 }
 #[tauri::command]
+async fn agent_git_repository_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::asset_session::agent_git_index::decode_repository_empty(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_git_repository_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local Git repository changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_git_repository(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        let args=crate::asset_session::agent_git_index::decode_repository_allow(raw)?;
+        serde_json::to_value(state.document.allow_agent_git_repository(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local Git repository changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_git_repository(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::asset_session::agent_git_index::decode_repository_empty(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_git_repository(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local Git repository changes are not supported on this platform.")) }
+}
+#[tauri::command]
 async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -5135,6 +5172,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
+            agent_git_repository_access, allow_agent_git_repository, revoke_agent_git_repository,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,

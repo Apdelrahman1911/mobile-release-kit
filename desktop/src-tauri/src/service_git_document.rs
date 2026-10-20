@@ -12,7 +12,10 @@ use serde::Deserialize;
 #[path = "service_git_commit_document.rs"]
 mod commit;
 pub(crate) use commit::{decode_commit_allow, CommitAllow};
-pub(super) use commit::review_matches as agent_git_files_review_matches;
+#[path = "service_git_repository_document.rs"]
+mod repository;
+pub(crate) use repository::{decode_repository_allow, decode_repository_empty, RepositoryAllow};
+pub(super) use repository::agent_git_review;
 use std::{path::Path, sync::OnceLock};
 
 #[derive(Deserialize)]
@@ -45,7 +48,7 @@ pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
     }
     Ok(args)
 }
-/// Captured at actual Observe admission, retained through its original Gate.
+/// Captured at actual Observe/Branches admission, retained through its original Gate.
 /// An old public projection alone cannot reconstruct this comparison witness.
 pub(super) struct Observation {
     root: asset_source::RegisteredRoot,
@@ -95,7 +98,7 @@ pub(super) fn observe_admission(
     root: &asset_source::RegisteredRoot,
     action: &read::Action,
 ) -> Option<Arc<Observation>> {
-    if action.kind != read::Kind::Observe {
+    if !matches!(action.kind, read::Kind::Observe | read::Kind::Branches) {
         return None;
     }
     let epoch = document.android_registration_control.epoch().ok()?;
@@ -145,7 +148,7 @@ pub(super) fn observe_returned(
     };
     book.observed = original
         .filter(|o| {
-            successful_observe(value)
+            repository::successful_read(value)
                 && o.native.runtime_id == value.context.project_id
                 && o.native.registration_generation == value.context.generation
                 && value.context.revision == format!("document-{}", o.document_revision)
@@ -345,9 +348,9 @@ impl DocumentBinding {
             registration: original.native.registration_generation,
             document_revision: original.document_revision,
             input_revision: original.native.input_revision,
-            read_operation_id: args.read_operation_id,
+            read_operation_id: Some(args.read_operation_id),
             document: Arc::downgrade(&self.inner.session_identity),
-            selection: selected,
+            selection: selected.into(),
             commit,
             changes: self.inner.changes.clone(),
         });
@@ -378,10 +381,7 @@ impl DocumentBinding {
             .lock()
             .map_err(|_| public(Error::StateUnknown))?;
         if book.revoke_epoch != revoke_epoch
-            || book.observed.as_ref().is_none_or(|o| {
-                !Arc::ptr_eq(&o.original, &original) || o.operation_id != scope.read_operation_id
-            })
-            || !matches!(&state.git_read,Some(git_read::Entry::Finished(v)) if v.operation_id==scope.read_operation_id&&successful_observe(v))
+            || !repository::basis_current(&book, &state, &scope, &original)
         {
             return Err(public(Error::Conflict));
         }
@@ -456,7 +456,7 @@ impl DocumentBinding {
         if link.phase() != phase
             || !Arc::ptr_eq(link.scope(), &grant.scope)
             || link.stopped()
-            || !commit::action(&grant.scope).is_ok_and(|expected| expected == *action)
+            || !repository::action(&grant.scope).is_ok_and(|expected| expected == *action)
         {
             return Err(public(Error::Conflict));
         }
@@ -469,11 +469,7 @@ impl DocumentBinding {
             edit,
         )?;
         if phase == requests::Phase::Prepare
-            && (book
-                .observed
-                .as_ref()
-                .is_none_or(|o| !Arc::ptr_eq(&o.original, &grant.observation))
-                || !matches!(&state.git_read,Some(git_read::Entry::Finished(v)) if v.operation_id==grant.scope.read_operation_id&&successful_observe(v)))
+            && !repository::basis_current(&book, state, &grant.scope, &grant.observation)
         {
             return Err(public(Error::Conflict));
         }
@@ -520,7 +516,7 @@ impl DocumentBinding {
                 local::Prepare {
                     project_id: scope.runtime_id.clone(),
                     expected_document_revision: scope.document_revision,
-                    action: commit::action(&scope)?,
+                    action: repository::action(&scope)?,
                 },
                 Some(link),
             ),
@@ -669,11 +665,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         let Some((new, revision, state, settlement)) = data else {
             continue;
         };
-        let action = match entry.status()?.selection.action {
-            wire::Action::Stage => crate::service_protocol::Action::GitStage,
-            wire::Action::Unstage => crate::service_protocol::Action::GitUnstage,
-            wire::Action::Commit => crate::service_protocol::Action::GitCommit,
-        };
+        let action = entry.status()?.selection.history_action();
         let id = entry.input().origin.request_id.clone();
         let result = if new {
             service.begin_operation(entry.runtime_id(), id, action, state, settlement)

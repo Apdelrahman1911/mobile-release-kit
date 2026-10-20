@@ -57,7 +57,7 @@ fn binding(mode: Mode) -> Arc<RequestBinding> {
         generation: "5".repeat(32),
         context,
         scope: ScopeData {
-            signing: None, key: None,
+            signing: None, key: None, certificate: None,
             provisioning,
             provenance,
             target: BundleTarget {

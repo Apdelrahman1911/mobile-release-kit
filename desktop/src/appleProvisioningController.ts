@@ -1,5 +1,7 @@
 // App-held UI coordination only. Neither promises, events nor comparison
 // counters can settle the original native Session or its account-wide journal.
+import { appleCertificateKeyChoices, appleDistributionCertificateInputBase, retainedAppleDistributionCertificateInput, isAppleDistributionCertificateMode } from './appleDistributionCertificateSetupProtocol.ts';
+import type { AppleCertificateKeySelection, AppleDistributionCertificateResult, AppleCertificateRecoveryHistory } from './appleDistributionCertificateSetupProtocol.ts';
 import { appleDistributionKeyInputBase, retainedAppleDistributionKeyInput, isAppleDistributionKeyMode } from './appleDistributionKeySetupProtocol.ts';
 import type { AppleDistributionKeyResult, AppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
 import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
@@ -22,13 +24,13 @@ interface Source {
   now?(): number;
 }
 type Base = Omit<PrepareAppleProvisioning, 'mode' | 'reference' | 'newApplication' | 'displayName'>;
-type InputFamily = 'bundle' | 'profile' | 'key';
-const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate';
+const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
 interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
 interface Attempt {
   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
-  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
+  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
   prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean;
 }
 interface Reference { identity: AppleProvisioningIdentity; witness: Witness; displayName: string; expires: number | null }
@@ -42,6 +44,11 @@ export interface AppleProvisioningState {
   status: AppleProvisioningStatus | null; projectId: string | null; ios: boolean;
   previousAttempts: AppleRecoveryHistory | null; continueReason: string | null;
   previousProfileAttempts: AppleProfileRecoveryHistory | null; profileContinueReason: string | null;
+  previousCertificateAttempts: AppleCertificateRecoveryHistory | null; certificateContinueReason: string | null;
+  certificateKeyChoices: readonly AppleCertificateKeySelection[]; certificateKeySelection: AppleCertificateKeySelection | null;
+  certificateResult: AppleDistributionCertificateResult | null; certificateTerminalRead: boolean;
+  certificateReviewReference: AppleProvisioningIdentity | null; certificateAttemptReference: AppleProvisioningIdentity | null;
+  certificateReviewReason: string | null; certificateCreateReason: string | null; certificateReconcileReason: string | null;
   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
   consent: (AppleProvisioningIdentity & { mode: AppleProvisioningMode; acknowledged: boolean }) | null;
   result: AppleProvisioningResult | null; reviewReference: AppleProvisioningIdentity | null;
@@ -81,6 +88,10 @@ export class AppleProvisioningController {
   private profileAttempt: Reference | null = null;
   private restoredProfile: Reference | null = null;
   private keyReview: Reference | null = null;
+  private certificateKey: AppleCertificateKeySelection | null = null;
+  private certificateReview: Reference | null = null;
+  private certificateAttempt: Reference | null = null;
+  private restoredCertificate: Reference | null = null;
   private inputFamily: InputFamily | null = null;
   private witness: Witness | null = null;
   private status: AppleProvisioningStatus | null = null;
@@ -110,11 +121,14 @@ export class AppleProvisioningController {
       if (this.selectionPending) return null;
       const project = this.source.project(), assets = this.source.assets();
       const family = requestedFamily ?? (assets?.scope.purpose === 'provisioning' ? 'profile' : 'bundle');
-      let base = family === 'key' ? appleDistributionKeyInputBase(project, assets) :
+      let base = family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
         family === 'profile' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
       const a = this.attempt;
       if (!base && family === 'key' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
         base = retainedAppleDistributionKeyInput(project, assets, a.witness.base);
+      }
+      if (!base && family === 'certificate' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
+        base = retainedAppleDistributionCertificateInput(project, assets, this.certificateKey, a.witness.base);
       }
       if (!base && family === 'profile' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
         base = retainedAppleProfileInput(project, assets, a.witness.base);
@@ -143,6 +157,7 @@ export class AppleProvisioningController {
     if (!this.initialized || !this.off || this.status?.availability !== 'available') return 'Apple setup is unavailable or busy. Refresh its status; no other account is selected automatically.';
     const witness = this.capture(family);
     if (family === 'key' && !witness) return 'Choose the App Store Connect key, unlock encrypted storage, then assess and assign its P8, Key ID and Issuer ID in Set up Apple signing. Save the app settings and read the saved version first. No P12 is needed.';
+    if (family === 'certificate' && !witness) return 'Choose the current encrypted signing key and assign the App Store Connect P8 in Set up Apple signing. Unlock storage and save the app settings/version first. A previous saved-key result is not a current selection.';
     if (family === 'profile' && !witness?.base.p12RecordId) return 'Choose Set up Apple signing, unlock encrypted storage, then assess and assign the existing P12/password and App Store Connect P8 in that context. Save the app settings and read its saved version first.';
     if (!witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
     if (!appleDisplayName(this.displayName)) return 'Enter an explicit Bundle ID display name (1–128 characters, no control characters).';
@@ -170,8 +185,19 @@ export class AppleProvisioningController {
         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'profile-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
     return op.profileRecovery ?? null;
   }
+  private certificateReconciliationReference(): Reference | null {
+    return this.referenceCurrent(this.restoredCertificate) ? this.restoredCertificate : this.referenceCurrent(this.certificateAttempt) ? this.certificateAttempt : null;
+  }
+  private previousCertificateAttempts(): AppleCertificateRecoveryHistory | null {
+    const a = this.attempt, op = this.status?.operation;
+    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+        !sameAppleIdentity(a.identity, op) || a.request.mode !== 'certificate-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+    return op.certificateRecovery ?? null;
+  }
   private reason(mode: AppleProvisioningMode): string | null {
     const base = this.baseReason(inputFamily(mode)); if (base) return base;
+    if (mode === 'certificate-create' && !this.referenceCurrent(this.certificateReview)) return 'Finish a fresh certificate check for this saved key first. Its separate request review is one-use and expires; an old receipt cannot restore it.';
+    if (mode === 'certificate-reconcile' && !this.certificateReconciliationReference()) return 'Choose a matching earlier certificate request. A read-only check never repeats issuance or clears earlier uncertainty.';
     if (mode === 'key-prepare' && !this.referenceCurrent(this.keyReview)) return 'Finish a fresh existing-key check first. Its one-use local-key review expires and cannot be restored from an old result.';
     if (mode === 'profile-reuse' || mode === 'profile-create') {
       if (!this.referenceCurrent(this.profileReview) || this.profileReview?.action !== mode) return 'Finish a current signing review first. Only its exact reuse or create choice can continue.';
@@ -198,6 +224,8 @@ export class AppleProvisioningController {
     const readResult = !!a?.terminalRead && !this.action && !this.cancellation && !this.issue && sameAppleIdentity(a.identity, op) ? op?.result ?? null : null;
     const keyTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
       !this.issue && isAppleDistributionKeyMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+    const certificateTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
+      !this.issue && isAppleDistributionCertificateMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
     const cancelId = a?.identity ?? (active(op) ? op : null);
     return Object.freeze({ native: !!this.original && !this.connectionRetired, visible: this.visible, initialized: this.initialized,
       listening: !!this.off, reading: !!this.read, pending: this.action?.kind ?? null, requestPending: !!this.action && !this.action.joined,
@@ -208,6 +236,12 @@ export class AppleProvisioningController {
         Object.freeze({ ...identity(a.identity), mode: a.request.mode, acknowledged: this.acknowledged }) : null,
       result: readResult?.scope === 'local-ios-bundle-provisioning' ? readResult : null,
       profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
+      certificateResult: certificateTerminalRead && readResult?.scope === 'local-ios-distribution-certificate' ? readResult : null, certificateTerminalRead,
+      certificateKeyChoices: appleCertificateKeyChoices(this.source.project(), this.source.assets()), certificateKeySelection: this.certificateKey,
+      certificateReviewReference: this.referenceCurrent(this.certificateReview) ? this.certificateReview.identity : null,
+      certificateAttemptReference: this.restoredCertificate?.identity ?? this.certificateAttempt?.identity ?? null,
+      certificateReviewReason: this.reason('certificate-review'), certificateCreateReason: this.reason('certificate-create'), certificateReconcileReason: this.reason('certificate-reconcile'),
+      previousCertificateAttempts: this.previousCertificateAttempts(), certificateContinueReason: this.baseReason('certificate'),
       keyResult: keyTerminalRead && readResult?.scope === 'local-ios-distribution-key' ? readResult : null,
       savedKey: keyTerminalRead ? op?.savedKey ?? null : null, keyTerminalRead,
       keyReviewReference: this.referenceCurrent(this.keyReview) ? this.keyReview.identity : null,
@@ -227,12 +261,13 @@ export class AppleProvisioningController {
       retained: this.ownerReason() !== null, cancelRequested: this.cancelRequested });
   }
   private publish(): void { this.state = this.projected(); if (!this.disposed) for (const listener of this.listeners) listener(); }
+  private clearCertificateReview(): void { this.certificateReview = null; this.restoredCertificate = null; }
   private clearConsent(): void {
     this.acknowledged = false; this.consentUntil = null;
     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
   }
   private fail(issue: Issue = 'unconfirmed'): void {
-    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
+    this.issue ??= issue; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
     if (this.attempt) this.attempt.retired = true;
     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
   }
@@ -244,7 +279,7 @@ export class AppleProvisioningController {
     this.publish();
   };
   invalidate = (): void => {
-    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
+    this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
     if (this.attempt) this.attempt.retired = true;
     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
     this.publish();
@@ -255,6 +290,17 @@ export class AppleProvisioningController {
   versionIntent = (): void => this.invalidate();
   setSelectionPending = (value: boolean): void => { if (value !== this.selectionPending) { this.selectionPending = value; this.syncProject(); } };
   setVisible = (value: boolean): void => { if (!value && this.consentUntil !== null) this.invalidate(); this.visible = value; this.publish(); };
+  selectCertificateKey = (recordId: string | null, recordRevision: number | null): void => {
+    if (this.disposed || this.ownerReason()) return;
+    const choices = appleCertificateKeyChoices(this.source.project(), this.source.assets());
+    const next = recordId === null && recordRevision === null ? null : choices.find(row => row.recordId === recordId && row.recordRevision === recordRevision);
+    if (next === undefined || sameOfflineData(next, this.certificateKey)) return;
+    const api = this.original, previous = this.certificateKey, witness = this.capture('key'), epoch = this.epoch + 1;
+    this.invalidate();
+    if (this.original !== api || this.epoch !== epoch || this.certificateKey !== previous || this.disposed || this.ownerReason() ||
+        !sameWitness(witness, this.capture('key')) || next && !appleCertificateKeyChoices(this.source.project(), this.source.assets()).some(row => sameOfflineData(row, next))) return;
+    this.certificateKey = next ? freeze({ ...next }) : null; this.witness = this.capture(); this.publish();
+  };
   setDisplayName = (value: string): void => {
     if (value === this.displayName || value.length > 512) return;
     this.invalidate(); this.displayName = value; this.publish();
@@ -281,7 +327,7 @@ export class AppleProvisioningController {
       try { this.off?.(); } catch { this.fail(); return; }
     }
     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.clearCertificateReview(); this.certificateAttempt = null; this.certificateKey = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
     if (!api) return;
     const pending = (async () => {
       try {
@@ -325,6 +371,11 @@ export class AppleProvisioningController {
         // Conservative UI age only: native expires from its original provider
         // observation. A read/event/reconnect never starts another 300 seconds.
         this.keyReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+      }
+      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'certificate-review' && op.outcome === 'complete' &&
+          op.result?.scope === 'local-ios-distribution-certificate' && op.result.decision === 'request-review' && op.result.reason === 'certificate-required' &&
+          this.now() < a.startedAt + 300000) {
+        this.certificateReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
       }
       if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
           op.result?.scope === 'local-ios-profile-setup' && ['reuse-available', 'create-available'].includes(op.result.decision) &&
@@ -387,6 +438,24 @@ export class AppleProvisioningController {
     if (!sameContinuation()) return Promise.resolve();
     return this.prepareIntent('profile-reconcile', continuation);
   };
+  continuePreviousCertificate = (operationId: string, ownerGeneration: string): Promise<void> => {
+    this.syncProject();
+    if (this.disposed || !this.visible || this.baseReason('certificate') || !this.original || !this.witness) return Promise.resolve();
+    const row = this.previousCertificateAttempts()?.attempts.find(candidate => sameAppleIdentity(candidate.reference, { operationId, ownerGeneration }));
+    if (!row) return Promise.resolve();
+    const continuation = { api: this.original, witness: this.witness, epoch: this.epoch + 1 };
+    const sameContinuation = () => this.original === continuation.api && this.witness === continuation.witness &&
+      this.epoch === continuation.epoch && !this.disposed && !this.connectionRetired;
+    this.invalidate();
+    if (!sameContinuation()) return Promise.resolve();
+    // Only display text and the historical reference survive this explicit
+    // choice. No key loan, Create review or earlier native join is restored.
+    this.displayName = row.displayName;
+    this.restoredCertificate = freeze({ identity: identity(row.reference), witness: continuation.witness, displayName: row.displayName, expires: null });
+    this.publish();
+    if (!sameContinuation()) return Promise.resolve();
+    return this.prepareIntent('certificate-reconcile', continuation);
+  };
   prepare = (mode: AppleProvisioningMode): Promise<void> => this.prepareIntent(mode);
   private prepareIntent(mode: AppleProvisioningMode, continuation?: { api: AppleProvisioningApi; witness: Witness; epoch: number }): Promise<void> {
     const family = inputFamily(mode), api = this.original, target = this.capture(family);
@@ -395,7 +464,7 @@ export class AppleProvisioningController {
     // old comparison locally before publishing; no pending original is replaced.
     if (this.inputFamily !== family) {
       if (continuation || this.ownerReason()) return Promise.resolve();
-      this.epoch++; this.clearConsent(); this.review = null; this.restored = null;
+      this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null;
       this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
       this.declaredNew = false; if (this.attempt) this.attempt.retired = true;
       this.inputFamily = family; this.witness = target;
@@ -408,16 +477,19 @@ export class AppleProvisioningController {
         !sameWitness(target, this.witness) || !sameWitness(target, this.capture(family)) ||
         continuation && (this.original !== continuation.api || this.witness !== continuation.witness || this.epoch !== continuation.epoch) ||
         this.disposed || !this.visible || this.reason(mode) || !this.witness || !this.status) return Promise.resolve();
-    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' ? null : mode === 'key-prepare' ? this.keyReview?.identity :
+    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' ? null :
+      mode === 'certificate-create' ? this.certificateReview?.identity : mode === 'certificate-reconcile' ? this.certificateReconciliationReference()?.identity : mode === 'key-prepare' ? this.keyReview?.identity :
       mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
       mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
     if (!request) return Promise.resolve();
     const a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
       previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
+      certificateReviewExpires: mode === 'certificate-create' ? this.certificateReview?.expires ?? null : null,
       retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false };
     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
+    if (isAppleDistributionCertificateMode(mode)) this.certificateReview = null; // Lost Prepare never restores issuance review.
     if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
     this.cancelClaim = null; this.cancelRequested = false; this.clearConsent(); this.mutation++;
     const slot: ActionSlot = { kind: 'prepare', joined: false, original: null, promise: null }; this.action = slot;
@@ -433,7 +505,7 @@ export class AppleProvisioningController {
         if (this.action === slot) this.action = null;
         const op = this.status?.operation;
         if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
-          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity); this.acknowledged = false;
+          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity); this.acknowledged = false;
           if (this.now() >= this.consentUntil) this.invalidate();
           else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed) this.invalidate(); }, this.consentUntil - this.now());
         }
@@ -446,6 +518,7 @@ export class AppleProvisioningController {
     if (!a || !api || a.startClaimed || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
     a.startClaimed = true; a.startedAt = this.now(); this.clearConsent(); this.mutation++;
     if (a.request.mode === 'profile-reuse' || a.request.mode === 'profile-create') this.profileAttempt = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
+    if (a.request.mode === 'certificate-create') this.certificateAttempt = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
     if (a.request.mode === 'register') this.registration = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
     const slot: ActionSlot = { kind: 'start', joined: false, original: null, promise: null }; this.action = slot;
     slot.promise = (async () => {

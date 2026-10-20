@@ -23,10 +23,10 @@ fn original_service_requires_both_grants_and_preserves_request_across_client_rec
         registration: 1,
         document_revision: 1,
         input_revision: 1,
-        read_operation_id: "git-read-1".into(),
+        read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(&doc),
         selection: git::Selection::new(git::Action::Stage, "a".repeat(64), vec!["app/a".into()])
-            .unwrap(),
+            .unwrap().into(),
         commit: None,
         changes,
     });

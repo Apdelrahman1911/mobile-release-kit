@@ -102,7 +102,8 @@ test('only two local-key modes use the original RAW4, with exact P8-only request
   }
   for (const mode of ['key-recover', 'certificate-review', 'certificate-create', 'certificate-reconcile']) {
     assert.equal(parseAppleProvisioningRequest({ ...request(), mode }), null);
-    assert.equal(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }), null);
+    if (mode === 'key-recover') assert.equal(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }), null);
+    else assert.ok(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }));
   }
   assert.equal(parseAppleProvisioningRequest({ ...request(), reference: id('1') }), null);
   assert.equal(parseAppleProvisioningRequest({ ...request('key-prepare'), reference: null }), null);

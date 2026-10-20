@@ -609,6 +609,62 @@ jobs:
               vault_store::macos::tests::apple_key_inventory_compares_old_full_witnesses_and_only_one_new_record \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
             grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            # Current Apple certificate, shared CLI repository and Fetch logic.
+            # Same library binary/cache: 67 new cases plus 24 affected cases.
+            # Six use existing exclusive private Store fixtures and synchronous
+            # close; none invokes Git, a provider, Keychain or a system tool.
+            # Prefix selectors intentionally omit --exact; the count prevents
+            # a missing/renamed test from silently becoming a pass.
+            (
+              umask 077
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+                credential_format::apple::provisioning_certificate::distribution_policy::tests:: \
+                apple_provisioning_protocol::certificate::tests:: \
+                apple_provisioning_protocol::certificate_recovery::tests:: \
+                saved_command_owner::apple_key::certificate::tests:: \
+                saved_command_owner::apple_provisioning::certificate_review::tests:: \
+                asset_session::vault::key_sources::certificate::tests:: \
+                asset_session::store_material::apple_key::tests:: \
+                service_git_repository_protocol::tests:: \
+                service_git_requests::repository_requests::tests:: \
+                asset_session::agent_git_index::repository::tests:: \
+                application_service::git_index::repository::tests:: \
+                installed_cli::git_index::repository_tests:: \
+                git_fetch_protocol::tests:: \
+                git_local_state::fetch_tests:: \
+                github_connection_session::fetch::tests:: \
+                asset_source::macos::git_local_sources::fetch_sources::tests:: \
+                supervisor::git_local::fetch::tests:: \
+                git_local_protocol::fetch_worker::tests:: \
+                runtime::git_fetch::tests:: \
+                apple_provisioning_protocol::tests::closed_prepare_never_accepts_account_path_query_or_old_consent \
+                saved_command_owner::apple_provisioning::tests::apple_original_session_stop_tightens_audit_and_preserves_earliest_failure \
+                saved_command_owner::apple_provisioning::tests::apple_projection_hides_child_data_until_original_terminal_complete \
+                asset_session::apple_key::tests::original_cleanup_guard_keeps_staged_data_and_stop_without_minting_no_generation \
+                apple_provisioning_journal::data::key::tests::certificate_sparse_receipt_and_sent_unknown_cannot_be_rewritten_or_rearmed \
+                apple_provisioning_journal::key::tests::existing_profile_or_certificate_pending_blocks_new_key_without_migration_or_replay \
+                apple_provisioning_journal::key::tests::lost_reserve_ack_survives_restart_without_recreating_original_or_regenerating \
+                service_git_requests::tests::prepare_receipt_does_not_make_ready_and_phase_ids_arm_before_dispatch \
+                service_git_requests::commit::tests::index_grant_and_queries_cannot_consume_or_cancel_commit_and_the_reverse \
+                asset_session::agent_git_index::tests::only_current_successful_observe_data_is_even_eligible_for_native_consent \
+                asset_session::agent_git_index::commit::tests::only_exact_private_draft_and_real_whole_index_review_match_common_native_scope \
+                asset_session::git_local::agent_tests::shared_apply_requires_same_original_request_and_phase_not_matching_public_ids \
+                installed_cli::git_index::tests::compiled_catalogue_names_only_separately_allowed_index_changes_and_stays_bounded \
+                installed_cli::git_index::commit_tests::commit_request_framing_and_catalogue_preserve_no_draft_and_existing_output_cap \
+                application_service::git_index::tests::original_service_requires_both_grants_and_preserves_request_across_client_reconnect \
+                application_service::git_index::commit::tests::same_service_requires_read_and_commit_grants_and_reconnect_cannot_replay \
+                git_local_protocol::tests::strict_local_commands_have_no_provider_or_serialized_plan_route \
+                git_local_protocol::tests::local_admission_keeps_document_writer_and_full_code_partitions_independent \
+                git_local_state::tests::pending_and_unknown_restart_rows_never_authorize_retry \
+                git_local_state::init_tests::init_schema_seven_is_actual_reservation_only_and_old_rows_remain_canonical \
+                supervisor::git_local::tests::local_clock_is_one_original_45_55_with_earliest_failure \
+                supervisor::git_local::tests::local_known_post_go_stop_needs_private_closed_control_and_cancelled_terminal \
+                supervisor::git_local::switch_tests::generic_or_absent_publication_cannot_authorize_switch_old_fd_successors \
+                github_connection_session::tests::supplied_unknown_stays_absorbing_after_late_final_data_and_disconnect \
+                --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 91 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+            )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
             # is retained until this exact, synchronous test process has exited.

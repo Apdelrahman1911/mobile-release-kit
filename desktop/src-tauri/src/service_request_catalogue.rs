@@ -163,13 +163,14 @@ impl Request {
 pub enum AdditionalFamily {
     GitIndex,
     GitCommit,
+    GitRepository,
     Identity,
     VersionReservation,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
         match self {
-            Self::GitIndex | Self::GitCommit => 0,
+            Self::GitIndex | Self::GitCommit | Self::GitRepository => 0,
             Self::Identity => 1,
             Self::VersionReservation => 2,
         }
@@ -178,6 +179,7 @@ impl AdditionalFamily {
         match self {
             Self::GitIndex => "git-index-status",
             Self::GitCommit => "git-commit-status",
+            Self::GitRepository => "git-repository-status",
             Self::Identity => "identity-request-status",
             Self::VersionReservation => "version-reserve-status",
         }

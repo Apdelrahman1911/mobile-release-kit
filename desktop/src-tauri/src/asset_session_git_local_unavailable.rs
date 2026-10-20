@@ -8,6 +8,10 @@ pub(super) enum ReadyReview {}
 #[derive(Clone)]
 pub(crate) struct GitLocalGate {context:wire::Context}
 impl GitLocalGate {
+    pub(crate) fn same_original(&self,_:&Self)->bool {false}
+    pub(crate) fn fetch_go(&self,_:&str,_:&wire::Request,_:impl FnOnce()->bool)->Result<zeroize::Zeroizing<Vec<u8>>,BridgeError> {
+        Err(BridgeError::unavailable("Selected-account Git Fetch is unavailable on this platform."))
+    }
     pub(crate) fn context(&self)->wire::Context {self.context.clone()}
     pub(crate) fn check_current(&self,_:&str)->Result<asset_source::RegisteredRoot,BridgeError> {Err(BridgeError::unavailable("Local Git writes are unavailable on this platform."))}
     pub(crate) fn claim<T>(&self,_:&str,_:impl FnOnce()->Result<T,BridgeError>)->Result<T,BridgeError> {Err(BridgeError::unavailable("Local Git writes are unavailable on this platform."))}

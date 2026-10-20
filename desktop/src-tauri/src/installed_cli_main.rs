@@ -9,6 +9,7 @@ mod service_version_reserve_protocol;
 mod service_version_reserve_requests;
 mod service_git_protocol;
 mod service_git_commit_protocol;
+mod service_git_repository_protocol;
 mod service_git_requests;
 mod service_setup_guidance;
 mod service_android_tools;

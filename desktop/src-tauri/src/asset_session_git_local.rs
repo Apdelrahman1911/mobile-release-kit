@@ -7,6 +7,8 @@ use crate::{git_local_protocol as wire,git_read_protocol as read,
     application_service_host::{ApplicationHost,NativeProject,NativeStateReady,NativeStateTicket},
     edit_owner::SavedEditStamp};
 use std::{path::{Path,PathBuf},sync::OnceLock};
+#[path="asset_session_git_fetch.rs"]
+mod fetch;
 
 pub(super) enum Entry {Original {ticket:GitLocalTicket,gate:GitLocalGate},Finished(wire::Projection)}
 /// No runtime/source/NativeUse/Publisher/Host backreference survives here.
@@ -15,6 +17,7 @@ pub(super) struct ReadyReview {
     public:wire::Prepared,action:wire::Action,root:asset_source::RegisteredRoot,
     stamp:Arc<SavedEditStamp>,epoch:u64,expires:Instant,
     agent:Option<Arc<crate::service_git_requests::NativeLink>>,
+    fetch:Option<crate::github_connection_session::fetch::Pins>,
 }
 impl Drop for ReadyReview {
     fn drop(&mut self) { if let Some(agent)=&self.agent { agent.review_removed(); } }
@@ -37,6 +40,7 @@ struct Selection {
     stamp:Arc<SavedEditStamp>,epoch:u64,review:Option<wire::Review>,
     publisher:Option<Arc<Mutex<PublisherSlot>>>,post:OnceLock<PostPublisher>,ready:OnceLock<Arc<NativeStateReady>>,
     app_data:Option<PathBuf>,agent:Option<Arc<crate::service_git_requests::NativeLink>>,
+    fetch:Option<crate::github_connection_session::fetch::Pins>,
 }
 #[derive(Clone)]
 pub(crate) struct GitLocalGate(Arc<Selection>);
@@ -60,6 +64,7 @@ fn scope_current(document:&Arc<Inner>,state:&DocumentState,context:&wire::Contex
         &&document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==context.generation&&&r==root)
 }
 impl GitLocalGate {
+    pub(crate) fn same_original(&self,other:&Self)->bool {Arc::ptr_eq(&self.0,&other.0)}
     pub(crate) fn agent_arm(&self,id:&str)->Result<(),BridgeError> {
         if let Some(agent)=&self.0.agent {agent.arm(id).map_err(state_error)?;} Ok(())
     }
@@ -103,6 +108,7 @@ impl GitLocalGate {
     }
     fn current_with_edit_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>)->Result<(),BridgeError> {
         if !self.original_locked(document,state,id) {return Err(changed())}
+        self.fetch_current_locked(state,id)?;
         if let Some(agent)=&self.0.agent {agent.current(id).map_err(state_error)?;}
         let epoch=if let Some(publisher)=&self.0.publisher {
             let publisher=publisher.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -123,6 +129,7 @@ impl GitLocalGate {
     /// mutex off Doc; its lock or transitional epoch is not external drift.
     fn agent_watch_current_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str)->Result<(),BridgeError> {
         if !self.original_locked(document,state,id) {return Err(changed())}
+        self.fetch_current_locked(state,id)?;
         if let Some(agent)=&self.0.agent {agent.current(id).map_err(state_error)?;}
         let edit=document.bridge.edits.saved_registration_guard(&document.session_identity)?;
         let (stamp,expected)=self.0.post.get().map_or((&self.0.stamp,self.0.epoch),|p|(&p.stamp,p.project.input_revision));
@@ -241,13 +248,14 @@ fn invalidate_read_data(state:&mut DocumentState) {
     if !git_read::pending(state) {state.git_read=None;}
     state.evidence.revoke(false);
 }
-pub(super) fn pending(state:&DocumentState)->bool {matches!(&state.git_local,Some(Entry::Original {ticket,..}) if !ticket.settled())}
+pub(super) fn pending(state:&DocumentState)->bool {matches!(&state.git_local,Some(Entry::Original {ticket,gate}) if !ticket.settled()||gate.0.fetch.is_some())}
 pub(super) fn stop(state:&DocumentState) {if let Some(Entry::Original {ticket,..})=&state.git_local {if !ticket.settled(){ticket.stop();}}}
 pub(super) fn invalidate(state:&mut DocumentState) {state.git_local_review=None;stop(state);}
 pub(super) fn retained_bytes(state:&DocumentState)->Option<usize> {
     if pending(state) {return None}
     let result=if state.git_local.is_some() {read::RESULT_BACKING} else {0};
-    result.checked_add(if state.git_local_review.is_some(){wire::REVIEW_BACKING}else{0})
+    result.checked_add(if state.git_local_review.is_some(){wire::REVIEW_BACKING}else{0})?
+        .checked_add(fetch::extra_retained(state.git_local_review.as_ref())?)
 }
 fn reason(error:&BridgeError)->(&'static str,read::Outcome) {
     match error.code.as_str() {
@@ -316,7 +324,7 @@ pub(super) fn agent_tick(document:&Arc<Inner>,state:&mut DocumentState) {
 pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
     if state.git_local_review.as_ref().is_some_and(|r|Instant::now()>=r.expires
         ||!scope_current(document,state,&r.public.context,&r.root,state.revision)
-        ||!document.android_registration_control.matches_epoch(r.epoch)||r.agent.as_ref().is_some_and(|a|{a.entry().expire(Instant::now());a.stopped()})) {state.git_local_review=None;}
+        ||!document.android_registration_control.matches_epoch(r.epoch)||!fetch::review_current(state,r)||r.agent.as_ref().is_some_and(|a|{a.entry().expire(Instant::now());a.stopped()})) {state.git_local_review=None;}
     let Some(Entry::Original {ticket,gate})=&state.git_local else {return};
     if !ticket.settled() {return}
     let view=projection(state.git_local.as_ref().expect("same original"));
@@ -329,30 +337,37 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
                     if Instant::now()>=expires {return None}
                     let review=terminal.review().ok()?;
                     if let Some(agent)=&gate.0.agent {
-                        let wire::Review::Files(details)=&review else {return None};
-                        if !agent_git_index::agent_git_files_review_matches(agent.scope(), details) {return None}
-                        if !agent.ready(crate::service_git_protocol::Review {review_id:format!("{}-review",ticket.operation_id()),
-                            expected_index:details.expected_index.clone(),review_digest:details.review_digest.clone(),
-                            document_revision:gate.0.document_revision,registration_generation:gate.0.context.generation},expires).ok()? {return None}
+                        let summary=agent_git_index::agent_git_review(agent.scope(),&review,
+                            format!("{}-review",ticket.operation_id()),gate.0.document_revision,gate.0.context.generation)?;
+                        if !agent.ready(summary,expires).ok()? {return None}
                     }
                     Some(ReadyReview {public:wire::Prepared {review_id:format!("{}-review",ticket.operation_id()),
                         context:gate.context(),action:gate.0.action.public(),review,diff:terminal.result.get("diff").cloned()},
-                        action:gate.0.action.clone(),root:gate.0.root.clone(),stamp:gate.0.stamp.clone(),epoch:gate.0.epoch,expires,agent:gate.0.agent.clone()})
+                        action:gate.0.action.clone(),root:gate.0.root.clone(),stamp:gate.0.stamp.clone(),epoch:gate.0.epoch,expires,agent:gate.0.agent.clone(),fetch:gate.0.fetch.clone()})
                 })()
             },_=>None,
         }
     }else{None};
     if prepared.is_none() {if let Some(agent)=&gate.0.agent {agent.no_review();}}
+    if fetch::finish(state).is_err() {
+        // Original IO may have returned, but contradictory/missing private
+        // Connection retirement evidence cannot free admission or mint a
+        // replacement review. Keep the original entry/hold for attention.
+        state.unknown=true;state.github.retire(crate::github_connection_protocol::Reason::CleanupUnknown);return;
+    }
     state.git_local_review=prepared;state.git_local=Some(Entry::Finished(view));
 }
 impl DocumentBinding {
     pub(super) fn git_local_new_gate(&self,state:&DocumentState)->Result<(),BridgeError> {
+        self.git_local_new_gate_for(state,wire::Kind::Stage)
+    }
+    fn git_local_new_gate_for(&self,state:&DocumentState,kind:wire::Kind)->Result<(),BridgeError> {
         if !state.lifetime.original_bound()||state.lost_observed {return Err(BridgeError::unavailable("The original application document is unavailable."))}
         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
             ||self.inner.bridge.edits.preflight_attention()||state.slot.as_ref().is_some_and(|s|s.phase!=Phase::Idle||!s.owner.resources_settled())
-            ||state.github.native_work_pending()||state.github.registration().is_some() {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
-        if !self.inner.bridge.supervisor.git_local_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
+            ||state.github.native_work_pending()||(kind!=wire::Kind::Fetch&&state.github.registration().is_some()) {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
+        if !self.inner.bridge.supervisor.git_local_profile_available()||kind==wire::Kind::Fetch&&!self.inner.bridge.supervisor.git_fetch_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
     }
     fn git_local_snapshot(&self,state:&DocumentState)->wire::Status {wire::Status {schema_version:1,document_revision:state.revision,
         available:self.inner.bridge.supervisor.git_local_profile_available()&&state.lifetime.original_bound()&&!state.lost_observed,
@@ -377,12 +392,14 @@ impl DocumentBinding {
         let request=wire::StartRequest {phase:wire::Phase::Prepare,project_id:args.project_id.clone(),expected_document_revision:args.expected_document_revision,
             action:Some(args.action.public()),review_id:None};
         let outcome=(|| {
-            self.git_local_new_gate(&state)?;
+            self.git_local_new_gate_for(&state,args.action.kind())?;
             if state.git_local_review.is_some() {return Err(BridgeError::new("busy","Use or close the current Git review first."))}
             if state.revision!=args.expected_document_revision {return Err(changed())}if !args.action.valid(){return Err(BridgeError::invalid())}
             let (generation,root)=self.inner.bridge.native_project(&args.project_id).map_err(|_|changed())?;
+            let fetch=fetch::select(&state,&args.project_id,generation,&args.action,admitted)?;
+            if fetch.is_some()&&agent.is_some(){return Err(BridgeError::invalid())}
             let future=GitLocalAdmission::reservation_bytes(args.action.kind()).ok_or_else(BridgeError::invalid)?;
-            lookup_memory::git_local_admission_bytes(&self.inner,&state,future).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
+            lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,args.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
             let epoch=self.inner.android_registration_control.epoch()?;
             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
             let stamp=Arc::new(edit.stamp()?);
@@ -391,10 +408,10 @@ impl DocumentBinding {
             let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root,
                 context:wire::Context {project_id:args.project_id.clone(),generation,revision:format!("document-{}",args.expected_document_revision)},
                 document_revision:state.revision,action:args.action.clone(),phase:wire::Phase::Prepare,admitted,stamp,epoch,review:None,publisher:None,
-                post:OnceLock::new(),ready:OnceLock::new(),app_data:None,agent}));
+                post:OnceLock::new(),ready:OnceLock::new(),app_data:None,agent,fetch}));
             let reserved=GitLocalAdmission::reserve(gate.clone(),args.action,wire::Phase::Prepare,admitted)?;
             let ticket=self.inner.bridge.supervisor.start_git_local(reserved)?;
-            state.git_local=Some(Entry::Original {ticket,gate});drop(edit);Ok(())
+            state.git_local=Some(Entry::Original {ticket,gate});fetch::retain(&mut state)?;drop(edit);Ok(())
         })();
         self.git_local_started(&state,request,outcome)
     }
@@ -417,7 +434,8 @@ impl DocumentBinding {
             // Do NOT call the ordinary epoch() reconciliation after our own
             // publisher reservation: it properly refuses pending publishers.
             let outcome=(|| {
-                self.git_local_new_gate(&state)?;
+                let kind=state.git_local_review.as_ref().ok_or_else(changed)?.action.kind();
+                self.git_local_new_gate_for(&state,kind)?;
                 if state.revision!=args.expected_document_revision {return Err(changed())}
                 let review=state.git_local_review.as_ref().ok_or_else(changed)?;
                 if !agent_review_matches(review.agent.as_deref(),agent.as_deref()) {return Err(changed());}
@@ -427,8 +445,10 @@ impl DocumentBinding {
                     ||Instant::now()>=review.expires||epoch!=review.epoch
                     ||!scope_current(&self.inner,&state,&review.public.context,&review.root,args.expected_document_revision) {return Err(changed())}
                 if !app_data.is_absolute()||app_data.as_os_str().len()>4096 {return Err(BridgeError::invalid())}
+                let fetch=fetch::selected_review(&state,review,admitted)?;
+                if fetch.is_some()&&agent.is_some(){return Err(BridgeError::invalid())}
                 let future=GitLocalAdmission::reservation_bytes(review.action.kind()).ok_or_else(BridgeError::invalid)?;
-                lookup_memory::git_local_admission_bytes(&self.inner,&state,future).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
+                lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,review.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
                 let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
                 if !edit.matches(&review.stamp) {return Err(changed())}
                 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -437,13 +457,14 @@ impl DocumentBinding {
                     context:wire::Context {project_id:args.project_id.clone(),generation:review.public.context.generation,
                         revision:format!("document-{}",args.expected_document_revision)},document_revision:state.revision,
                     action:review.action.clone(),phase:wire::Phase::Apply,admitted,stamp:review.stamp.clone(),epoch,review:Some(review.public.review.clone()),
-                    publisher:Some(held.clone()),post:OnceLock::new(),ready:OnceLock::new(),app_data:Some(app_data.to_owned()),agent}));
+                    publisher:Some(held.clone()),post:OnceLock::new(),ready:OnceLock::new(),app_data:Some(app_data.to_owned()),agent,fetch}));
                 let reserved=GitLocalAdmission::reserve(gate.clone(),review.action.clone(),wire::Phase::Apply,admitted)?;
                 let ticket=self.inner.bridge.supervisor.start_git_local(reserved)?;
-                // No fallible operation follows insertion. Consume review and
-                // revoke dependent DATA under this SAME actual Document.
+                // Consume before the optional same-Connection hold. A hold
+                // failure retains this actual owner as Unknown, never a new
+                // admission refusal or an unspent Publisher/review.
                 state.git_local=Some(Entry::Original {ticket,gate});state.git_local_review=None;inserted=true;
-                invalidate_read_data(&mut state);drop(edit);drop(publisher);Ok(())
+                invalidate_read_data(&mut state);fetch::retain(&mut state)?;drop(edit);drop(publisher);Ok(())
             })();
             self.git_local_started(&state,request,outcome)
         };

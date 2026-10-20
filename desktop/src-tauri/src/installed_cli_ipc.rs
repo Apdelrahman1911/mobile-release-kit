@@ -259,6 +259,8 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
         p::ResponseBody::GitCommitScope(view) => service.android_tools_client_current(&client, &view.0.project_id)?,
         p::ResponseBody::GitIndexRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::GitCommitRequest(view) => service.android_tools_client_current(&client, &view.0.origin.project_id)?,
+        p::ResponseBody::GitRepositoryScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+        p::ResponseBody::GitRepositoryRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
         p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
         p::ResponseBody::Repository(view) => service.android_tools_client_current(&client, &view.project_id)?,

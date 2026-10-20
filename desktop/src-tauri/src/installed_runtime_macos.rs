@@ -571,6 +571,7 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { upload_key_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
+    fetch_helper_required:bool,fetch_helper:Option<usize>,
     history_nomination: Option<HistoryProviderNomination>, history_provider: Option<usize>,
     store: Option<store_runtime::Originals>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -613,7 +614,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 }
 impl Book {
     fn new() -> Self { Self { upload_key_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
-        history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,
+        history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,fetch_helper_required:false,fetch_helper:None,
         store: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
@@ -974,6 +975,10 @@ impl Book {
                     let expected = files.get(&path).ok_or(AdmissionFailure::Inventory)?;
                     if self.read(index, expected.size, false, end, stop)?.0 != expected.sha256 { return Err(AdmissionFailure::Inventory); }
                     history_runtime::provider_observed(self,&path,index,Some(expected))?;
+                    if self.fetch_helper_required && path=="git_remote_helper_bootstrap.py" {
+                        if self.fetch_helper.is_some() || expected.size==0 || expected.size>64*1024 {return Err(AdmissionFailure::Inventory)}
+                        self.fetch_helper=Some(index);
+                    }
                     if self.tool_ca_required && path=="github-ca.pem" {
                         if self.tool_ca.is_some() || expected.size==0 || expected.size>512*1024 {return Err(AdmissionFailure::Inventory);}
                         self.tool_ca=Some((index,expected.size,expected.sha256.clone()));
@@ -987,6 +992,7 @@ impl Book {
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
                     || history_runtime::provider_retained(self,&path)
                     || self.tool_ca_required && path=="github-ca.pem"
+                    || self.fetch_helper_required && path=="git_remote_helper_bootstrap.py"
                     || self.store.is_some() && store_runtime::retained(&path);
                 if !retain {
                     self.point(end, stop)?;
@@ -1138,6 +1144,9 @@ impl Book {
         if selection.bootstrap == selection.cwd.join("git_local_bootstrap.py") && !files.contains_key("git_local_bootstrap.py") {
             return Err(AdmissionFailure::Inventory);
         }
+        if self.fetch_helper_required && (selection.bootstrap!=selection.cwd.join("git_remote_bootstrap.py")
+            || !files.contains_key("git_remote_bootstrap.py") || !files.contains_key("git_remote_helper_bootstrap.py")
+            || !self.tool_ca_required) {return Err(AdmissionFailure::Inventory)}
         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
             return Err(AdmissionFailure::Inventory);
         }
@@ -1147,6 +1156,7 @@ impl Book {
         let mut observed = BTreeSet::new(); self.walk(root, "", &files, &directories, &mut observed, selection, 0, end, stop)?;
         if observed.len() != files.len() + directories.len() { return Err(AdmissionFailure::Inventory); }
         if self.store.as_ref().is_some_and(|store| !store.complete()) { return Err(AdmissionFailure::Inventory); }
+        if self.fetch_helper_required && (self.fetch_helper.is_none() || self.tool_ca.is_none()){return Err(AdmissionFailure::Inventory)}
         self.point(end, stop)?; self.inspected = true; Ok(())
     }
     fn prepare(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {

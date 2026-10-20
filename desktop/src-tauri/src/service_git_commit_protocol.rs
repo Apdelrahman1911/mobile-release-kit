@@ -10,12 +10,14 @@ pub(crate) const DRAFT_BACKING: usize = 4096 + 128 + 254 + 3 * std::mem::size_of
 pub(crate) enum Family {
     Index,
     Commit,
+    Repository,
 }
 impl Family {
     pub(crate) fn matches(self, action: p::Action) -> bool {
         match self {
             Self::Index => matches!(action, p::Action::Stage | p::Action::Unstage),
             Self::Commit => action == p::Action::Commit,
+            Self::Repository => false,
         }
     }
 }

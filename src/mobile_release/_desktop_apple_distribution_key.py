@@ -151,6 +151,10 @@ class AppleDistributionKeyWork:
         self._binding(self._operation)
         _need(runtime is self._runtime and type(self._scratch) is FiniteScratch)
         name = "apple_distribution_key.rb" if self._mode == PREPARE_MODE else "apple_distribution_key_verify.rb"
+        if self._mode in {"certificate-review", "certificate-create", "certificate-reconcile"}:
+            # Same actual key verifier, preceded by fixed offline resources.
+            # A missing/invalid G3/root refuses BEFORE any certificate POST.
+            name = "apple_distribution_certificate_prepare.rb"
         argv = ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane" / name))
         if self._mode != PREPARE_MODE:
             _need(self._input is not None)

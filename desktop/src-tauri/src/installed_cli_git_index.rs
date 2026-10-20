@@ -24,6 +24,7 @@ fn names(family: Family) -> &'static [&'static str; 5] {
     match family {
         Family::Index => &["git-index-scope", "git-index-prepare", "git-index-start", "git-index-status", "git-index-cancel"],
         Family::Commit => &["git-commit-scope", "git-commit-prepare", "git-commit-start", "git-commit-status", "git-commit-cancel"],
+        Family::Repository => &["git-repository-scope", "git-repository-prepare", "git-repository-start", "git-repository-status", "git-repository-cancel"],
     }
 }
 pub(super) fn recognizes(args: &[OsString]) -> bool { recognizes_for(args, Family::Index) }
@@ -81,7 +82,7 @@ fn framed(body: p::RequestBody) -> Result<p::Request, Error> {
     p::encode_request(&request)?;
     Ok(request)
 }
-fn receipt(q: &git::Query, family: Family) -> String {
+pub(super) fn receipt(q: &git::Query, family: Family) -> String {
     format!("Inspect without replay: mrk {} {} {} {} --json\nRequest STOP: mrk {} {} {} {} --json\n",
     names(family)[3], q.project_id.as_str(), q.service_instance.as_str(), q.request_id.as_str(),
     names(family)[4], q.project_id.as_str(), q.service_instance.as_str(), q.request_id.as_str())
@@ -106,6 +107,7 @@ fn output(
     output_for(response, project, origin, json, Family::Index)
 }
 fn output_for(response: &p::Response, project: &Id, origin: Option<&git::Query>, json: bool, family: Family) -> Result<(u8, Vec<u8>), Error> {
+    if family == Family::Repository { return super::git_repository::output(response, project, origin, json); }
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
     }
@@ -229,7 +231,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
             Command::Scope(p) => (
                 p.clone(),
                 None,
-                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }) },
+                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }), Family::Repository => p::RequestBody::GitRepositoryScope(p::ProjectQuery { project_id: p }) },
             ),
             Command::Prepare {
                 project,
@@ -248,24 +250,24 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                     Some(q.clone()),
                     match family {
                         Family::Index => p::RequestBody::GitIndexPrepare(git::Prepare { origin: q, grant_id: grant }),
-                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }),
+                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Repository => p::RequestBody::GitRepositoryPrepare(git::Prepare { origin: q, grant_id: grant }),
                     },
                 )
             }
             Command::Start(s) => (
                 s.origin.project_id.clone(),
                 Some(s.origin.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s) },
+                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s), Family::Repository => p::RequestBody::GitRepositoryStart(s) },
             ),
             Command::Status(q) => (
                 q.project_id.clone(),
                 Some(q.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q) },
+                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q), Family::Repository => p::RequestBody::GitRepositoryStatus(q) },
             ),
             Command::Cancel(q) => (
                 q.project_id.clone(),
                 Some(q.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q) },
+                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q), Family::Repository => p::RequestBody::GitRepositoryCancel(q) },
             ),
         };
         let result = (|| {
@@ -297,3 +299,7 @@ mod commit_tests;
 #[cfg(test)]
 #[path = "installed_cli_git_index_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "installed_cli_git_repository_tests.rs"]
+mod repository_tests;
