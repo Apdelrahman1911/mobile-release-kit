@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use std::time::Instant;
 use zeroize::Zeroizing;
 
+#[path="git_switch_sources_macos.rs"]
+mod switch_sources;
+
 const SOURCE_LIMIT: usize = 128;
 struct RefEdge {
     parent: usize,
@@ -67,6 +70,7 @@ pub(crate) struct GitLocalSources {
     reference: Option<RefEdge>,
     replacement: Option<Replacement>,
     post_claimed: bool,
+    switch:Option<switch_sources::State>,
 }
 impl Drop for GitLocalSources {
     fn drop(&mut self) {
@@ -92,7 +96,7 @@ impl GitLocalSources {
             git: None,
             indices: [None; 4],
             operation_id: None, review: None, reference: None, replacement: None,
-            post_claimed: false,
+            post_claimed: false, switch:None,
         }
     }
     pub(crate) fn not_started(&self) -> bool {
@@ -102,7 +106,8 @@ impl GitLocalSources {
         SOURCE_LIMIT
             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
             .checked_add(std::mem::size_of::<Self>() + 65536 + 5 * PATH_LIMIT + 4096)?
-            .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
+            .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
+            .checked_add(switch_sources::State::working_bytes()?)
     }
     pub(crate) fn first_failure(&self) -> Option<(Failure, Instant)> {
         self.acl.as_ref().and_then(SnapshotBook::first_failure)
@@ -275,6 +280,7 @@ impl GitLocalSources {
         Ok(current)
     }
     fn snapshot_original(&self, index: usize, maximum: u64, stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
+        if self.switch_is_old(index) {return self.switch_snapshot_original(index,maximum,stop)}
         let Some(replacement) = self.replacement.as_ref().filter(|v|v.old==Some(index)) else {return self.snapshot(index,maximum,stop)};
         checkpoint(stop)?;
         let held = stat::fstat(self.book.fd(index)?).map_err(|_|Reason::SourceChanged)?;
@@ -292,12 +298,18 @@ impl GitLocalSources {
     /// witness; candidate-shaped DATA alone cannot call this exception.
     pub(crate) fn post_returned(&mut self, publication: Option<&GitLocalPublication>,
         stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
-        if self.finished || self.first.is_some() || self.post_claimed {return Err(Reason::SourceChanged)}
+        if self.finished || self.first.is_some() || self.post_claimed {
+            if self.switch.is_some() {self.retain_switch_unknown();return Err(Reason::CleanupUnknown)}
+            return Err(Reason::SourceChanged)
+        }
         self.post_claimed = true;
         let result = (|| {
             if let Some(publication) = publication {
                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
+                if review.action()==wire::Kind::BranchSwitch {
+                    self.switch_returned(publication,stop)?;return self.post_inner(stop)
+                }
                 let intent = publication.intent_for(self.operation_id.as_deref().ok_or(Reason::SourceChanged)?,native,review)?.clone();
                 if self.replacement.is_some() {return Err(Reason::SourceChanged)}
                 let uid = native.uid;
@@ -313,6 +325,7 @@ impl GitLocalSources {
                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
                     },
+                    wire::Kind::BranchSwitch=>return Err(Reason::SourceChanged),
                 };
                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
@@ -321,6 +334,9 @@ impl GitLocalSources {
             }
             self.post_inner(stop)
         })();
+        // After a child return, a missing/failed exact switch-source rematch
+        // cannot release the target lock as a harmless stale-source refusal.
+        if result.is_err() && self.switch.is_some() {self.retain_switch_unknown();return Err(Reason::CleanupUnknown)}
         self.remember(result)
     }
     pub(crate) fn inspect(&mut self, root: &RegisteredRoot, runtime_live: usize, id: &str,
@@ -339,7 +355,9 @@ impl GitLocalSources {
             let project_parts = parts(&root.path)?;
             let tool_parts = parts(Path::new(wire::TOOL_PATH))?;
             let parent_parts = &tool_parts[..tool_parts.len() - 1];
-            let capacity = roster_limit([project_parts.len(), parent_parts.len()], 42 + source_extra(&project_parts))?;
+            let extra=(42usize).checked_add(source_extra(&project_parts))
+                .and_then(|n|switch_sources::State::extra(review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
+            let capacity = roster_limit([project_parts.len(), parent_parts.len()], extra)?;
             if capacity > SOURCE_LIMIT
                 || capacity
                     .checked_add(runtime_live)
@@ -410,6 +428,7 @@ impl GitLocalSources {
                 return Err(Reason::SourceRefused);
             }
             self.native = Some(native);
+            if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}
             if review.is_some_and(|v| matches!(v.action(),wire::Kind::Commit|wire::Kind::BranchCreate)) { self.capture_reference(stop)?; }
             self.post_inner(stop)
         })();
@@ -426,7 +445,9 @@ impl GitLocalSources {
             filesystem(fd, stop)?;
             let held = stat::fstat(fd).map_err(|_| Reason::SourceChanged)?;
             checkpoint(stop)?;
-            if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
+            if self.switch_is_old(index) {
+                self.switch_old_identity(index,&held)?;
+            } else if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
                 self.old_identity(index,&held)?;
             } else {
                 let named = if let Some(parent) = slot.parent {
@@ -514,7 +535,7 @@ impl GitLocalSources {
             let maximum = if matches!(replacement.intent.action(),wire::Kind::Commit|wire::Kind::BranchCreate) {65} else {wire::INDEX_LIMIT};
             if self.snapshot(replacement.successor,maximum,stop)? != replacement.successor_snapshot {return Err(Reason::SourceChanged)}
         }
-        Ok(())
+        self.post_switch(stop)
     }
     pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         if self.finished || self.first.is_some() || self.post_claimed {
@@ -543,7 +564,7 @@ impl GitLocalSources {
                 return Err(Reason::CleanupUnknown);
             }
         }
-        if expired(self.first_failure()) || !self.book.close_all() || expired(self.first_failure()) {
+        if expired(self.first_failure()) || !self.close_switch_book(expired) || expired(self.first_failure()) {
             return Err(Reason::CleanupUnknown);
         }
         self.close_failed = false;

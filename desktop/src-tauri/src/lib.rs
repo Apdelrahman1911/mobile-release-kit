@@ -107,6 +107,7 @@ mod git_read_protocol;
 mod version_enrollment_protocol;
 mod git_local_protocol;
 mod git_branch_protocol;
+mod git_switch_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;

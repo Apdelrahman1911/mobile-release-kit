@@ -46,7 +46,7 @@ fn schema_two_is_closed_and_cannot_import_branch_data_as_a_legacy_row() {
     let mut state=State::empty();state.reserve(row(2)).unwrap();let good=snapshot(&state);
     for mutate in [
         (|v:&mut serde_json::Value|v["schemaVersion"]=json!(1)) as fn(&mut serde_json::Value),
-        |v|v["schemaVersion"]=json!(3),
+        |v|v["schemaVersion"]=json!(4),
         |v|v["rows"][0]["branch"]["expectedTargetAbsent"]=json!(false),
         |v|v["rows"][0]["branch"]["targetRef"]=json!("refs/heads/main"),
         |v|v["rows"][0]["candidateIndex"]=json!("4".repeat(64)),
