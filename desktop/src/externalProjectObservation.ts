@@ -7,6 +7,7 @@ import { copyBoundedComparisonData, parseSavedConfigContent, sameSavedConfig } f
 import { parseReleaseVersionObservation } from './releaseVersion.ts';
 import type { ReleaseVersionObservation, ReleaseVersionState } from './releaseVersion.ts';
 import { parseSetupAnalysis } from './smartSetup.ts';
+import { parseProjectScriptDiscovery } from './projectScripts.ts';
 import type { ApiError, JsonObject, ProjectSnapshot } from './types.ts';
 
 export const EXTERNAL_PROJECT_CHECK_INTERVAL_MS = 30_000;
@@ -49,8 +50,9 @@ export function parseExternalProjectSnapshot(value: unknown): ProjectSnapshot | 
   try {
     const input = copyBoundedComparisonData(value, 3 * 1024 * 1024, 32_768);
     const hasSetupAnalysis = record(input) && Object.hasOwn(input, 'setupAnalysis');
+    const hasScriptDiscovery = record(input) && Object.hasOwn(input, 'scriptDiscovery');
     if (!keys(input, ['root', 'observedAt', 'observationScope', 'config', 'discovery', 'assurance', 'issues',
-      ...(hasSetupAnalysis ? ['setupAnalysis'] : [])]) ||
+      ...(hasSetupAnalysis ? ['setupAnalysis'] : []), ...(hasScriptDiscovery ? ['scriptDiscovery'] : [])]) ||
         !boundedText(input.root, 4096) || input.root.length === 0 || !boundedText(input.observedAt, 64) ||
         !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(input.observedAt) ||
         !Number.isFinite(Date.parse(input.observedAt)) || input.observationScope !== 'single-request-non-atomic' || !issues(input.issues)) return null;
@@ -72,6 +74,10 @@ export function parseExternalProjectSnapshot(value: unknown): ProjectSnapshot | 
       const analysis = parseSetupAnalysis(input.setupAnalysis);
       if (!analysis || analysis.configurationState !== config.state || analysis.discoveryPartial !== discovery.partial) return null;
     }
+    if (hasScriptDiscovery) {
+      const scripts = parseProjectScriptDiscovery(input.scriptDiscovery);
+      if (!scripts || scripts.sourcePartial !== discovery.partial) return null;
+    }
     return freeze(input as unknown as ProjectSnapshot);
   } catch { return null; }
 }
@@ -91,6 +97,7 @@ export function sameExternalProjectSnapshot(a: ProjectSnapshot, b: ProjectSnapsh
     config: { ...snapshot.config, content: snapshot.config.content ? { ...snapshot.config.content } : null,
       issues: snapshot.config.issues.map((issue) => ({ ...issue })) },
     discovery: { ...snapshot.discovery, scan: { ...snapshot.discovery.scan }, limits: { ...snapshot.discovery.limits } },
+    ...(snapshot.scriptDiscovery === undefined ? {} : { scriptDiscovery: snapshot.scriptDiscovery }),
     assurance: { ...snapshot.assurance }, issues: snapshot.issues.map((issue) => ({ ...issue })),
   });
   return sameJson(comparison(a), comparison(b));

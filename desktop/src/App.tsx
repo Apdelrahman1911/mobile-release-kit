@@ -113,6 +113,9 @@ import type { ProjectPathState } from './projectPaths.ts';
 import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page, ProjectPathField } from './types.ts';
 import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
 import { DraftEditor } from './components/DraftEditor.tsx';
+import { ProjectScripts } from './components/ProjectScripts.tsx';
+import { applyProjectScriptEdit } from './projectScripts.ts';
+import type { ProjectScriptContext } from './projectScripts.ts';
 import { ConfigSave } from './components/ConfigSave.tsx';
 import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
 import { GitHubConnection } from './components/GitHubConnection.tsx';
@@ -408,7 +411,7 @@ export function App() {
     initializationControllerRef.current?.beforeWorkspaceAction(action);
     const previous = workspaceRef.current;
     const next = workspaceReducer(previous, action);
-    if (next === previous) return;
+    if (next === previous) return false;
     if (next.selectedId !== previous.selectedId) {
       // Retire before publishing the project change; even away-and-back cannot
       // adopt an older catalogue reply. No native document/session is invented.
@@ -447,6 +450,7 @@ export function App() {
     editControllerRef.current?.syncDraft();
     syncConnectionContext();
     githubHistoryControllerRef.current?.syncContext();
+    return true; // Reports only this local reducer update, never a native save.
   }, [syncConnectionContext, retirePathPicker, retireIdentity]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
@@ -1734,9 +1738,20 @@ export function App() {
 
   const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initializationRetainsDraft(initialization.getSnapshot(),projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
 
+  const projectScriptsContext = (): ProjectScriptContext => {
+    const current = workspaceRef.current, service = pathService.current;
+    return { session: current.selectedId ? current.projects[current.selectedId] ?? null : null, catalog,
+      service: service.api?.mode === 'native' ? service : null, epoch: identityEpoch.current, preview,
+      // This is only a local draft edit: an idle connected account is not a
+      // reason to disconnect, but pending/unknown owners and reviews still gate.
+      reason: bootstrapPending.current ? 'Wait for the current application capabilities.' :
+        projectPathOwnerReason(pathPickerRef.current) ?? savedCommandBusy() ?? savedCommandPrerequisiteReason(false, false, undefined, false, true) };
+  };
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
+    projectScripts={metadataOnly ? null : <ProjectScripts context={projectScriptsContext()}
+      onAdd={(intent) => applyProjectScriptEdit(intent, projectScriptsContext, (action) => dispatch(action))} onHelp={setHelp} />}
     chooseReason={chooseReason}
     pathPicker={{ reason: projectPathStartReason(), pendingField: pathPicker.eligible?.field ?? null, onBrowse: (field) => void chooseProjectPath(field) }}
     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}

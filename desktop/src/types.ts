@@ -314,6 +314,7 @@ export interface ProjectSnapshot {
   assurance: Assurance;
   issues: Issue[];
   setupAnalysis?: JsonObject;
+  scriptDiscovery?: JsonObject;
 }
 
 export interface ProjectReference { id: string; name: string; path: string }

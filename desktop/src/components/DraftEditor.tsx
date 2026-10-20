@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { fieldsFor } from '../catalog.ts';
 import { draftStatus } from '../certainty.ts';
 import { isDirty, savedRevisionFresh, validationFresh } from '../drafts.ts';
@@ -19,6 +20,7 @@ interface EditorProps {
   catalog: Catalog | null;
   session: ProjectSession | null;
   metadataOnly?: boolean;
+  projectScripts?: ReactNode;
   preview: boolean;
   chooseReason: string | null;
   pathPicker: ProjectPathControls;
@@ -42,7 +44,7 @@ interface EditorProps {
   onHelp: (help: HelpContent) => void;
 }
 
-export function DraftEditor({ catalog, session, metadataOnly = false, preview, chooseReason, pathPicker, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
+export function DraftEditor({ catalog, session, metadataOnly = false, projectScripts, preview, chooseReason, pathPicker, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
   const [search, setSearch] = useState('');
   if (!session) return <div className="card"><EmptyState icon="folder" title="First, choose a project" description="The native folder picker establishes the project boundary. Drafts remain separate for every project you open."><button className="button primary" disabled={chooseReason !== null} aria-describedby={chooseReason ? 'draft-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : 'Choose project folder'}</button>{chooseReason && <p id="draft-choose-reason" className="toolbar-reason">{chooseReason}</p>}</EmptyState></div>;
   if (!catalog) return <div className="card"><EmptyState icon="settings" title="The field catalogue is unavailable" description="A compatible core must provide the schema and contextual help before configuration controls are enabled. No fallback policy is substituted." /></div>;
@@ -83,6 +85,7 @@ export function DraftEditor({ catalog, session, metadataOnly = false, preview, c
       </section>
       {count === 0 && <div className="card"><EmptyState compact icon="search" title="No matching metadata settings" description="Try a different term." /></div>}
     </div> : <GuidedConfigurationFields catalog={catalog} session={session} preview={preview} pathPicker={pathPicker} reviewReason={reviewReason} onReview={onReview} onEdit={onEdit} onHelp={onHelp} />}
+    {!metadataOnly && projectScripts}
     <DraftSaveActions session={session} status={{ tone: status.tone, label: statusText }} saveReason={saveReason} discardReason={discardReason}
       validateReason={validateReason} reviewReason={reviewReason} onPrepareSave={onPrepareSave} onDiscard={onDiscard}
       onValidate={onValidate} onReview={onReview} onHelp={onHelp} />

@@ -115,7 +115,7 @@ export type WorkspaceAction =
   | { type: 'snapshot-done'; projectId: string; requestId: number; snapshot: ProjectSnapshot; observedAt: number }
   | { type: 'snapshot-failed'; projectId: string; requestId: number; error: ApiError }
   | { type: 'new-draft'; projectId: string; draft: JsonObject }
-  | { type: 'edit'; projectId: string; path: string; value: JsonValue | undefined }
+  | { type: 'edit'; projectId: string; path: string; value: JsonValue | undefined; expectedSession?: ProjectSession }
   | { type: 'remove-forbidden'; projectId: string; reviewId: number; paths: string[] }
   | { type: 'undo-removal'; projectId: string; removalId: number }
   | { type: 'forget-removal'; projectId: string; removalId: number }
@@ -263,6 +263,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       next = { ...session, draft: action.draft, draftOrigin: 'empty', revision: session.revision + 1, validationError: null, editError: null };
       break;
     case 'edit': {
+      // Guided script appends must not overwrite a reentrant newer draft.
+      if (action.expectedSession !== undefined && (state.selectedId !== action.projectId || session !== action.expectedSession)) return state;
       if (session.draft === null) return state;
       if (blockingAncestor(session.draft, action.path) !== null) {
         next = editFailure(session, 'A parent field has a non-object value. It was preserved; a child control cannot replace it.');
