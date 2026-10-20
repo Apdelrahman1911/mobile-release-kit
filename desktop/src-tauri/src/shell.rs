@@ -2503,6 +2503,17 @@ async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Requ
     actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
 }
 
+// Non-async: Tauri executes this original command on the main thread. The
+// native shim checks that again; no dispatch queue can outlive the Doc gate.
+#[tauri::command]
+fn github_browser_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_browser_protocol::RequestSent, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Browser handoff has no fixture admission."));
+    edit_window(&webview)?;
+    let tauri::ipc::InvokeBody::Raw(bytes)=request.body() else {return Err(BridgeError::invalid());};
+    let selected=crate::github_browser_protocol::decode(bytes)?;
+    state.document.github_browser_open(&selected)
+}
+
 fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
@@ -5104,7 +5115,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
             github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
-            github_activity_status, github_activity_read, github_activity_cancel,
+            github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,

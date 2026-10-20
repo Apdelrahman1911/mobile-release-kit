@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path="github_pull_request_management.rs"]
+mod management;
+
 pub(crate) const PROTOCOL: &str = "mrk-github-pull-request/1";
 pub(crate) const EVENT: &str = "github-pull-request-status";
 pub(crate) const INITIAL_LIMIT: usize = 8192;
@@ -86,6 +89,7 @@ pub(crate) enum Effect {
     PotentiallyApplied,
     AcknowledgedUnconfirmed,
     CreatedObserved,
+    ClosedConfirmed,
     Unresolved,
     FoundUnattributed,
 }
@@ -290,8 +294,8 @@ impl Comparison {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Prepared {
     pub(crate) target: Target,
-    base_sha: String,
-    head_sha: String,
+    pub(super) base_sha: String,
+    pub(super) head_sha: String,
     comparison: Comparison,
     draft: bool,
     creation_permission: String,
@@ -353,6 +357,8 @@ pub(crate) struct Pending {
     pub(crate) claimed: bool,
     #[serde(deserialize_with = "nullable")]
     pub(crate) acknowledged: Option<Acknowledgement>,
+    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="management::present")]
+    pub(crate) closed: Option<management::Closed>,
 }
 impl Pending {
     fn valid(&self) -> bool {
@@ -361,13 +367,14 @@ impl Pending {
                 .acknowledged
                 .as_ref()
                 .is_none_or(|v| self.claimed && v.valid(&self.prepared))
+            && self.closed.as_ref().is_none_or(|c| self.claimed && self.acknowledged.as_ref().is_some_and(|a| c.valid(a)))
     }
     fn heap(&self) -> Option<usize> {
         self.prepared.heap()?.checked_add(
             self.acknowledged
                 .as_ref()
                 .map_or(Some(0), Acknowledgement::heap)?,
-        )
+        )?.checked_add(self.closed.as_ref().map_or(Some(0), management::Closed::heap)?)
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -549,6 +556,10 @@ impl Creation {
                     && self.acknowledged.is_some()
                     && self.acknowledged == self.observed
                     && self.reason == Reason::None
+            }
+            Effect::ClosedConfirmed => {
+                r.kind == Kind::Reconcile && self.claimed && self.acknowledged.is_some()
+                    && self.acknowledged == self.observed && self.reason == Reason::None
             }
             Effect::Unresolved => {
                 r.kind == Kind::Reconcile && self.observed.is_none() && self.reason != Reason::None

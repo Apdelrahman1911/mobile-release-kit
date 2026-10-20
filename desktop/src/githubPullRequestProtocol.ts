@@ -1,5 +1,7 @@
 // One closed draft-PR route on the existing native connection. No token, push,
 // merge, ready-for-review, workflow dispatch or provider URL crosses this port.
+import { encodeGitHubBrowserRequest, pullRequestClosed } from './githubPullRequestManagement.ts';
+import type { GitHubBrowserRequest, PullRequestClosed } from './githubPullRequestManagement.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, connectionNumericId as numeric, connectionOpaqueId as id,
   connectionUtc as utc, sameConnectionData as same } from './githubConnectionProtocol.ts';
@@ -12,20 +14,20 @@ export const PULL_REQUEST_REASONS = ['none','invalid-input','target-changed','br
   'resources-unavailable','runtime-unavailable','unqualified','not-connected','busy','cleanup-unknown','consent-expired'] as const;
 export type PullRequestReason = typeof PULL_REQUEST_REASONS[number];
 export type PullRequestKind = 'prepare'|'create'|'pending'|'reconcile';
-export type PullRequestEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'unresolved'|'found-unattributed';
+export type PullRequestEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'closed-confirmed'|'unresolved'|'found-unattributed';
 export interface PullRequestDraft {base:string;head:string;title:string;body:string}
 export interface PullRequestScope {projectBinding:string;repository:string;accountId:string;repositoryId:string}
 export interface PullRequestIntent {base:string;head:string;marker:string;titleSha256:string;bodySha256:string}
 export interface PullRequestTarget {scope:PullRequestScope;intent:PullRequestIntent|null}
 export interface PullRequestPrepared {target:PullRequestTarget;baseSha:string;headSha:string;comparison:{aheadBy:number;behindBy:number;totalCommits:number;reportedFiles:number;coverage:'windowed';files:{path:string;change:string}[]};draft:true;creationPermission:'not-proven';confirmation:string}
 export interface PullRequestAcknowledgement {id:string;number:string;url:string}
-export interface PullRequestPending {prepared:PullRequestPrepared;claimed:boolean;acknowledged:PullRequestAcknowledgement|null}
+export interface PullRequestPending {prepared:PullRequestPrepared;claimed:boolean;acknowledged:PullRequestAcknowledgement|null;closed?:PullRequestClosed}
 export interface PullRequestConsent {id:string;expiresAt:string;prepared:PullRequestPrepared}
 export interface PullRequestOperation {id:string;projectId:string;kind:PullRequestKind;target:PullRequestTarget;phase:'running'|'stopping'|'settled'|'cleanup-unknown';reason:PullRequestReason;effect:PullRequestEffect}
 export interface PullRequestStatus {schemaVersion:1;revision:number;sessionId:string|null;available:boolean;reason:PullRequestReason;operation:PullRequestOperation|null;consent:PullRequestConsent|null;pending:PullRequestPending[];observed:PullRequestAcknowledgement|null;acknowledged:PullRequestAcknowledgement|null}
 export interface PullRequestPrepare {sessionId:string;expectedRevision:number;expectedConnectionRevision:number;draft:PullRequestDraft}
 export interface PullRequestCreate {sessionId:string;expectedRevision:number;consentId:string;confirm:true}
-export interface PullRequestPort {readonly mode:'native';status():Promise<unknown>;prepare(a:PullRequestPrepare):Promise<unknown>;create(a:PullRequestCreate):Promise<unknown>;pending(a:{sessionId:string;expectedRevision:number;expectedConnectionRevision:number}):Promise<unknown>;reconcile(a:{sessionId:string;expectedRevision:number;marker:string}):Promise<unknown>;discard(a:{sessionId:string;expectedRevision:number;consentId:string}):Promise<unknown>;cancel(a:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
+export interface PullRequestPort {readonly mode:'native';openBrowser?(request:GitHubBrowserRequest):Promise<unknown>;status():Promise<unknown>;prepare(a:PullRequestPrepare):Promise<unknown>;create(a:PullRequestCreate):Promise<unknown>;pending(a:{sessionId:string;expectedRevision:number;expectedConnectionRevision:number}):Promise<unknown>;reconcile(a:{sessionId:string;expectedRevision:number;marker:string}):Promise<unknown>;discard(a:{sessionId:string;expectedRevision:number;consentId:string}):Promise<unknown>;cancel(a:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
 export type PullRequestCommand = `github_pull_request_${'status'|'prepare'|'create'|'pending'|'reconcile'|'discard'|'cancel'}`;
 const one=<T extends string>(v:unknown,items:readonly T[]):v is T=>typeof v==='string'&&(items as readonly string[]).includes(v);
 const rev=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>0&&v<=0xffff_fffe;
@@ -45,19 +47,20 @@ function prepared(v:unknown):v is PullRequestPrepared{
   const paths=new Set<string>();return c.files.every(f=>{if(!keys(f,['path','change'])||!text(f.path,192)||!one(f.change,['added','removed','modified','renamed','copied','changed','unchanged'])||paths.has(f.path))return false;paths.add(f.path);return true;})&&new TextEncoder().encode(JSON.stringify(v)).length<=4096-64;
 }
 function acknowledgement(v:unknown,t:PullRequestTarget):v is PullRequestAcknowledgement{return keys(v,['id','number','url'])&&numeric(v.id)&&numeric(v.number)&&v.url===`https://github.com/${t.scope.repository}/pull/${v.number}`;}
-function pending(v:unknown):v is PullRequestPending{return keys(v,['prepared','claimed','acknowledged'])&&prepared(v.prepared)&&typeof v.claimed==='boolean'&&(v.acknowledged===null||v.claimed&&acknowledgement(v.acknowledged,v.prepared.target));}
+function pending(v:unknown):v is PullRequestPending{return (keys(v,['prepared','claimed','acknowledged'])||keys(v,['prepared','claimed','acknowledged','closed']))&&prepared(v.prepared)&&typeof v.claimed==='boolean'&&(v.acknowledged===null||v.claimed&&acknowledgement(v.acknowledged,v.prepared.target))&&(!Object.hasOwn(v,'closed')||v.claimed&&pullRequestClosed(v.closed,v.acknowledged as PullRequestAcknowledgement|null));}
 export function parsePullRequestStatus(raw:unknown):PullRequestStatus|null{
   try{const v=copyBoundedComparisonData(raw,192*1024,8192);
     if(!keys(v,['schemaVersion','revision','sessionId','available','reason','operation','consent','pending','observed','acknowledged'])||v.schemaVersion!==1||!rev(v.revision)||(v.sessionId!==null&&!id(v.sessionId))||typeof v.available!=='boolean'||!one(v.reason,PULL_REQUEST_REASONS)||v.available!==(v.reason==='none'))return null;
     const o=v.operation;
-    if(o!==null&&(!keys(o,['id','projectId','kind','target','phase','reason','effect'])||!id(o.id)||!id(o.projectId)||!one(o.kind,['prepare','create','pending','reconcile'])||!target(o.target)||(o.kind==='pending')!==(o.target.intent===null)||!one(o.phase,['running','stopping','settled','cleanup-unknown'])||!one(o.reason,PULL_REQUEST_REASONS)||!one(o.effect,['none','not-sent','potentially-applied','acknowledged-unconfirmed','created-observed','unresolved','found-unattributed'])||v.sessionId===null||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||(o.kind==='prepare'||o.kind==='pending')&&o.effect!=='none'))return null;
+    if(o!==null&&(!keys(o,['id','projectId','kind','target','phase','reason','effect'])||!id(o.id)||!id(o.projectId)||!one(o.kind,['prepare','create','pending','reconcile'])||!target(o.target)||(o.kind==='pending')!==(o.target.intent===null)||!one(o.phase,['running','stopping','settled','cleanup-unknown'])||!one(o.reason,PULL_REQUEST_REASONS)||!one(o.effect,['none','not-sent','potentially-applied','acknowledged-unconfirmed','created-observed','closed-confirmed','unresolved','found-unattributed'])||v.sessionId===null||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||(o.kind==='prepare'||o.kind==='pending')&&o.effect!=='none'))return null;
     const c=v.consent;if(c!==null&&(!keys(c,['id','expiresAt','prepared'])||!hex(c.id,32)||!utc(c.expiresAt)||!prepared(c.prepared)||!o||o.kind!=='prepare'||o.phase!=='settled'||o.reason!=='none'||!same(c.prepared.target,o.target)))return null;
     if(!Array.isArray(v.pending)||v.pending.length>32)return null;
     const markers=new Set<string>();for(const r of v.pending){if(!pending(r)||!r.prepared.target.intent||markers.has(r.prepared.target.intent.marker))return null;markers.add(r.prepared.target.intent.marker);}
     const selectedTarget=o===null?null:o.target;if(selectedTarget!==null&&!target(selectedTarget))return null;
     if(v.acknowledged!==null&&(!o||!selectedTarget||o.phase!=='settled'||!one(o.kind,['create','reconcile'])||!acknowledgement(v.acknowledged,selectedTarget)))return null;
-    if(v.observed!==null&&(!o||!selectedTarget||o.phase!=='settled'||!acknowledgement(v.observed,selectedTarget)||!(o.effect==='created-observed'&&o.reason==='none'&&same(v.acknowledged,v.observed)||o.effect==='found-unattributed'&&o.reason==='unattributed'&&v.acknowledged===null)))return null;
-    if(o?.effect==='created-observed'&&(v.acknowledged===null||v.observed===null)||o?.effect==='acknowledged-unconfirmed'&&v.acknowledged===null||o?.effect==='found-unattributed'&&v.observed===null)return null;
+    if(v.observed!==null&&(!o||!selectedTarget||o.phase!=='settled'||!acknowledgement(v.observed,selectedTarget)||!((o.effect==='created-observed'||o.kind==='reconcile'&&o.effect==='closed-confirmed')&&o.reason==='none'&&same(v.acknowledged,v.observed)||o.effect==='found-unattributed'&&o.reason==='unattributed'&&v.acknowledged===null)))return null;
+    if((o?.effect==='created-observed'||o?.effect==='closed-confirmed')&&(v.acknowledged===null||v.observed===null)||o?.effect==='acknowledged-unconfirmed'&&v.acknowledged===null||o?.effect==='found-unattributed'&&v.observed===null)return null;
+    if(o?.effect==='closed-confirmed'&&(o.kind!=='reconcile'||o.phase!=='settled'||o.reason!=='none'))return null;
     return v as unknown as PullRequestStatus;
   }catch{return null;}
 }
@@ -72,10 +75,10 @@ export function encodePullRequestRequest(command:PullRequestCommand,raw:unknown)
     if(!ok)return null;const b=new TextEncoder().encode(JSON.stringify(v));return b.length<=max?b:null;
   }catch{return null;}
 }
-export function createGitHubPullRequestPort(mode:string,invoke:(name:PullRequestCommand,bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof PULL_REQUEST_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):PullRequestPort|null{
+export function createGitHubPullRequestPort(mode:string,invoke:(name:PullRequestCommand|'github_browser_open',bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof PULL_REQUEST_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):PullRequestPort|null{
   if(mode!=='native'||!listen)return null;
   const call=(name:PullRequestCommand,v:unknown)=>{const bytes=encodePullRequestRequest(name,v);if(!bytes)throw {code:'github_pull_request_refused_invalid_input'};return invoke(name,bytes);};
-  return Object.freeze({mode:'native',status:()=>call('github_pull_request_status',{}),prepare:(a)=>call('github_pull_request_prepare',a),create:(a)=>call('github_pull_request_create',a),pending:(a)=>call('github_pull_request_pending',a),reconcile:(a)=>call('github_pull_request_reconcile',a),discard:(a)=>call('github_pull_request_discard',a),cancel:(a)=>call('github_pull_request_cancel',a),subscribe:(f)=>listen(PULL_REQUEST_EVENT,f)} satisfies PullRequestPort);
+  return Object.freeze({mode:'native',openBrowser:(request:GitHubBrowserRequest)=>{const bytes=encodeGitHubBrowserRequest(request);if(!bytes)throw {code:'github_browser_refused'};return invoke('github_browser_open',bytes);},status:()=>call('github_pull_request_status',{}),prepare:(a)=>call('github_pull_request_prepare',a),create:(a)=>call('github_pull_request_create',a),pending:(a)=>call('github_pull_request_pending',a),reconcile:(a)=>call('github_pull_request_reconcile',a),discard:(a)=>call('github_pull_request_discard',a),cancel:(a)=>call('github_pull_request_cancel',a),subscribe:(f)=>listen(PULL_REQUEST_EVENT,f)} satisfies PullRequestPort);
 }
 export function pullRequestError(raw:unknown):{reason:PullRequestReason;notAdmitted:boolean}{
   try{const d=raw&&typeof raw==='object'?Object.getOwnPropertyDescriptor(raw,'code'):null,code=d&&Object.hasOwn(d,'value')?d.value:null;

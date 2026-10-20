@@ -18,6 +18,7 @@ import { GitHubActivity } from './components/GitHubActivity.tsx';
 import { GitHubPullRequestController } from './githubPullRequestController.ts';
 import { GitHubActionsRetryController } from './githubActionsRetryController.ts';
 import { GitHubPullRequest } from './components/GitHubPullRequest.tsx';
+import { PullRequestFollowup } from './components/PullRequestManagement.tsx';
 import { GitHubActionsRetry } from './components/GitHubActionsRetry.tsx';
 import { GitHubRepositoryCreate } from './components/GitHubRepositoryCreate.tsx';
 import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
@@ -2140,6 +2141,7 @@ export function App() {
               ? gitReadState.observation?.observation.branch ?? null : null} />
             <GitHubActionsRetry controller={githubActionsRetry} state={actionsRetryState} /></>}
           pullRequestView={<GitHubPullRequest controller={githubPullRequest} state={pullRequestState}
+            management={<PullRequestFollowup controller={githubPullRequest} state={pullRequestState} activity={githubActivity}/>}
             repository={connectionState.context?.repository ?? null}
             baseSuggestion={connectionState.status?.repository.state === 'observed' ? connectionState.status.repository.value?.defaultBranch ?? null : null}
             headSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id

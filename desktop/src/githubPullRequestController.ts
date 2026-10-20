@@ -1,5 +1,7 @@
 // One presentation coordinator for the original native connection operation.
 // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
+import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
+import type { GitHubBrowserState, GitHubBrowserPage } from './githubPullRequestManagement.ts';
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
 import { parsePullRequestStatus, parsePullRequestDraft, pullRequestError, PULL_REQUEST_HELP } from './githubPullRequestProtocol.ts';
@@ -8,11 +10,14 @@ import type { PullRequestConsent, PullRequestKind, PullRequestPort, PullRequestR
 
 interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string }
 interface Original { port: PullRequestPort; live: boolean; unlisten: (() => void) | null; status: PullRequestStatus | null; fresh: boolean; closeCheck: object | null }
-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
+interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard' | 'browser'; ended: boolean; promise: Promise<unknown> | null }
 interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: PullRequestKind; draft: PullRequestDraft; target: PullRequestTarget | null; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: PullRequestConsent | null }
 interface Review { owner: Original; context: Context; epoch: object; consent: PullRequestConsent; draft: PullRequestDraft }
+export interface PullRequestCompletion { readonly context:Context; readonly status:PullRequestStatus }
+interface Completion {owner:Original;epoch:object;value:PullRequestCompletion}
 export interface PullRequestView {
+  browserState:GitHubBrowserState;browserPending:boolean;
   native: boolean; status: PullRequestStatus | null; draft: PullRequestDraft;
   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
   error: PullRequestReason | null; originalRepository: string | null;
@@ -44,7 +49,7 @@ function advances(a: PullRequestStatus, b: PullRequestStatus): boolean {
   return true;
 }
 export class GitHubPullRequestController {
-  private state: PullRequestView = immutable({ native: false, status: null, draft: {base:'',head:'',title:'',body:''}, confirmed: false,
+  private state: PullRequestView = immutable({ browserState:'idle',browserPending:false,native: false, status: null, draft: {base:'',head:'',title:'',body:''}, confirmed: false,
     pending: false, observing: false, cancelling: false, discarding: false, uncertain: false, error: null, originalRepository: null });
   private listeners = new Set<() => void>();
   private desired: PullRequestPort | null = null;
@@ -52,6 +57,8 @@ export class GitHubPullRequestController {
   private work = new Set<Work>();
   private attempt: Attempt | null = null;
   private review: Review | null = null;
+  private completion:Completion|null=null;
+  private browserToken:object|null=null;
   private current: Context | null = null;
   private epoch: object = {};
   private approval: object = {};
@@ -64,14 +71,14 @@ export class GitHubPullRequestController {
   getSnapshot = (): PullRequestView => this.state;
   subscribe = (f: () => void): (() => void) => { this.listeners.add(f); return () => { this.listeners.delete(f); }; };
   private update(patch: Partial<PullRequestView> = {}): void {
-    this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null,
+    this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null, browserPending:[...this.work].some(w=>w.kind==='browser'),
       observing: [...this.work].some((w) => w.kind === 'status' || w.kind === 'subscribe'), cancelling: [...this.work].some((w) => w.kind === 'cancel'),
       discarding: [...this.work].some((w) => w.kind === 'discard') });
     for (const f of [...this.listeners]) { try { f(); } catch { /* Rendering cannot disown an original invocation. */ } }
   }
-  private fail(reason: PullRequestReason): void { if (this.unknown) { this.update(); return; } this.unknown = true; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
+  private fail(reason: PullRequestReason): void { if (this.unknown) { this.update(); return; } this.unknown = true; this.completion=null; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
   private invalidate(): void {
-    this.epoch = {}; this.review = null;
+    this.epoch = {}; this.review = null; this.completion=null; this.browserToken=null; this.state=immutable({...this.state,browserState:'idle'});
     if (this.attempt) this.attempt.stopWanted = true;
     this.update({ confirmed: false }); this.stopInvalidated();
   }
@@ -168,6 +175,8 @@ export class GitHubPullRequestController {
       same(a.context, context(this.connection())) && a.draft === this.state.draft && sameBranches(s.consent.prepared.target,a.draft)) {
       this.review = { owner: a.owner, epoch: a.epoch, context: a.context, consent: s.consent, draft:a.draft };
     }
+    if(a.replyOk&&(a.kind==='create'||a.kind==='reconcile')&&(s.acknowledged||s.observed)&&a.epoch===this.epoch&&a.owner.port===this.desired&&!this.disposed&&same(a.context,context(this.connection())))
+      this.completion={owner:a.owner,epoch:a.epoch,value:immutable({context:a.context,status:s})};
     this.update({ uncertain: false, error: s.operation.reason === 'none' ? null : s.operation.reason });
   }
   canCheck():boolean { const o=this.original;return !!o?.live&&(!this.disposed||this.owns(o))&&![...this.work].some(w=>w.owner===o&&(w.kind==='status'||w.kind==='subscribe')); }
@@ -196,8 +205,51 @@ export class GitHubPullRequestController {
     return r && !this.unknown && !this.disposed && r.owner === o && o.port === this.desired && o.fresh && r.epoch === this.epoch &&
       same(c, r.context) && same(o.status?.consent, r.consent) && r.draft===this.state.draft && sameBranches(r.consent.prepared.target,r.draft) ? r.consent : null;
   }
+  currentCompletion():PullRequestCompletion|null {
+    const r=this.completion,o=this.original,s=o?.status;
+    return r&&!this.unknown&&!this.disposed&&r.owner===o&&o.live&&o.port===this.desired&&o.fresh&&r.epoch===this.epoch&&
+      same(r.value.context,context(this.connection()))&&same(r.value.status.operation,s?.operation)&&same(r.value.status.acknowledged,s?.acknowledged)&&
+      same(r.value.status.observed,s?.observed)?r.value:null;
+  }
+  completionBrowserReason(expected:PullRequestCompletion):string|null {
+    return this.currentCompletion()!==expected?BROWSER_HELP.stale:this.browserReason();
+  }
+  comparisonBrowserReason(expected:PullRequestConsent):string|null {
+    return this.currentConsent()!==expected?BROWSER_HELP.stale:this.browserReason();
+  }
+  private browserReason():string|null {
+    if(!this.original?.port.openBrowser)return BROWSER_HELP.unavailable;
+    if(['unconfirmed','unavailable','stale'].includes(this.state.browserState))return BROWSER_HELP[this.state.browserState];
+    return this.startReason();
+  }
+  openCompletedPullRequest(expected:PullRequestCompletion,page:GitHubBrowserPage):void {
+    if(!['conversation','files'].includes(page)||this.completionBrowserReason(expected)||!expected.status.operation)return;
+    this.openBrowser({kind:'created-pull-request',operationId:expected.status.operation.id,page},()=>this.currentCompletion()===expected);
+  }
+  openComparison(expected:PullRequestConsent):void {
+    if(this.comparisonBrowserReason(expected))return;
+    this.openBrowser({kind:'comparison',consentId:expected.id},()=>this.currentConsent()===expected);
+  }
+  private openBrowser(target:{kind:'created-pull-request';operationId:string;page:GitHubBrowserPage}|{kind:'comparison';consentId:string},sourceCurrent:()=>boolean):void {
+    const o=this.original!,s=o.status!,c=context(this.connection()),epoch=this.epoch,revision=this.connection().status?.revision;
+    if(!c||revision===undefined||!o.port.openBrowser)return;
+    const token={};this.browserToken=token;
+    const w:Work={owner:o,kind:'browser',ended:false,promise:null};this.work.add(w);this.update({browserState:'requesting'});
+    const peer=this.peer();
+    const current=()=>this.browserToken===token&&this.epoch===epoch&&sourceCurrent()&&o===this.original&&o.port===this.desired&&
+      o.status===s&&same(c,context(this.connection()))&&revision===this.connection().status?.revision;
+    if(!current()||peer||this.work.size!==1){if(this.browserToken===token)this.update({browserState:'stale'});this.finish(w);return;}
+    const returned=(raw:unknown)=>{const ok=browserRequestReturned(raw);if(this.browserToken===token)this.update({browserState:current()?(ok?'request-sent':'unconfirmed'):'stale'});};
+    const failed=(raw:unknown)=>{const state=browserFailure(raw);if(this.browserToken===token)this.update({browserState:current()?state:'stale'});};
+    try {
+      const promise=o.port.openBrowser({...target,sessionId:c.sessionId,expectedRevision:s.revision,expectedConnectionRevision:revision});
+      if(!(promise instanceof Promise))throw new Error('Original browser request not retained');w.promise=promise;
+      void promise.then(returned,failed).finally(()=>this.finish(w));
+    }catch(e){failed(e);this.finish(w);}
+  }
   ownerReason(): string | null {
     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
+    if([...this.work].some(w=>w.kind==='browser'))return 'The original browser request is still returning. Other tasks wait for that same call.';
     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
       return 'The original draft pull request task is still active. Check status or Stop it before starting another task.';
     if (this.original?.closeCheck) return 'Check task status to refresh the original review. Your draft is kept; Close has not been repeated.';
@@ -220,7 +272,7 @@ export class GitHubPullRequestController {
     if(this.currentConsent())return 'Create or close the current review first.';
     if(!parsePullRequestDraft(this.state.draft))return PULL_REQUEST_HELP['invalid-input'];
     const s=this.original!.status!,c=context(this.connection())!;
-    if(s.pending.some(p=>inContext(p.prepared.target,c)&&sameBranches(p.prepared.target,this.state.draft)) ||
+    if(s.pending.some(p=>!p.closed&&inContext(p.prepared.target,c)&&sameBranches(p.prepared.target,this.state.draft)) ||
       s.operation?.kind==='create'&&s.operation.effect!=='not-sent'&&inContext(s.operation.target,c)&&sameBranches(s.operation.target,this.state.draft))
       return 'Check the previous attempt for these branches below. A new review cannot authorize a duplicate Create.';
     return null;
@@ -244,7 +296,7 @@ export class GitHubPullRequestController {
     const a: Attempt = { owner: o, work: w, context: c, epoch, kind, draft:this.state.draft, target:kind==='create'?consent?.prepared.target??null:kind==='reconcile'?s.pending.find(p=>p.prepared.target.intent?.marker===marker)?.prepared.target??null:null,
       revision: s.revision, previousId: s.operation?.id ?? null, operationId: null, marker, sent: false, replyOk: false, stopWanted: false, stopSent: false,
       consent: kind === 'create' ? consent : null };
-    this.attempt = a; this.review = null; this.update({ confirmed: false, error: null, originalRepository: c.repository });
+    this.attempt = a; this.review = null; this.completion=null; this.browserToken=null; this.update({ confirmed: false, error: null, browserState:'idle', originalRepository: c.repository });
     const peer = this.peer();
     if (this.attempt !== a || a.stopWanted || kind==='create'&&approval!==this.approval || a.draft!==this.state.draft || this.epoch !== epoch || o !== this.original || o.port !== this.desired || this.disposed ||
       this.unknown || o.status !== s || !o.fresh || peer ||

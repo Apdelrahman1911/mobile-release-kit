@@ -245,6 +245,15 @@ impl ConnectionState {
         self.pull_request.finish(before);
         self.pull_request.view.clone()
     }
+    pub(super) fn pull_request_browser_comparison(&self, id:&str, project:&str, g:u32,
+        root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<crate::github_browser_protocol::Destination,BridgeError> {
+        let c=self.pull_request.consent.as_ref().filter(|c|c.id==id&&c.project_id==project
+            &&c.generation==g&&&c.root==root&&edit.matches(&c.stamp)&&now<c.end
+            &&self.private.as_ref().is_some_and(|s|s.id==c.session_id&&s.retirement.is_none()))
+            .ok_or_else(crate::github_browser_protocol::refused)?;
+        Ok(crate::github_browser_protocol::Destination::Comparison{repository:c.prepared.target.scope.repository.clone(),
+            base_sha:c.prepared.base_sha.clone(),head_sha:c.prepared.head_sha.clone()})
+    }
     pub(crate) fn pull_request_registered_project(&self) -> Option<&str> {
         self.pull_request
             .active
@@ -974,7 +983,7 @@ impl ConnectionState {
                 }
             }
         }
-        if reason != p::Reason::None && effect == p::Effect::CreatedObserved {
+        if reason != p::Reason::None && matches!(effect, p::Effect::CreatedObserved | p::Effect::ClosedConfirmed) {
             effect = if self.pull_request.view.acknowledged.is_some() {
                 p::Effect::AcknowledgedUnconfirmed
             } else {
@@ -994,7 +1003,7 @@ impl ConnectionState {
             self.pull_request.view.observed = None;
             if let Some(o) = &mut self.pull_request.view.operation {
                 o.reason = reason;
-                if o.effect == p::Effect::CreatedObserved {
+                if matches!(o.effect, p::Effect::CreatedObserved | p::Effect::ClosedConfirmed) {
                     o.effect = if self.pull_request.view.acknowledged.is_some() {
                         p::Effect::AcknowledgedUnconfirmed
                     } else {

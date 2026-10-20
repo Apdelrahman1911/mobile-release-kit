@@ -304,6 +304,7 @@ mod github_setup_protocol;
 mod github_publication_protocol;
 mod github_repository_create_protocol;
 mod github_activity_protocol;
+mod github_browser_protocol;
 mod github_pull_request_protocol;
 mod github_actions_retry_protocol;
 mod github_setup_session;

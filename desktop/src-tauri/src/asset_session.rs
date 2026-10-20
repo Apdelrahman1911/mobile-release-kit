@@ -146,6 +146,8 @@ pub(crate) use github_publication::GitHubPublicationGoGate;
 #[path = "asset_session_repository_create.rs"]
 mod repository_create;
 pub(crate) use repository_create::RepositoryCreateGoGate;
+#[path = "asset_session_github_browser.rs"]
+mod github_browser;
 #[path = "asset_session_github_activity.rs"]
 mod activity;
 pub(crate) use activity::GitHubActivityGoGate;

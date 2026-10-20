@@ -79,6 +79,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
 #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
 #[path = "../src/github_activity_protocol.rs"] mod github_activity_protocol;
+#[path = "../src/github_browser_protocol.rs"] mod github_browser_protocol;
 #[path = "../src/github_pull_request_protocol.rs"] mod github_pull_request_protocol;
 #[path = "../src/github_actions_retry_protocol.rs"] mod github_actions_retry_protocol;
 #[path = "../src/error.rs"] mod error;

@@ -1,18 +1,20 @@
 import { useId } from 'react';
+import type { ReactNode } from 'react';
+import { BROWSER_HELP } from '../githubPullRequestManagement.ts';
 import { SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 import { PULL_REQUEST_HELP } from '../githubPullRequestProtocol.ts';
 import type { GitHubPullRequestController, PullRequestView } from '../githubPullRequestController.ts';
 
-export function GitHubPullRequest({ controller, state, repository = null, baseSuggestion = null, headSuggestion = null, compact = false, onShow }: {
+export function GitHubPullRequest({ controller, state, repository = null, baseSuggestion = null, headSuggestion = null, compact = false, onShow, management }: {
   controller: GitHubPullRequestController; state: PullRequestView; repository?: string|null; baseSuggestion?: string|null; headSuggestion?: string|null;
-  compact?: boolean; onShow?: () => void;
+  compact?: boolean; onShow?: () => void; management?:ReactNode;
 }) {
   const id=useId(), status=state.status, op=status?.operation, review=controller.currentConsent();
   const attention=!!controller.ownerReason()||state.uncertain||!!state.error||!!status?.pending.length||!!op&&['potentially-applied','acknowledged-unconfirmed','unresolved','found-unattributed'].includes(op.effect);
   if(compact&&!attention)return null;
-  const busy=state.pending||state.observing||state.discarding||state.cancelling||state.uncertain;
+  const busy=state.browserPending||state.pending||state.observing||state.discarding||state.cancelling||state.uncertain;
   const reason=review?controller.createReason():controller.prepareReason();
   const settled=op?.phase==='settled'&&!state.pending&&!state.uncertain;
   return <section className="card" aria-label="Create a draft pull request">
@@ -21,10 +23,10 @@ export function GitHubPullRequest({ controller, state, repository = null, baseSu
     {state.originalRepository&&attention&&<p className="save-note">Original task: <strong>{state.originalRepository}</strong></p>}
     {op&&<p role="status">{op.phase==='cleanup-unknown'?'Cleanup needs attention':op.phase==='stopping'?'Stopping the original request…':!settled?'Waiting for the original task to finish…':
       op.effect==='created-observed'?'Draft pull request created and checked':op.effect==='acknowledged-unconfirmed'?'GitHub acknowledged creation; final details are not confirmed':
-      op.effect==='found-unattributed'?'Matching draft found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Original check finished'}</p>}
+      op.effect==='closed-confirmed'?'Earlier acknowledged pull request confirmed closed':op.effect==='found-unattributed'?'Matching draft found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Original check finished'}</p>}
     {state.uncertain&&<p className="review-caution" role="alert">The original request is unconfirmed. Keep the app and its files. Check status; do not repeat Create or reconnect to dismiss this warning.</p>}
     {state.error&&<p className="review-caution" role="status">{PULL_REQUEST_HELP[state.error]}</p>}
-    {op&&op.reason!=='none'&&op.reason!==state.error&&<p className="review-caution">{PULL_REQUEST_HELP[op.reason]}</p>}
+    {op&&op.reason!=='none'&&op.reason!==state.error&&<p className="review-caution">{PULL_REQUEST_HELP[op.reason]}</p>}    {state.browserPending&&<p role="status">{BROWSER_HELP.requesting}</p>}
     <div className="button-row">
       <button type="button" className="button small secondary" disabled={!controller.canCheck()} onClick={()=>controller.checkStatus()}>Check task status</button>
       {(state.pending||op&&op.phase!=='settled')&&<button type="button" className="button small secondary" disabled={!controller.canCancel()||state.cancelling} onClick={()=>controller.cancel()}>Stop original request</button>}
@@ -53,18 +55,19 @@ export function GitHubPullRequest({ controller, state, repository = null, baseSu
         <strong>{review.prepared.target.intent!.head} → {review.prepared.target.intent!.base}</strong>
         <p>{review.prepared.comparison.aheadBy} commit(s) ahead · {review.prepared.comparison.behindBy} behind. Branches can change before the server accepts the request; they are checked again before sending.</p>
         <p>File-name sample (up to four; not a full diff):</p><ul>{review.prepared.comparison.files.map(f=><li key={f.path}>{f.path} · {f.change}</li>)}</ul>
-        <p><a href={`https://github.com/${review.prepared.target.scope.repository}/compare/${review.prepared.baseSha}...${review.prepared.headSha}`} target="_blank" rel="noopener noreferrer">Review the full comparison on GitHub</a></p>
+        {!management&&<p className="save-note">Copy this comparison address into your browser: <span className="review-text">{`https://github.com/${review.prepared.target.scope.repository}/compare/${review.prepared.baseSha}...${review.prepared.headSha}`}</span></p>}
         <p><strong>{state.draft.title}</strong></p>{state.draft.body&&<pre className="review-text">{state.draft.body}</pre>}
         <label className="checkbox-row"><input type="checkbox" checked={state.confirmed} disabled={busy} onChange={e=>controller.setConfirmed(e.target.checked)}/><span>{review.prepared.confirmation}</span></label>
       </div></div>}
+      {management}
       {reason&&<p className="save-note" role="status">{reason}</p>}
       <div className="button-row"><button type="button" className="button" disabled={!!reason} onClick={()=>review?controller.create():controller.prepare()}>{review?'Create draft pull request':'Review draft pull request'}</button>
         <button type="button" className="button secondary" disabled={!!controller.pendingReason()} onClick={()=>controller.loadPending()}>Check previous attempts</button></div>
-      {settled&&status?.acknowledged&&<p><a href={status.acknowledged.url} target="_blank" rel="noopener noreferrer">Open pull request #{status.acknowledged.number}</a>. {op?.effect==='created-observed'?'Its original creation ID and reviewed details were checked. It is still a draft, not approved or merged.':'The original creation ID was acknowledged, but the final details still need review. Do not create a duplicate.'}</p>}
-      {settled&&op?.effect==='found-unattributed'&&status?.observed&&<p><a href={status.observed.url} target="_blank" rel="noopener noreferrer">Inspect matching draft #{status.observed.number}</a>. It is not claimed as this app’s successful creation.</p>}
+      {!management&&settled&&status?.acknowledged&&<p>Pull request #{status.acknowledged.number}: <span className="review-text">{status.acknowledged.url}</span>. {op?.effect==='created-observed'?'Its original creation ID and reviewed details were checked. It is still a draft, not approved or merged.':'The original creation ID was acknowledged, but the final details still need review. Do not create a duplicate.'}</p>}
+      {!management&&settled&&op?.effect==='found-unattributed'&&status?.observed&&<p>Matching draft #{status.observed.number}: <span className="review-text">{status.observed.url}</span>. It is not claimed as this app’s successful creation.</p>}
       {!!status?.pending.length&&<div><h4>Previous attempts</h4><p>Checking an attempt only reads GitHub. It never resends Create, closes a PR or changes your branches.</p>
         {status.pending.map(p=><div key={p.prepared.target.intent!.marker}><p><strong>{p.prepared.target.scope.repository}</strong> · {p.prepared.target.intent!.head} → {p.prepared.target.intent!.base}<br/>
-          {p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
+          {p.closed?`Previously confirmed closed${p.closed.merged?' after merging':''}. A new explicit review still checks for an open PR.`:p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
           <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.intent!.marker)} onClick={()=>controller.reconcile(p.prepared.target.intent!.marker)}>Check this attempt on GitHub</button></div>)}
       </div>}
       <ProgressiveDisclosure title="Help: branches, permissions and separate actions">

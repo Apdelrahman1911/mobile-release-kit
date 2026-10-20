@@ -1,4 +1,6 @@
 import { useId } from 'react';
+import { SelectedPullRequestActions } from './PullRequestManagement.tsx';
+import { BROWSER_HELP } from '../githubPullRequestManagement.ts';
 import { SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
@@ -32,7 +34,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
     {(state.pending || op && op.phase !== 'settled') && <p role="status">{op?.phase === 'cleanup-unknown' ? 'Cleanup needs attention.' : op?.phase === 'stopping' ? 'Stopping the original read…' : 'Reading the original GitHub selection…'}</p>}
     {state.uncertain && <p className="review-caution" role="alert">The original read is unconfirmed. Keep the app open and preserve its files. Checking status does not repeat the remote read or clear unknown cleanup.</p>}
     {state.error && <p className="review-caution" role="status">{ACTIVITY_HELP[state.error]}</p>}
-    {op && op.reason !== 'none' && op.reason !== state.error && <p className="review-caution">{ACTIVITY_HELP[op.reason]}</p>}
+    {op && op.reason !== 'none' && op.reason !== state.error && <p className="review-caution">{ACTIVITY_HELP[op.reason]}</p>}    {state.browserPending && <p role="status">{BROWSER_HELP.requesting}</p>}
     <div className="button-row">
       <button type="button" className="button small secondary" disabled={!controller.canCheck()} onClick={() => controller.checkStatus()}>Check task status</button>
       {(state.pending || op && op.phase !== 'settled') && <button type="button" className="button small secondary" disabled={!controller.canCancel() || state.cancelling} onClick={() => controller.cancel()}>Stop original read</button>}
@@ -51,7 +53,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
       {result && data?.kind === 'overview' && <>
         <h4>Open pull requests</h4><Coverage value={data.pullRequests} empty="No open pull requests were returned on this page." />
         {data.pullRequests.rows.map(p => <div className="review-item" key={p.id}>
-          <p><a href={activityLink(repository, 'pull', p.number)!} target="_blank" rel="noopener noreferrer">#{p.number} {p.title}</a> {p.draft ? '· Draft' : ''}</p>
+          <p><strong>#{p.number} {p.title}</strong> {p.draft ? '· Draft' : ''}</p>
           <p className="save-note">{p.headRepository ?? 'Head repository not reported'} · {p.headBranch} → {p.baseBranch}</p>
           <button type="button" className="button small secondary" disabled={!!controller.readReason({kind:'pull-request',number:p.number})} onClick={() => controller.readSelection(result,{kind:'pull-request',number:p.number})}>Read changes, reviews & checks</button>
         </div>)}
@@ -65,7 +67,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
       {data?.kind === 'pull-request' && <>
         <h4>#{data.pullRequest.number} {data.pullRequest.title}</h4>
         <p>{data.pullRequest.headRepository ?? 'Head repository not reported'} · {data.pullRequest.headBranch} → {data.pullRequest.baseBranch} · {data.pullRequest.state}{data.pullRequest.draft ? ' · Draft' : ''}</p>
-        <p><a href={`${activityLink(repository,'pull',data.pullRequest.number)!}/files`} target="_blank" rel="noopener noreferrer">Open the full diff on GitHub</a></p>
+        <SelectedPullRequestActions controller={controller} state={state}/>
         <h5>Changed files</h5><Coverage value={data.changedFiles} empty="No changed files were reported." />
         <ul>{data.changedFiles.rows.map(f => <li key={f.path}>{f.path} · {f.change} · +{f.additions} / −{f.deletions}</li>)}</ul>
         <h5>Review records</h5><p className="save-note">First chronological page, up to 30 records. A person’s later review may differ. These are not an overall approval or a branch-protection decision.</p>

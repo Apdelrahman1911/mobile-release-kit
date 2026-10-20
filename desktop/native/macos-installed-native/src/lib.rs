@@ -180,6 +180,8 @@ pub mod vault_helper;
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
     os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
 
+pub mod github_browser;
+
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
     #[cfg(test)]

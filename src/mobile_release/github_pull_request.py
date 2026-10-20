@@ -328,13 +328,23 @@ def create(prepared: Prepared, draft: Draft, exchange: Exchange, journal: Journa
 
 
 def pending_record(value: object) -> dict:
-    r = obj(value, {"prepared", "claimed", "acknowledged"}); prepared = Prepared.parse(r["prepared"])
+    require(type(value) is dict and set(value) in ({"prepared", "claimed", "acknowledged"}, {"prepared", "claimed", "acknowledged", "closed"}))
+    r = value; prepared = Prepared.parse(r["prepared"])
     require(type(r["claimed"]) is bool and (r["acknowledged"] is None or r["claimed"]))
-    return {"prepared": prepared.value(), "claimed": r["claimed"], "acknowledged": None if r["acknowledged"] is None else acknowledgement(r["acknowledged"], prepared)}
+    out = {"prepared": prepared.value(), "claimed": r["claimed"], "acknowledged": None if r["acknowledged"] is None else acknowledgement(r["acknowledged"], prepared)}
+    if "closed" in r:
+        from .github_pull_request_management import closed_observation
+        require(out["acknowledged"] is not None)
+        out["closed"] = closed_observation(r["closed"], out["acknowledged"])
+    return out
 
 
-def reconcile(record: dict, exchange: Exchange) -> dict:
-    original = pending_record(record); prepared = Prepared.parse(original["prepared"]); op = Operation(prepared.target, exchange)
+def reconcile(record: dict, exchange: Exchange, *, journal=None) -> dict:
+    original = pending_record(record)
+    if original["acknowledged"] is not None:
+        from .github_pull_request_management import reconcile_acknowledged
+        return reconcile_acknowledged(original, exchange, journal)
+    prepared = Prepared.parse(original["prepared"]); op = Operation(prepared.target, exchange)
     result = {"effect": "unresolved", "reason": "unresolved", "claimed": original["claimed"], "acknowledged": original["acknowledged"],
               "observed": None, "control": _control()}
     try:
@@ -375,6 +385,7 @@ def creation_result(value: object, prepared: Prepared, kind: str) -> dict:
     elif e == "potentially-applied": require(kind == "create" and r["claimed"] and ack is None and seen is None and r["reason"] != "none")
     elif e == "acknowledged-unconfirmed": require(kind == "create" and r["claimed"] and ack is not None and seen is None and r["reason"] != "none")
     elif e == "created-observed": require(r["claimed"] and ack is not None and seen == ack and r["reason"] == "none")
+    elif e == "closed-confirmed": require(kind == "reconcile" and r["claimed"] and ack is not None and seen == ack and r["reason"] == "none")
     elif e == "unresolved": require(kind == "reconcile" and seen is None and r["reason"] != "none")
     elif e == "found-unattributed": require(kind == "reconcile" and ack is None and seen is not None and r["reason"] == "unattributed")
     else: require(False)

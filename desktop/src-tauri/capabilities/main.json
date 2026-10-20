@@ -78,6 +78,7 @@
     "allow-github-activity-status",
     "allow-github-activity-read",
     "allow-github-activity-cancel",
+    "allow-github-browser-open",
     "allow-github-actions-retry-status",
     "allow-github-actions-retry-prepare",
     "allow-github-actions-retry-start",

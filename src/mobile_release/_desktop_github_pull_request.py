@@ -106,7 +106,7 @@ def execute(request: Initial, token: str | None, retained: p.Prepared | None, dr
                 p.require(request.kind == "reconcile" and retained is not None and journal is not None)
                 matches = [entry for entry in journal.pending(request.target) if entry["prepared"] == retained.value()]
                 p.need(len(matches) == 1, "journal-unavailable")
-                result["creation"] = p.reconcile(matches[0], exchange)
+                result["creation"] = p.reconcile(matches[0], exchange, journal=journal)
                 result["reason"] = result["creation"]["reason"]
     except (p.Refused, ReadFailure) as error:
         result["reason"] = error.reason

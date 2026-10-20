@@ -15,6 +15,8 @@ use crate::{error::BridgeError, github_connection_protocol::{self as wire, Accou
 pub(crate) mod publication;
 #[path = "github_repository_create_session.rs"]
 pub(crate) mod repository_create;
+#[path = "github_browser_session.rs"]
+mod browser;
 #[path = "github_activity_session.rs"]
 pub(crate) mod activity;
 #[path = "github_pull_request_session.rs"]

@@ -1,4 +1,6 @@
 // Bounded read-only PR/Actions DATA. No workflow dispatch, approval or token.
+import { encodeGitHubBrowserRequest } from './githubPullRequestManagement.ts';
+import type { GitHubBrowserRequest } from './githubPullRequestManagement.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, connectionNumericId as numeric, connectionOpaqueId as id,
   connectionUtc as utc, sameConnectionData as same } from './githubConnectionProtocol.ts';
@@ -27,7 +29,7 @@ export interface ActivityObservation {target:ActivityTarget;selection:ActivitySe
 export interface ActivityOperation {id:string;projectId:string;target:ActivityTarget;selection:ActivitySelection;phase:'running'|'stopping'|'settled'|'cleanup-unknown';reason:ActivityReason}
 export interface ActivityStatus {schemaVersion:1;revision:number;sessionId:string|null;available:boolean;reason:ActivityReason;operation:ActivityOperation|null;result:ActivityObservation|null}
 export interface ActivityRead {sessionId:string;projectId:string;expectedRevision:number;expectedConnectionRevision:number;selection:ActivitySelection}
-export interface GitHubActivityPort {readonly mode:'native';status():Promise<unknown>;read(args:ActivityRead):Promise<unknown>;cancel(args:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
+export interface GitHubActivityPort {readonly mode:'native';openBrowser?(request:GitHubBrowserRequest):Promise<unknown>;status():Promise<unknown>;read(args:ActivityRead):Promise<unknown>;cancel(args:{operationId:string}):Promise<unknown>;subscribe(f:(value:unknown)=>void):Promise<()=>void>}
 export type ActivityCommand = `github_activity_${'status'|'read'|'cancel'}`;
 const one = <T extends string>(v:unknown,items:readonly T[]):v is T=>typeof v==='string'&&(items as readonly string[]).includes(v);
 const rev = (v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>0&&v<=0xffff_fffe;
@@ -87,10 +89,10 @@ export function encodeActivityRequest(command:ActivityCommand,raw:unknown):Uint8
     command==='github_activity_read'&&keys(v,['sessionId','projectId','expectedRevision','expectedConnectionRevision','selection'])&&id(v.sessionId)&&id(v.projectId)&&rev(v.expectedRevision)&&rev(v.expectedConnectionRevision)&&activitySelection(v.selection);
     if(!ok)return null;const b=new TextEncoder().encode(JSON.stringify(v));return b.length<=1024?b:null;}catch{return null;}
 }
-export function createGitHubActivityPort(mode:string,invoke:(name:ActivityCommand,bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof ACTIVITY_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):GitHubActivityPort|null{
+export function createGitHubActivityPort(mode:string,invoke:(name:ActivityCommand|'github_browser_open',bytes:Uint8Array)=>Promise<unknown>,listen:((event:typeof ACTIVITY_EVENT,f:(value:unknown)=>void)=>Promise<()=>void>)|null):GitHubActivityPort|null{
   if(mode!=='native'||!listen)return null;
   const call=(name:ActivityCommand,v:unknown)=>{const bytes=encodeActivityRequest(name,v);if(!bytes)throw {code:'github_activity_refused_invalid_input'};return invoke(name,bytes);};
-  return Object.freeze({mode:'native',status:()=>call('github_activity_status',{}),read:(v)=>call('github_activity_read',v),cancel:(v)=>call('github_activity_cancel',v),subscribe:(f)=>listen(ACTIVITY_EVENT,f)} satisfies GitHubActivityPort);
+  return Object.freeze({mode:'native',openBrowser:(request:GitHubBrowserRequest)=>{const bytes=encodeGitHubBrowserRequest(request);if(!bytes)throw {code:'github_browser_refused'};return invoke('github_browser_open',bytes);},status:()=>call('github_activity_status',{}),read:(v)=>call('github_activity_read',v),cancel:(v)=>call('github_activity_cancel',v),subscribe:(f)=>listen(ACTIVITY_EVENT,f)} satisfies GitHubActivityPort);
 }
 export function activityError(raw:unknown):{reason:ActivityReason;notAdmitted:boolean}{
   try{const d=raw&&typeof raw==='object'?Object.getOwnPropertyDescriptor(raw,'code'):null;const code=d&&Object.hasOwn(d,'value')?d.value:null;
