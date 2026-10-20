@@ -9,10 +9,14 @@ import type { ReleaseVersionState } from './releaseVersion.ts';
 import type { ProjectInitializationState } from './projectInitialization.ts';
 import type { VersionEditState } from './releaseVersionEditController.ts';
 import type { Page } from './types.ts';
+import { setupResume } from './setupResume.ts';
+import type { SetupResumeSource } from './setupResume.ts';
 
 export type SetupStageId = 'project' | 'configuration' | 'version' | 'tools' | 'signing' | 'build';
 export type SetupAction =
   | { kind: 'choose-project' | 'refresh-project' | 'read-version' | 'open-version' | 'open-initialization' }
+  | { kind: 'open-build-tools'; platform: 'android' | 'ios' }
+  | { kind: 'show-original-controls' }
   | { kind: 'navigate'; page: Page };
 export interface SetupNextAction {
   label: string;
@@ -42,10 +46,10 @@ export interface SetupCheckObservation {
   summary: string;
 }
 export interface SetupActivity {
-  projectId: string;
+  projectId: string | null; // null: computer-wide or original project not yet acknowledged.
   task: string;
   // "unknown" is ORIGINAL OPERATION finality, never an unperformed check.
-  state: 'prepared' | 'running' | 'cancellation-requested' | 'failed' | 'recovery-required' | 'unknown';
+  state: 'prepared' | 'running' | 'cancellation-requested' | 'failed' | 'recovery-required' | 'unknown' | 'retained';
   action: SetupAction;
 }
 export interface SetupOverviewInput {
@@ -60,12 +64,16 @@ export interface SetupOverviewInput {
   releaseVersionReason: string | null;
   checks?: readonly SetupCheckObservation[];
   activities?: readonly SetupActivity[];
+  resume?: SetupResumeSource;
+  setupReadinessReason?: string | null;
 }
 export interface SetupOverview {
   stages: readonly SetupStage[];
   currentStage: SetupStageId;
   next: SetupNextAction;
   currentActivity: SetupActivity | null;
+  attentionActivity: SetupActivity | null;
+  attentionIsCurrentProject: boolean;
   otherProjectActivities: readonly SetupActivity[];
   known: readonly string[];
   remaining: readonly string[];
@@ -78,7 +86,7 @@ export interface SetupOverview {
 const navigate = (page: Page): SetupAction => ({ kind: 'navigate', page });
 const next = (label: string, action: SetupAction, disabledReason: string | null = null): SetupNextAction => ({ label, action, disabledReason });
 const activityRank: Record<SetupActivity['state'], number> = {
-  unknown: 0, 'recovery-required': 1, 'cancellation-requested': 2, running: 3, prepared: 4, failed: 5,
+  unknown: 0, 'recovery-required': 1, 'cancellation-requested': 2, running: 3, prepared: 4, retained: 5, failed: 6,
 };
 
 // A shared *display* subset, not a generic native command or lifecycle owner.
@@ -226,20 +234,27 @@ export function setupActivitySummary(activity: SetupActivity): string {
     case 'running': return `${activity.task} is in progress. Open it to see progress and the available cancel controls.`;
     case 'prepared': return `${activity.task} is waiting for your review. Nothing is approved by continuing this guide.`;
     case 'failed': return `${activity.task} did not complete successfully. Review its error and recovery guidance before trying again.`;
+    case 'retained': return `${activity.task}. Use its original controls to see what needs attention. This guide does not restart or dismiss it.`;
   }
 }
 
 export function setupOverview(input: SetupOverviewInput): SetupOverview {
   const { session, configSaveState: saves, initializationState: initialization, versionEditState: editor } = input;
   const version = savedVersionForSetup(session, input.releaseVersionState, input.preview);
+  const resume = input.resume ? setupResume(session, input.preview, input.setupReadinessReason ?? input.refreshReason, input.resume) : null;
   const activities = [
     ...editActivities(saves, 'Saving release settings', navigate('settings'), saves.recoveryProjects.map((item) => item.projectId)),
     ...editActivities(initialization, 'Release-file setup', { kind: 'open-initialization' }, initialization.recoveryProjects.map((item) => item.projectId)),
     ...editActivities(editor.edit, 'Editing the version', { kind: 'open-version' }, editor.edit.recoveryProjects),
     ...(input.activities ?? []),
+    ...(resume?.activities ?? []),
   ];
   if (session?.saveRecoveryRequired) activities.push({ projectId: session.project.id, task: 'Release settings', state: 'recovery-required', action: navigate('settings') });
-  const currentActivity = activities.filter((activity) => activity.projectId === session?.project.id).sort((a, b) => activityRank[a.state] - activityRank[b.state])[0] ?? null;
+  const ranked = [...activities].sort((a, b) => activityRank[a.state] - activityRank[b.state]);
+  const currentActivity = ranked.find((activity) => activity.projectId !== null && activity.projectId === session?.project.id) ?? null;
+  // An original elsewhere can block this app too, but does not become the
+  // selected project's readiness or implicitly switch the selected project.
+  const attentionActivity = ranked.find((activity) => activity === currentActivity || activity.state !== 'failed') ?? null;
   const stages: SetupStage[] = [
     { id: 'project', title: 'Choose your app', state: session && !input.preview ? 'observed' : 'needs-action',
       statusLabel: input.preview && session ? 'Example only' : session ? 'Folder selected' : 'Choose a folder',
@@ -251,13 +266,27 @@ export function setupOverview(input: SetupOverviewInput): SetupOverview {
       next: next('Review a local build', navigate('releases')) },
     checkStage(input, 'signing'),
   ];
-  const current = stages.find((stage) => stage.state !== 'observed')!;
-  const action = currentActivity ? next(currentActivity.state === 'prepared' ? 'Continue reviewing this task' :
-    currentActivity.state === 'running' || currentActivity.state === 'cancellation-requested' ? 'View current task' : 'Review unfinished work', currentActivity.action) : current.next;
+  if (resume) {
+    // Existing dirty/missing/invalid/read-in-progress behavior is retained. A
+    // formerly format-valid snapshot with a retired comparison is not current.
+    const configuration = stages[1]!;
+    if (resume.configuration && configuration.state === 'observed') Object.assign(configuration, resume.configuration);
+    for (const id of ['tools', 'build', 'signing'] as const) {
+      const row = stages.find((item) => item.id === id)!;
+      if (resume[id] && row.state !== 'observed') Object.assign(row, resume[id]);
+    }
+  }
+  const first = stages.find((stage) => stage.state !== 'observed')!;
+  // A current selected tool copy suggests the original build review; it does
+  // not mark the tool stage checked or authorize the build.
+  const current = first.id === 'tools' && resume?.reviewBuild ? stages.find((stage) => stage.id === 'build')! : first;
+  const action = attentionActivity ? next(attentionActivity.state === 'prepared' ? 'Continue reviewing this task' :
+    attentionActivity.state === 'running' || attentionActivity.state === 'cancellation-requested' ? 'View current task' : 'Review unfinished work', attentionActivity.action) : current.next;
   return {
-    stages, currentStage: current.id, next: action, currentActivity,
+    stages, currentStage: current.id, next: action, currentActivity, attentionActivity,
+    attentionIsCurrentProject: attentionActivity !== null && attentionActivity.projectId !== null && attentionActivity.projectId === session?.project.id,
     otherProjectActivities: activities.filter((activity) => activity.projectId !== session?.project.id),
-    known: stages.filter((stage) => stage.state === 'observed').map((stage) => stage.statusLabel === 'Checked for setup' ? `${stage.title}: checked for setup` : stage.statusLabel),
+    known: [...stages.filter((stage) => stage.state === 'observed').map((stage) => stage.statusLabel === 'Checked for setup' ? `${stage.title}: checked for setup` : stage.statusLabel), ...(resume?.facts ?? [])],
     remaining: stages.filter((stage) => stage.state !== 'observed').map((stage) => `${stage.title} — ${stage.statusLabel.toLowerCase()}`),
     version, versionLabel: version ? version.name : input.preview ? 'Example only' : input.releaseVersionState.pending && input.releaseVersionState.project?.projectId === session?.project.id ? 'Reading…' : 'Not read for these settings',
     initializationNeedsAttention: editNeedsAttention(initialization, initialization.recoveryProjects),

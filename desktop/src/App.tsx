@@ -1969,7 +1969,14 @@ export function App() {
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'metadata' && <MetadataImagesOperation state={metadataImagesState} controller={metadataImages} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'dashboard' && <ReleaseVersionSave state={versionEditState} controller={versionEdit} onShowProject={showVersionProject} />}
-        {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} configSaveState={saveState} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+        {page === 'dashboard' && <Dashboard resume={{ platform: environmentState.platform,
+          android: androidBuildState, ios: iosArchiveState, toolPreparation: toolAcquisitionState,
+          diagnostics: diagnosticsState, credentials: assetState, localChecks: offlinePreflightState,
+          androidSubmissionPending: androidBuild.hasPendingGuiSubmission(), iosSubmissionPending: iosArchive.hasPendingGuiSubmission(),
+          localChecksSubmissionPending: offlinePreflight.hasPendingGuiSubmission(), otherOwnerReason: savedCommandBusy() }}
+          onOpenBuildTools={(platform) => { environment.setContext(platform, 'build'); diagnostics.setContext(platform, 'build'); navigate('environment'); }}
+          onShowOriginalControls={() => { main.current?.focus({ preventScroll: true }); main.current?.scrollTo({ top: 0 }); }}
+          session={session} info={info} preview={preview} configSaveState={saveState} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
           setupReadinessReason={(loading ? 'Capabilities are loading.' : refreshReason) ?? configurationOwnerReason(saveState, session?.project.id ?? '') ??
             workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}

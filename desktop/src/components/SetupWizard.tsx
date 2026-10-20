@@ -24,7 +24,7 @@ export function SetupWizard({ overview, onAction, onHelp }: {
     </SectionHeading>
     <ol>
       {overview.stages.map((stage, index) => {
-        const current = stage.id === overview.currentStage && !overview.currentActivity;
+        const current = stage.id === overview.currentStage && !overview.attentionActivity;
         const reasonId = `guided-step-${stage.id}-reason`;
         return <li key={stage.id} aria-current={current ? 'step' : undefined} className={current ? 'guided-current-step' : undefined}>
           <span className="guided-step-number" aria-hidden="true">{stage.state === 'observed' ? <Icon name="check" size={16} /> : index + 1}</span>
