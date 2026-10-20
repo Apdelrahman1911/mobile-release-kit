@@ -33,12 +33,17 @@ enum Platform { Android, Ios, Project }
 enum Stage { Candidate, ExternalTesting, Production }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum Purpose { Full, Signing, Store }
+enum Purpose { Full, Signing, Store, Provisioning }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum PolicyVersion { #[serde(rename = "credential-policy-v1")] V1 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount }
+
+fn purpose_pair(platform: Platform, stage: Stage, purpose: Purpose, mode: ExecutionMode, kind: Kind) -> bool {
+    purpose != Purpose::Provisioning || (platform == Platform::Ios && stage == Stage::Candidate
+        && mode == ExecutionMode::Local && matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile))
+}
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token, ContactFirstName, ContactLastName, ContactEmail, ContactPhone, DemoUsername, DemoPassword, KeyBase64, Version }
@@ -746,6 +751,10 @@ impl AssessmentRequest {
         let purpose: Purpose = finite(&context["purpose"])?;
         let draft = &context["draft"];
         if !draft.is_object() { return Err(AssessmentError::invalid()); }
+        // This combined role is a NEW context, never a Store/Signing retarget.
+        // Admit its closed tuple/kind before copying any private scalar input.
+        let kind: Kind = finite(&object["input"]["kind"])?;
+        if !purpose_pair(platform, stage, purpose, execution_mode, kind) { return Err(AssessmentError::invalid()); }
         let input = input(&object["input"])?;
         protocol::check_value(body).map_err(|_| AssessmentError::limit())?;
         if !size_within(body, protocol::REQUEST_LIMIT - 1) || !size_within(draft, DRAFT_LIMIT) { return Err(AssessmentError::limit()); }
@@ -980,6 +989,8 @@ fn result_valid(result: &AssessmentResult, expected: &Expected) -> bool {
     if result.schema_version != 1 || result.policy_version != PolicyVersion::V1 || result.kind != expected.kind
         || result.context != expected.context || result.fields.len() != expected.kind.layout().len()
         || result.fields.len() != expected.fields.len() { return false; }
+    if !purpose_pair(result.context.platform, result.context.stage, result.context.purpose,
+        result.context.execution_mode, result.kind) { return false; }
     let assurance = &result.assurance;
     if assurance.scalar_values_processed != expected.scalar_values_processed || assurance.file_observations_processed != expected.file_observations_processed
         || assurance.selected_files_read || assurance.keyring_accessed || assurance.storage_writes_performed || assurance.project_code_executed { return false; }
@@ -1095,6 +1106,124 @@ mod tests {
     const KINDS: [Kind; 11] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
         Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken,
         Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment];
+
+    fn provisioning_request(kind: Kind) -> Value {
+        let mut body = request(kind);
+        body["context"]["platform"] = json!("ios");
+        body["context"]["purpose"] = json!("provisioning");
+        body["context"]["executionMode"] = json!("local");
+        body
+    }
+    fn provisioning_response(kind: Kind) -> Value {
+        let mut raw = response(kind);
+        raw["context"]["purpose"] = json!("provisioning");
+        raw["context"]["executionMode"] = json!("local");
+        raw
+    }
+
+    #[test]
+    fn provisioning_kinds_roundtrip_independently_without_requiring_a_profile_input() {
+        for kind in [Kind::AscP8, Kind::AppleP12, Kind::AppleProfile] {
+            let body = provisioning_request(kind);
+            assert_eq!(roundtrip(&body), body);
+            let raw = provisioning_response(kind);
+            assert_eq!(raw["fields"].as_array().map(Vec::len), Some(kind.layout().len()));
+            if kind != Kind::AppleProfile {
+                assert!(!raw["fields"].as_array().unwrap().iter()
+                    .any(|row| row["requirement"] == "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64"));
+            }
+            accepts(&body, raw);
+        }
+    }
+
+    #[test]
+    fn provisioning_admission_requires_explicit_local_ios_candidate_and_exact_kind() {
+        let body = provisioning_request(Kind::AppleP12);
+        for (key, value) in [("executionMode", json!("github")), ("executionMode", Value::Null),
+            ("executionMode", json!(true)), ("executionMode", json!("LOCAL")),
+            ("platform", json!("android")), ("platform", json!("project")),
+            ("stage", json!("external-testing")), ("stage", json!("production")),
+            ("purpose", json!("Provisioning"))] {
+            let mut bad = body.clone(); bad["context"][key] = value;
+            request_error(&bad, "assessment_invalid_request");
+        }
+        let mut missing = body; missing["context"].as_object_mut().unwrap().remove("executionMode");
+        request_error(&missing, "assessment_invalid_request");
+        for kind in KINDS.into_iter().chain([Kind::GoogleServiceAccount]) {
+            if matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile) { continue; }
+            request_error(&provisioning_request(kind), "assessment_invalid_request");
+        }
+    }
+
+    #[test]
+    fn provisioning_result_cannot_retarget_a_store_or_signing_assessment() {
+        for kind in [Kind::AscP8, Kind::AppleP12, Kind::AppleProfile] {
+            let body = provisioning_request(kind);
+            let raw = provisioning_response(kind);
+            for (key, value) in [("purpose", "full"), ("purpose", "signing"), ("purpose", "store"),
+                ("platform", "android"), ("stage", "production"), ("executionMode", "github")] {
+                let mut stale = raw.clone(); stale["context"][key] = json!(value);
+                refuses(&body, stale);
+            }
+            let mut missing = raw.clone(); missing["context"].as_object_mut().unwrap().remove("executionMode");
+            refuses(&body, missing);
+            for purpose in ["full", "signing", "store"] {
+                let mut previous = body.clone(); previous["context"]["purpose"] = json!(purpose);
+                refuses(&previous, raw.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn provisioning_not_applicable_is_not_a_preview_grant() {
+        let body = provisioning_request(Kind::AppleP12);
+        for reason in ["platform-disabled", "not-required"] {
+            let mut raw = provisioning_response(Kind::AppleP12);
+            raw["applicability"] = json!({"state":"not-applicable", "reason":reason});
+            raw["state"] = json!("not-applicable");
+            for field in raw["fields"].as_array_mut().unwrap() {
+                field["state"] = json!("not-applicable"); field["checks"] = json!([]);
+            }
+            let result = sanitized_result(raw, &admitted(&body).expected()).ok().expect("core applicability is retained");
+            assert!(!result.permits_session_preview());
+        }
+    }
+
+    #[test]
+    fn provisioning_missing_password_cannot_be_promoted_to_configured() {
+        let mut body = provisioning_request(Kind::AppleP12);
+        body["input"]["fields"]["password"] = Value::Null;
+        let mut raw = provisioning_response(Kind::AppleP12);
+        raw["state"] = json!("missing"); raw["fields"][1]["state"] = json!("missing");
+        raw["fields"][1]["presence"] = json!("missing"); raw["fields"][1]["issues"] = json!(["required-missing"]);
+        raw["fields"][1]["checks"] = json!([]); raw["assurance"]["scalarValuesProcessed"] = json!(false);
+        let result = sanitized_result(raw.clone(), &admitted(&body).expected()).ok().expect("missing remains missing");
+        assert!(!result.permits_session_preview());
+        raw["state"] = json!("configured");
+        refuses(&body, raw);
+    }
+
+    #[test]
+    fn provisioning_result_is_still_redacted_format_data_not_custody_or_native_proof() {
+        for kind in [Kind::AscP8, Kind::AppleP12, Kind::AppleProfile] {
+            let body = provisioning_request(kind);
+            let raw = provisioning_response(kind);
+            accepts(&body, raw.clone());
+            assert_eq!(raw["assurance"]["sourceCustody"], "not-established");
+            assert_eq!(raw["assurance"]["nativeValidation"], "not-run");
+            assert_eq!(raw["assurance"]["serviceValidation"], "not-run");
+            for (field, value) in [("selectedFilesRead", json!(true)), ("keyringAccessed", json!(true)),
+                ("storageWritesPerformed", json!(true)), ("nativeValidation", json!("verified")),
+                ("sourceCustody", json!("established")), ("serviceValidation", json!("verified"))] {
+                let mut forged = raw.clone(); forged["assurance"][field] = value;
+                refuses(&body, forged);
+            }
+            for field in ["value", "keyRef", "distributionCertificateSha256"] {
+                let mut leaking = raw.clone(); leaking["fields"][0][field] = json!("fictional-never-reflect");
+                refuses(&body, leaking);
+            }
+        }
+    }
 
     #[test]
     fn ios_signing_dependency_assessment_preserves_context_and_preview_requiredness() {

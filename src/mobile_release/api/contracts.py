@@ -339,7 +339,7 @@ class CredentialGuide(TypedDict):
 
 AssessmentPlatform = Literal["android", "ios", "project"]
 AssessmentStage = Literal["candidate", "external-testing", "production"]
-AssessmentPurpose = Literal["full", "signing", "store"]
+AssessmentPurpose = Literal["full", "signing", "store", "provisioning"]
 AssessmentState = Literal["not-applicable", "missing", "unknown", "invalid", "configured", "format-valid"]
 AssessmentIdentity = Literal["not-applicable", "not-assessed", "match", "mismatch"]
 AssessmentUnavailableReason = Literal["not-run", "incomplete", "unsupported-format", "unsupported-variant",
