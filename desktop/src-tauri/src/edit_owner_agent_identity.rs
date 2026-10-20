@@ -5,6 +5,9 @@ use super::*;
 use crate::{agent_identity_requests as requests, service_protocol::Id};
 use std::sync::{OnceLock, Weak};
 
+#[path = "edit_owner_agent_identity_actions.rs"]
+pub(super) mod actions;
+
 pub(super) struct Link {
     entry: Arc<requests::Entry>,
     owner: Weak<Inner>,
@@ -245,16 +248,17 @@ pub(super) fn linked(r: &Registry) {
 pub(super) fn prepare_allowed(
     active: &ActiveOwner,
     submission: &identity_wire::Submission,
+    action: Option<&Arc<requests::Entry>>,
     now: Instant,
 ) -> bool {
-    active.session.agent_identity.as_ref().is_none_or(|link| {
+    actions::allowed(active, action, requests::actions::Kind::Prepare) && active.session.agent_identity.as_ref().is_none_or(|link| {
         link.active(active)
             && link.entry.review_live(now)
             && matching_submission(&link.entry.input().change, submission)
     })
 }
-pub(super) fn apply_allowed(active: &ActiveOwner, now: Instant) -> bool {
-    active
+pub(super) fn apply_allowed(active: &ActiveOwner, action: Option<&Arc<requests::Entry>>, now: Instant) -> bool {
+    actions::allowed(active, action, requests::actions::Kind::Start) && active
         .session
         .agent_identity
         .as_ref()

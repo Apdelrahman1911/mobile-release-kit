@@ -423,6 +423,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+  readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;

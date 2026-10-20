@@ -1453,7 +1453,7 @@ impl Inner {
             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        identity_history::changed(self, registry);
+        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); }
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
@@ -1652,6 +1652,11 @@ impl Inner {
         }.clear(now)
     }
     fn expire_locked(&self, publication: &mut EditPublication<'_>, r: &mut Registry, id: &str, now: Instant) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some((at, reason)) = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a|
+            agent_identity::actions::cancellation_at(&a.session, now).filter(|(at, _)| a.cleanup_start.is_none_or(|prior| *at < prior))) {
+            self.trigger_locked(publication, r, id, reason, at);
+        }
         // Evaluate the original phase endpoint before a new native F can clear
         // phase_end. Both events use their actual time; neither extends cleanup.
         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
@@ -2443,6 +2448,12 @@ impl EditOwner {
     }
     fn prepare_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
         counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>) -> Result<DomainStatus, BridgeError> {
+        self.prepare_domain_action(supplied, window, domain, session_id, revision, counters, params, registration, submission, None)
+    }
+    fn prepare_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+        counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>,
+        agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
+        if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         if !wire::token(session_id) || !wire::token(revision)
@@ -2472,7 +2483,7 @@ impl EditOwner {
             match (domain, submission) {
                 (EditDomain::ProjectIdentity, Some(SavedTextSubmission::Identity(submission))) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    if !agent_identity::prepare_allowed(a, &submission, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                    if !agent_identity::prepare_allowed(a, &submission, agent_action, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if counters != (0, 0) || !a.projection.identity.as_mut().is_some_and(|detail| detail.admit_submission(submission)) {
                         self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
                     }
@@ -2509,6 +2520,10 @@ impl EditOwner {
                         .and_then(|detail| detail.recovery.as_ref()).and_then(|recovery| recovery.checkout.as_ref())
                         .is_some_and(|checkout| checkout.view.state == workflow_wire::RecoveryState::Recoverable) => {},
                 _ => return Err(invalid_owner()),
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Prepare) {
+                self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
             a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
@@ -2574,6 +2589,11 @@ impl EditOwner {
     }
     fn apply_domain_intent(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>, recovery_intent: bool) -> Result<DomainStatus, BridgeError> {
+        self.apply_domain_action(supplied, window, domain, session_id, plan_token, registration, recovery_intent, None)
+    }
+    fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+        registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
+        if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
@@ -2609,7 +2629,7 @@ impl EditOwner {
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            if !agent_identity::apply_allowed(a, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+            if !agent_identity::apply_allowed(a, agent_action, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
             if domain == EditDomain::Configuration && a.session.configuration_recovery != recovery_intent { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
                 if a.session.configuration_recovery || matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages | EditDomain::ProjectInitialization | EditDomain::ProjectIdentity) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
@@ -2622,6 +2642,10 @@ impl EditOwner {
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&a.session);
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
+                self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+            }
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -4407,7 +4431,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
         inner.bump(&mut r, &mut publication);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+        { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+          agent_identity::actions::retired(&r, &a.session, a.unknown); }
     }
     guard.completed = true;
     })();

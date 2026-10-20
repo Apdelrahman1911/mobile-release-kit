@@ -78,6 +78,9 @@ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instan
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
     local_checks: Arc<crate::agent_local_checks::Inbox>, build_requests: Arc<crate::agent_build_requests::Inbox> }
+#[path = "application_service_identity_actions.rs"]
+mod identity_actions;
+
 impl ApplicationService {
     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
         Self::open_with_android_tools(store, Arc::new(crate::service_android_tools::ObservationSlot::default()))
@@ -362,6 +365,10 @@ impl ApplicationService {
                 p::RequestBody::LocalCheckSubmit(input) => return self.submit_local_check(client, input.clone()),
                 p::RequestBody::LocalCheckStatus(query) => return self.query_local_check(client, query, false),
                 p::RequestBody::LocalCheckCancel(query) => return self.query_local_check(client, query, true),
+                p::RequestBody::IdentityPrepare(q) => return self.identity_action_request(client, q, Some(crate::agent_identity_requests::actions::Kind::Prepare), None, false),
+                p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
+                p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
+                p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
                 p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
                 p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
                 _ => {},
@@ -372,7 +379,8 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
-                p::RequestBody::Requests(_) | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
+                | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),

@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "agent_identity_actions.rs"]
+pub(crate) mod actions;
+
 pub(crate) const LIMIT: usize = 32;
 pub(crate) const LIFETIME: Duration = Duration::from_secs(15 * 60);
 const QUEUED: u8 = 0;
@@ -302,6 +305,8 @@ pub(crate) struct Entry {
     claimed: AtomicBool,
     approval: OnceLock<Approval>,
     original: OnceLock<Original>,
+    actions: OnceLock<actions::Action>,
+    action_cancelled: OnceLock<Instant>,
 }
 impl Entry {
     pub(crate) fn input(&self) -> &Submit {
@@ -368,6 +373,7 @@ impl Entry {
         self.phase.store(UNCONFIRMED, Ordering::Release);
     }
     pub(crate) fn revoke(&self) {
+        self.cancel_action(Instant::now());
         self.lease.revoked.store(true, Ordering::Release);
     }
     fn expire_pending(&self, now: Instant) {
@@ -382,7 +388,7 @@ impl Entry {
         matches!(
             self.phase.load(Ordering::Acquire),
             QUEUED | CLAIMING | UNCONFIRMED
-        )
+        ) || self.action_occupies()
     }
     pub(crate) fn status(&self) -> IntentStatus {
         self.expire_pending(Instant::now());
@@ -604,6 +610,8 @@ impl Inbox {
             claimed: AtomicBool::new(false),
             approval: OnceLock::new(),
             original: OnceLock::new(),
+            actions: OnceLock::new(),
+            action_cancelled: OnceLock::new(),
         });
         let status = entry.status();
         book.entries.push(entry);
@@ -712,7 +720,7 @@ fn lease_view(book: &Book, now: Instant) -> LeaseStatus {
 /// bounded decoded copies, GUI snapshot/link transients and allocation slack.
 /// Root input itself is native-only; no request can enlarge the fixed roster.
 pub(crate) const fn document_backing_bytes() -> usize {
-    (LIMIT + 16) * (4096 + 4096 + 2048)
+    (LIMIT + 16) * (4096 + 4096 + 2048) + actions::DOCUMENT_BACKING
 }
 
 #[cfg(test)]
@@ -976,7 +984,7 @@ mod tests {
                 .state,
             IntentState::Declined
         ));
-        assert!(document_backing_bytes() < 512 * 1024);
+        assert!(document_backing_bytes() < 4 * 1024 * 1024);
     }
     #[test]
     fn restart_does_not_restore_or_replay_an_intent() {

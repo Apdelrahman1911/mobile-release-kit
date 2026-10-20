@@ -1,0 +1,861 @@
+--- a/desktop/src-tauri/src/agent_identity_requests.rs
++++ b/desktop/src-tauri/src/agent_identity_requests.rs
+@@ -11,6 +11,9 @@
+     },
+     time::{Duration, Instant},
+ };
++
++#[path = "agent_identity_actions.rs"]
++pub(crate) mod actions;
+
+ pub(crate) const LIMIT: usize = 32;
+ pub(crate) const LIFETIME: Duration = Duration::from_secs(15 * 60);
+@@ -302,6 +305,8 @@
+     claimed: AtomicBool,
+     approval: OnceLock<Approval>,
+     original: OnceLock<Original>,
++    actions: OnceLock<actions::Action>,
++    action_cancelled: OnceLock<Instant>,
+ }
+ impl Entry {
+     pub(crate) fn input(&self) -> &Submit {
+@@ -368,6 +373,7 @@
+         self.phase.store(UNCONFIRMED, Ordering::Release);
+     }
+     pub(crate) fn revoke(&self) {
++        self.cancel_action(Instant::now());
+         self.lease.revoked.store(true, Ordering::Release);
+     }
+     fn expire_pending(&self, now: Instant) {
+@@ -382,7 +388,7 @@
+         matches!(
+             self.phase.load(Ordering::Acquire),
+             QUEUED | CLAIMING | UNCONFIRMED
+-        )
++        ) || self.action_occupies()
+     }
+     pub(crate) fn status(&self) -> IntentStatus {
+         self.expire_pending(Instant::now());
+@@ -604,6 +610,8 @@
+             claimed: AtomicBool::new(false),
+             approval: OnceLock::new(),
+             original: OnceLock::new(),
++            actions: OnceLock::new(),
++            action_cancelled: OnceLock::new(),
+         });
+         let status = entry.status();
+         book.entries.push(entry);
+@@ -712,7 +720,7 @@
+ /// bounded decoded copies, GUI snapshot/link transients and allocation slack.
+ /// Root input itself is native-only; no request can enlarge the fixed roster.
+ pub(crate) const fn document_backing_bytes() -> usize {
+-    (LIMIT + 16) * (4096 + 4096 + 2048)
++    (LIMIT + 16) * (4096 + 4096 + 2048) + actions::DOCUMENT_BACKING
+ }
+
+ #[cfg(test)]
+@@ -976,7 +984,7 @@
+                 .state,
+             IntentState::Declined
+         ));
+-        assert!(document_backing_bytes() < 512 * 1024);
++        assert!(document_backing_bytes() < 4 * 1024 * 1024);
+     }
+     #[test]
+     fn restart_does_not_restore_or_replay_an_intent() {
+--- a/desktop/src-tauri/src/edit_owner_agent_identity.rs
++++ b/desktop/src-tauri/src/edit_owner_agent_identity.rs
+@@ -4,6 +4,9 @@
+ use super::*;
+ use crate::{agent_identity_requests as requests, service_protocol::Id};
+ use std::sync::{OnceLock, Weak};
++
++#[path = "edit_owner_agent_identity_actions.rs"]
++pub(super) mod actions;
+
+ pub(super) struct Link {
+     entry: Arc<requests::Entry>,
+@@ -245,16 +248,17 @@
+ pub(super) fn prepare_allowed(
+     active: &ActiveOwner,
+     submission: &identity_wire::Submission,
++    action: Option<&Arc<requests::Entry>>,
+     now: Instant,
+ ) -> bool {
+-    active.session.agent_identity.as_ref().is_none_or(|link| {
++    actions::allowed(active, action, requests::actions::Kind::Prepare) && active.session.agent_identity.as_ref().is_none_or(|link| {
+         link.active(active)
+             && link.entry.review_live(now)
+             && matching_submission(&link.entry.input().change, submission)
+     })
+ }
+-pub(super) fn apply_allowed(active: &ActiveOwner, now: Instant) -> bool {
+-    active
++pub(super) fn apply_allowed(active: &ActiveOwner, action: Option<&Arc<requests::Entry>>, now: Instant) -> bool {
++    actions::allowed(active, action, requests::actions::Kind::Start) && active
+         .session
+         .agent_identity
+         .as_ref()
+--- a/desktop/src-tauri/src/edit_owner_identity_history.rs
++++ b/desktop/src-tauri/src/edit_owner_identity_history.rs
+@@ -76,7 +76,7 @@
+
+ /// `retired` is supplied ONLY by the original observe_final hook after its
+ /// already-existing join/ledger checks. There is no exported DTO/finality API.
+-fn observation(
++pub(super) fn observation(
+     projection: &EditProjection,
+     unknown: bool,
+     retired: bool,
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -1453,7 +1453,7 @@
+             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        identity_history::changed(self, registry);
++        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); }
+         self.changes.send_replace(registry.revision);
+         self.changed.notify_waiters();
+     }
+@@ -1652,6 +1652,11 @@
+         }.clear(now)
+     }
+     fn expire_locked(&self, publication: &mut EditPublication<'_>, r: &mut Registry, id: &str, now: Instant) {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some((at, reason)) = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a|
++            agent_identity::actions::cancellation_at(&a.session, now).filter(|(at, _)| a.cleanup_start.is_none_or(|prior| *at < prior))) {
++            self.trigger_locked(publication, r, id, reason, at);
++        }
+         // Evaluate the original phase endpoint before a new native F can clear
+         // phase_end. Both events use their actual time; neither extends cleanup.
+         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
+@@ -2443,6 +2448,12 @@
+     }
+     fn prepare_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+         counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>) -> Result<DomainStatus, BridgeError> {
++        self.prepare_domain_action(supplied, window, domain, session_id, revision, counters, params, registration, submission, None)
++    }
++    fn prepare_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
++        counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>,
++        agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
++        if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+         if !wire::token(session_id) || !wire::token(revision)
+@@ -2472,7 +2483,7 @@
+             match (domain, submission) {
+                 (EditDomain::ProjectIdentity, Some(SavedTextSubmission::Identity(submission))) => {
+                     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-                    if !agent_identity::prepare_allowed(a, &submission, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
++                    if !agent_identity::prepare_allowed(a, &submission, agent_action, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                     if counters != (0, 0) || !a.projection.identity.as_mut().is_some_and(|detail| detail.admit_submission(submission)) {
+                         self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+                     }
+@@ -2510,6 +2521,10 @@
+                         .is_some_and(|checkout| checkout.view.state == workflow_wire::RecoveryState::Recoverable) => {},
+                 _ => return Err(invalid_owner()),
+             }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Prepare) {
++                self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
++            }
+             a.prepare_counters = Some(counters);
+             a.claimed_seq = 1;
+             a.phase_end = Some(phase_end);
+@@ -2574,6 +2589,11 @@
+     }
+     fn apply_domain_intent(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+         registration: Option<WorkflowRegistration>, recovery_intent: bool) -> Result<DomainStatus, BridgeError> {
++        self.apply_domain_action(supplied, window, domain, session_id, plan_token, registration, recovery_intent, None)
++    }
++    fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
++        registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
++        if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
+@@ -2609,7 +2629,7 @@
+             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
+             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+-            if !agent_identity::apply_allowed(a, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
++            if !agent_identity::apply_allowed(a, agent_action, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+             if domain == EditDomain::Configuration && a.session.configuration_recovery != recovery_intent { return Err(invalid_owner()); }
+             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
+                 if a.session.configuration_recovery || matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages | EditDomain::ProjectInitialization | EditDomain::ProjectIdentity) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
+@@ -2622,6 +2642,10 @@
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             installed_macos_observation::retire(&a.session);
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
++                self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
++            }
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+             a.claimed_seq = 2;
+@@ -4407,7 +4431,8 @@
+         r.last = Some(a.projection); // Atomic active -> one terminal projection.
+         inner.bump(&mut r, &mut publication);
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
++        { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
++          agent_identity::actions::retired(&r, &a.session, a.unknown); }
+     }
+     guard.completed = true;
+     })();
+--- a/desktop/src-tauri/src/asset_session_agent_identity.rs
++++ b/desktop/src-tauri/src/asset_session_agent_identity.rs
+@@ -12,6 +12,8 @@
+     service_protocol::{Error, Id},
+ };
+ use serde::{de::DeserializeOwned, Deserialize};
++#[path = "asset_session_agent_identity_actions.rs"]
++pub(crate) mod actions;
+
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -78,6 +78,9 @@
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+     local_checks: Arc<crate::agent_local_checks::Inbox>, build_requests: Arc<crate::agent_build_requests::Inbox> }
++#[path = "application_service_identity_actions.rs"]
++mod identity_actions;
++
+ impl ApplicationService {
+     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
+         Self::open_with_android_tools(store, Arc::new(crate::service_android_tools::ObservationSlot::default()))
+@@ -362,6 +365,10 @@
+                 p::RequestBody::LocalCheckSubmit(input) => return self.submit_local_check(client, input.clone()),
+                 p::RequestBody::LocalCheckStatus(query) => return self.query_local_check(client, query, false),
+                 p::RequestBody::LocalCheckCancel(query) => return self.query_local_check(client, query, true),
++                p::RequestBody::IdentityPrepare(q) => return self.identity_action_request(client, q, Some(crate::agent_identity_requests::actions::Kind::Prepare), None, false),
++                p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
++                p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
++                p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
+                 p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
+                 p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
+                 _ => {},
+@@ -372,7 +379,8 @@
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+-                p::RequestBody::Requests(_) | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
++                p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
++                | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
+                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
+                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -226,6 +226,10 @@
+     #[serde(rename = "ios-archive.cancel")] IosArchiveCancel(crate::agent_ios_archive::Query),
+     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
+     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
++    #[serde(rename = "identity.prepare")] IdentityPrepare(crate::agent_identity_requests::Query),
++    #[serde(rename = "identity.start")] IdentityStart(crate::agent_identity_requests::actions::Start),
++    #[serde(rename = "identity.status")] IdentityActionStatus(crate::agent_identity_requests::Query),
++    #[serde(rename = "identity.cancel")] IdentityCancel(crate::agent_identity_requests::Query),
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -249,6 +253,7 @@
+     AndroidTools(crate::service_android_tools::View),
+     Requests(crate::service_request_catalogue::Catalogue),
+     IdentityIntent(crate::agent_identity_requests::IntentStatus),
++    IdentityAction(crate::agent_identity_requests::actions::Status),
+     LocalCheck(crate::agent_local_checks::Status),
+     AndroidBuildRequest(crate::agent_android_build::Status),
+     IosArchiveRequest(crate::agent_ios_archive::Status),
+@@ -361,6 +366,7 @@
+         }
+         ResponseBody::Operation(row) => operation(row)?,
+         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
++        ResponseBody::IdentityAction(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::IosArchiveRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -6,6 +6,8 @@
+ use std::{ffi::OsString, io::Write, path::PathBuf};
+ #[path = "installed_cli_identity.rs"]
+ mod identity;
++#[path = "installed_cli_identity_actions.rs"]
++mod identity_actions;
+ #[path = "installed_cli_local_checks.rs"]
+ mod local_checks;
+ #[path = "installed_cli_android_build.rs"]
+@@ -27,6 +29,10 @@
+   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
+   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
+   mrk identity-request-status PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
++  mrk identity-prepare PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
++  mrk identity-start PROJECT_ID SERVICE_INSTANCE INTENT_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
++  mrk identity-status PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
++  mrk identity-cancel PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
+   mrk local-check PROJECT_ID OBSERVATION_REVISION [--json]\n\
+   mrk local-check-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk local-check-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -46,14 +52,15 @@
+ android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
+ observe --json may include optional setup state codes, not a passed check or release approval.\n\
+ Identity requests additionally need the separate 15-minute Desktop request permission.\n\
+-In Desktop Settings, check requests and explicitly review/preview/apply the unchanged proposal.\n\
++In Desktop, read the requested source, then either continue locally or allow only that exact change once.\n\
+ Stdin is one closed JSON object: selection {platform,target,project}, desiredIdentity, identityIntent.\n\
+ Local checks require a separate one-use 15-minute project permission in Desktop.\n\
+ Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
+ Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
+ Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
+ The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
+-There is no direct CLI Apply, toolkit signing, credential or publishing route.\n";
++Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
++There is no arbitrary edit, toolkit signing, credential or publishing route.\n";
+
+ struct Options { request: p::Request, json: bool }
+ enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
+@@ -119,6 +126,13 @@
+     CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
+ ];
+
++const IDENTITY_ACTION_COMMANDS: [CommandCapability; 4] = [
++    CommandCapability { command: "identity-prepare", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Preview the exact already-read identity proposal explicitly delegated in Desktop, once." },
++    CommandCapability { command: "identity-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID", "SESSION_ID", "OWNER_GENERATION", "REVISION", "PLAN_TOKEN", "--reviewed"], description: "Apply that exact original preview, once; never repeat after an unconfirmed acknowledgement." },
++    CommandCapability { command: "identity-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Read the same original delegated edit; history remains separate." },
++    CommandCapability { command: "identity-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Request STOP on that original edit; acknowledgement is not completed cleanup." },
++];
++
+ /// A bounded description of this compiled interface, never a live ServiceInfo
+ /// response or a grant. Missing/unavailable Desktop is deliberately irrelevant.
+ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+@@ -129,6 +143,7 @@
+             "runtimeChecked": false,
+             "serviceTransportImplemented": cfg!(any(target_os = "linux", target_os = "macos")),
+             "supportsDirectMutationCommands": false,
++            "supportsExactDelegatedIdentityEdits": true,
+             "supportsNamedProjectExecution": true,
+             "operationsRequire": {"runningDesktop": true, "projectReadGrant": true},
+             "observationScope": "saved-data-not-live-validation-or-native-authority",
+@@ -161,6 +176,14 @@
+                 "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
+                 "sharesBuildGrantAndRequestLimitWithAndroid": true,
+             },
++            "identityActions": {
++                "scope": "already-read-exact-identity-proposal", "defaultEnabled": false, "oneUse": true,
++                "nativeAvailabilityChecked": false, "readGrantAuthorizesEdits": false, "proposalGrantAuthorizesEdits": false,
++                "maxStartWindowSeconds": crate::agent_identity_requests::LIFETIME.as_secs(),
++                "sharesProposalTombstones": true, "maxRetainedRequests": crate::agent_identity_requests::LIMIT,
++                "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
++                "commands": IDENTITY_ACTION_COMMANDS,
++            },
+             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+@@ -177,16 +200,17 @@
+             Reads require a running Desktop and an explicit project read grant.\n\
+             Saved observations are not live validation or native operation authority.\n\
+             Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
+-            Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
++            Arbitrary edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+             iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
+             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
+             Prepare never starts a build; project code may have file/network/signing effects.\n\
+             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
+-            Identity proposals require a separate Desktop permission and explicit Desktop review/apply.\n\n");
++            Identity proposals require a separate Desktop permission and explicit Desktop review/apply or exact one-use delegation.\n\
++            Delegated edits reuse the same native source read and original session, never a headless writer.\n\n");
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -195,7 +219,7 @@
+         text.into_bytes()
+     };
+     if json { bytes.push(b'\n'); }
+-    if bytes.len() > 8192 { return Err(Error::StateUnknown); }
++    if bytes.len() > 12 * 1024 { return Err(Error::StateUnknown); }
+     Ok(bytes)
+ }
+
+@@ -281,10 +305,17 @@
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+         p::ResponseBody::IdentityIntent(value) => identity::human(value),
++        p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
+         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
+         p::ResponseBody::AndroidBuildRequest(value) => android_build::human(value),
+         p::ResponseBody::IosArchiveRequest(value) => ios_archive::human(value),
+     }
++}
++
++// Preserve the longest closed command (Start plus --json is ten words), and
++// one rejection sentinel. No child may silently accept a truncated prefix.
++fn collect_arguments(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
++    args.into_iter().take(11).collect()
+ }
+
+ /// Root wires the separate installed `mrk` executable to this single entry.
+@@ -292,9 +323,10 @@
+ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
+     // Remember only the presence of the non-secret output switch. Rejected
+     // argument contents are neither echoed nor included in a public response.
+-    let args: Vec<OsString> = args.into_iter().take(8).collect();
++    let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
++    if identity_actions::recognizes(&args) { return identity_actions::run(args); }
+     if local_checks::recognizes(&args) { return local_checks::run(args); }
+     if android_build::recognizes(&args) { return android_build::run(args); }
+     if ios_archive::recognizes(&args) { return ios_archive::run(args); }
+@@ -438,6 +470,11 @@
+             assert!(matches!(parse(args(&words)).unwrap(), Parsed::Request(_)));
+         }
+         let human = String::from_utf8(capabilities(false).unwrap()).unwrap();
++        let actions = &value["identityActions"];
++        assert_eq!(actions["defaultEnabled"], false); assert_eq!(actions["oneUse"], true);
++        assert_eq!(actions["readGrantAuthorizesEdits"], false); assert_eq!(actions["proposalGrantAuthorizesEdits"], false);
++        assert_eq!(actions["nativeAvailabilityChecked"], false); assert_eq!(actions["commands"].as_array().unwrap().len(), 4);
++        assert_eq!(actions["requires"]["originalNativeSourceRead"], true);
+         let identity = &value["identityRequests"];
+         assert_eq!(identity["scope"], "desktop-reviewed-proposal");
+         assert_eq!(identity["defaultEnabled"], false);
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1657,6 +1657,48 @@
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
+ }
++#[tauri::command]
++async fn allow_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        use crate::asset_session::agent_identity as agent;
++        let args: agent::actions::Allow = agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.allow_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
++}
++
++#[tauri::command]
++async fn agent_identity_action_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        use crate::asset_session::agent_identity as agent;
++        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_identity_action_status(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
++}
++
++#[tauri::command]
++async fn revoke_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        use crate::asset_session::agent_identity as agent;
++        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
++}
++
+ #[tauri::command]
+ async fn agent_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+@@ -2754,8 +2796,17 @@
+ impl Drop for ArtifactInspectionRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
+ }
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++struct IdentityActionsRelayGuard { document: DocumentBinding, closed: bool }
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++impl Drop for IdentityActionsRelayGuard {
++    fn drop(&mut self) { if !self.closed { self.document.identity_actions_relay_lost(); } }
++}
++
+ #[deny(unused_variables, unused_assignments)]
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+     let mut revisions = edits.subscribe();
+     let mut assets = document.subscribe();
+     let mut diagnostics = document.environment_diagnostics_subscribe();
+@@ -2787,6 +2838,8 @@
+     let removal_notice=document.removal_notice_runtime();
+     let (start, enter) = oneshot::channel();
+     let handle = tauri::async_runtime::spawn(async move {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let mut identity_actions_guard = identity_actions_guard;
+         let mut local_history_guard = local_history_guard;
+         let mut local_history_revision = None;
+         let mut local_history_relay_failed = false;
+@@ -2847,7 +2900,7 @@
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+         let mut removal_notice_open=removal_notice.is_some();
+         loop {
+-            if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
++            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+             document.finish_macos_maintenance(app.clone());
+             // Optional history performs bounded synchronous service IO only
+@@ -2855,6 +2908,8 @@
+             // SAME retained relay owns the call; no detached writer is created.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let _ = application_history.publish_identity_history();
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            document.service_identity_actions_tick();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !preflight_relay_failed { document.service_local_checks_tick(); }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3189,7 +3244,7 @@
+             };
+             tokio::select! {
+                 biased;
+-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
++                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                 result = revisions.changed() => { if result.is_err() { return; } },
+                 result = assets.changed() => { if result.is_err() { return; } },
+                 result = diagnostics.changed() => { if result.is_err() { return; } },
+@@ -3263,6 +3318,7 @@
+                     // positively joined above. Drain captured terminal facts
+                     // before closing the original service, including on quit.
+                     // A history error remains in Host custody; cleanup MUST run.
++                    document.drain_identity_actions_for_exit();
+                     document.drain_local_checks_for_exit();
+                     document.drain_android_builds_for_exit();
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -4727,6 +4783,7 @@
+             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
+                 tauri::generate_handler![
+             app_info, application_read_status, allow_application_read, revoke_application_read,
++            allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -322,7 +322,8 @@
+             "release_version_edit_close", "release_version_edit_status",
+             "project_identity_open", "project_identity_prepare", "project_identity_apply",
+             "project_identity_close", "project_identity_status",
+-            "agent_identity_status", "allow_agent_identity", "revoke_agent_identity", "decline_agent_identity",
++            "allow_agent_identity_action", "agent_identity_action_status", "revoke_agent_identity_action",
++        "agent_identity_status", "allow_agent_identity", "revoke_agent_identity", "decline_agent_identity",
+             "review_agent_identity", "prepare_agent_identity", "apply_agent_identity",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -53,6 +53,9 @@
+     "allow-release-version-edit-close", "allow-release-version-edit-status",
+     "allow-project-identity-open", "allow-project-identity-prepare", "allow-project-identity-apply",
+     "allow-project-identity-close", "allow-project-identity-status",
++    "allow-allow-agent-identity-action",
++    "allow-agent-identity-action-status",
++    "allow-revoke-agent-identity-action",
+     "allow-agent-identity-status", "allow-allow-agent-identity", "allow-revoke-agent-identity", "allow-decline-agent-identity",
+     "allow-review-agent-identity", "allow-prepare-agent-identity", "allow-apply-agent-identity",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+--- a/desktop/src/projectIdentityNative.ts
++++ b/desktop/src/projectIdentityNative.ts
+@@ -234,6 +234,7 @@
+   context: IdentityUiContext; stamp: number; window: string; after: number; previous: string | null;
+   request: IdentityOpenRequest; sessionId: string | null; projection: IdentityProjection | null;
+   preparation: IdentityPrepareRequest | null;
++  delegated: IdentityPrepareRequest | null; mutationPublished: boolean;
+   retired: boolean; sent: boolean; prepareClaimed: boolean; applyClaimed: boolean; applySent: boolean;
+   closeRequested: boolean; closeSent: boolean; outcomePublished: boolean;
+ }
+@@ -411,10 +412,17 @@
+           { platform: p.checkout.view.selection.platform, target: p.checkout.view.selection.target, project: p.checkout.view.selection.project })) {
+           this.#fail('protocol'); return;
+         }
+-        if (p.prepared && (!a.preparation || a.preparation.intent === 'edit' && (p.checkout?.view.kind !== 'project-identity' ||
++        const expectedPreparation = a.preparation ?? a.delegated;
++        if (p.prepared && (!expectedPreparation || expectedPreparation.intent === 'edit' && (p.checkout?.view.kind !== 'project-identity' ||
+           p.prepared.view.kind !== 'project-identity-preview' || !identityPreviewMatches(p.prepared.view, p.checkout.view,
+-            a.preparation.desiredIdentity, a.preparation.identityIntent)))) { this.#fail('protocol'); return; }
++            expectedPreparation.desiredIdentity, expectedPreparation.identityIntent)))) { this.#fail('protocol'); return; }
+         a.sessionId = p.sessionId; a.projection = p;
++        if (p.applySubmitted && a.delegated && !a.mutationPublished) {
++          // Actual original observation, not a permission ACK, invalidates the
++          // same saved inputs. Mark submitted BEFORE the reentrant callback.
++          a.applySent = true; a.mutationPublished = true;
++          try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); }
++        }
+         if (terminal(p) && !a.outcomePublished && (p.phase === 'unknown' || this.#issue === null)) {
+           a.outcomePublished = true;
+           try { this.#source.onOutcome?.(p); } catch { this.#fail('unconfirmed'); }
+@@ -455,7 +463,7 @@
+       // A late transport error cannot erase an original settled receipt.
+       if (!(a.projection?.phase === 'final' && a.projection.nativeFinality === 'settled')) this.#fail('unconfirmed');
+     }).finally(() => this.#finish(work));
+-    if (kind === 'apply') { try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); } }
++    if (kind === 'apply' && !a.mutationPublished) { a.mutationPublished = true; try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); } }
+     this.#publish();
+     return true;
+   }
+@@ -475,7 +483,7 @@
+         this.#original()?.projectId === c.projectId && this.#original()?.coreOutcome?.journal === 'recovery_required')) return false;
+     const a: Attempt = { context: c, stamp: this.#stamp, window: status.windowGeneration, after: status.statusRevision,
+       previous: status.lastTerminal?.sessionId ?? null, request, sessionId: null, projection: null, retired: false, sent: false,
+-      preparation: null, prepareClaimed: false, applyClaimed: false, applySent: false, closeRequested: false, closeSent: false, outcomePublished: false };
++      preparation: null, delegated: null, mutationPublished: false, prepareClaimed: false, applyClaimed: false, applySent: false, closeRequested: false, closeSent: false, outcomePublished: false };
+     this.#attempt = a;
+     const sent = this.#send('open', a, () => this.#api.open(request), () => this.#guard(a, status, a.stamp));
+     if (!sent && this.#attempt === a && !a.sent) { this.#attempt = null; this.#publish(); }
+@@ -496,7 +504,7 @@
+   #prepare(request: IdentityPrepareRequest): boolean {
+     if (!encodeProjectIdentityRequest('project_identity_prepare', request)) return false;
+     const a = this.#bound(), p = a?.projection, status = this.#status;
+-    if (!a || !p?.checkout || p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || a.prepareClaimed || request.intent !== p.intent ||
++    if (!a || !p?.checkout || p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || a.prepareClaimed || a.delegated || request.intent !== p.intent ||
+       request.sessionId !== p.sessionId || request.revision !== p.checkout.revision) return false;
+     if (request.intent === 'edit' && (p.checkout.view.kind !== 'project-identity' || p.checkout.view.state !== 'supported' ||
+       !identityValueFits(request.desiredIdentity, p.checkout.view.selection.platform) || request.desiredIdentity !== p.checkout.view.identity &&
+@@ -517,7 +525,7 @@
+   #apply(request: IdentitySendRequest): boolean {
+     if (!encodeProjectIdentityRequest('project_identity_apply', request)) return false;
+     const a = this.#bound(), p = a?.projection, status = this.#status;
+-    if (!a || !a.prepareClaimed || !a.preparation || !p?.prepared || p.phase !== 'reviewing' || p.nativeReason !== 'none' ||
++    if (!a || a.delegated || !a.prepareClaimed || !a.preparation || !p?.prepared || p.phase !== 'reviewing' || p.nativeReason !== 'none' ||
+       p.reviewRemainingMs === 0 || a.applyClaimed || p.applySubmitted ||
+       request.intent !== p.intent || request.sessionId !== p.sessionId || request.revision !== p.prepared.revision || request.planToken !== p.prepared.planToken) return false;
+     a.applyClaimed = true;
+@@ -529,6 +537,28 @@
+   }
+   apply(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'edit'); }
+   recover(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'recover'); }
++  /** Passive expectation for one explicitly delegated, already-opened proposal.
++   * This sends nothing and is NOT native permission or a Prepare claim. The
++   * separate original native Allow still has to bind the exact source/change. */
++  expectAgentIdentityAction(request: IdentitySessionRequest & { desiredIdentity: string; intent: IdentityIntent }): boolean {
++    const args = uiArguments(request, ['sessionId', 'revision', 'desiredIdentity', 'intent']);
++    const a = this.#bound(), p = a?.projection;
++    if (!args || !a || a.delegated || a.preparation || a.prepareClaimed || a.applyClaimed || p?.intent !== 'edit' ||
++      p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || !p.checkout || p.checkout.view.kind !== 'project-identity' ||
++      p.checkout.view.state !== 'supported' || p.checkout.revision !== args.revision || p.sessionId !== args.sessionId ||
++      !identityValueFits(args.desiredIdentity, p.checkout.view.selection.platform) || !['preserve', 'new-application'].includes(args.intent as string) ||
++      args.desiredIdentity !== p.checkout.view.identity && (args.intent !== 'new-application' || p.checkout.view.selection.continuity !== 'unknown' ||
++        p.checkout.view.identityStatus !== 'unverified')) return false;
++    a.delegated = Object.freeze({ intent: 'edit', sessionId: p.sessionId, revision: p.checkout.revision,
++      desiredIdentity: args.desiredIdentity, identityIntent: args.intent as IdentityIntent });
++    this.#publish(); return true;
++  }
++  /** Read the SAME original attempt, including during its synchronous mutation
++   * callback before the next view publication. Permission DATA cannot set it. */
++  agentIdentityApplySubmitted(): boolean {
++    const a = this.#attempt;
++    return !!a?.delegated && a.applySent && a.projection?.applySubmitted === true;
++  }
+   /** BEFORE every context/API/selection intent, even no-op or ABA intents. */
+   beforeContextIntent(): void {
+     if (this.#stamp === Number.MAX_SAFE_INTEGER) this.#fail('protocol'); else this.#stamp += 1;
+--- a/desktop/src/components/ProjectIdentityEditor.tsx
++++ b/desktop/src/components/ProjectIdentityEditor.tsx
+@@ -1,4 +1,5 @@
+ import { useId, useSyncExternalStore } from 'react';
++import type { ReactNode } from 'react';
+ import { IDENTITY_NEW_WARNING, identityValueFits } from '../projectIdentity.ts';
+ import type { ProjectIdentityController } from '../projectIdentityController.ts';
+ import type { AgentIdentityProposal } from '../projectIdentityNative.ts';
+@@ -7,7 +8,7 @@
+ // Root supplies a controller only through the genuine native identity owner.
+ // A controller without that optional port renders useful, disabled guidance.
+ // Mounting/typing never invokes a native analysis, build, Store call or write.
+-export function ProjectIdentityEditor({ controller, onDraftChange, requestedChange }: { controller: ProjectIdentityController; onDraftChange?: (value: string) => void; requestedChange?: AgentIdentityProposal['request']['change'] }) {
++export function ProjectIdentityEditor({ controller, onDraftChange, requestedChange, agentAction, delegated = false }: { controller: ProjectIdentityController; onDraftChange?: (value: string) => void; requestedChange?: AgentIdentityProposal['request']['change']; agentAction?: ReactNode; delegated?: boolean }) {
+   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+   const id = useId();
+   const { analysis, preview, recovery, actions, diagnostic } = state;
+@@ -40,7 +41,7 @@
+       {analysis.configuredIdentity !== analysis.identity && <div className="field"><span className="field-label">ID in saved project settings</span><code>{analysis.configuredIdentity ?? 'Not available'}</code></div>}
+     </div>}
+
+-    {analysis?.state === 'supported' && !recovery && !preview && state.session?.phase === 'editing' && <fieldset disabled={!state.canEditDraft}>
++    {analysis?.state === 'supported' && !recovery && !preview && state.session?.phase === 'editing' && <fieldset disabled={!state.canEditDraft || delegated}>
+       <legend>Which app are you setting up?</legend>
+       <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'preserve'} disabled={!!requestedChange}
+         onChange={() => controller.setIntent('preserve')} />Keep this app and its current ID</label>
+@@ -61,8 +62,10 @@
+       </>}
+     </fieldset>}
+
++    {agentAction}
+     {preview && <div className="review-panel">
+       <h3>{changed ? 'Review the ID change' : 'Keep the current ID'}</h3>
++      {delegated && <p>The agent owns this delegated preview/start. Follow its original status above; do not Apply it again here.</p>}
+       {changed ? <>
+         <p><code>{preview.changes[0]?.beforeId}</code> → <code>{preview.changes[0]?.afterId}</code></p>
+         <p className="review-caution">{IDENTITY_NEW_WARNING}</p>
+@@ -70,9 +73,9 @@
+         <details><summary>Files in this preview</summary><ul>{preview.changes.map((change, index) =>
+           <li key={`${change.path}-${change.line}-${index}`}><code>{change.path}:{change.line}</code> — {change.role === 'saved-identity' ? 'saved project setting' : label}</li>)}</ul></details>
+       </> : <p>No project files will change.</p>}
+-      <label className="checkbox-row"><input type="checkbox" checked={state.reviewAcknowledged} disabled={!state.reviewCurrent || state.busy}
++      <label className="checkbox-row"><input type="checkbox" checked={state.reviewAcknowledged} disabled={!state.reviewCurrent || state.busy || delegated}
+         onChange={(event) => controller.acknowledgeReview(event.target.checked)} />{changed ? 'I reviewed these IDs and want this exact change.' : 'I reviewed the ID and want to keep it.'}</label>
+-      <button type="button" className="button primary" disabled={!actions.apply} onClick={() => controller.apply()}>
++      <button type="button" className="button primary" disabled={!actions.apply || delegated} onClick={() => controller.apply()}>
+         {changed ? `Apply ${label} change` : 'Confirm unchanged ID'}
+       </button>
+     </div>}
+@@ -101,7 +104,7 @@
+     <div className="button-row">
+       {needsRecovery && !recovery && <button type="button" className="button primary" disabled={!actions.inspectRecovery} onClick={() => controller.inspectRecovery()}>Review interrupted change</button>}
+       {(!state.session || state.session.phase === 'final') && !needsRecovery ? <button type="button" className="button primary" disabled={!actions.analyze} onClick={() => controller.analyze()}>Read {label}</button> : null}
+-      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare || requestMismatch} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
++      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare || requestMismatch || delegated} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
+       {actions.discard && <button type="button" className="button secondary" onClick={() => controller.discard()}>Close review</button>}
+       {!state.session && !actions.analyze && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}
+       {state.session && !actions.prepare && !actions.apply && !actions.prepareRecovery && !actions.recover && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -48,6 +48,9 @@
+ import { VersionEnrollmentController } from './versionEnrollmentController.ts';
+ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
+ import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
++import { AgentIdentityActionController } from './agentIdentityActions.ts';
++import type { AgentIdentityActionView } from './agentIdentityActions.ts';
++import { AgentIdentityAction } from './components/AgentIdentityAction.tsx';
+ import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
+ import { ProjectIdentityController } from './projectIdentityController.ts';
+ import type { ProjectIdentityUiState } from './projectIdentityController.ts';
+@@ -131,7 +134,7 @@
+ import { GitHub } from './pages/GitHub.tsx';
+
+ interface IdentityInput { platform: 'android' | 'ios'; target: string }
+-interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean }
++interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean; actions: AgentIdentityActionController | null }
+ const emptyIdentitySubscribe = () => () => {};
+ const emptyIdentitySnapshot = () => null;
+
+@@ -263,12 +266,13 @@
+   const identityInvalidation = useRef<(projectId: string) => void>(() => {});
+   const identityBusy = useCallback(() => identityRef.current?.rebindFailed
+     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
+-    : identityRef.current?.native.ownerReason() ?? null, []);
++    : identityRef.current?.actions?.pendingReason() ?? identityRef.current?.native.ownerReason() ?? null, []);
+   const retireIdentity = useCallback(() => {
+     versionEnrollmentRef.current?.beforeContextIntent();
+     repositoryCreateRef.current?.beforeWorkspaceAction();
+     activityRef.current?.beforeWorkspaceAction();
+     retireGitRead();
++    identityRef.current?.actions?.beforeContextIntent();
+     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
+     identityRef.current?.native.beforeContextIntent();
+     identityRef.current?.ui.retire();
+@@ -866,6 +870,9 @@
+     identityBinding?.native.getState ?? emptyIdentitySnapshot, identityBinding?.native.getState ?? emptyIdentitySnapshot);
+   const identityUi = useSyncExternalStore<ProjectIdentityUiState | null>(identityBinding?.ui.subscribe ?? emptyIdentitySubscribe,
+     identityBinding?.ui.getSnapshot ?? emptyIdentitySnapshot, identityBinding?.ui.getSnapshot ?? emptyIdentitySnapshot);
++  const identityActionState = useSyncExternalStore<AgentIdentityActionView | null>(identityBinding?.actions?.subscribe ?? emptyIdentitySubscribe,
++    identityBinding?.actions?.getSnapshot ?? emptyIdentitySnapshot, identityBinding?.actions?.getSnapshot ?? emptyIdentitySnapshot);
++  useEffect(() => { identityBinding?.actions?.sync(); }, [identityBinding, identityState, identityUi]);
+   const identityOtherReason = identityAdmission.current();
+   useEffect(() => { identityRef.current?.ui.sync(); }, [identityBinding, identityOtherReason]);
+   const identityContext = useCallback((service: object): IdentityUiContext => {
+@@ -885,9 +892,9 @@
+     const port = proposal ? service.api?.agentIdentity && bindAgentIdentityApi(base, service.api.agentIdentity, proposal) : base;
+     if (!port) return;
+     // Never dispose/rebind an original Promise, active review or unknown cleanup.
+-    if (old?.rebindFailed || old?.native.ownerReason()) return;
++    if (old?.rebindFailed || old?.actions?.pendingReason() || old?.native.ownerReason()) return;
+     retireIdentity();
+-    if (old?.native.ownerReason()) return; // A synchronous listener may have started an original status read.
++    if (old?.actions?.pendingReason() || old?.native.ownerReason()) return; // Original status/permission promises remain retained.
+     const retainFailedDisposal = () => {
+       if (!old) return;
+       // Disposal may clear subscriptions before unlisten throws. Keep the same
+@@ -897,14 +904,18 @@
+     };
+     try { old?.ui.dispose(); old?.native.dispose(); }
+     catch { retainFailedDisposal(); return; }
+-    if (old?.native.ownerReason()) { retainFailedDisposal(); return; }
++    if (old?.actions?.pendingReason() || old?.native.ownerReason()) { retainFailedDisposal(); return; }
+     const native = new ProjectIdentityNativeController(port, { current: () => identityContext(service),
+       otherOperationReason: () => identityAdmission.current(),
+       // Called only AFTER the real Apply invocation is retained. These effects
+       // may retire local consent, but never cancel a submitted original Apply.
+       onMutationSubmitted: (projectId) => identityInvalidation.current(projectId),
+       onOutcome: (original) => { if (original.applySubmitted) identityInvalidation.current(original.projectId); } });
+-    const pair: IdentityBinding = { service, native, ui: new ProjectIdentityController(() => identityContext(service), native), rebindFailed: false, proposal, proposalSeeded: false };
++    const ui = new ProjectIdentityController(() => identityContext(service), native);
++    const actions = proposal ? new AgentIdentityActionController(() => ({ api: service.api?.agentIdentityActions ?? null,
++      connection: pathService.current === service ? service : null, proposal, native, editor: ui, epoch: identityEpoch.current,
++      projectId: workspaceRef.current.selectedId, blocked: identityContext(service).blocked })) : null;
++    const pair: IdentityBinding = { service, native, ui, rebindFailed: false, proposal, proposalSeeded: false, actions };
+     identityRef.current = pair; setIdentityBinding(pair); native.connect();
+   }, [identityContext, retireIdentity]);
+   useEffect(() => {
+@@ -941,7 +952,7 @@
+       const parsed = parseAgentIdentityGuiStatus(value);
+       if (!parsed) throw new Error('unconfirmed');
+       setAgentObserved({ service, value: parsed });
+-      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native review and exact-preview approval.' } : null);
++      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native source review and exact-change approval.' } : null);
+     } catch {
+       if (!work.superseded && (action === 'revoke' ? cliService.current : pathService.current) === service && book.epoch === epoch) setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke; do not replay an edit.' });
+     } finally {
+@@ -1905,14 +1916,15 @@
+               {identityBinding.proposal && <div className="button-row"><button type="button" className="button small secondary" disabled={identityBusy() !== null}
+                 onClick={() => connectIdentity(pathService.current, null)}>Return to my local app ID draft</button></div>}
+               <ProjectIdentityEditor controller={identityBinding.ui} onDraftChange={identityBinding.proposal ? undefined : keepIdentityText}
+-                requestedChange={identityBinding.proposal?.request.change} />
++                requestedChange={identityBinding.proposal?.request.change} delegated={identityActionState?.claimed ?? false}
++                agentAction={identityBinding.actions ? <AgentIdentityAction controller={identityBinding.actions} /> : undefined} />
+             </> : <p>App ID editing needs the connected native Desktop app. No app ID files are changed here; your local drafts are kept.</p>}
+           </ProgressiveDisclosure>
+           <ProgressiveDisclosure title="Advanced · CLI / AI access" needsAttention={cliReadNeedsAttention || !!agentRequestMessage || !!agentRequests?.pending} reveal={cliAccessReveal}>
+             <CliReadAccessPanel controller={cliReadAccess} />
+             <AgentLocalCheckAccess controller={agentLocalChecks} blocked={loading || choosing || !session || savedCommandBusy() !== null} />
+             {cliService.current.api?.mode === 'native' && cliService.current.api.agentIdentity && <section className="card"><h3>Let an agent propose an app ID</h3>
+-              <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. The CLI cannot Apply: you must read the saved source, acknowledge a new app when applicable, preview, and approve the exact native change here.</p>
++              <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. Proposal permission alone cannot Apply. Read the saved source and acknowledge a new app when applicable, then continue here or explicitly delegate that exact change once to the agent.</p>
+               <p>Current observation: {agentRequests ? agentRequests.lease.enabled ? 'request permission was observed enabled' : 'request permission was observed disabled' : 'not checked'}. Status is not an approval or completed edit.</p>
+               {agentRequestMessage && <p role="status" className="review-caution">{agentRequestMessage}</p>}
+               <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || identityBusy() !== null}
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -423,6 +423,7 @@
+   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
++  readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
+   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
+   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -83,6 +83,7 @@
+ import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
+ import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
+ import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
++import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
+ import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
+ import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
+ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
+@@ -401,6 +402,7 @@
+     mode,
+     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
+     agentIdentity: createAgentIdentityApi(mode, invoke),
++    agentIdentityActions: createAgentIdentityActionApi(mode, invoke),
+     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
+     agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
+     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),

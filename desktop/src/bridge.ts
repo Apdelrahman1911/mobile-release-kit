@@ -83,6 +83,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
+import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
 import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
 import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
@@ -401,6 +402,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     mode,
     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
     agentIdentity: createAgentIdentityApi(mode, invoke),
+    agentIdentityActions: createAgentIdentityActionApi(mode, invoke),
     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
     agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),

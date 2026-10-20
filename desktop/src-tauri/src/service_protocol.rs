@@ -226,6 +226,10 @@ pub enum RequestBody {
     #[serde(rename = "ios-archive.cancel")] IosArchiveCancel(crate::agent_ios_archive::Query),
     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.prepare")] IdentityPrepare(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.start")] IdentityStart(crate::agent_identity_requests::actions::Start),
+    #[serde(rename = "identity.status")] IdentityActionStatus(crate::agent_identity_requests::Query),
+    #[serde(rename = "identity.cancel")] IdentityCancel(crate::agent_identity_requests::Query),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -249,6 +253,7 @@ pub enum ResponseBody {
     AndroidTools(crate::service_android_tools::View),
     Requests(crate::service_request_catalogue::Catalogue),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+    IdentityAction(crate::agent_identity_requests::actions::Status),
     LocalCheck(crate::agent_local_checks::Status),
     AndroidBuildRequest(crate::agent_android_build::Status),
     IosArchiveRequest(crate::agent_ios_archive::Status),
@@ -361,6 +366,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         }
         ResponseBody::Operation(row) => operation(row)?,
         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+        ResponseBody::IdentityAction(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::IosArchiveRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },

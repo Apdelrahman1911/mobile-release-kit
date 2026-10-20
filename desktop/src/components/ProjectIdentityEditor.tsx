@@ -1,4 +1,5 @@
 import { useId, useSyncExternalStore } from 'react';
+import type { ReactNode } from 'react';
 import { IDENTITY_NEW_WARNING, identityValueFits } from '../projectIdentity.ts';
 import type { ProjectIdentityController } from '../projectIdentityController.ts';
 import type { AgentIdentityProposal } from '../projectIdentityNative.ts';
@@ -7,7 +8,7 @@ import { Badge, SectionHeading } from './Common.tsx';
 // Root supplies a controller only through the genuine native identity owner.
 // A controller without that optional port renders useful, disabled guidance.
 // Mounting/typing never invokes a native analysis, build, Store call or write.
-export function ProjectIdentityEditor({ controller, onDraftChange, requestedChange }: { controller: ProjectIdentityController; onDraftChange?: (value: string) => void; requestedChange?: AgentIdentityProposal['request']['change'] }) {
+export function ProjectIdentityEditor({ controller, onDraftChange, requestedChange, agentAction, delegated = false }: { controller: ProjectIdentityController; onDraftChange?: (value: string) => void; requestedChange?: AgentIdentityProposal['request']['change']; agentAction?: ReactNode; delegated?: boolean }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const id = useId();
   const { analysis, preview, recovery, actions, diagnostic } = state;
@@ -40,7 +41,7 @@ export function ProjectIdentityEditor({ controller, onDraftChange, requestedChan
       {analysis.configuredIdentity !== analysis.identity && <div className="field"><span className="field-label">ID in saved project settings</span><code>{analysis.configuredIdentity ?? 'Not available'}</code></div>}
     </div>}
 
-    {analysis?.state === 'supported' && !recovery && !preview && state.session?.phase === 'editing' && <fieldset disabled={!state.canEditDraft}>
+    {analysis?.state === 'supported' && !recovery && !preview && state.session?.phase === 'editing' && <fieldset disabled={!state.canEditDraft || delegated}>
       <legend>Which app are you setting up?</legend>
       <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'preserve'} disabled={!!requestedChange}
         onChange={() => controller.setIntent('preserve')} />Keep this app and its current ID</label>
@@ -61,8 +62,10 @@ export function ProjectIdentityEditor({ controller, onDraftChange, requestedChan
       </>}
     </fieldset>}
 
+    {agentAction}
     {preview && <div className="review-panel">
       <h3>{changed ? 'Review the ID change' : 'Keep the current ID'}</h3>
+      {delegated && <p>The agent owns this delegated preview/start. Follow its original status above; do not Apply it again here.</p>}
       {changed ? <>
         <p><code>{preview.changes[0]?.beforeId}</code> → <code>{preview.changes[0]?.afterId}</code></p>
         <p className="review-caution">{IDENTITY_NEW_WARNING}</p>
@@ -70,9 +73,9 @@ export function ProjectIdentityEditor({ controller, onDraftChange, requestedChan
         <details><summary>Files in this preview</summary><ul>{preview.changes.map((change, index) =>
           <li key={`${change.path}-${change.line}-${index}`}><code>{change.path}:{change.line}</code> — {change.role === 'saved-identity' ? 'saved project setting' : label}</li>)}</ul></details>
       </> : <p>No project files will change.</p>}
-      <label className="checkbox-row"><input type="checkbox" checked={state.reviewAcknowledged} disabled={!state.reviewCurrent || state.busy}
+      <label className="checkbox-row"><input type="checkbox" checked={state.reviewAcknowledged} disabled={!state.reviewCurrent || state.busy || delegated}
         onChange={(event) => controller.acknowledgeReview(event.target.checked)} />{changed ? 'I reviewed these IDs and want this exact change.' : 'I reviewed the ID and want to keep it.'}</label>
-      <button type="button" className="button primary" disabled={!actions.apply} onClick={() => controller.apply()}>
+      <button type="button" className="button primary" disabled={!actions.apply || delegated} onClick={() => controller.apply()}>
         {changed ? `Apply ${label} change` : 'Confirm unchanged ID'}
       </button>
     </div>}
@@ -101,7 +104,7 @@ export function ProjectIdentityEditor({ controller, onDraftChange, requestedChan
     <div className="button-row">
       {needsRecovery && !recovery && <button type="button" className="button primary" disabled={!actions.inspectRecovery} onClick={() => controller.inspectRecovery()}>Review interrupted change</button>}
       {(!state.session || state.session.phase === 'final') && !needsRecovery ? <button type="button" className="button primary" disabled={!actions.analyze} onClick={() => controller.analyze()}>Read {label}</button> : null}
-      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare || requestMismatch} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
+      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare || requestMismatch || delegated} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
       {actions.discard && <button type="button" className="button secondary" onClick={() => controller.discard()}>Close review</button>}
       {!state.session && !actions.analyze && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}
       {state.session && !actions.prepare && !actions.apply && !actions.prepareRecovery && !actions.recover && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}

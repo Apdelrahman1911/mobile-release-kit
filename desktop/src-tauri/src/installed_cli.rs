@@ -6,6 +6,8 @@ use p::{Error, Id};
 use std::{ffi::OsString, io::Write, path::PathBuf};
 #[path = "installed_cli_identity.rs"]
 mod identity;
+#[path = "installed_cli_identity_actions.rs"]
+mod identity_actions;
 #[path = "installed_cli_local_checks.rs"]
 mod local_checks;
 #[path = "installed_cli_android_build.rs"]
@@ -27,6 +29,10 @@ Usage:\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
   mrk identity-request-status PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
+  mrk identity-prepare PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
+  mrk identity-start PROJECT_ID SERVICE_INSTANCE INTENT_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+  mrk identity-status PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
+  mrk identity-cancel PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
   mrk local-check PROJECT_ID OBSERVATION_REVISION [--json]\n\
   mrk local-check-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk local-check-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -46,14 +52,15 @@ requests lists retained local-check/build request IDs in this Desktop instance, 
 android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
 observe --json may include optional setup state codes, not a passed check or release approval.\n\
 Identity requests additionally need the separate 15-minute Desktop request permission.\n\
-In Desktop Settings, check requests and explicitly review/preview/apply the unchanged proposal.\n\
+In Desktop, read the requested source, then either continue locally or allow only that exact change once.\n\
 Stdin is one closed JSON object: selection {platform,target,project}, desiredIdentity, identityIntent.\n\
 Local checks require a separate one-use 15-minute project permission in Desktop.\n\
 Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
 Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
 Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
-There is no direct CLI Apply, toolkit signing, credential or publishing route.\n";
+Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
+There is no arbitrary edit, toolkit signing, credential or publishing route.\n";
 
 struct Options { request: p::Request, json: bool }
 enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
@@ -119,6 +126,13 @@ const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
     CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
 ];
 
+const IDENTITY_ACTION_COMMANDS: [CommandCapability; 4] = [
+    CommandCapability { command: "identity-prepare", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Preview the exact already-read identity proposal explicitly delegated in Desktop, once." },
+    CommandCapability { command: "identity-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID", "SESSION_ID", "OWNER_GENERATION", "REVISION", "PLAN_TOKEN", "--reviewed"], description: "Apply that exact original preview, once; never repeat after an unconfirmed acknowledgement." },
+    CommandCapability { command: "identity-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Read the same original delegated edit; history remains separate." },
+    CommandCapability { command: "identity-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Request STOP on that original edit; acknowledgement is not completed cleanup." },
+];
+
 /// A bounded description of this compiled interface, never a live ServiceInfo
 /// response or a grant. Missing/unavailable Desktop is deliberately irrelevant.
 fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
@@ -129,6 +143,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "runtimeChecked": false,
             "serviceTransportImplemented": cfg!(any(target_os = "linux", target_os = "macos")),
             "supportsDirectMutationCommands": false,
+            "supportsExactDelegatedIdentityEdits": true,
             "supportsNamedProjectExecution": true,
             "operationsRequire": {"runningDesktop": true, "projectReadGrant": true},
             "observationScope": "saved-data-not-live-validation-or-native-authority",
@@ -161,6 +176,14 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
                 "sharesBuildGrantAndRequestLimitWithAndroid": true,
             },
+            "identityActions": {
+                "scope": "already-read-exact-identity-proposal", "defaultEnabled": false, "oneUse": true,
+                "nativeAvailabilityChecked": false, "readGrantAuthorizesEdits": false, "proposalGrantAuthorizesEdits": false,
+                "maxStartWindowSeconds": crate::agent_identity_requests::LIFETIME.as_secs(),
+                "sharesProposalTombstones": true, "maxRetainedRequests": crate::agent_identity_requests::LIMIT,
+                "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                "commands": IDENTITY_ACTION_COMMANDS,
+            },
             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
@@ -177,16 +200,17 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             Reads require a running Desktop and an explicit project read grant.\n\
             Saved observations are not live validation or native operation authority.\n\
             Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
-            Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+            Arbitrary edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
             iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
             Prepare never starts a build; project code may have file/network/signing effects.\n\
             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
-            Identity proposals require a separate Desktop permission and explicit Desktop review/apply.\n\n");
+            Identity proposals require a separate Desktop permission and explicit Desktop review/apply or exact one-use delegation.\n\
+            Delegated edits reuse the same native source read and original session, never a headless writer.\n\n");
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -195,7 +219,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         text.into_bytes()
     };
     if json { bytes.push(b'\n'); }
-    if bytes.len() > 8192 { return Err(Error::StateUnknown); }
+    if bytes.len() > 12 * 1024 { return Err(Error::StateUnknown); }
     Ok(bytes)
 }
 
@@ -281,10 +305,17 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+        p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
         p::ResponseBody::AndroidBuildRequest(value) => android_build::human(value),
         p::ResponseBody::IosArchiveRequest(value) => ios_archive::human(value),
     }
+}
+
+// Preserve the longest closed command (Start plus --json is ten words), and
+// one rejection sentinel. No child may silently accept a truncated prefix.
+fn collect_arguments(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    args.into_iter().take(11).collect()
 }
 
 /// Root wires the separate installed `mrk` executable to this single entry.
@@ -292,9 +323,10 @@ fn human(response: &p::ResponseBody) -> String {
 pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     // Remember only the presence of the non-secret output switch. Rejected
     // argument contents are neither echoed nor included in a public response.
-    let args: Vec<OsString> = args.into_iter().take(8).collect();
+    let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
+    if identity_actions::recognizes(&args) { return identity_actions::run(args); }
     if local_checks::recognizes(&args) { return local_checks::run(args); }
     if android_build::recognizes(&args) { return android_build::run(args); }
     if ios_archive::recognizes(&args) { return ios_archive::run(args); }
@@ -438,6 +470,11 @@ mod tests {
             assert!(matches!(parse(args(&words)).unwrap(), Parsed::Request(_)));
         }
         let human = String::from_utf8(capabilities(false).unwrap()).unwrap();
+        let actions = &value["identityActions"];
+        assert_eq!(actions["defaultEnabled"], false); assert_eq!(actions["oneUse"], true);
+        assert_eq!(actions["readGrantAuthorizesEdits"], false); assert_eq!(actions["proposalGrantAuthorizesEdits"], false);
+        assert_eq!(actions["nativeAvailabilityChecked"], false); assert_eq!(actions["commands"].as_array().unwrap().len(), 4);
+        assert_eq!(actions["requires"]["originalNativeSourceRead"], true);
         let identity = &value["identityRequests"];
         assert_eq!(identity["scope"], "desktop-reviewed-proposal");
         assert_eq!(identity["defaultEnabled"], false);

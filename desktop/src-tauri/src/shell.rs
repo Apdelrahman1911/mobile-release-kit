@@ -1658,6 +1658,48 @@ async fn revoke_agent_ios_archive(webview: Webview, request: tauri::ipc::Request
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
 }
 #[tauri::command]
+async fn allow_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::actions::Allow = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
+#[tauri::command]
+async fn agent_identity_action_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_identity_action_status(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
+#[tauri::command]
+async fn revoke_agent_identity_action(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use crate::asset_session::agent_identity as agent;
+        let args: agent::IntentRequest = agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_identity_action(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Delegated identity edits are not supported on this platform.")) }
+}
+
+#[tauri::command]
 async fn agent_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -2754,8 +2796,17 @@ struct ArtifactInspectionRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for ArtifactInspectionRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct IdentityActionsRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for IdentityActionsRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.identity_actions_relay_lost(); } }
+}
+
 #[deny(unused_variables, unused_assignments)]
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
@@ -2787,6 +2838,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let removal_notice=document.removal_notice_runtime();
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut identity_actions_guard = identity_actions_guard;
         let mut local_history_guard = local_history_guard;
         let mut local_history_revision = None;
         let mut local_history_relay_failed = false;
@@ -2847,7 +2900,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // Optional history performs bounded synchronous service IO only
@@ -2855,6 +2908,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // SAME retained relay owns the call; no detached writer is created.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let _ = application_history.publish_identity_history();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            document.service_identity_actions_tick();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !preflight_relay_failed { document.service_local_checks_tick(); }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3189,7 +3244,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
@@ -3263,6 +3318,7 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
                     // positively joined above. Drain captured terminal facts
                     // before closing the original service, including on quit.
                     // A history error remains in Host custody; cleanup MUST run.
+                    document.drain_identity_actions_for_exit();
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
                     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -4727,6 +4783,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
             app_info, application_read_status, allow_application_read, revoke_application_read,
+            allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,

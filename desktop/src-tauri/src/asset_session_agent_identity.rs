@@ -12,6 +12,8 @@ use crate::{
     service_protocol::{Error, Id},
 };
 use serde::{de::DeserializeOwned, Deserialize};
+#[path = "asset_session_agent_identity_actions.rs"]
+pub(crate) mod actions;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

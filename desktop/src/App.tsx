@@ -48,6 +48,9 @@ import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { VersionEnrollmentController } from './versionEnrollmentController.ts';
 import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
 import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
+import { AgentIdentityActionController } from './agentIdentityActions.ts';
+import type { AgentIdentityActionView } from './agentIdentityActions.ts';
+import { AgentIdentityAction } from './components/AgentIdentityAction.tsx';
 import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import { ProjectIdentityController } from './projectIdentityController.ts';
 import type { ProjectIdentityUiState } from './projectIdentityController.ts';
@@ -131,7 +134,7 @@ import { Artifacts } from './pages/Artifacts.tsx';
 import { GitHub } from './pages/GitHub.tsx';
 
 interface IdentityInput { platform: 'android' | 'ios'; target: string }
-interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean }
+interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean; actions: AgentIdentityActionController | null }
 const emptyIdentitySubscribe = () => () => {};
 const emptyIdentitySnapshot = () => null;
 
@@ -263,12 +266,13 @@ export function App() {
   const identityInvalidation = useRef<(projectId: string) => void>(() => {});
   const identityBusy = useCallback(() => identityRef.current?.rebindFailed
     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
-    : identityRef.current?.native.ownerReason() ?? null, []);
+    : identityRef.current?.actions?.pendingReason() ?? identityRef.current?.native.ownerReason() ?? null, []);
   const retireIdentity = useCallback(() => {
     versionEnrollmentRef.current?.beforeContextIntent();
     repositoryCreateRef.current?.beforeWorkspaceAction();
     activityRef.current?.beforeWorkspaceAction();
     retireGitRead();
+    identityRef.current?.actions?.beforeContextIntent();
     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
     identityRef.current?.native.beforeContextIntent();
     identityRef.current?.ui.retire();
@@ -866,6 +870,9 @@ export function App() {
     identityBinding?.native.getState ?? emptyIdentitySnapshot, identityBinding?.native.getState ?? emptyIdentitySnapshot);
   const identityUi = useSyncExternalStore<ProjectIdentityUiState | null>(identityBinding?.ui.subscribe ?? emptyIdentitySubscribe,
     identityBinding?.ui.getSnapshot ?? emptyIdentitySnapshot, identityBinding?.ui.getSnapshot ?? emptyIdentitySnapshot);
+  const identityActionState = useSyncExternalStore<AgentIdentityActionView | null>(identityBinding?.actions?.subscribe ?? emptyIdentitySubscribe,
+    identityBinding?.actions?.getSnapshot ?? emptyIdentitySnapshot, identityBinding?.actions?.getSnapshot ?? emptyIdentitySnapshot);
+  useEffect(() => { identityBinding?.actions?.sync(); }, [identityBinding, identityState, identityUi]);
   const identityOtherReason = identityAdmission.current();
   useEffect(() => { identityRef.current?.ui.sync(); }, [identityBinding, identityOtherReason]);
   const identityContext = useCallback((service: object): IdentityUiContext => {
@@ -885,9 +892,9 @@ export function App() {
     const port = proposal ? service.api?.agentIdentity && bindAgentIdentityApi(base, service.api.agentIdentity, proposal) : base;
     if (!port) return;
     // Never dispose/rebind an original Promise, active review or unknown cleanup.
-    if (old?.rebindFailed || old?.native.ownerReason()) return;
+    if (old?.rebindFailed || old?.actions?.pendingReason() || old?.native.ownerReason()) return;
     retireIdentity();
-    if (old?.native.ownerReason()) return; // A synchronous listener may have started an original status read.
+    if (old?.actions?.pendingReason() || old?.native.ownerReason()) return; // Original status/permission promises remain retained.
     const retainFailedDisposal = () => {
       if (!old) return;
       // Disposal may clear subscriptions before unlisten throws. Keep the same
@@ -897,14 +904,18 @@ export function App() {
     };
     try { old?.ui.dispose(); old?.native.dispose(); }
     catch { retainFailedDisposal(); return; }
-    if (old?.native.ownerReason()) { retainFailedDisposal(); return; }
+    if (old?.actions?.pendingReason() || old?.native.ownerReason()) { retainFailedDisposal(); return; }
     const native = new ProjectIdentityNativeController(port, { current: () => identityContext(service),
       otherOperationReason: () => identityAdmission.current(),
       // Called only AFTER the real Apply invocation is retained. These effects
       // may retire local consent, but never cancel a submitted original Apply.
       onMutationSubmitted: (projectId) => identityInvalidation.current(projectId),
       onOutcome: (original) => { if (original.applySubmitted) identityInvalidation.current(original.projectId); } });
-    const pair: IdentityBinding = { service, native, ui: new ProjectIdentityController(() => identityContext(service), native), rebindFailed: false, proposal, proposalSeeded: false };
+    const ui = new ProjectIdentityController(() => identityContext(service), native);
+    const actions = proposal ? new AgentIdentityActionController(() => ({ api: service.api?.agentIdentityActions ?? null,
+      connection: pathService.current === service ? service : null, proposal, native, editor: ui, epoch: identityEpoch.current,
+      projectId: workspaceRef.current.selectedId, blocked: identityContext(service).blocked })) : null;
+    const pair: IdentityBinding = { service, native, ui, rebindFailed: false, proposal, proposalSeeded: false, actions };
     identityRef.current = pair; setIdentityBinding(pair); native.connect();
   }, [identityContext, retireIdentity]);
   useEffect(() => {
@@ -941,7 +952,7 @@ export function App() {
       const parsed = parseAgentIdentityGuiStatus(value);
       if (!parsed) throw new Error('unconfirmed');
       setAgentObserved({ service, value: parsed });
-      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native review and exact-preview approval.' } : null);
+      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native source review and exact-change approval.' } : null);
     } catch {
       if (!work.superseded && (action === 'revoke' ? cliService.current : pathService.current) === service && book.epoch === epoch) setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke; do not replay an edit.' });
     } finally {
@@ -1905,14 +1916,15 @@ export function App() {
               {identityBinding.proposal && <div className="button-row"><button type="button" className="button small secondary" disabled={identityBusy() !== null}
                 onClick={() => connectIdentity(pathService.current, null)}>Return to my local app ID draft</button></div>}
               <ProjectIdentityEditor controller={identityBinding.ui} onDraftChange={identityBinding.proposal ? undefined : keepIdentityText}
-                requestedChange={identityBinding.proposal?.request.change} />
+                requestedChange={identityBinding.proposal?.request.change} delegated={identityActionState?.claimed ?? false}
+                agentAction={identityBinding.actions ? <AgentIdentityAction controller={identityBinding.actions} /> : undefined} />
             </> : <p>App ID editing needs the connected native Desktop app. No app ID files are changed here; your local drafts are kept.</p>}
           </ProgressiveDisclosure>
           <ProgressiveDisclosure title="Advanced · CLI / AI access" needsAttention={cliReadNeedsAttention || !!agentRequestMessage || !!agentRequests?.pending} reveal={cliAccessReveal}>
             <CliReadAccessPanel controller={cliReadAccess} />
             <AgentLocalCheckAccess controller={agentLocalChecks} blocked={loading || choosing || !session || savedCommandBusy() !== null} />
             {cliService.current.api?.mode === 'native' && cliService.current.api.agentIdentity && <section className="card"><h3>Let an agent propose an app ID</h3>
-              <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. The CLI cannot Apply: you must read the saved source, acknowledge a new app when applicable, preview, and approve the exact native change here.</p>
+              <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. Proposal permission alone cannot Apply. Read the saved source and acknowledge a new app when applicable, then continue here or explicitly delegate that exact change once to the agent.</p>
               <p>Current observation: {agentRequests ? agentRequests.lease.enabled ? 'request permission was observed enabled' : 'request permission was observed disabled' : 'not checked'}. Status is not an approval or completed edit.</p>
               {agentRequestMessage && <p role="status" className="review-caution">{agentRequestMessage}</p>}
               <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || identityBusy() !== null}
