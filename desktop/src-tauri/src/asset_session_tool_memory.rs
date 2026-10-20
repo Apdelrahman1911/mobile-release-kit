@@ -39,7 +39,7 @@ impl DocumentBinding {
         }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         {
-            let document = lookup_memory::retained_document_bytes(&self.inner, state).map_err(|error| {
+            let document = lookup_memory::tool_acquisition_document_bytes(&self.inner, state, census).map_err(|error| {
                 if error == keyring::Problem::CleanupUnknown { BridgeError::cleanup_unknown() }
                 else { crate::tool_acquisition_protocol::invalid() }
             })?;

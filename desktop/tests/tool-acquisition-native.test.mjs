@@ -13,7 +13,7 @@ const context = () => ({ projectId: 'inert-project', draftRevision: 1, baselineG
 const operation = () => ({ operationId: OP, ownerGeneration: OWNER, context: context(), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', result: null });
 const status = (op = null) => ({ schemaVersion: 1, statusRevision: 4, availability: op ? 'busy' : 'available', operation: op });
-const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: {
+const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], compatible: [] }, requirements: {
   schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA, complete: true, platform: 'android', projectCodeExecuted: false,
   xcode: { version: '26.3', build: '17C529' }, android: { jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' },
     sdkPlatform: { state: 'literal', value: 'android-35' }, sdkBuildTools: { state: 'unspecified', value: null },
@@ -100,7 +100,8 @@ test('phase/outcome/result contradictions, dangerous objects and bounded status 
 
 test('public protected-tool comparison is closed and cannot be used as request authority', () => {
   for (const finding of [null, 'reuse-selected', 'none-in-supported-catalogue', 'manual-check-required']) {
-    const op = complete(); op.result.protectedTools = finding;
+    const op = complete(); op.result.protectedTools = finding; op.result.components = finding === 'none-in-supported-catalogue' ? op.result.components :
+      finding === 'reuse-selected' ? { missing: [], compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'] } : null;
     assert.equal(parseToolAcquisitionStatus(status(op)).operation.result.protectedTools, finding);
     assert.equal(encodeToolAcquisitionRequest('prepare_tool_acquisition', { ...context(), protectedTools: finding }), null);
   }
@@ -114,17 +115,52 @@ test('public protected-tool comparison is closed and cannot be used as request a
   assert.equal(parseToolAcquisitionStatus(status(extra)), null);
 });
 
-test('native staged result requires all four sources, same operation and no installation assertions', () => {
+test('native staged result requires a canonical nonempty set, same operation and no installation assertions', () => {
   const op = { ...complete('acquire'), result: staged() }; assert.ok(parseToolAcquisitionStatus(status(op)));
   for (const field of ['nativeFinality', 'registered', 'readyToBuild']) {
     const v = clone(op); v.result.assurance[field] = true; assert.equal(parseToolAcquisitionStatus(status(v)), null);
   }
   for (const mutate of [
     (v) => { v.result.operationId = 'f'.repeat(32); },
-    (v) => { v.result.downloadedArchives.pop(); v.result.groups.pop(); },
     (v) => { v.result.downloadedArchives.unshift('jdk'); },
     (v) => { v.result.groups[1].components.pop(); v.result.groups[1].allRequiredComponentsStaged = false; v.result.groups[1].next = 'complete-sdk-manually'; },
     (v) => { v.context.action = 'inspect'; v.context.review = null; },
   ]) { const v = clone(op); mutate(v); assert.equal(parseToolAcquisitionStatus(status(v)), null); }
   assert.equal(parseToolAcquisitionStatus(staged()), null);
+});
+
+test('native partial partition is closed, exhaustive and separate from renderer admission', () => {
+  const all = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'];
+  for (let mask = 0; mask < 16; mask++) {
+    const op = complete(); op.result.components = { missing: all.filter((_, i) => mask & (1 << i)), compatible: all.filter((_, i) => !(mask & (1 << i))) };
+    assert.ok(parseToolAcquisitionStatus(status(op)));
+    assert.equal(encodeToolAcquisitionRequest('prepare_tool_acquisition', { ...context(), components: op.result.components }), null);
+  }
+  for (const parts of [true, {}, { missing: ['gradle'], compatible: ['jdk', 'sdk-platform'] },
+    { missing: ['gradle'], compatible: ['jdk', 'sdk-platform', 'gradle'] },
+    { missing: ['sdk-build-tools', 'sdk-platform'], compatible: ['jdk', 'gradle'] },
+    { missing: ['gradle'], compatible: ['jdk', 'sdk-platform', 'sdk-build-tools'], verified: true }]) {
+    const op = complete(); op.result.components = parts; assert.equal(parseToolAcquisitionStatus(status(op)), null);
+  }
+  const manual = complete(); manual.result.protectedTools = 'manual-check-required';
+  assert.equal(parseToolAcquisitionStatus(status(manual)), null);
+  const selected = complete(); selected.result.protectedTools = 'reuse-selected';
+  assert.equal(parseToolAcquisitionStatus(status(selected)), null);
+});
+
+test('single SDK staging remains manual and exact official continuation does not suggest replacement', async () => {
+  const { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } = await import('../src/toolAcquisitionComponents.ts');
+  const op = complete('acquire'), data = staged();
+  data.reusedArchives = []; data.downloadedArchives = ['sdk-platform'];
+  data.groups = [{ group: 'sdk', components: ['sdk-platform'], allRequiredComponentsStaged: false, next: 'complete-sdk-manually' }];
+  op.result = data;
+  assert.ok(parseToolAcquisitionStatus(status(op)));
+  assert.equal(hasIncompleteSdk({ missing: ['sdk-platform'], compatible: ['jdk', 'sdk-build-tools', 'gradle'] }), true);
+  assert.equal(hasIncompleteSdk({ missing: ['sdk-platform', 'sdk-build-tools'], compatible: ['jdk', 'gradle'] }), false);
+  assert.match(MANUAL_ANDROID_SDK_STEPS.join(' '), /Keep your existing SDK/);
+  assert.match(MANUAL_ANDROID_SDK_STEPS.join(' '), /Android 15 \(API 35\).*Show Package Details.*35\.0\.0/);
+  assert.match(MANUAL_ANDROID_SDK_STEPS.join(' '), /license.*inspect.*revision is 2/);
+  assert.equal(toolComponentLabel('sdk-build-tools'), 'Android Build-Tools 35.0.0');
+  op.result.groups[0].allRequiredComponentsStaged = true; op.result.groups[0].next = 'choose-native-source';
+  assert.equal(parseToolAcquisitionStatus(status(op)), null);
 });

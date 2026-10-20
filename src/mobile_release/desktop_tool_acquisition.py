@@ -13,8 +13,8 @@ import time
 
 from ._desktop_tool_acquisition_control import ToolAcquisitionInput
 from ._desktop_tool_acquisition_protocol import (CA_LIMIT, CONTROL_LIMIT, MANIFEST_LIMIT,
-    ToolAcquisitionRequest, decode, require)
-from ._tool_acquisition_spec import AcquisitionError, COMPONENTS
+    ToolAcquisitionRequest, component_partition, decode, require)
+from ._tool_acquisition_spec import AcquisitionError
 from ._tool_requirements_capture import Capture
 from .cancellation import DefaultCancellation
 from .owned_process import fatal_lifetime_error
@@ -81,10 +81,12 @@ class ToolAcquisitionRun:
         self.checkpoint()
         native = self.request.native["cache"]
         identity = native["rootIdentity"]
+        missing, compatible = component_partition(native["missing"], native["compatible"])
+        require(bool(missing))
         return Admission(self.request.operation_id, native["contextSha256"], self.request.native["profile"],
             native["referenceSha256"], native["projectionSha256"], native["generation"], Path(native["root"]),
             (int(identity["device"]), int(identity["inode"]), identity["uid"], identity["gid"], identity["mode"]),
-            COMPONENTS, (), True, LOOKUP_SCOPE, self.source.work_end)
+            missing, compatible, True, LOOKUP_SCOPE, self.source.work_end)
 
     def checked_manifest(self):
         require(self._claimed)

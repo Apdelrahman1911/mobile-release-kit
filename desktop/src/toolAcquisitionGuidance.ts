@@ -2,8 +2,8 @@
 // original, installation consent, a protected tool lease or build readiness.
 import type { AndroidToolSourceRole } from './androidToolSources.ts';
 
-type Component = 'jdk' | 'sdk-platform' | 'sdk-build-tools' | 'gradle';
-const components: readonly Component[] = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'];
+export type Component = 'jdk' | 'sdk-platform' | 'sdk-build-tools' | 'gradle';
+export const components: readonly Component[] = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'];
 const roles: readonly AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
 export interface StagedToolSourcesData {
   schemaVersion: 1; kind: 'staged-tool-sources'; operationId: string; contextSha256: string;
@@ -35,7 +35,7 @@ function list(value: unknown, max: number): unknown[] | null {
   }
   return copy;
 }
-function componentList(value: unknown): Component[] | null {
+export function componentList(value: unknown): Component[] | null {
   const result = list(value, 4);
   return result && result.every((part) => components.includes(part as Component)) &&
     JSON.stringify(result) === JSON.stringify(components.filter((part) => result.includes(part))) ? result as Component[] : null;
@@ -93,7 +93,7 @@ export function stagedToolSourceGuidance(value: unknown, presentation: StagedToo
     'Run Inspect selected tools. Review all three sources and the setup service before explicitly approving a protected copy. The download has not registered anything.',
     'Keep existing installations and global settings. The search covered registered copies, selected folders and known supported locations, not every folder on this computer.'];
   if (report.groups.some((group) => !group.allRequiredComponentsStaged)) steps.unshift(
-    'Only the missing Android SDK package was staged; another required package is already known elsewhere. This staged SDK is incomplete. Choose an existing complete supported SDK or finish manual SDK preparation without overwriting working tools.');
+    'Only the missing Android SDK package was staged; the other required package was checked in your chosen SDK. This staged SDK is incomplete. Choose an existing complete supported SDK or finish manual SDK preparation without overwriting working tools.');
   const pickers = report.groups.map((group) => ({ role: group.group,
     label: group.group === 'jdk' ? 'Choose JDK' : group.group === 'gradle' ? 'Choose Gradle' :
       group.allRequiredComponentsStaged ? 'Choose Android SDK' : 'Choose complete Android SDK' }));

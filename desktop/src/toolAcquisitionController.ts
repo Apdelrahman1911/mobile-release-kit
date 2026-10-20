@@ -9,6 +9,7 @@ import { parseToolAcquisitionContext, parseToolAcquisitionStatus, sameToolAcquis
 import type { ToolAcquisitionContext, ToolAcquisitionIdentity, ToolAcquisitionOperation, ToolAcquisitionStatus,
   ToolAcquisitionStart, ToolRequirementsObservation } from './toolAcquisitionProtocol.ts';
 import type { StagedToolPresentation } from './toolAcquisitionGuidance.ts';
+import { stagedMatchesComponents } from './toolAcquisitionComponents.ts';
 import { PreparedToolSourceHandoff } from './toolAcquisitionSourcePicker.ts';
 import type { PreparedToolFolders, PreparedToolSourcePick, ToolSourceFolderContext } from './toolAcquisitionSourcePicker.ts';
 import type { AndroidToolSourceRole } from './androidToolSources.ts';
@@ -225,6 +226,9 @@ export class ToolAcquisitionController {
       return 'The selected protected tools match this project. No download or replacement is needed; builds still run their own checks.';
     if (i.result.protectedTools !== 'none-in-supported-catalogue')
       return 'A matching supported tool selection was not confirmed. Use the existing Recover or Choose tools controls; do not replace working tools.';
+    if (!i.result.components) return 'The selected folders have not been fully checked. Use the existing Choose and Inspect tools controls; nothing will be replaced.';
+    if (!i.result.components.missing.length)
+      return 'The chosen tool sources match. Nothing needs downloading. Inspect all selected tools and separately approve the protected copy.';
     const a = i.result.requirements.android;
     if ([a.jdk, a.agp, a.sdkPlatform, a.sdkBuildTools].some((hint) => hint.state === 'unknown') ||
         a.gradle.state !== 'literal' || a.gradle.sha256 === null)
@@ -294,6 +298,10 @@ export class ToolAcquisitionController {
         if (!a.identity) a.identity = identity(op);
       }
     } else if (before && (p || op) && !sameToolAcquisitionIdentity(p, op)) { this.fail('protocol'); return null; }
+    if (a?.context.action === 'acquire' && op?.outcome === 'complete' && sameToolAcquisitionIdentity(a.identity, op) &&
+        (op.result?.kind !== 'staged-tool-sources' || !stagedMatchesComponents(op.result, a.requirements?.components ?? null))) {
+      this.fail('protocol'); return null; // A compatible installation must never appear in this download result.
+    }
     this.status = s;
     if (source === 'read') this.initialized = true;
     if (s.availability === 'cleanup-unknown' || op?.phase === 'unknown') this.fail('unknown');

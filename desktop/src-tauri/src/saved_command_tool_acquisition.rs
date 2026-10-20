@@ -25,6 +25,10 @@ mod cache;
 mod native;
 #[path = "saved_command_tool_acquisition_reuse.rs"]
 mod reuse;
+#[path = "saved_command_tool_acquisition_picked.rs"]
+mod picked;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use picked::SourceGate;
 #[path = "saved_command_tool_acquisition_sources.rs"]
 mod sources;
 pub(crate) use sources::SourceNomination;
@@ -62,6 +66,7 @@ struct Known {
     android: Arc<Inner>,
     document: Weak<()>,
     catalog: reuse::CatalogLoan,
+    sources: android_sources::AcquisitionSnapshot,
     revision: u32,
     source_generation: u32,
     registration_generation: u32,
@@ -88,10 +93,7 @@ impl Known {
         {
             return None;
         }
-        let originals = r.android_sources.census_originals()?;
-        if originals.iter().any(Option::is_some) {
-            return None;
-        }
+        let sources = r.android_sources.acquisition_snapshot()?;
         let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android)?;
         let registration_generation = r
             .android_registration
@@ -100,6 +102,7 @@ impl Known {
             android: binding.android.clone(),
             document: binding.document.clone(),
             catalog,
+            sources,
             revision: r.revision,
             source_generation: r.android_sources.census_generation(),
             registration_generation,
@@ -131,7 +134,7 @@ impl Known {
             && !self.android.android_registration_control.is_unknown()
             && self.catalog.current(&r.android_catalog, &self.android)
             && r.android_sources.census_generation() == self.source_generation
-            && r.android_sources.same_census_originals(&[None, None, None])
+            && r.android_sources.same_acquisition_snapshot(&self.sources)
             && r.android_registration
                 .tool_acquisition_generation()
                 == Some(self.registration_generation)
@@ -143,6 +146,7 @@ impl Known {
             && self.source_generation == other.source_generation
             && self.registration_generation == other.registration_generation
             && self.catalog.generation() == other.catalog.generation()
+            && self.sources.same(&other.sources)
             && self.current()
             && other.current()
     }
@@ -171,6 +175,7 @@ impl Inspection {
             && self.terminal.outcome == wire::Outcome::Complete
             && self.terminal.lifetime.settled()
             && self.terminal.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+            && self.terminal.components().is_some_and(|parts| parts.needs_download())
             && self
                 .terminal
                 .result
@@ -234,6 +239,7 @@ struct Expected {
     context_sha256: String,
     reference_sha256: String,
     projection_sha256: String,
+    components: wire::components::Partition,
 }
 
 /// Native-only census from the SAME owner, original Android state and retained
@@ -244,14 +250,17 @@ pub(crate) struct Census {
     revision: u32,
     known: Arc<Known>,
     retained: usize,
+    future: usize,
+    pickers: picked::PickerOriginals,
 }
 impl Census {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained
     }
-    pub(crate) fn future_public_bytes(&self) -> usize {
-        FUTURE_PUBLIC_BYTES
+    pub(crate) fn picker_originals(&self) -> impl Iterator<Item = &Arc<crate::asset_session::OriginalWork>> {
+        self.pickers.iter()
     }
+    pub(crate) fn future_public_bytes(&self) -> usize { self.future }
     pub(crate) fn public_work_limit(&self) -> usize {
         PUBLIC_WORK_LIMIT
     }
@@ -345,6 +354,7 @@ impl SavedCommandOwner {
             return Err(wire::invalid());
         }
         let known = Arc::new(Known::capture(binding).ok_or_else(wire::invalid)?);
+        let future = picked::future_bytes(&known).ok_or_else(wire::invalid)?;
         let r = self
             .inner
             .registry
@@ -353,8 +363,11 @@ impl SavedCommandOwner {
         if r.active.is_some() || r.disabled || r.exhausted || r.stopping || r.document_lost {
             return Err(wire::invalid());
         }
-        let retained = retained_bytes(&self.inner, &r, document)
+        let mut pickers = picked::PickerOriginals::new();
+        pickers.record(known.sources.picker_originals()).ok_or_else(wire::invalid)?;
+        let retained = retained_bytes(&self.inner, &r, document, &mut pickers)
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Known>() + 2 * std::mem::size_of::<usize>()))
+            .and_then(|bytes| bytes.checked_add(known.sources.retained_bytes()?))
             .ok_or_else(wire::invalid)?;
         Ok(Census {
             owner: Arc::downgrade(&self.inner),
@@ -362,6 +375,8 @@ impl SavedCommandOwner {
             revision: r.revision,
             known,
             retained,
+            future,
+            pickers,
         })
     }
     pub(crate) fn prepare_tool_acquisition(
@@ -375,6 +390,7 @@ impl SavedCommandOwner {
     ) -> Result<wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
         if !input.valid()
+            || !census.known.sources.matches_project(&input.project_id, registration, &root)
             || !document.matches(&input, registration, &root)
             || !census
                 .document
@@ -629,7 +645,7 @@ pub(super) fn start_admitted(
         return false;
     };
     census.matches(inner, r)
-        && budget.accepts(census, FUTURE_PUBLIC_BYTES)
+        && budget.accepts(census, census.future_public_bytes())
         && census.known.same(&intent.known)
         && intent.document.matches(context, p.registration, &p.project)
         && intent.current()
@@ -778,6 +794,7 @@ pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &
                 && t.outcome == wire::Outcome::Complete
                 && t.lifetime.settled()
                 && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+                && t.components().is_some_and(|parts| parts.needs_download())
             {
                 r.tool_acquisition.review = Some(Arc::new(Inspection {
                     original: owner.clone(), terminal: t.clone(),
@@ -794,6 +811,14 @@ fn observe_protected_tools(owner: &Session, active: &mut Active) {
     // Only post-join public DATA is added. A selected loan creates no download
     // Review and thus retains no orphaned catalogue/Session after retirement.
     terminal.observe_protected_tools(finding);
+    match finding {
+        wire::ProtectedTools::ReuseSelected => terminal.observe_components(wire::components::Partition::compatible_all()),
+        wire::ProtectedTools::NoneInSupportedCatalogue => {
+            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+            if let Some((parts, _)) = native::picked_finding(owner) { terminal.observe_components(parts); }
+        },
+        wire::ProtectedTools::ManualCheckRequired => {},
+    }
 }
 fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -848,7 +873,7 @@ fn context_bytes(value: &wire::Context) -> Option<usize> {
     }
     Some(b)
 }
-fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Option<usize> {
+fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, pickers: &mut picked::PickerOriginals) -> Option<usize> {
     let binding = inner.tool_acquisition.get()?;
     #[cfg(all(
         target_os = "macos",
@@ -924,9 +949,11 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Opt
             // actual catalogue backing is counted by the SAME Android census;
             // a retired prepared selection must be cancelled, not omitted.
             if intent.known.catalog.empty().is_none() && !intent.known.current() { return None; }
+            pickers.record(intent.known.sources.picker_originals())?;
             bytes = bytes
                 .checked_add(std::mem::size_of::<Intent>())?
                 .checked_add(std::mem::size_of::<Known>())?
+                .checked_add(intent.known.sources.retained_bytes()?)?
                 .checked_add(intent.document.retained_bytes()?)?
                 .checked_add(
                     intent
@@ -995,9 +1022,11 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Opt
             // Only missing-tool Inspect/Acquire Sessions are retained as cache
             // producers or download Reviews. No uncounted old selected loan.
             if intent.known.catalog.empty().is_none() { return None; }
+            pickers.record(intent.known.sources.picker_originals())?;
             bytes = bytes
                 .checked_add(std::mem::size_of::<Intent>())?
                 .checked_add(std::mem::size_of::<Known>())?
+                .checked_add(intent.known.sources.retained_bytes()?)?
                 .checked_add(intent.document.retained_bytes()?)?
                 .checked_add(
                     intent
@@ -1170,6 +1199,7 @@ pub(super) fn check_frame(owner: &Session, frame: wire::Frame) -> Result<wire::F
             if result["contextSha256"] != expected.context_sha256
                 || result["referenceSha256"] != expected.reference_sha256
                 || result["projectionSha256"] != expected.projection_sha256
+                || !wire::staged_matches_partition(result, expected.components)
             {
                 return Err(BridgeError::protocol());
             }

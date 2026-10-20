@@ -38,6 +38,41 @@ impl SourceSnapshot {
     }
 }
 
+/// Partial selected-folder comparison only; never the all-three SourceSnapshot.
+/// Every Some retains the SAME native picker. No paths arrive from acquisition IPC.
+pub(super) struct AcquisitionSnapshot {
+    binding: Option<(String, u32, RegisteredRoot)>, generation: u32,
+    roots: [Option<RegisteredRoot>; 3], originals: [Option<Arc<OriginalWork>>; 3],
+}
+impl AcquisitionSnapshot {
+    pub(super) fn has_picks(&self) -> bool { self.roots.iter().any(Option::is_some) }
+    pub(super) fn roots(&self) -> &[Option<RegisteredRoot>; 3] { &self.roots }
+    pub(super) fn picker_originals(&self) -> &[Option<Arc<OriginalWork>>; 3] { &self.originals }
+    pub(super) fn matches_project(&self, id: &str, registration: u32, project: &RegisteredRoot) -> bool {
+        match &self.binding {
+            Some((old, generation, root)) => old == id && *generation == registration && root == project,
+            None => !self.has_picks(),
+        }
+    }
+    /// Only outside BOTH Doc and Registry: these are genuine original joins.
+    pub(super) fn originals_settled(&self) -> bool {
+        self.originals.iter().flatten().all(|original| original.android_source_selected_settled())
+    }
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.binding == other.binding && self.generation == other.generation && self.roots == other.roots
+            && self.originals.iter().zip(&other.originals).all(|(a,b)| match (a,b) {
+                (None,None) => true, (Some(a),Some(b)) => Arc::ptr_eq(a,b), _ => false,
+            })
+    }
+    pub(super) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>();
+        if let Some((id, _, root)) = &self.binding {
+            bytes = bytes.checked_add(id.capacity())?.checked_add(root.path.capacity())?;
+        }
+        self.roots.iter().flatten().try_fold(bytes, |sum, root| sum.checked_add(root.path.capacity()))
+    }
+}
+
 pub(super) struct Sources {
     generation: u32, capability: Option<Availability>, unknown: bool,
     binding: Option<(String, u32, RegisteredRoot)>, selected: SelectedSet,
@@ -67,6 +102,19 @@ impl Sources {
         assert!(!Arc::ptr_eq(&current,&old));
         assert!(current.picker_originals().iter().zip(old.picker_originals()).all(|(a,b)|Arc::ptr_eq(a,b)));
         (sources,current,old)
+    }
+    pub(super) fn acquisition_snapshot(&self) -> Option<AcquisitionSnapshot> {
+        let originals = self.census_originals()?;
+        if !self.selected.is_empty() && (self.binding.is_none() || self.generation == 0) { return None; }
+        Some(AcquisitionSnapshot { binding: self.binding.clone(), generation: self.generation,
+            roots: std::array::from_fn(|index| self.selected.0[index].1.as_ref().map(|s| s.root.clone())), originals })
+    }
+    pub(super) fn same_acquisition_snapshot(&self, snapshot: &AcquisitionSnapshot) -> bool {
+        !self.unknown && self.active.is_none() && self.generation == snapshot.generation
+            && self.binding == snapshot.binding && self.same_census_originals(&snapshot.originals)
+            && self.selected.0.iter().zip(&snapshot.roots).all(|((_, selected), root)| match (selected,root) {
+                (None,None) => true, (Some(selected),Some(root)) => selected.root == *root, _ => false,
+            })
     }
     pub(super) fn census_generation(&self)->u32{self.generation}
     /// Separate read-only census seam for service setup, including a genuinely
@@ -303,5 +351,55 @@ impl SavedCommandOwner {
             self.inner.bump(&mut registry);
         }
         self.android_sources_snapshot(&mut registry, gate)
+    }
+}
+
+#[cfg(test)]
+mod acquisition_snapshot_tests {
+    use super::*;
+    #[test]
+    fn partial_snapshot_preserves_exact_picker_and_refuses_changed_pending_or_unknown_sources() {
+        // Existing unentered originals: no GUI/source/coordinator join is
+        // fabricated. Snapshot equality is DATA, never a full SourceReview.
+        let project = RegisteredRoot { path: "/inert/project".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(
+                crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let selected = RegisteredRoot { path: "/inert/selected.jdk".into(), identity: project.identity.clone() };
+        let original = OriginalWork::artifact_unentered_original_data();
+        let mut sources = Sources::default();
+        let empty = sources.acquisition_snapshot().unwrap();
+        assert!(!empty.has_picks());
+        sources.generation = 1;
+        sources.binding = Some(("project".into(), 2, project.clone()));
+        sources.selected.insert(wire::Role::Jdk, Selected { root: selected.clone(), original: original.clone() });
+        let picked = sources.acquisition_snapshot().unwrap();
+        assert!(picked.has_picks());
+        assert!(picked.matches_project("project", 2, &project));
+        assert!(!picked.matches_project("other", 2, &project));
+        assert!(!picked.matches_project("project", 3, &project));
+        assert!(sources.same_acquisition_snapshot(&picked));
+        assert!(picked.same(&sources.acquisition_snapshot().unwrap()));
+        assert!(!picked.same(&empty));
+        assert!(!picked.originals_settled());
+        assert!(sources.snapshot().is_none()); // Still missing the other two ordinary picker roles.
+        assert!(picked.retained_bytes().unwrap() > std::mem::size_of::<AcquisitionSnapshot>());
+        sources.selected.insert(wire::Role::Jdk, Selected { root: selected.clone(),
+            original: OriginalWork::artifact_unentered_original_data() });
+        assert!(!sources.same_acquisition_snapshot(&picked)); // Same path, different original.
+        sources.selected.insert(wire::Role::Jdk, Selected { root: selected.clone(), original: original.clone() });
+        sources.selected.0[0].1.as_mut().unwrap().root.path = "/inert/other.jdk".into();
+        assert!(!sources.same_acquisition_snapshot(&picked));
+        sources.selected.0[0].1.as_mut().unwrap().root = selected;
+        sources.generation += 1;
+        assert!(!sources.same_acquisition_snapshot(&picked));
+        sources.generation -= 1;
+        sources.active = Some(Pick { original, operation: wire::Operation {
+            operation_id: 1, source_generation: 1, role: wire::Role::Sdk }, first: None });
+        assert!(sources.acquisition_snapshot().is_none());
+        assert!(!sources.same_acquisition_snapshot(&picked));
+        sources.active = None;
+        sources.unknown = true;
+        assert!(sources.acquisition_snapshot().is_none());
+        assert!(!sources.same_acquisition_snapshot(&picked));
     }
 }

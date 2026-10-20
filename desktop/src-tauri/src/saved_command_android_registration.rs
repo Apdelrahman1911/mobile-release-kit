@@ -2319,13 +2319,13 @@ pub(super) fn execute_owner_census(inner:&Inner,document:&Arc<()>)->Option<(usiz
 }
 
 /// The same original allocation census, including genuinely joined prior
-/// service/maintenance holdings and an empty picked-source set. No tool permit.
+/// service/maintenance holdings and current picked originals. No tool permit.
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) fn tool_acquisition_owner_bytes(inner:&Inner,document:&Arc<()>)->Option<usize>{
     if !inner.android_original_document_matches(Some(document)){return None;}
     let registry=inner.registry.try_lock().ok()?;
     registry.android_registration.tool_acquisition_generation()?;
-    if registry.android_sources.census_originals()?.iter().any(Option::is_some){return None;}
+    let _ = registry.android_sources.census_originals()?; // ToolAcquisitionCensus passes exact picker Arcs to the same Doc traversal.
     let registration=registry.android_registration.maintenance_retained_bytes()?;
     original_owner_retained_bytes(inner,&registry,document,0,registration,0)
 }

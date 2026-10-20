@@ -1298,6 +1298,7 @@ impl Book {
         context_sha: &str,
         reference_sha: &str,
         projection_sha: &str,
+        components: wire::components::Partition,
     ) -> Result<Value> {
         let cache = self.cache.as_ref().ok_or(wire::Reason::RecoveryRequired)?;
         let source = self.source.as_ref().ok_or(wire::Reason::Stale)?;
@@ -1309,7 +1310,7 @@ impl Book {
             .map_err(|_| wire::Reason::InputLimit)?;
         Ok(
             json!({"root":cache.location.cache.join("archives"),"rootIdentity":cache.witness.archives,"generation":generation,
-            "contextSha256":context_sha,"referenceSha256":reference_sha,"projectionSha256":projection_sha,"missing":wire::COMPONENTS,"compatible":[],
+            "contextSha256":context_sha,"referenceSha256":reference_sha,"projectionSha256":projection_sha,"missing":components.missing(),"compatible":components.compatible(),
             "intentBase64":intent_base64,"origins":cache.known.iter().map(|o|json!({"operationId":o.operation,"intentSha256":o.intent_sha256})).collect::<Vec<_>>(),
             "footprint":source.footprint}),
         )

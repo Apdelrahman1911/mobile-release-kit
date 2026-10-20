@@ -2073,10 +2073,24 @@ mod lookup_memory {
     // Actual retained Document/artifact/GitHub buffers for a new public-tool
     // operation. No fabricated current owner, standalone state or signing credit.
     pub(super) fn retained_document_bytes(document: &Arc<Inner>, state: &DocumentState) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, None)
+    }
+    // The SAME census/Seen visits every exact current and earlier picker held
+    // by tool preparation. A snapshot path or the current Document.slot alone
+    // cannot account for those original source/GUI/retirement allocations.
+    pub(super) fn tool_acquisition_document_bytes(document: &Arc<Inner>, state: &DocumentState,
+        tools: &crate::saved_command_owner::ToolAcquisitionCensus) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, Some(tools))
+    }
+    fn document_bytes_with_tool_pickers(document: &Arc<Inner>, state: &DocumentState,
+        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>) -> Result<usize, Problem> {
         let mut census = Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
             sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() };
         census.artifact_document(document)?;
         census.document(state)?;
+        if let Some(tools) = tools {
+            for original in tools.picker_originals() { census.owner(original)?; }
+        }
         if !state.github.setup_has_material() && !state.github.history_has_retained_data() {
             census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
         }
@@ -2402,6 +2416,25 @@ mod lookup_memory {
             assert_eq!(seen.insert(&values[0].clone()), Ok(false));
             assert_eq!(seen.insert(&values[IDENTITIES]), Err(Problem::Capacity));
             assert_eq!(seen.used, IDENTITIES);
+        }
+        #[test]
+        fn lookup_tool_picker_census_refuses_unjoined_and_contended_originals() {
+            // Same inert original constructor, not a returned-picker factory.
+            // Tools have no fabricated current-owner exemption in this census.
+            let picker = OriginalWork::artifact_unentered_original_data();
+            let source = SourceBook::new(); let retirement = Retirement::default();
+            let mut unjoined = Census::new(&picker, &source, &retirement);
+            unjoined.current = None;
+            assert_eq!(unjoined.owner(&picker), Err(Problem::CleanupUnknown));
+            assert_eq!(unjoined.owners.used, 1); // Reached the original, not omitted.
+            let held = picker.coordinator.lock().unwrap();
+            let mut contended = Census::new(&picker, &source, &retirement);
+            contended.current = None;
+            assert_eq!(contended.owner(&picker), Err(Problem::CleanupUnknown));
+            assert_eq!(contended.owners.used, 1);
+            assert!(matches!(held.receipt, JoinReceipt::New));
+            drop(held);
+            assert!(!picker.android_source_selected_settled());
         }
         #[test]
         fn lookup_payload_material_context_and_source_arcs_deduplicate_separately() {

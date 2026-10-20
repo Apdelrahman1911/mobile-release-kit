@@ -182,6 +182,17 @@ def decode(value, limit):
     return result
 
 
+def component_partition(missing, compatible):
+    """Canonical DATA only; native source custody is not reconstructed here."""
+    require(type(missing) is list and type(compatible) is list and len(missing) + len(compatible) == 4)
+    names = [part.value for part in COMPONENTS]
+    for parts in (missing, compatible):
+        require(all(choice(part, names) for part in parts) and parts == [part for part in names if part in parts])
+    require(not set(missing) & set(compatible) and set(missing) | set(compatible) == set(names))
+    return (tuple(part for part in COMPONENTS if part.value in missing),
+            tuple(part for part in COMPONENTS if part.value in compatible))
+
+
 def cache(value, *, operation, selected):
     keys(value, ("root", "rootIdentity", "generation", "contextSha256", "referenceSha256", "projectionSha256",
                  "missing", "compatible", "intentBase64", "origins", "footprint"))
@@ -189,9 +200,10 @@ def cache(value, *, operation, selected):
     identity(value["rootIdentity"])
     require(value["rootIdentity"]["mode"] == (stat.S_IFDIR | 0o700) and integer(value["generation"], 2**53 - 1, 1)
             and all(text(value[key], SHA) for key in ("contextSha256", "referenceSha256", "projectionSha256")))
-    # The original first native route requires empty known copies; partial
-    # uninspected selections are manual, not guessed component compatibility.
-    require(value["missing"] == [part.value for part in COMPONENTS] and value["compatible"] == [])
+    # The SAME native SourceSlots inspection supplies this exact partition.
+    # Present wrong/unreadable selections cannot be represented as missing.
+    missing, _ = component_partition(value["missing"], value["compatible"])
+    require(bool(missing))
     footprint(value["footprint"])
     require(value["footprint"]["sourcesSha256"] == selected["review"]["requirementsSha256"])
     require_saved_config(value["footprint"], selected)
@@ -283,7 +295,9 @@ def staged(value, request):
             and value["operationId"] == request.operation_id and value["cacheJob"] == "tool-" + request.operation_id
             and value["lookupScope"] == "registered-selected-known")
     require(all(value[key] == request.native["cache"][key] for key in ("contextSha256", "referenceSha256", "projectionSha256")))
-    expected = [part.value for part in COMPONENTS]
+    missing, _ = component_partition(request.native["cache"]["missing"], request.native["cache"]["compatible"])
+    expected = [part.value for part in missing]
+    require(bool(expected))
     all_parts = []
     for field in ("reusedArchives", "downloadedArchives"):
         parts = value[field]
@@ -292,11 +306,17 @@ def staged(value, request):
         all_parts.extend(parts)
     require(len(all_parts) == len(expected) and set(all_parts) == set(expected))
     groups = value["groups"]
-    require(type(groups) is list and len(groups) == 3)
-    for row, group, components in zip(groups, ("jdk", "sdk", "gradle"), ([expected[0]], expected[1:3], [expected[3]])):
+    expected_groups = []
+    for group in ("jdk", "sdk", "gradle"):
+        components = [part.value for part in missing if part.group == group]
+        if components:
+            complete = len(components) == sum(part.group == group for part in COMPONENTS)
+            expected_groups.append({"group": group, "components": components, "allRequiredComponentsStaged": complete,
+                "next": "choose-native-source" if complete else "complete-sdk-manually"})
+    require(type(groups) is list and len(groups) == len(expected_groups))
+    for row, expected_group in zip(groups, expected_groups):
         keys(row, ("group", "components", "allRequiredComponentsStaged", "next"))
-        require(row["group"] == group and row["components"] == components and row["allRequiredComponentsStaged"] is True
-                and row["next"] == "choose-native-source")
+        require(type(row["allRequiredComponentsStaged"]) is bool and row == expected_group)
     assurance = keys(value["assurance"], ("nativeFinality", "registered", "readyToBuild"))
     require(all(item is False for item in assurance.values()))
 

@@ -22,7 +22,7 @@ const status = (revision = 1, operation = null, availability = operation && oper
   ({ schemaVersion: 1, statusRevision: revision, availability, operation });
 const operation = (context, acquire = false) => ({ operationId: acquire ? ACQUIRE : OP, ownerGeneration: acquire ? ACQUIRE_OWNER : OWNER,
   context: clone(context), phase: 'awaiting-consent', intentUsable: true, outcome: null, reason: 'none', result: null });
-const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: {
+const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], compatible: [] }, requirements: {
   schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA, complete: true, platform: 'android', projectCodeExecuted: false,
   xcode: { version: '26.3', build: '17C529' }, android: { jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' },
     sdkPlatform: { state: 'literal', value: 'android-35' }, sdkBuildTools: { state: 'unspecified', value: null },
@@ -64,7 +64,7 @@ function harness(t, initial = status()) {
     known() { known = [{}, {}, {}]; controller.syncProject(); },
   };
 }
-async function inspected(h, protectedTools = 'none-in-supported-catalogue') {
+async function inspected(h, protectedTools = 'none-in-supported-catalogue', components = undefined) {
   await h.ready;
   const flow = h.controller.inspect(), prepare = h.calls.at(-1);
   assert.equal(prepare.kind, 'prepare'); assert.equal(prepare.request.action, 'inspect');
@@ -72,10 +72,12 @@ async function inspected(h, protectedTools = 'none-in-supported-catalogue') {
   h.reply(prepare, status(2, op)); await flush();
   const start = h.calls.at(-1); assert.equal(start.kind, 'start');
   const done = terminal(op); done.result.protectedTools = protectedTools;
+  done.result.components = components === undefined ? protectedTools === 'none-in-supported-catalogue' ? done.result.components :
+    protectedTools === 'reuse-selected' ? { missing: [], compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'] } : null : components;
   h.reply(start, status(3, done)); await flow;
   assert.equal(h.state.inspection?.kind, 'tool-requirements-observation');
   assert.equal(h.state.inspection.protectedTools, protectedTools);
-  assert.equal(h.state.reviewReason === null, protectedTools === 'none-in-supported-catalogue'); return op;
+  assert.equal(h.state.reviewReason === null, protectedTools === 'none-in-supported-catalogue' && !!done.result.components?.missing.length); return op;
 }
 async function reviewed(h) {
   await inspected(h);
@@ -125,7 +127,7 @@ test('reuse finding waits for original invocation and a new terminal status read
   const h = harness(t); await h.ready;
   const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
   h.reply(prepare, status(2, op)); await flush();
-  const start = h.calls.at(-1), done = terminal(op); done.result.protectedTools = 'reuse-selected';
+  const start = h.calls.at(-1), done = terminal(op); done.result.protectedTools = 'reuse-selected'; done.result.components = { missing: [], compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'] };
   h.emit(status(4, done)); await flush();
   assert.equal(h.state.inspection, null); assert.equal(h.state.requestPending, true);
   const read = deferred(); h.readQueue.push(read);
@@ -332,4 +334,62 @@ test('lost Start response and later unqualified status retain original cancellat
   const cancel = h.controller.cancel(); assert.equal(h.calls.at(-1).kind, 'cancel');
   h.reply(h.calls.at(-1), status(6, terminal(op, 'cancelled'), 'runtime-unqualified')); await cancel;
   assert.equal(h.state.issue, null); assert.match(h.state.checkReason, /not enabled/);
+});
+
+const partition = (missing) => ({ missing, compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((p) => !missing.includes(p)) });
+function subsetStaged(missing) {
+  const value = staged(); value.reusedArchives = []; value.downloadedArchives = [...missing];
+  value.groups = ['jdk', 'sdk', 'gradle'].flatMap((group) => {
+    const all = group === 'jdk' ? ['jdk'] : group === 'sdk' ? ['sdk-platform', 'sdk-build-tools'] : ['gradle'];
+    const parts = all.filter((p) => missing.includes(p));
+    return parts.length ? [{ group, components: parts, allRequiredComponentsStaged: parts.length === all.length,
+      next: parts.length === all.length ? 'choose-native-source' : 'complete-sdk-manually' }] : [];
+  });
+  return value;
+}
+async function subsetReviewed(h, missing) {
+  await inspected(h, 'none-in-supported-catalogue', partition(missing));
+  const flow = h.controller.reviewDownload(), call = h.calls.at(-1), op = operation(call.request, true);
+  h.reply(call, status(4, op)); await flow;
+  assert.equal(h.state.consent.acknowledged, false);
+  return op;
+}
+
+test('checked chosen full tuple goes to ordinary inspection without download consent or Start', async (t) => {
+  const h = harness(t); await inspected(h, 'none-in-supported-catalogue', partition([]));
+  assert.match(h.state.reviewReason, /Nothing needs downloading.*Inspect all selected/);
+  await h.controller.reviewDownload(); await h.controller.download(ACQUIRE, ACQUIRE_OWNER);
+  assert.equal(h.calls.length, 2); assert.equal(h.state.consent, null);
+  assert.equal(h.state.inspection.components.compatible.length, 4);
+});
+
+test('partial chosen JDK and SDK platform retain exact two-piece download through original fresh status', async (t) => {
+  const h = harness(t), missing = ['sdk-build-tools', 'gradle'], op = await subsetReviewed(h, missing);
+  assert.deepEqual(h.state.inspection.components.missing, missing);
+  assert.deepEqual(h.state.inspection.components.compatible, partition(missing).compatible);
+  assert.equal(Object.hasOwn(h.calls.at(-1).request, 'components'), false); // Renderer sends no partition authority.
+  await downloadStarted(h, op);
+  const done = terminal(op); done.result = subsetStaged(missing);
+  h.emit(status(6, done)); await flush();
+  assert.equal(h.state.issue, null); assert.equal(h.state.presentation, 'current-staged');
+  assert.equal(h.state.status.operation.result.groups[0].allRequiredComponentsStaged, false);
+  assert.equal(h.state.status.operation.result.groups[0].next, 'complete-sdk-manually');
+  assert.equal(h.state.preparedFolders, null); // No original source-picker status is available in this harness; no shortcut is invented.
+});
+
+test('native result adding a known compatible source is refused without losing original status/cancel', async (t) => {
+  const h = harness(t), op = await subsetReviewed(h, ['gradle']); await downloadStarted(h, op);
+  const done = terminal(op); done.result = subsetStaged(['jdk', 'gradle']);
+  h.emit(status(6, done)); await flush();
+  assert.equal(h.state.issue, 'protocol'); assert.notEqual(h.state.presentation, 'current-staged');
+  assert.equal(h.state.status.operation.phase, 'running'); assert.equal(h.state.canCancel, true);
+  assert.equal(h.state.preparedFolders, null);
+});
+
+test('unobserved picked partition cannot create download consent and stale selected folders retire the review', async (t) => {
+  const h = harness(t); await inspected(h, 'none-in-supported-catalogue', null);
+  assert.match(h.state.reviewReason, /not been fully checked/); await h.controller.reviewDownload(); assert.equal(h.calls.length, 2);
+  const next = harness(t); await inspected(next, 'none-in-supported-catalogue', partition(['gradle']));
+  next.known(); await next.controller.reviewDownload();
+  assert.equal(next.calls.length, 2); assert.equal(next.state.inspection, null); assert.equal(next.state.consent, null);
 });

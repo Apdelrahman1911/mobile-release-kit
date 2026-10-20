@@ -25,7 +25,10 @@ pub(crate) const STATUS_LIMIT: usize = 64 * 1024;
 pub(crate) const CONTROL_LIMIT: usize = 16 * 1024;
 pub(crate) const CA_LIMIT: usize = 512 * 1024;
 pub(crate) const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
-pub(crate) const COMPONENTS: [&str; 4] = ["jdk", "sdk-platform", "sdk-build-tools", "gradle"];
+#[path = "tool_acquisition_components.rs"]
+pub(crate) mod components;
+use components::Partition;
+pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
 pub(crate) const FIXED: [&str; 7] = [
     "build.gradle",
     "build.gradle.kts",
@@ -43,7 +46,7 @@ pub(crate) const CONFIG: &str = "release/mobile-release.json";
 #[serde(rename_all = "camelCase")]
 struct IntentData<'a> {
     cache_generation: u32,
-    components: [&'static str; 4],
+    components: Vec<&'static str>,
     context_sha256: &'a str,
     operation_id: &'a str,
     profile: Profile,
@@ -58,8 +61,10 @@ pub(crate) fn intent_bytes(
     context: &str,
     reference: &str,
     projection: &str,
+    partition: Partition,
 ) -> Result<Vec<u8>, BridgeError> {
     if !token(operation)
+        || !partition.needs_download()
         || generation == 0
         || ![context, reference, projection].into_iter().all(sha)
     {
@@ -68,7 +73,7 @@ pub(crate) fn intent_bytes(
     bounded(
         &IntentData {
             cache_generation: generation,
-            components: COMPONENTS,
+            components: partition.missing(),
             context_sha256: context,
             operation_id: operation,
             profile,
@@ -674,8 +679,24 @@ pub(crate) struct Terminal {
     pub(crate) lifetime: Lifetime,
     #[serde(skip)]
     protected_tools: Option<ProtectedTools>,
+    #[serde(skip)]
+    components: Option<Partition>,
 }
 impl Terminal {
+    pub(crate) fn components(&self) -> Option<Partition> { self.components }
+    /// Added only by the original native owner after source/child/driver joins.
+    /// A child-supplied field is rejected by the closed wire decoder.
+    pub(crate) fn observe_components(&mut self, value: Partition) {
+        if self.components.is_none() && self.context.action == Action::Inspect && self.outcome == Outcome::Complete
+            && self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
+            && match self.protected_tools {
+                Some(ProtectedTools::ReuseSelected) => !value.needs_download(),
+                Some(ProtectedTools::NoneInSupportedCatalogue) => true,
+                _ => false,
+            } {
+            self.components = Some(value);
+        }
+    }
     pub(crate) fn protected_tools(&self) -> Option<ProtectedTools> {
         self.protected_tools
     }
@@ -735,7 +756,7 @@ impl Terminal {
         self.result.as_ref().map(|v| match self.context.action {
             Action::Inspect => {
                 json!({"kind":"tool-requirements-observation","requirements":v["requirements"],
-                    "protectedTools":self.protected_tools})
+                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data)})
             }
             Action::Acquire => v.clone(),
         })
@@ -813,17 +834,29 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
             return Err(invalid());
         }
     }
-    if all.len() != 4 {
-        return Err(invalid());
-    }
-    let expected = json!([
-        {"group":"jdk","components":["jdk"],"allRequiredComponentsStaged":true,"next":"choose-native-source"},
-        {"group":"sdk","components":["sdk-platform","sdk-build-tools"],"allRequiredComponentsStaged":true,"next":"choose-native-source"},
-        {"group":"gradle","components":["gradle"],"allRequiredComponentsStaged":true,"next":"choose-native-source"}]);
-    if v["groups"] != expected {
+    if all.is_empty() || all.len() > COMPONENTS.len() { return Err(invalid()); }
+    let expected: Vec<Value> = [("jdk", &COMPONENTS[..1]), ("sdk", &COMPONENTS[1..3]), ("gradle", &COMPONENTS[3..])]
+        .into_iter().filter_map(|(group, parts)| {
+            let missing: Vec<_> = parts.iter().copied().filter(|part| all.contains(part)).collect();
+            if missing.is_empty() { return None; }
+            let complete = missing.len() == parts.len();
+            Some(json!({"group":group,"components":missing,"allRequiredComponentsStaged":complete,
+                "next":if complete { "choose-native-source" } else { "complete-sdk-manually" }}))
+        }).collect();
+    if v["groups"] != json!(expected) {
         return Err(invalid());
     }
     Ok(())
+}
+/// Additional native binding: structurally valid staged DATA must contain
+/// exactly the original observer's missing set, never a compatible component.
+pub(crate) fn staged_matches_partition(value: &Value, partition: Partition) -> bool {
+    let (Some(reused), Some(downloaded)) = (value["reusedArchives"].as_array(), value["downloadedArchives"].as_array()) else { return false; };
+    if !partition.needs_download() || reused.len() + downloaded.len() != partition.missing().len() { return false; }
+    COMPONENTS.into_iter().enumerate().all(|(index, name)| {
+        let count = reused.iter().chain(downloaded).filter(|v| *v == name).count();
+        count == usize::from(!partition.is_compatible(index))
+    })
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -999,6 +1032,72 @@ mod tests {
         assert_eq!(refused.protected_tools(), None);
     }
     #[test]
+    fn partial_components_are_native_only_postjoin_data_not_child_findings() {
+        let partition = Partition::observed([Some(true), Some(true), Some(false), Some(false)]).unwrap();
+        for outer in [true, false] {
+            let mut value = terminal_value();
+            if outer { value["components"] = partition.data(); }
+            else { value["result"]["components"] = partition.data(); }
+            assert!(decode_terminal(value).is_err());
+        }
+        let Frame::Terminal(mut terminal) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        assert_eq!(terminal.components(), None);
+        terminal.observe_components(partition);
+        assert_eq!(terminal.components(), None); // No original catalogue comparison yet.
+        terminal.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
+        terminal.observe_components(partition);
+        assert_eq!(terminal.public_result().unwrap()["components"], partition.data());
+        terminal.observe_components(Partition::missing_all());
+        assert_eq!(terminal.components(), Some(partition)); // One original finding, never overwritten.
+        let Frame::Terminal(mut reused) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        reused.observe_protected_tools(ProtectedTools::ReuseSelected);
+        reused.observe_components(partition);
+        assert_eq!(reused.components(), None);
+        reused.observe_components(Partition::compatible_all());
+        assert_eq!(reused.components(), Some(Partition::compatible_all()));
+        let Frame::Terminal(mut stopped) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        stopped.lifetime.stop_observed = CoreStop::Cancelled;
+        stopped.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
+        stopped.observe_components(partition);
+        assert_eq!(stopped.components(), None);
+        // These codec/setter checks do not create an original native join.
+    }
+    #[test]
+    fn partial_intent_and_staged_result_match_only_original_missing_components() {
+        let partition = Partition::observed([Some(true), Some(true), Some(false), Some(false)]).unwrap();
+        let operation = "d".repeat(32);
+        let raw = intent_bytes(&operation, 1, Profile::MacArm64, &"1".repeat(64), &"2".repeat(64),
+            &"3".repeat(64), partition).unwrap();
+        let intent: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(intent["components"], json!(["sdk-build-tools", "gradle"]));
+        assert!(intent_bytes(&operation, 1, Profile::MacArm64, &"1".repeat(64), &"2".repeat(64),
+            &"3".repeat(64), Partition::compatible_all()).is_err());
+        let mut context = prepare(&context_value()).unwrap();
+        context.action = Action::Acquire;
+        context.review = Some(Review { operation_id: "0".repeat(32), owner_generation: "1".repeat(32),
+            requirements_sha256: "b".repeat(64) });
+        let offered = json!({"schemaVersion":1,"kind":"staged-tool-sources","operationId":operation,
+            "contextSha256":"1".repeat(64),"referenceSha256":"2".repeat(64),"projectionSha256":"3".repeat(64),
+            "cacheJob":format!("tool-{operation}"),"lookupScope":"registered-selected-known",
+            "reusedArchives":["sdk-build-tools"],"downloadedArchives":["gradle"],
+            "groups":[{"group":"sdk","components":["sdk-build-tools"],"allRequiredComponentsStaged":false,"next":"complete-sdk-manually"},
+                {"group":"gradle","components":["gradle"],"allRequiredComponentsStaged":true,"next":"choose-native-source"}],
+            "assurance":{"nativeFinality":false,"registered":false,"readyToBuild":false}});
+        assert!(result_valid(&offered, &operation, &context).is_ok());
+        assert!(staged_matches_partition(&offered, partition));
+        assert!(!staged_matches_partition(&offered, Partition::missing_all()));
+        let mut changed = offered.clone();
+        changed["reusedArchives"] = json!(["jdk", "sdk-build-tools"]);
+        assert!(!staged_matches_partition(&changed, partition));
+        let mut changed = offered.clone();
+        changed["downloadedArchives"] = json!(["sdk-build-tools"]);
+        assert!(!staged_matches_partition(&changed, partition));
+        let mut changed = offered.clone();
+        changed["groups"][0]["allRequiredComponentsStaged"] = json!(true);
+        changed["groups"][0]["next"] = json!("choose-native-source");
+        assert!(result_valid(&changed, &operation, &context).is_err());
+    }
+    #[test]
     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {
         assert!(prepare(&context_value()).is_ok());
         for name in [
@@ -1091,6 +1190,7 @@ mod tests {
             &context,
             &reference,
             &projection,
+            Partition::missing_all(),
         )
         .unwrap();
         let expected=format!("{{\"cacheGeneration\":7,\"components\":[\"jdk\",\"sdk-platform\",\"sdk-build-tools\",\"gradle\"],\"contextSha256\":\"{context}\",\"operationId\":\"{operation}\",\"profile\":\"macos-arm64\",\"projectionSha256\":\"{projection}\",\"referenceSha256\":\"{reference}\",\"schemaVersion\":1}}");
@@ -1101,7 +1201,8 @@ mod tests {
             Profile::MacArm64,
             &context,
             &reference,
-            &projection
+            &projection,
+            Partition::missing_all(),
         )
         .is_err());
     }

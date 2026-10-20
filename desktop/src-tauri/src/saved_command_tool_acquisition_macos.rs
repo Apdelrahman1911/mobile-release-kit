@@ -2,7 +2,8 @@
 //! Every effect below is on the saved owner's registered blocking worker. The
 //! cache tail runs only AFTER actual child/pipe/driver/manager/runtime joins.
 use super::*;
-use crate::installed_runtime::ToolAcquisitionRuntimeSlots;
+use crate::installed_runtime::{ToolAcquisitionRuntimeSlots, AndroidRegistrationSourceSlots};
+use wire::components::Partition;
 
 pub(in crate::saved_command_owner) struct Original {
     runtime: ToolAcquisitionRuntimeSlots,
@@ -10,6 +11,8 @@ pub(in crate::saved_command_owner) struct Original {
     selected: Option<VerifiedRuntime>,
     request: Option<Vec<u8>>,
     runtime_closed: bool,
+    sources: Option<AndroidRegistrationSourceSlots>,
+    picked: Option<(Partition, [u8; 32])>,
     unknown: bool,
 }
 impl Original {
@@ -20,6 +23,8 @@ impl Original {
             selected: None,
             request: None,
             runtime_closed: false,
+            sources: None,
+            picked: None,
             unknown: false,
         }
     }
@@ -33,6 +38,7 @@ impl Original {
             && self.runtime_closed
             && self.runtime.settled()
             && self.cache.settled()
+            && self.sources.as_ref().is_none_or(|source| source.settled())
             && self.request.is_none()
     }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
@@ -50,7 +56,56 @@ impl Original {
         if let Some(request) = &self.request {
             bytes = bytes.checked_add(request.capacity())?;
         }
+        if let Some(source) = &self.sources { bytes = bytes.checked_add(source.retained_bytes()?)?; }
         Some(bytes)
+    }
+    fn inspect_picked(&mut self, inner: &Arc<Inner>, owner: &Arc<Session>) -> Result<(), BridgeError> {
+        let intent = owner.tools.intent.as_ref().ok_or_else(wire::invalid)?;
+        let Context::ToolAcquisition(context) = &owner.context else { return Err(wire::invalid()); };
+        if self.sources.is_some() || self.picked.is_some()
+            || !intent.known.sources.matches_project(&context.project_id, owner.registration, &owner.project)
+            || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
+        if intent.known.catalog.empty().is_none() { return Ok(()); } // Existing selected protected tuple wins.
+        if !intent.known.sources.has_picks() {
+            self.picked = Some((Partition::missing_all(), [0; 32]));
+            return Ok(());
+        }
+        let Profile::ToolAcquisition(profile) = owner.profile else { return Err(wire::invalid()); };
+        let reservation = AndroidRegistrationSourceSlots::acquisition_reservation(profile.android()).ok_or_else(wire::invalid)?;
+        let bound = reservation.acquisition_retained_bytes().ok_or_else(wire::invalid)?;
+        let future = picked::future_bytes(&intent.known).ok_or_else(wire::invalid)?;
+        // Include the original's already-retained empty runtime/cache/cells in
+        // the SAME future reservation before reserving the full read peak.
+        if self.retained_bytes().and_then(|bytes| bytes.checked_add(reservation.bytes()))
+            .is_none_or(|bytes| bytes > future) {
+            return Err(wire::invalid());
+        }
+        // Retain the actual original BEFORE its first allocation/native IO. The
+        // same registered inspection task performs reads AND consuming closes.
+        self.sources = Some(AndroidRegistrationSourceSlots::new_acquisition(owner.native_audit_cutoff.subscribe(),
+            picked::SourceGate::new(inner, owner), reservation));
+        let source = self.sources.as_mut().ok_or_else(wire::invalid)?;
+        let result = source.acquisition_once(intent.known.sources.roots(), owner.clocks.work, &owner.stop.subscribe(),
+            &mut |failure, at| owner.publish_native_failure(Some((failure, at))));
+        let closed = source.settle_originals(&mut |first| owner.native_cleanup_expired(first));
+        if closed != crate::installed_runtime::CloseOutcome::Settled || !source.settled() {
+            self.unknown = true;
+            return Err(BridgeError::cleanup_unknown());
+        }
+        result.map_err(|_| wire::invalid())?;
+        if source.retained_bytes().is_none_or(|bytes| bytes > bound)
+            || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
+        self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
+        Ok(())
+    }
+    fn picked_finding(&self) -> Option<(Partition, [u8; 32])> {
+        if self.unknown || !self.settled() { return None; }
+        let finding = self.picked?;
+        match &self.sources {
+            Some(source) if source.acquisition_finding() == Some(finding) => Some(finding),
+            None if finding == (Partition::missing_all(), [0; 32]) => Some(finding),
+            _ => None,
+        }
     }
     fn runtime_failure(&self, owner: &Session, returned: Option<AdmissionFailure>) {
         publish_macos_returned_failure(returned, || self.runtime.first_failure(), &mut |first| {
@@ -93,13 +148,21 @@ fn claim_clear(inner: &Inner, r: &super::super::Registry, owner: &Session) -> bo
         && !inner.poisoned.load(Ordering::SeqCst)
         && !stopped(owner)
 }
-fn context_current(inner: &Inner, owner: &Session) -> bool {
+pub(super) fn context_current(inner: &Inner, owner: &Session) -> bool {
     owner
         .tools
         .intent
         .as_ref()
         .is_some_and(|intent| intent.current())
         && claim_clear(inner, &inner.lock(), owner)
+}
+/// Frozen read-only DATA from an already actually joined source producer.
+/// No filesystem IO/continuing lease is claimed at this comparison boundary.
+pub(super) fn picked_finding(owner: &Session) -> Option<(Partition, [u8; 32])> {
+    if !original_joined(owner) { return None; }
+    let resources = owner.resources.try_lock().ok()?;
+    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+    original.picked_finding()
 }
 fn copy_runtime(v: &VerifiedRuntime) -> VerifiedRuntime {
     VerifiedRuntime {
@@ -209,7 +272,15 @@ pub(super) fn inspect(
     let mut original = original
         .try_lock()
         .map_err(|_| BridgeError::cleanup_unknown())?;
+    // Fresh same-picker proof precedes CA/cache intent/network admission. A
+    // selected present-but-wrong tree refuses; it never becomes "missing".
+    original.inspect_picked(inner, owner)?;
     if context.action == wire::Action::Acquire {
+        let inspection = intent.inspection.as_ref().ok_or_else(wire::invalid)?;
+        let parts = original.picked.ok_or_else(wire::invalid)?;
+        if !inspection.matches(context, owner.registration, &owner.project) || !permits(profile, inspection)
+            || !parts.0.needs_download() || picked_finding(&inspection.original) != Some(parts)
+            || inspection.terminal.components() != Some(parts.0) { return Err(wire::invalid()); }
         let armed = original.runtime.arm_public_ca_once();
         original.runtime_failure(owner, armed.as_ref().err().copied());
         armed.map_err(|_| owner.domain.unavailable())?;
@@ -235,7 +306,7 @@ pub(super) fn inspect(
         .is_none_or(|n| n == 0)
         || original
             .retained_bytes()
-            .is_none_or(|n| n > FUTURE_PUBLIC_BYTES)
+            .is_none_or(|n| picked::future_bytes(&intent.known).is_none_or(|bound| n > bound))
     {
         original.cache_failure(owner, wire::Reason::Limit);
         return Err(wire::invalid());
@@ -257,6 +328,7 @@ pub(super) fn inspect(
             )
             .map_err(|_| wire::Reason::Input);
         }
+        let components = original.picked.ok_or(wire::Reason::Stale)?.0;
         let inspection = intent.inspection.as_ref().ok_or(wire::Reason::Stale)?;
         if !inspection.matches(context, owner.registration, &owner.project)
             || !permits(profile, inspection)
@@ -284,8 +356,10 @@ pub(super) fn inspect(
         let context_raw=crate::edit_protocol::bounded(&json!({"context":context,"profile":profile,"projectRegistration":owner.registration,
             "projectRoot":wire::native_path(&owner.project.path),"rootIdentity":owner.project.identity.posix().map_err(|_|wire::Reason::Input)?.preflight_identity(),
             "catalogGeneration":intent.known.catalog.generation(),"ownerRevision":intent.known.revision,
-            "sourceGeneration":intent.known.source_generation,"registrationGeneration":intent.known.registration_generation}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
+            "sourceGeneration":intent.known.source_generation,"registrationGeneration":intent.known.registration_generation,
+            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1)}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
         let expected = Expected {
+            components,
             context_sha256: hash(&context_raw),
             reference_sha256: projection
                 .reference_sha256
@@ -305,6 +379,7 @@ pub(super) fn inspect(
             &expected.context_sha256,
             &expected.reference_sha256,
             &expected.projection_sha256,
+            components,
         )
         .map_err(|_| wire::Reason::Limit)?;
         let location = inner
@@ -336,6 +411,7 @@ pub(super) fn inspect(
             &expected.context_sha256,
             &expected.reference_sha256,
             &expected.projection_sha256,
+            components,
         )?;
         let bytes = wire::request(
             &owner.id,

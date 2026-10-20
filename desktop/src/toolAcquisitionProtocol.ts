@@ -4,6 +4,8 @@ import { copyBoundedComparisonData, offlineCounter, parseSavedConfigContent, sam
 import type { SavedConfigContent } from './offlinePreflightTypes.ts';
 import { parseStagedToolSources } from './toolAcquisitionGuidance.ts';
 import type { StagedToolSourcesData } from './toolAcquisitionGuidance.ts';
+import { parseToolComponentPartition } from './toolAcquisitionComponents.ts';
+import type { ToolComponentPartition } from './toolAcquisitionComponents.ts';
 
 export const TOOL_ACQUISITION_EVENT = 'tool-acquisition-state-changed';
 export const TOOL_ACQUISITION_CONSENT = 'pinned-public-tool-sources-v1';
@@ -25,6 +27,7 @@ export interface ToolRequirementsObservation {
   // Only native post-join publication adds this comparison. It is not a tool
   // lease or build-readiness claim; null never permits a download review.
   protectedTools: ProtectedToolsFinding | null;
+  components: ToolComponentPartition | null;
   requirements: {
     schemaVersion: 1; basis: 'unverified-static-source-hints'; sourcesSha256: string;
     complete: true; platform: 'android'; projectCodeExecuted: false;
@@ -84,8 +87,11 @@ function hint(v: unknown, optional: boolean): boolean {
 }
 function requirements(v: unknown): v is ToolRequirementsObservation {
   // The native public result deliberately omits its private source footprint.
-  if (!keys(v, ['kind', 'requirements', 'protectedTools']) || v.kind !== 'tool-requirements-observation' ||
+  if (!keys(v, ['kind', 'requirements', 'protectedTools', 'components']) || v.kind !== 'tool-requirements-observation' ||
       v.protectedTools !== null && !oneOf(v.protectedTools, ['reuse-selected', 'none-in-supported-catalogue', 'manual-check-required'])) return false;
+  const parts = v.components === null ? null : parseToolComponentPartition(v.components);
+  if (v.components !== null && (!parts || !['reuse-selected', 'none-in-supported-catalogue'].includes(v.protectedTools as string) ||
+      v.protectedTools === 'reuse-selected' && parts.missing.length !== 0)) return false;
   const r = v.requirements;
   if (!keys(r, ['schemaVersion', 'basis', 'sourcesSha256', 'complete', 'platform', 'projectCodeExecuted', 'xcode', 'android']) ||
       r.schemaVersion !== 1 || r.basis !== 'unverified-static-source-hints' || !sha(r.sourcesSha256) || r.complete !== true ||
@@ -104,8 +110,7 @@ function completedResult(v: unknown, op: ToolAcquisitionOperation): boolean {
   if (op.context.action === 'inspect') return requirements(v);
   const report = parseStagedToolSources(v);
   return report !== null && report.operationId === op.operationId && report.cacheJob === `tool-${op.operationId}` &&
-    report.reusedArchives.length + report.downloadedArchives.length === 4 && report.groups.length === 3 &&
-    report.groups.every((group) => group.allRequiredComponentsStaged && group.next === 'choose-native-source');
+    report.reusedArchives.length + report.downloadedArchives.length > 0; // Exact native missing-set match is separate.
 }
 export function parseToolAcquisitionStatus(value: unknown): ToolAcquisitionStatus | null {
   try {

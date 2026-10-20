@@ -3,6 +3,7 @@ import type { ToolAcquisitionController, ToolAcquisitionState } from '../toolAcq
 import { stagedToolSourceGuidance, toolAcquisitionFailureGuidance } from '../toolAcquisitionGuidance.ts';
 import type { ToolRequirementHint } from '../toolAcquisitionProtocol.ts';
 import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
+import { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } from '../toolAcquisitionComponents.ts';
 
 export interface PrepareBuildEnvironmentProps {
   state: ToolAcquisitionState;
@@ -55,6 +56,8 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
 
   const requirements = state.inspection?.requirements.android;
   const reuseSelected = state.inspection?.protectedTools === 'reuse-selected';
+  const parts = state.inspection?.components;
+  const chosenComplete = !reuseSelected && !!parts && parts.missing.length === 0;
   const report = op?.result?.kind === 'staged-tool-sources' ? op.result : null;
   const staged = report && stagedToolSourceGuidance(report, state.presentation);
   const busy = toolsBusy || retained;
@@ -70,16 +73,23 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       {checkReason && <p className="save-note">{checkReason}</p>}
     </>}
     {requirements && !report && <>
-      <h3>{reuseSelected ? 'No tool download needed' : 'Required tool sources'}</h3>
+      <h3>{reuseSelected || chosenComplete ? 'No tool download needed' : 'Required tool sources'}</h3>
       {reuseSelected && <p role="status">Your selected protected JDK, Android platform, build tools and Gradle match this project’s saved requirements. Keep using them unchanged. This check downloaded and installed nothing; builds still run their own checks.</p>}
+      {chosenComplete && <p role="status">Your chosen JDK, Android SDK packages and Gradle match the supported profile. Nothing was downloaded. Inspect the selected tools next, then review and approve any protected copy.</p>}
+      {!reuseSelected && parts && <dl className="environment-baseline">
+        <dt>Keep unchanged</dt><dd>{parts.compatible.map(toolComponentLabel).join(', ') || 'No matching chosen sources'}</dd>
+        <dt>Download only</dt><dd>{parts.missing.map(toolComponentLabel).join(', ') || 'Nothing'}</dd>
+      </dl>}
+      {!reuseSelected && parts && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. Its download will not be merged into your existing SDK. Keep the matching package and finish SDK setup manually below, then choose and inspect the complete folder.</p>}
       <p>The saved project’s source hints were checked without running its build scripts. This is not a build-readiness check.</p>
       <dl className="environment-baseline"><dt>Java JDK</dt><dd>{hint(requirements.jdk)}</dd>
         <dt>Android platform</dt><dd>{hint(requirements.sdkPlatform)}</dd>
         <dt>Android build tools</dt><dd>{hint(requirements.sdkBuildTools)}</dd>
         <dt>Gradle</dt><dd>{requirements.gradle.version ?? 'Could not be read safely'}</dd></dl>
       {!consent && !active && <>
-        {!reuseSelected && <>
-          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue, not every folder on this computer.</p>
+        {chosenComplete && <button type="button" className="button primary" disabled={toolsBusy} onClick={openRegistration}>Inspect selected tools</button>}
+        {!reuseSelected && !chosenComplete && <>
+          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue and your chosen folders, not every folder on this computer.</p>
           <button type="button" className="button primary" disabled={reviewReason !== null} onClick={() => void controller.reviewDownload()}>Review download</button>
           {reviewReason && <p className="save-note">{reviewReason}</p>}
         </>}
@@ -99,13 +109,16 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
     {originalControls}
     <details><summary>Existing tools &amp; manual setup</summary>
-      <p>Keep your working JDK, Android SDK and Gradle installation. Refresh the protected tool list, or choose complete existing source folders. Inspect and approve the protected copy in Set up build tools below.</p>
+      <p>Keep your working JDK, Android SDK and Gradle installation. Choose the folders you already have, then use Check existing protected tools and Check required tools again. Refresh the saved project if requested. Inspect and approve the protected copy in Set up build tools below.</p>
       <div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => void refreshCatalog()}>Check existing protected tools</button>
         {(['jdk', 'sdk', 'gradle'] as const).map((role) => <button type="button" className="button secondary" key={role} disabled={busy}
           onClick={() => void chooseSource(role)}>Choose {role === 'jdk' ? 'JDK' : role === 'sdk' ? 'Android SDK' : 'Gradle'}</button>)}
         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
       <p>For manual preparation, use the exact supported releases shown in the existing tool review. Do not upgrade a compatible installation, change global Java settings or run a project wrapper just to discover its version.</p>
-      <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build, an empty supported catalogue and no picked source folders. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
+      <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build and a complete check of the supported catalogue and chosen folders. Only confirmed missing pieces are downloaded; present but incompatible or unreadable tools need manual review. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
+      <h3>Complete an Android SDK manually</h3>
+      <ol>{MANUAL_ANDROID_SDK_STEPS.map((step) => <li key={step}>{step}</li>)}</ol>
+      <p>The supported downloaded SDK contains API 35 revision 2 and Build-Tools 35.0.0 only. NDK, CMake, emulator, platform-tools and other versions are not installed by this action. A single-package download is not a complete SDK; no license acceptance is automated.</p>
       <p>Literal source hints are not Gradle’s resolved configuration. The native operation rechecks exact project sources and its pinned tool profile before any download. iOS/Xcode setup remains a separate check.</p>
       {report && <p>Staging folder identifier: <code>{report.cacheJob}</code>. A folder name is not an installation or completion receipt.</p>}
     </details>

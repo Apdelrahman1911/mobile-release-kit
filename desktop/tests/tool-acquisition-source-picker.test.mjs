@@ -114,13 +114,13 @@ test('context ABA, lost invoke and unknown source never refresh the handoff', ()
   }
 });
 
-async function controllers(t) {
+async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], staged = report() } = {}) {
   let ws = workspaceReducer(initialWorkspace, { type: 'select', project: { id: 'p1', name: 'Inert', path: '/never-opened-tools' } });
   ws = workspaceReducer(ws, { type: 'snapshot-start', projectId: 'p1', requestId: 1 });
   ws = workspaceReducer(ws, { type: 'snapshot-done', projectId: 'p1', requestId: 1, observedAt: 1, snapshot: {
     root: '/never-opened-tools', config: { path: 'release/mobile-release.json', state: 'format-valid', data: { android: { enabled: true, module: ':app' } },
       content: { bytes: 120, sha256: SHA }, issues: [] }, discovery: { hints: {} }, issues: [] } });
-  let tools, native = { schemaVersion: 1, statusRevision: 0, availability: 'available', operation: null }, sources = sourceIdle();
+  let tools, native = { schemaVersion: 1, statusRevision: 0, availability: 'available', operation: null }, sources = clone(initialSources);
   let catalogStatus = catalog(), registrationStatus = registration();
   const calls = [], observers = [];
   const listen = (kind, callback) => { const entry = { kind, callback, closed: false }; observers.push(entry); return () => { entry.closed = true; }; };
@@ -150,13 +150,14 @@ async function controllers(t) {
         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
     }, start: async () => {
       const op = native.operation;
-      const requirements = { kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
+      const requirements = { kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
+        compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((part) => !missing.includes(part)) }, requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
         complete: true, platform: 'android', projectCodeExecuted: false, xcode: { version: '26.3', build: '17C529' }, android: {
           jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' }, sdkPlatform: { state: 'literal', value: 'android-35' },
           sdkBuildTools: { state: 'unspecified', value: null }, gradle: { state: 'literal', version: '8.14.5',
             distributionUrl: 'https://services.gradle.org/distributions/gradle-8.14.5-bin.zip', sha256: SHA } } } };
       native = { ...native, availability: 'available', statusRevision: native.statusRevision + 1, operation: { ...op, phase: 'terminal', intentUsable: false,
-        outcome: 'complete', result: op.context.action === 'inspect' ? requirements : report() } }; return clone(native);
+        outcome: 'complete', result: op.context.action === 'inspect' ? requirements : staged } }; return clone(native);
     }, cancel: async () => { throw new Error('completed acquire has no pending cancellation'); } };
   tools.setVisible(true); await tools.connect(toolApi);
   const off = android.subscribe(() => tools.syncProject());
@@ -195,6 +196,28 @@ test('actual controllers retain folder handoff across JDK then SDK while old acq
   assert.deepEqual(h.calls[1].input.acquired, { operationId: OP, ownerGeneration: GEN });
   h.reply(h.calls[1], source(2, 'sdk')); await second;
   assert.equal(h.tools.getSnapshot().presentation, 'stale'); assert.equal(h.tools.getSnapshot().preparedFolders.continuing, true);
+});
+
+test('partial download keeps chosen JDK and SDK, offers only prepared Gradle and leaves SDK completion manual', async (t) => {
+  const selections = [{ role: 'jdk', displayName: 'Existing JDK' }, { role: 'sdk', displayName: 'Existing SDK with platform 35' }];
+  const staged = report(); staged.reusedArchives = []; staged.downloadedArchives = ['sdk-build-tools', 'gradle'];
+  staged.groups = [
+    { group: 'sdk', components: ['sdk-build-tools'], allRequiredComponentsStaged: false, next: 'complete-sdk-manually' },
+    { group: 'gradle', components: ['gradle'], allRequiredComponentsStaged: true, next: 'choose-native-source' },
+  ];
+  const h = await controllers(t, { initialSources: { ...source(2, 'sdk'), selections }, missing: ['sdk-build-tools', 'gradle'], staged });
+  assert.deepEqual(h.tools.getSnapshot().preparedFolders, { roles: ['gradle'], incompleteSdk: true, continuing: false, waiting: false });
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selections);
+  await h.choose('jdk'); await h.choose('sdk'); assert.equal(h.calls.length, 0);
+  const picking = h.choose('gradle'); assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.calls[0].input, { schemaVersion: 1, sourceGeneration: 2, projectId: 'p1', role: 'gradle',
+    acquired: { operationId: OP, ownerGeneration: GEN } });
+  const after = [...selections, { role: 'gradle', displayName: 'Prepared Gradle folder' }];
+  h.reply(h.calls[0], { ...source(3, 'gradle'), selections: after }); await picking;
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections, after);
+  assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, true);
+  assert.equal(h.tools.getSnapshot().presentation, 'stale');
+  assert.equal(h.calls.length, 1); // No SDK replacement, inspection/register or build was auto-invoked.
 });
 
 test('same original catalogue retirement and prerequisite relays preserve only the nominated picker across relay order', async (t) => {

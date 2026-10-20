@@ -33,6 +33,8 @@ use crate::android_upload_key_protocol as upload_wire;
 #[path = "saved_command_tool_acquisition.rs"]
 mod tool_acquisition;
 pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus, SourceNomination as ToolSourceNomination};
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use tool_acquisition::SourceGate as ToolAcquisitionSourceGate;
 
 #[path = "saved_command_local_history.rs"]
 mod local_history;

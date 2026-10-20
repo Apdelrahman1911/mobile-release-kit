@@ -167,7 +167,32 @@ fn hex(value: &[u8; 32]) -> String {
     output
 }
 
-pub(crate) fn for_profile(profile: Profile) -> Option<Projection> {
+/// Static component roster from the SAME already checked compiled reference.
+/// This read-only DATA does not synthesize a Recipe, JDK observation, Review or
+/// tool permit. Its consumer must read the genuine chosen source originals.
+#[derive(Clone, Copy)]
+pub(crate) struct PickedRoster {
+    pub(crate) profile: Profile,
+    pub(crate) reference_sha256: [u8; 32],
+    pub(crate) roster: SourceRoster,
+    pub(crate) jdk_vendor: &'static str,
+    pub(crate) jdk_version: &'static str,
+}
+fn picked_roster(checked: &CheckedReference) -> Option<PickedRoster> {
+    let r = checked.reference;
+    let expected = [(SourceGroup::Jdk, ""), (SourceGroup::Sdk, "platforms/android-35"),
+        (SourceGroup::Sdk, "build-tools/35.0.0"), (SourceGroup::Gradle, "")];
+    if r.trees.len() != expected.len() || !r.trees.iter().zip(expected).all(|(tree,(group,prefix))|
+        tree.group == group && tree.prefix == prefix) { return None; }
+    Some(PickedRoster { profile: checked.profile, reference_sha256: checked.digest,
+        roster: SourceRoster { trees: r.trees, members: r.source_members, support: r.support,
+            archive_members: r.support_members, optional_sdk_metadata: &sdk_metadata::OPTIONAL },
+        jdk_vendor: r.observed_jdk_vendor, jdk_version: r.observed_jdk_version })
+}
+pub(crate) fn picked_roster_for(profile: Profile) -> Option<PickedRoster> {
+    picked_roster(checked_profile(profile)?)
+}
+fn checked_profile(profile: Profile) -> Option<&'static CheckedReference> {
     if !available_for(profile) { return None; }
     let catalogue = match profile {
         Profile::MacArm64 => COMPILED_CATALOGUE.get()?,
@@ -175,9 +200,17 @@ pub(crate) fn for_profile(profile: Profile) -> Option<Projection> {
         Profile::LinuxX64 => return None,
     };
     if catalogue.len() != 1 { return None; }
-    let checked = catalogue.first()?.as_ref()?;
-    if checked.profile != profile { return None; }
-    projection(checked)
+    catalogue.first()?.as_ref().filter(|checked| checked.profile == profile)
+}
+#[cfg(test)]
+pub(crate) fn picked_roster_data(profile: Profile) -> Option<PickedRoster> {
+    // Actual compiled DATA only; does not initialize a cache or a native gate.
+    let reference = match profile { Profile::MacArm64 => &REFERENCES[0],
+        Profile::MacX64 => &intel_catalogue::REFERENCES[0], Profile::LinuxX64 => return None };
+    picked_roster(&CheckedReference::new_for(profile, reference)?)
+}
+pub(crate) fn for_profile(profile: Profile) -> Option<Projection> {
+    projection(checked_profile(profile)?)
 }
 
 #[cfg(test)]

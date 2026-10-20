@@ -14,6 +14,9 @@ use crate::{
     asset_source::RegisteredRoot,
 };
 
+#[path = "android_registration_source_acquisition_macos.rs"]
+mod acquisition;
+
 const LIVE_FDS: usize = 64;
 const SDK_METADATA_BYTES: usize = 32 * 1024;
 // Optional package.xml originals are read once during this source's complete
@@ -184,6 +187,7 @@ pub(crate) struct SourceSlots {
     first: Option<(AdmissionFailure, Instant)>, audit: watch::Receiver<Instant>,
     gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
     inspection_diagnostic: app::InspectionDiagnostic,
+    acquisition: Option<acquisition::Work>,
 }
 impl SourceSlots {
     #[cfg(test)]
@@ -201,7 +205,7 @@ impl SourceSlots {
             proposal: None, instance: None, support: FixedSupportSlots::new_registered(gate.clone()),
             frame: None, frame_entered: false, frame_settled: false, live: 0, read_bytes: 0, account: None,
             begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate,
-            inspection_diagnostic: app::InspectionDiagnostic::default() }
+            inspection_diagnostic: app::InspectionDiagnostic::default(), acquisition: None }
     }
     /// One real source phase, not a new pool. The caller adds previous Review,
     /// client/control/task/status/request storage under its same64MiB cap.
@@ -268,6 +272,7 @@ impl SourceSlots {
     }
     pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
         let first=earliest_failure(self.first,self.gate.as_ref().and_then(|gate|gate.source_first()));
+        let first=earliest_failure(first,self.acquisition.as_ref().and_then(|work|work.gate.source_first()));
         if self.settled { return first; }
         earliest_failure(earliest_failure(first, self.support.first_failure()),
             self.frame.as_ref().and_then(SnapshotBook::first_failure).map(|(f, at)| (map_acl_failure(f), at)))
@@ -276,11 +281,13 @@ impl SourceSlots {
         self.first = earliest_failure(self.first_failure(), Some((failure, at)));
         if failure == AdmissionFailure::Unknown { self.unknown = true; }
         if let Some(gate)=&self.gate{gate.source_note(failure,at);}
+        if let Some(work)=&self.acquisition{work.gate.source_note(failure,at);}
         if let Some((failure, at)) = self.first { publish(failure, at); }
     }
     fn point(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if self.unknown || self.settled || self.audit.has_changed().is_err() { return Err(AdmissionFailure::Unknown); }
         if let Some(gate)=&self.gate{gate.source_work()?;}
+        if let Some(work)=&self.acquisition{work.gate.source_work()?;}
         // No watch::Ref survives into a genuine pending WAIT.
         let audit_end=*self.audit.borrow();
         checkpoint(end.min(audit_end), stop)
@@ -323,12 +330,17 @@ impl SourceSlots {
         let policy = if original.selected { Policy::Empty } else { Policy::Ancestors };
         let audit = self.audit.clone();
         let gate=self.gate.clone();
+        let acquisition=self.acquisition.as_ref().map(|work|work.gate.clone());
         let result = self.frame.as_mut().ok_or(AdmissionFailure::Unknown)?.observe_phased(fd.as_fd(), identity.acl_expected()?, policy,
             &mut |phase,first|{
                 use native::vault_filesystem::ObservePhase;
                 if phase==ObservePhase::Cleanup {
                     if let Some(gate)=&gate{return gate.source_cleanup_expired(first.map(|(failure,at)|(map_acl_failure(failure),at)));}
-                }else if let Some(gate)=&gate{if gate.source_work().is_err(){return true;}}
+                    if let Some(gate)=&acquisition{return gate.source_cleanup_expired(first.map(|(failure,at)|(map_acl_failure(failure),at)));}
+                }else {
+                    if let Some(gate)=&gate{if gate.source_work().is_err(){return true;}}
+                    if let Some(gate)=&acquisition{if gate.source_work().is_err(){return true;}}
+                }
                 let audit_end=*audit.borrow();
                 audit.has_changed().is_err() || checkpoint(end.min(audit_end), stop).is_err()
             }).map_err(map_acl_failure);
@@ -470,6 +482,7 @@ impl SourceSlots {
     }
     fn begin(&mut self, roots: &[RegisteredRoot; 3], phase: SourcePhase, end: Instant, stop: &watch::Receiver<bool>)
         -> Result<([Vec<Identity>; 3], JdkLayout, String, String)> {
+        if self.acquisition.is_some() { return Err(AdmissionFailure::Inventory); }
         self.selected_profile()?;
         self.allocate_records(phase)?;
         self.point(end, stop)?; self.account = Some(native::real_user().map_err(native_error)?); self.point(end, stop)?;
@@ -1036,8 +1049,10 @@ impl SourceSlots {
         expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
         if self.settled { return CloseOutcome::Unknown; }
         let gate=self.gate.clone();
+        let acquisition=self.acquisition.as_ref().map(|work|work.gate.clone());
         let mut expired=|first|{
-            let gate_expired=gate.as_ref().is_some_and(|gate|gate.source_cleanup_expired(first));
+            let gate_expired=gate.as_ref().is_some_and(|gate|gate.source_cleanup_expired(first))
+                || acquisition.as_ref().is_some_and(|gate|gate.source_cleanup_expired(first));
             let owner_expired=expired(first);gate_expired || owner_expired
         };
         let mut first = self.first_failure();
@@ -1086,7 +1101,7 @@ impl SourceSlots {
     pub(crate) fn take_inspection_review(&mut self) -> Result<SourceReview> {
         // No native/book probes after retirement. This checks only frozen
         // source-worker DATA; owner still must consume actual source JoinHandle.
-        if !self.settled() || self.first.is_some() || self.reproof || self.streamed { return Err(AdmissionFailure::Unknown); }
+        if self.acquisition.is_some() || !self.settled() || self.first.is_some() || self.reproof || self.streamed { return Err(AdmissionFailure::Unknown); }
         let instance = self.instance.take().ok_or(AdmissionFailure::Inventory)?;
         if instance.len() != 32 || !instance.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
             return Err(AdmissionFailure::Inventory);
