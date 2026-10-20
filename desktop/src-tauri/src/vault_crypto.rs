@@ -268,6 +268,17 @@ impl VaultKey {
     }
 }
 
+/// Native backend COMPONENT fixture only: authenticate a fresh synthetic
+/// initialization key locally. This is not a Keychain candidate, native unlock
+/// receipt or Desktop permission; no such original is manufactured here.
+#[cfg(all(test, debug_assertions, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) fn backup_component_key(identity: Identity) -> Result<([u8; format::HEADER_BYTES], VaultKey)> {
+    let proposed = InitializationKey::generate(identity)?;
+    let expected = *proposed.header();
+    let (header, key) = proposed.consume_for_transport(|bytes| VaultKey::authenticate(bytes, identity, &expected));
+    Ok((header, key?))
+}
+
 pub(crate) struct SealedRecord { prefix: RecordPrefix, bytes: Vec<u8> }
 impl SealedRecord {
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }

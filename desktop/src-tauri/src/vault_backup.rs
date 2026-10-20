@@ -95,6 +95,19 @@ pub(crate) struct ImportedBackup {
 }
 impl ImportedBackup {
     pub(crate) fn file(&self) -> Option<&[u8]> { self.file.as_ref().map(|range| &self.plaintext[range.clone()]) }
+    /// Compare the complete authenticated NEW readback to this SAME restored
+    /// input, without serializing or copying any private scalar/file. Record
+    /// and fresh revision identity remain the native import owner's checks.
+    pub(crate) fn matches_authenticated_readback(&self, record: &super::AuthenticatedRecord) -> bool {
+        let expected = &self.descriptor;
+        let actual = &record.descriptor;
+        expected.kind == actual.kind && expected.label == actual.label
+            && expected.presence() == actual.presence() && expected.has_file() == actual.has_file()
+            && self.fields.vault_kind() == expected.kind && record.fields.vault_kind() == expected.kind
+            && crate::asset_commands::field_names(expected.kind).iter().all(|name|
+                self.fields.borrow_value(name) == record.fields.borrow_value(name))
+            && self.file() == record.file.as_ref().map(super::StoredBytes::bytes)
+    }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         self.plaintext.capacity().checked_add(self.descriptor.retained_bytes().ok()?)?
             .checked_add(self.fields.retained_bytes()?)?.checked_add(std::mem::size_of::<Self>())
@@ -313,5 +326,53 @@ mod tests {
         assert!(opened.record == id(42));
         assert_eq!(opened.fields.borrow_value("contactEmail"), Some("fixture@example.invalid"));
         assert!(opened.file.is_none());
+        assert!(restored.matches_authenticated_readback(&opened));
+    }
+    #[test]
+    fn complete_new_readback_matches_every_descriptor_scalar_and_file() {
+        let (bytes, code) = backup();
+        let restored = import(bytes, RecoveryCode::parse(&code).unwrap(), ALLOWANCE).unwrap();
+        let id = |byte| format::Id::from_bytes([byte; 16]).unwrap();
+        let key = super::super::lifecycle_data_key(format::Identity::new(id(40), id(41)).unwrap());
+        let seal_open = |descriptor: &format::Descriptor, fields: &Fields, file: Option<&[u8]>| {
+            let sealed = key.seal_record_with(id(42), None, descriptor, fields, file, ALLOWANCE,
+                &mut Fixed { call: 50, fail: None }).unwrap();
+            key.open_record(sealed.bytes().to_vec(), ALLOWANCE).unwrap()
+        };
+        let opened = seal_open(&restored.descriptor, &restored.fields, restored.file());
+        assert!(restored.matches_authenticated_readback(&opened));
+        for name in commands::field_names(Kind::AndroidKeystore) {
+            let mut values = serde_json::json!({"storePassword":"synthetic-store",
+                "keyAlias":"synthetic-upload", "keyPassword":"synthetic-key"});
+            values[*name] = serde_json::json!("different-synthetic-value");
+            let changed = commands::own_fields(Kind::AndroidKeystore, &values).ok().unwrap();
+            let opened = seal_open(&restored.descriptor, &changed, restored.file());
+            assert!(!restored.matches_authenticated_readback(&opened));
+        }
+        let changed_label = format::Descriptor::new(Kind::AndroidKeystore,
+            Some("Different synthetic label".into()), vec![true; 3], true).unwrap();
+        assert!(!restored.matches_authenticated_readback(&seal_open(&changed_label, &restored.fields, restored.file())));
+        assert!(!restored.matches_authenticated_readback(&seal_open(&restored.descriptor,
+            &restored.fields, Some(b"different-synthetic-file"))));
+        let changed_presence = format::Descriptor::new(Kind::AndroidKeystore,
+            restored.descriptor.label.clone(), vec![true, false, true], true).unwrap();
+        let absent_alias = commands::own_fields(Kind::AndroidKeystore, &serde_json::json!({
+            "storePassword":"synthetic-store", "keyAlias":null, "keyPassword":"synthetic-key"
+        })).ok().unwrap();
+        assert!(!restored.matches_authenticated_readback(&seal_open(&changed_presence, &absent_alias, restored.file())));
+    }
+    #[test]
+    fn descriptor_success_does_not_authenticate_persisted_backup_payload() {
+        let (bytes, code) = backup();
+        let restored = import(bytes, RecoveryCode::parse(&code).unwrap(), ALLOWANCE).unwrap();
+        let id = |byte| format::Id::from_bytes([byte; 16]).unwrap();
+        let key = super::super::lifecycle_data_key(format::Identity::new(id(40), id(41)).unwrap());
+        let sealed = key.seal_record_with(id(42), None, &restored.descriptor, &restored.fields,
+            restored.file(), ALLOWANCE, &mut Fixed { call: 50, fail: None }).unwrap();
+        let descriptor_end = 216 + sealed.prefix.descriptor_length + 16;
+        let mut changed = sealed.bytes().to_vec();
+        let last = changed.len() - 1; changed[last] ^= 1;
+        assert!(key.open_descriptor(&changed[..descriptor_end], ALLOWANCE).is_ok());
+        assert!(matches!(key.open_record(changed, ALLOWANCE), Err(Error::Authentication)));
     }
 }
