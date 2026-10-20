@@ -9,6 +9,7 @@ import { GitHubGhEntryController } from '../src/githubGhEntryController.ts';
 import { createGitHubGhApi, encodeGitHubGhRequest, githubGhFailure, parseGitHubGhRequest,
   parseGitHubGhResult, parseGitHubGhStatus } from '../src/githubGhEntryProtocol.ts';
 import { GITHUB_WORKFLOWS } from '../src/githubSetupProtocol.ts';
+import { parseGitHubGhAccountsRequest, parseGitHubGhAccountsStatus } from '../src/githubGhAccountsProtocol.ts';
 
 const HELP = JSON.parse(readFileSync(new URL('../../src/mobile_release/api/data/github-connection-v1.json', import.meta.url), 'utf8'));
 const CONTEXT = { documentId: 'document-a', projectId: 'project-a', projectGeneration: 1, repository: 'Owner/App' };
@@ -46,6 +47,13 @@ function auth(phase = 'idle', patch = {}) {
 const handoff = () => ({ schemaVersion: 1, operationId: 'auth-a', outcome: 'http-handoff', connection: checking() });
 const noHttp = (patch = {}) => ({ schemaVersion: 1, operationId: 'auth-a', outcome: 'no-http', auth: auth('failed', patch) });
 const unknown = () => ({ schemaVersion: 1, operationId: 'auth-a', outcome: 'unknown', auth: auth('cleanup-unknown') });
+const ACCOUNTS_REQUEST = { projectId: CONTEXT.projectId, repository: CONTEXT.repository, expectedDocumentRevision: 7, expectedConnectionRevision: 1 };
+function accounts(phase = 'settled', patch = {}) {
+  return { schemaVersion: 1, kind: 'accounts', documentRevision: 8, connectionRevision: 1, available: true,
+    operationId: 'accounts-a', projectId: CONTEXT.projectId, repository: CONTEXT.repository, phase,
+    reason: phase === 'cleanup-unknown' ? 'cleanup-unknown' : ['stopping', 'failed'].includes(phase) ? 'cancelled' : 'none',
+    accounts: phase === 'settled' ? { observationId: 'gh-accounts-1', logins: ['Owner', 'Second'], current: true } : null, ...patch };
+}
 function fakeClock() {
   const pending = new Map(); let serial = 0;
   return { schedule(fn) { const id = ++serial; pending.set(id, fn); return id; }, cancel(id) { pending.delete(id); },
@@ -81,14 +89,21 @@ async function harness({ available = true, authAvailable = true } = {}) {
   return h;
 }
 async function ready(options) { const h = await harness(options); await h.read(); return h; }
+async function finding() {
+  const h = await harness(); assert.equal(h.entry.findAccounts(), true); h.last('github_auth_status').resolve(auth()); await flush();
+  assert.equal(h.count('github_auth_accounts'), 1); return h;
+}
+async function listed() {
+  const h = await finding(); h.last('github_auth_accounts').resolve(accounts()); await flush(); return h;
+}
 
 // Native byte decoder is tested separately by its author; these tests ensure
 // the only renderer transport matches it and cannot widen into PAT/process I/O.
-test('exact RAW three-command bridge, closed native shapes and inert preview', async () => {
+test('exact RAW commands, unchanged manual/PAT boundary and inert preview', async () => {
   const calls = []; const api = createGitHubGhApi('native', async (name, bytes) => { calls.push({ name, value: JSON.parse(new TextDecoder().decode(bytes)) }); return null; });
-  await api.status(); await api.connect(REQUEST); await api.cancel({ operationId: 'auth-a' });
-  assert.deepEqual(calls.map((c) => c.name), ['github_auth_status', 'github_auth_connect', 'github_auth_cancel']);
-  assert.deepEqual(calls.map((c) => c.value), [{}, REQUEST, { operationId: 'auth-a' }]);
+  await api.status(); await api.connect(REQUEST); await api.cancel({ operationId: 'auth-a' }); await api.accounts(ACCOUNTS_REQUEST);
+  assert.deepEqual(calls.map((c) => c.name), ['github_auth_status', 'github_auth_connect', 'github_auth_cancel', 'github_auth_accounts']);
+  assert.deepEqual(calls.map((c) => c.value), [{}, REQUEST, { operationId: 'auth-a' }, ACCOUNTS_REQUEST]);
   assert.equal(createGitHubGhApi('preview', () => { throw Error('must not call'); }), null);
   assert.ok(parseGitHubGhRequest({ ...REQUEST, selectedLogin: 'a--b' }));
   for (const patch of [{ selectedLogin: '-user' }, { selectedLogin: 'user\n' }, { selectedLogin: 'é' }, { selectedLogin: 'x'.repeat(40) },
@@ -285,4 +300,169 @@ test('bounded passive polling never extends expiry, retries Connect or releases 
   h.entry.dispose(); assert.equal(h.count('github_auth_cancel'), 1); assert.equal(h.state.pendingCount, 2); assert.equal(h.entry.attach(null, null), false);
   h.last('github_auth_cancel').resolve(auth('failed')); h.last('github_auth_connect').resolve(noHttp()); await flush();
   assert.equal(h.state.pendingCount, 0); assert.equal(h.entry.ownerReason(), null); assert.equal(h.timer.count, 0);
+});
+
+test('accounts parser admits complete names only; no tokens, paths, aliases, partial lists or executable account DTO', () => {
+  assert.ok(parseGitHubGhAccountsRequest(ACCOUNTS_REQUEST)); assert.ok(parseGitHubGhAccountsStatus(accounts()));
+  assert.equal(parseGitHubGhStatus(accounts()), null); assert.equal(parseGitHubGhAccountsStatus(auth()), null);
+  assert.ok(parseGitHubGhAccountsStatus(accounts('settled', { accounts: { observationId: 'empty-list', logins: [], current: true } })));
+  const request = { ...REQUEST, accountsObservationId: 'gh-accounts-1' };
+  assert.deepEqual({ ...parseGitHubGhRequest(request) }, request);
+  for (const accountsObservationId of [null, false, '', 'bad\n']) assert.equal(parseGitHubGhRequest({ ...REQUEST, accountsObservationId }), null);
+  for (const field of ['token', 'path', 'selectedLogin', 'command', 'authority'])
+    assert.equal(parseGitHubGhAccountsRequest({ ...ACCOUNTS_REQUEST, [field]: 'PRIVATE_SENTINEL' }), null);
+  for (const logins of [['a', 'A'], ['z', 'a'], ['unsafe/name'], ['a--b'], ['new\n'], ['é'], Array.from({ length: 17 }, (_, n) => `A${n}`)])
+    assert.equal(parseGitHubGhAccountsStatus(accounts('settled', { accounts: { observationId: 'list', logins, current: true } })), null);
+  for (const patch of [{ selectedLogin: 'Owner' }, { accounts: null }, { http: null }, { token: 'PRIVATE_SENTINEL' },
+    { accounts: { ...accounts().accounts, active: 'Owner' } }, { accounts: { ...accounts().accounts, complete: false } }])
+    assert.equal(parseGitHubGhAccountsStatus(accounts('settled', patch)), null);
+  let calls = 0;
+  const privateValue = accounts(); Object.defineProperty(privateValue, 'token', { enumerable: true, get() { calls++; return 'PRIVATE_SENTINEL'; } });
+  assert.equal(parseGitHubGhAccountsStatus(privateValue), null); assert.equal(calls, 0);
+});
+
+test('one explicit Find serially checks comparisons and reads names; no mount effects or automatic selection/connect', async () => {
+  const h = await harness(); assert.equal(h.calls.length, 0); assert.equal(h.entry.chooseAccount('Owner'), false);
+  assert.equal(h.entry.findAccounts(), true); assert.equal(h.count('github_auth_status'), 1); assert.equal(h.count('github_auth_accounts'), 0);
+  assert.equal(h.entry.findAccounts(), false); assert.equal(h.entry.connect(), false);
+  h.onInvoke = (name) => { if (name === 'github_auth_accounts') { assert.equal(h.state.pendingCount, 1); assert.ok(h.entry.ownerReason()); } };
+  h.last('github_auth_status').resolve(auth()); await flush();
+  assert.deepEqual(h.last('github_auth_accounts').request, ACCOUNTS_REQUEST);
+  assert.equal(h.count('github_auth_connect'), 0); assert.equal(h.connectionState.busy, null);
+  h.last('github_auth_accounts').resolve(accounts()); await flush();
+  assert.equal(h.state.manual, false); assert.equal(h.state.login, 'Owner', 'manual draft is retained, never used as automatic selection');
+  assert.equal(h.state.selectedAccount, null); assert.equal(h.state.accountsFresh, true); assert.equal(h.entry.connect(), false);
+  assert.equal(h.entry.chooseAccount('Unlisted'), false); assert.equal(h.entry.chooseAccount('Owner'), true);
+  assert.equal(h.entry.startReason(), null); assert.equal(h.entry.connect(), true);
+  assert.deepEqual(h.last('github_auth_connect').request, { ...REQUEST, expectedDocumentRevision: 8, accountsObservationId: 'gh-accounts-1' });
+  assert.equal(h.connectionState.status.account.value, null, 'a listed name does not become the authenticated account');
+  h.last('github_auth_connect').resolve(noHttp()); await flush();
+  assert.equal(h.state.accountsFresh, false); assert.equal(h.state.login, 'Owner'); assert.equal(h.entry.connect(), false);
+});
+
+test('early native accounts status cannot release original invocation; full list cannot change after joined success', async () => {
+  const h = await finding(); await h.read(accounts());
+  assert.equal(h.state.pendingCount, 1); assert.equal(h.entry.chooseAccount('Owner'), false); assert.equal(h.entry.attach(null, null), false);
+  h.last('github_auth_accounts').resolve(accounts()); await flush();
+  assert.equal(h.state.pendingCount, 0); assert.equal(h.entry.chooseAccount('Owner'), true);
+  await h.read(accounts('settled', { accounts: { ...accounts().accounts, logins: ['Other'] } }));
+  assert.equal(h.state.issue, 'unconfirmed'); assert.equal(h.entry.connect(), false); assert.equal(h.state.selectedAccount, 'Owner');
+  assert.deepEqual(h.state.accounts.logins, ['Owner', 'Second'], 'contradictory name projection is not adopted');
+});
+
+test('account terminal reply overtakes older polls without hiding later contradiction or original Unknown', async () => {
+  for (const older of [accounts('reading'), auth()]) {
+    const h = await finding(); assert.equal(h.entry.checkStatus(), true);
+    const poll = h.last('github_auth_status');
+    h.last('github_auth_accounts').resolve(accounts()); await flush();
+    assert.equal(h.state.pendingCount, 1, 'the older poll remains owned until its actual return');
+    assert.equal(h.state.issue, null); assert.equal(h.state.accountsFresh, true);
+    assert.equal(h.entry.chooseAccount('Owner'), false, 'a pending read still blocks new work');
+    poll.resolve(older); await flush();
+    assert.equal(h.state.pendingCount, 0); assert.equal(h.state.issue, null);
+    assert.equal(h.state.accountsOriginal.phase, 'settled'); assert.equal(h.state.accountsFresh, true);
+    assert.equal(h.entry.chooseAccount('Owner'), true); assert.equal(h.count('github_auth_connect'), 0);
+    await h.read(accounts('settled', { accounts: { ...accounts().accounts, logins: ['Changed'] } }));
+    assert.equal(h.state.issue, 'unconfirmed', 'a later complete-list contradiction is not an older poll');
+    assert.equal(h.entry.connect(), false);
+  }
+  const unknown = await finding(); unknown.entry.checkStatus();
+  const oldPoll = unknown.last('github_auth_status');
+  unknown.last('github_auth_accounts').resolve(accounts()); await flush();
+  oldPoll.resolve(accounts('cleanup-unknown')); await flush();
+  assert.equal(unknown.state.issue, 'cleanup-unknown', 'matching original Unknown stays absorbing even from an overtaken poll');
+  assert.equal(unknown.entry.canCancel(), true); assert.equal(unknown.entry.chooseAccount('Owner'), false);
+});
+
+test('project/API/ABA retirement never revives a previously read list through Status; original calls still settle', async () => {
+  const h = await finding(); h.setContext({ ...CONTEXT, projectId: 'other-project' }); h.setContext(CONTEXT);
+  h.last('github_auth_accounts').resolve(accounts()); await flush();
+  assert.equal(h.state.pendingCount, 0); assert.equal(h.state.accountsFresh, false); assert.equal(h.entry.chooseAccount('Owner'), false);
+  await h.read(accounts()); assert.equal(h.state.accountsFresh, false, 'status cannot adopt the retired read after ABA');
+  assert.equal(h.state.login, 'Owner'); assert.equal(h.entry.findAccounts(), true);
+  h.last('github_auth_status').resolve(accounts()); await flush();
+  assert.equal(h.count('github_auth_accounts'), 2);
+  const newer = accounts('settled', { operationId: 'accounts-b', documentRevision: 9, accounts: { ...accounts().accounts, observationId: 'gh-accounts-2' } });
+  h.last('github_auth_accounts').resolve(newer); await flush(); assert.equal(h.state.accountsFresh, true);
+  h.apiNow = null; h.entry.syncContext(); assert.equal(h.state.accountsFresh, false);
+  assert.equal(h.entry.attach(null, null), true); assert.equal(h.state.login, 'Owner');
+});
+
+test('descriptor and synchronous publication reentrancy cannot authorize an unsent or stale account read', async () => {
+  for (const action of ['context', 'peer']) {
+    const h = await harness(); h.entry.findAccounts(); let once = false;
+    const off = h.entry.subscribe(() => {
+      if (once || h.state.pendingCount !== 1 || !h.state.status) return;
+      once = true; if (action === 'context') h.setContext(null); else h.blocked = 'Another original task';
+    });
+    h.last('github_auth_status').resolve(auth()); await flush(); off();
+    assert.equal(h.count('github_auth_accounts'), 0); assert.equal(h.state.pendingCount, 0); assert.equal(h.count('github_auth_connect'), 0);
+  }
+  const h = await finding(); let once = false;
+  const value = new Proxy(accounts(), { getOwnPropertyDescriptor(target, key) {
+    if (!once) { once = true; h.setContext(null); } return Reflect.getOwnPropertyDescriptor(target, key);
+  } });
+  h.last('github_auth_accounts').resolve(value); await flush();
+  assert.equal(h.state.context, null); assert.equal(h.state.accountsFresh, false); assert.equal(h.state.pendingCount, 0);
+});
+
+test('account Stop overlaps original read, survives API replacement and keeps exact original port until both return', async () => {
+  const h = await finding(); await h.read(accounts('reading')); h.apiNow = null; h.entry.syncContext();
+  assert.equal(h.count('github_auth_cancel'), 1); assert.equal(h.state.pendingCount, 2);
+  assert.deepEqual(h.last('github_auth_cancel').request, { operationId: 'accounts-a' }); assert.equal(h.entry.attach(null, null), false);
+  h.last('github_auth_cancel').resolve(accounts('stopping')); await flush();
+  assert.equal(h.state.pendingCount, 1); assert.equal(h.entry.attach(null, null), false);
+  h.last('github_auth_accounts').resolve(accounts('failed')); await flush();
+  assert.equal(h.state.pendingCount, 0); assert.equal(h.state.accountsFresh, false); assert.equal(h.entry.attach(null, null), true);
+  assert.equal(h.state.login, 'Owner'); assert.equal(h.count('github_auth_accounts'), 1);
+});
+
+test('account cleanup Unknown is absorbing for sent and observed originals, preserving Stop before late replies', async () => {
+  for (const sent of [true, false]) {
+    const h = sent ? await finding() : await harness(); await h.read(accounts('cleanup-unknown'));
+    const original = h.state.accountsOriginal;
+    await h.read(accounts('failed')); await h.read(accounts());
+    assert.equal(h.state.accountsOriginal, original); assert.equal(h.entry.canCancel(), true); assert.equal(h.entry.findAccounts(), false);
+    assert.equal(h.entry.requestCancel(), true); h.last('github_auth_cancel').resolve(accounts('failed'));
+    if (sent) h.last('github_auth_accounts').resolve(accounts()); await flush();
+    assert.equal(h.state.issue, 'cleanup-unknown'); assert.equal(h.state.accountsOriginal, original); assert.equal(h.state.pendingCount, 0);
+    assert.equal(h.state.accountsFresh, false); assert.equal(h.entry.attach(null, null), false);
+  }
+});
+
+test('lost account reply stays unconfirmed, exact native pre-admission refusal does not invent a read or discard text', async () => {
+  const h = await finding(); h.last('github_auth_accounts').reject({ message: 'PRIVATE_SENTINEL' }); await flush();
+  await h.read(accounts()); assert.equal(h.state.issue, 'unconfirmed'); assert.equal(h.state.accountsFresh, false);
+  assert.equal(h.entry.findAccounts(), false); assert.equal(h.entry.useManual(), false); assert.equal(JSON.stringify(h.state).includes('PRIVATE_SENTINEL'), false);
+  const refused = await finding(); refused.last('github_auth_accounts').reject({ code: 'github_connection_refused_busy' }); await flush();
+  assert.equal(refused.state.failure, 'busy'); assert.equal(refused.entry.ownerReason(), null); assert.equal(refused.state.login, 'Owner');
+  assert.equal(refused.count('github_auth_accounts'), 1); assert.equal(refused.count('github_auth_connect'), 0);
+  const contradictory = await finding(); await contradictory.read(accounts('reading'));
+  contradictory.last('github_auth_accounts').reject({ code: 'github_connection_refused_busy' }); await flush();
+  assert.equal(contradictory.state.issue, 'unconfirmed'); assert.ok(contradictory.entry.ownerReason());
+});
+
+test('manual fallback is explicit and never sends a stale list witness; listed empty/unavailable data is not account absence', async () => {
+  const h = await listed(); assert.equal(h.entry.useManual(), true); assert.equal(h.state.manual, true);
+  assert.equal(h.entry.connect(), true); assert.deepEqual(h.last('github_auth_connect').request, { ...REQUEST, expectedDocumentRevision: 8 });
+  h.last('github_auth_connect').resolve(noHttp()); await flush(); assert.equal(h.state.login, 'Owner');
+  const empty = await finding(); empty.last('github_auth_accounts').resolve(accounts('settled', { accounts: { ...accounts().accounts, logins: [] } })); await flush();
+  assert.equal(empty.state.accountsFresh, true); assert.equal(empty.entry.connect(), false); assert.equal(empty.state.selectedAccount, null);
+  for (const response of [auth('idle', { available: false, reason: 'runtime-unavailable' }), { malformed: true }]) {
+    const other = await harness(); other.entry.findAccounts(); other.last('github_auth_status').resolve(response); await flush();
+    assert.equal(other.count('github_auth_accounts'), 0); assert.equal(other.count('github_auth_connect'), 0); assert.equal(other.state.login, 'Owner');
+  }
+});
+
+test('changing the chosen account is explicit; mismatched original account or scope cannot complete it', async () => {
+  const h = await listed(); h.entry.chooseAccount('Owner'); h.entry.chooseAccount('Second');
+  assert.equal(h.count('github_auth_connect'), 0); assert.equal(h.entry.connect(), true);
+  assert.equal(h.last('github_auth_connect').request.selectedLogin, 'Second');
+  assert.equal(h.last('github_auth_connect').request.accountsObservationId, 'gh-accounts-1');
+  assert.equal(h.entry.chooseAccount('Owner'), false, 'choice cannot change while the original connection owns it');
+  h.last('github_auth_connect').resolve(noHttp()); await flush();
+  assert.equal(h.state.issue, 'unconfirmed'); assert.equal(h.connectionState.busy, 'connect');
+  const foreign = await finding(); foreign.last('github_auth_accounts').resolve(accounts('settled', { projectId: 'another-project' })); await flush();
+  assert.equal(foreign.state.issue, 'unconfirmed'); assert.equal(foreign.state.accountsFresh, false);
+  assert.equal(foreign.entry.chooseAccount('Owner'), false);
 });

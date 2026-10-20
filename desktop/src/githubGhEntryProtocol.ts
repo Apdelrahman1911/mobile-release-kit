@@ -1,15 +1,18 @@
-// Selected-gh DATA only. No account discovery, path, token, process, provider
-// nomination or native authority is accepted or returned by this adapter.
+// Selected-gh DATA only. Local account names are not credentials, provider
+// nomination, native authority or a verified GitHub identity.
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, connectionOpaqueId, connectionRepository, connectionRevision,
   GITHUB_CONNECTION_REASONS, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionObservationPort, GitHubConnectionReason, GitHubConnectionStatus } from './githubConnectionTypes.ts';
+import { parseGitHubGhAccountsRequest } from './githubGhAccountsProtocol.ts';
+import type { GitHubGhAccountsRequest } from './githubGhAccountsProtocol.ts';
 
-export type GitHubGhCommand = 'github_auth_status' | 'github_auth_connect' | 'github_auth_cancel';
+export type GitHubGhCommand = 'github_auth_status' | 'github_auth_connect' | 'github_auth_cancel' | 'github_auth_accounts';
 export type GitHubGhPhase = 'idle' | 'picking' | 'running' | 'checking-identity' | 'stopping' | 'settled' | 'failed' | 'cleanup-unknown';
 export interface GitHubGhRequest {
   projectId: string; repository: string; selectedLogin: string;
   expectedDocumentRevision: number; expectedConnectionRevision: number;
+  accountsObservationId?: string;
 }
 export interface GitHubGhStatus {
   schemaVersion: 1; documentRevision: number; connectionRevision: number; available: boolean;
@@ -25,6 +28,7 @@ export interface GitHubGhApi {
   status(): Promise<unknown>;
   connect(request: GitHubGhRequest): Promise<unknown>;
   cancel(request: { operationId: string }): Promise<unknown>;
+  accounts(request: GitHubGhAccountsRequest): Promise<unknown>;
 }
 // A nonsecret entry attached to the SAME existing connection observer. It
 // cannot bypass the existing controller's context/help/native-capability gate.
@@ -44,7 +48,8 @@ export const ghActive = (status: GitHubGhStatus | null): boolean => !!status &&
 export function parseGitHubGhRequest(value: unknown): GitHubGhRequest | null {
   try {
     const v = copyBoundedComparisonData(value, 1024, 32);
-    return keys(v, ['projectId', 'repository', 'selectedLogin', 'expectedDocumentRevision', 'expectedConnectionRevision']) &&
+    const base = ['projectId', 'repository', 'selectedLogin', 'expectedDocumentRevision', 'expectedConnectionRevision'];
+    return (keys(v, base) || keys(v, [...base, 'accountsObservationId']) && connectionOpaqueId(v.accountsObservationId)) &&
       connectionOpaqueId(v.projectId) && connectionRepository(v.repository) && ghLoginFits(v.selectedLogin) &&
       ghAdmissionRevision(v.expectedDocumentRevision) && ghAdmissionRevision(v.expectedConnectionRevision)
       ? v as unknown as GitHubGhRequest : null;
@@ -52,9 +57,9 @@ export function parseGitHubGhRequest(value: unknown): GitHubGhRequest | null {
 }
 export function encodeGitHubGhRequest(command: GitHubGhCommand, value: unknown): Uint8Array | null {
   try {
-    const v = command === 'github_auth_connect' ? parseGitHubGhRequest(value) : copyBoundedComparisonData(value, 1024, 8);
+    const v = command === 'github_auth_connect' ? parseGitHubGhRequest(value) : command === 'github_auth_accounts' ? parseGitHubGhAccountsRequest(value) : copyBoundedComparisonData(value, 1024, 8);
     if (!(command === 'github_auth_status' ? keys(v, []) : command === 'github_auth_cancel'
-      ? keys(v, ['operationId']) && connectionOpaqueId(v.operationId) : command === 'github_auth_connect' && v !== null)) return null;
+      ? keys(v, ['operationId']) && connectionOpaqueId(v.operationId) : (command === 'github_auth_connect' || command === 'github_auth_accounts') && v !== null)) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v));
     return bytes.byteLength + command.length + 32 <= 1024 ? bytes : null;
   } catch { return null; }
@@ -129,7 +134,7 @@ export function githubGhFailure(value: unknown): { reason: GitHubConnectionReaso
 }
 export const ghUnconfirmed = () => ({ code: 'GitHubGhUnconfirmed', message: 'The original GitHub CLI request could not be confirmed. Check its status; do not repeat it.', retryable: false as const });
 
-/** Only these three NEW commands are RAW. Existing PAT transport is untouched. */
+/** Only these closed gh commands are RAW. Existing PAT transport is untouched. */
 export function createGitHubGhApi(mode: string, invoke: (command: GitHubGhCommand, body: Uint8Array) => Promise<unknown>): GitHubGhApi | null {
   if (mode !== 'native') return null;
   const call = (command: GitHubGhCommand, request: unknown) => {
@@ -138,5 +143,6 @@ export function createGitHubGhApi(mode: string, invoke: (command: GitHubGhComman
     return invoke(command, bytes);
   };
   return Object.freeze({ mode: 'native' as const, status: () => call('github_auth_status', {}),
-    connect: (r: GitHubGhRequest) => call('github_auth_connect', r), cancel: (r: { operationId: string }) => call('github_auth_cancel', r) });
+    connect: (r: GitHubGhRequest) => call('github_auth_connect', r), cancel: (r: { operationId: string }) => call('github_auth_cancel', r),
+    accounts: (r: GitHubGhAccountsRequest) => call('github_auth_accounts', r) });
 }
