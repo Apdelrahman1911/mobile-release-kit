@@ -55,7 +55,7 @@ pub(super) fn borrow(
         prepare_document: Some(Arc::downgrade(&document.inner)),
         execute_tools: None,
         supplemental: std::array::from_fn(|_| None),
-        profile_sources: Some(sources),
+        profile_sources: Some(sources), key_sources: None,
     });
     if !result.provisioning_matches(context, registration, root)
         || !result.current(state, registration, root)

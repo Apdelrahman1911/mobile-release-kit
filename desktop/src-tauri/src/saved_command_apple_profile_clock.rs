@@ -13,14 +13,19 @@ pub(crate) struct AppleProvisioningClock {
     hard: Instant,
     first: Mutex<Option<(AssetReason, Instant)>>,
     completed: AtomicBool,
+    key_mode: bool,
+    key_prepare: bool,
+    key_preservation_veto: AtomicBool,
 }
 
 impl AppleProvisioningClock {
     // Only the real Start body, after retaining the SAME SavedSession and
     // before reserving/attaching its Asset destination, may construct this.
-    pub(super) fn for_session(session: &Arc<Session>) -> Result<Arc<Self>, BridgeError> {
+    pub(in crate::saved_command_owner) fn for_session(
+        session: &Arc<Session>,
+    ) -> Result<Arc<Self>, BridgeError> {
         if session.domain != SavedCommandDomain::AppleProvisioning
-            || !matches!(&session.context, Context::AppleProvisioning(context) if context.mode.profile())
+            || !matches!(&session.context, Context::AppleProvisioning(context) if context.mode.profile() || context.mode.key())
             || session.clocks.work <= session.clocks.admitted
             || session.clocks.cleanup < session.clocks.work
             || session.clocks.cleanup.duration_since(session.clocks.work) > SETTLEMENT
@@ -36,10 +41,13 @@ impl AppleProvisioningClock {
             hard: session.clocks.cleanup,
             first: Mutex::new(None),
             completed: AtomicBool::new(false),
+            key_mode: matches!(&session.context, Context::AppleProvisioning(context) if context.mode.key()),
+            key_prepare: matches!(&session.context, Context::AppleProvisioning(context) if context.mode == crate::apple_provisioning_protocol::Mode::KeyPrepare),
+            key_preservation_veto: AtomicBool::new(false),
         }))
     }
 
-    pub(super) fn bind_original(
+    pub(in crate::saved_command_owner) fn bind_original(
         &self,
         session: &Arc<Session>,
         original: &Arc<crate::asset_session::OriginalWork>,
@@ -103,6 +111,7 @@ impl AppleProvisioningClock {
                 AssetReason::UserCancelled => Reason::Cancelled,
                 AssetReason::Deadline => Reason::TimedOut,
                 AssetReason::DocumentLost => Reason::DocumentLost,
+                AssetReason::Shutdown if self.key_mode => Reason::Shutdown,
                 AssetReason::CleanupUnknown => Reason::CleanupUnknown,
                 _ => Reason::CredentialsUnavailable,
             };
@@ -128,7 +137,18 @@ impl AppleProvisioningClock {
         }
     }
 
-    pub(super) fn latch(&self, reason: AssetReason, at: Instant) {
+    pub(in crate::saved_command_owner) fn latch(&self, reason: AssetReason, at: Instant) {
+        // A later excluded failure vetoes local-key preservation even when an
+        // earlier cancellation remains the displayed first reason. Never
+        // overwrite/forget that later loss through the minimum-F projection.
+        if self.key_mode
+            && !matches!(
+                reason,
+                AssetReason::UserCancelled | AssetReason::Shutdown | AssetReason::Deadline
+            )
+        {
+            self.key_preservation_veto.store(true, Ordering::SeqCst);
+        }
         match self.first.try_lock() {
             Ok(mut first) => {
                 if first.is_none_or(|(_, earlier)| at < earlier) {
@@ -141,11 +161,46 @@ impl AppleProvisioningClock {
                 }
             }
         }
+        if self.key_mode {
+            if let Some(session) = self.session.upgrade() {
+                session.apple.changed.notify_waiters();
+            }
+        }
         // Failure on the Saved original must wake its SAME Asset original.
         // This only requests STOP; it cannot acknowledge source/save closure.
         if let Some(original) = self.original.get().and_then(Weak::upgrade) {
             original.request_apple_profile_stop();
         }
+    }
+
+    /// Memory-only key-prepare tail. It is NOT a fresh admission and never
+    /// authorizes generation, Pending/GO, certificate POST or profile save.
+    /// Every original native source/Store check remains independently required.
+    pub(crate) fn key_preservation_end(&self) -> Option<Instant> {
+        if !self.key_prepare
+            || self.completed.load(Ordering::SeqCst)
+            || self.key_preservation_veto.load(Ordering::SeqCst)
+            || self
+                .session
+                .upgrade()
+                .is_none_or(|session| session.resource_unknown.load(Ordering::SeqCst))
+        {
+            return None;
+        }
+        let first = self.first.try_lock().ok()?;
+        let end = match *first {
+            None => self.work,
+            Some((
+                AssetReason::UserCancelled | AssetReason::Shutdown | AssetReason::Deadline,
+                at,
+            )) => at
+                .max(self.admitted)
+                .min(self.work)
+                .checked_add(SETTLEMENT)?
+                .min(self.hard),
+            _ => return None,
+        };
+        (Instant::now() < end).then_some(end)
     }
 
     pub(crate) fn interrupted(&self) -> bool {
@@ -160,7 +215,7 @@ impl AppleProvisioningClock {
 
     // Only after real private disposal, all source/worker/journal/native-use
     // and Asset continuation returns. Normal terminal pipe STOP is NOT this.
-    pub(super) fn mark_completed(&self, session: &Arc<Session>) -> bool {
+    pub(in crate::saved_command_owner) fn mark_completed(&self, session: &Arc<Session>) -> bool {
         if !self
             .session
             .upgrade()

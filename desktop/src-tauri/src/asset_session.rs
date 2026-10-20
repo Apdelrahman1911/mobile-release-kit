@@ -25,6 +25,9 @@ pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path="asset_session_apple_profile.rs"]
 mod apple_profile;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "asset_session_apple_key.rs"]
+mod apple_key;
 pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput, UploadKeySavedInput};
 #[path = "asset_session_version_allocation.rs"]
 mod version_allocation;
@@ -97,7 +100,7 @@ use crate::vault_keyring_macos as keyring;
 #[path = "asset_session_keyring_macos.rs"]
 mod keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-pub(crate) use vault::{AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
+pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
 
 // A borrowed original session record is not a serialized credential or a new
 // credential owner. Only this document module can construct the signed loan.
@@ -300,7 +303,7 @@ pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
-    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup }
+    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
@@ -443,6 +446,8 @@ pub(crate) struct OriginalWork {
     apple_profile_clock: std::sync::OnceLock<Arc<crate::saved_command_owner::AppleProvisioningClock>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     apple_profile: std::sync::OnceLock<apple_profile::Work>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_key: std::sync::OnceLock<apple_key::Work>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
     #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -485,6 +490,8 @@ impl OriginalWork {
             apple_profile_clock: std::sync::OnceLock::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             apple_profile: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_key: std::sync::OnceLock::new(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
             #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -603,7 +610,7 @@ impl OriginalWork {
     fn lookup_allocations_allowed(&self) -> bool {
         if self.installation.as_ref().is_some_and(|work| !work.settled()) { return false; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-        if !self.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse()) { return false; }
+        if !self.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse() && !work.apple_distribution_key_blocks_reuse()) { return false; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
@@ -654,7 +661,8 @@ impl OriginalWork {
         // proof. Attempt concrete native private disposal before taking data;
         // failed disposal keeps this holding and cannot become empty/Idle.
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-        if !holding.vault.dispose_private_upload_key() || !holding.vault.dispose_private_apple_profile() { return false; }
+        if !holding.vault.dispose_private_upload_key() || !holding.vault.dispose_private_apple_profile()
+            || !holding.vault.dispose_private_apple_distribution_key() { return false; }
         let retirement = std::mem::take(&mut *holding);
         // Still off the document/admission lock, but retain THIS custody mutex
         // through the actual drop and receipt. A census cannot see empty data
@@ -1097,8 +1105,8 @@ fn session_data_empty(state: &DocumentState) -> bool {
 fn slot_private_data_empty(_slot: &Slot) -> bool {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { _slot.vault.loaded.is_none()
-        && _slot.owner.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse())
-        && _slot.owner.retirement.try_lock().is_ok_and(|holding| !holding.vault.backup_blocks_reuse() && !holding.vault.upload_key_blocks_reuse() && !holding.vault.apple_profile_blocks_reuse()) }
+        && _slot.owner.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse() && !work.apple_distribution_key_blocks_reuse())
+        && _slot.owner.retirement.try_lock().is_ok_and(|holding| !holding.vault.backup_blocks_reuse() && !holding.vault.upload_key_blocks_reuse() && !holding.vault.apple_profile_blocks_reuse() && !holding.vault.apple_distribution_key_blocks_reuse()) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { true }
 }
@@ -1888,6 +1896,22 @@ mod lookup_memory {
             self.add(value.own_retained_bytes())?;
             self.vault_loan(value.census_loan())
         }
+        fn apple_distribution_key_sources(&mut self, value: &vault::distribution_key::Work) -> Result<(), Problem> {
+            // Work.retained_bytes/data_bytes already includes this immutable
+            // inventory. Deduplicate only its actual shared Arc against the
+            // parent-only source census, never a renderer count or estimate.
+            if let Some(destination)=value.destination() {
+                let inventory=destination.inventory();
+                if !self.secret_loans.insert(inventory)? {
+                    self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                }
+            }
+            if let Some(context) = value.context() { self.context(context)?; }
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            if let Some(store) = value.store() { self.vault_store(store)?; }
+            if let Some(payload) = value.payload().map_err(|_| Problem::CleanupUnknown)? { self.payload(&payload)?; }
+            Ok(())
+        }
         fn vault_session(&mut self, value: &vault::Session) -> Result<(), Problem> {
             self.add(value.data_bytes().ok_or(Problem::Capacity)?)?; self.vault_store(value.store())?;
             if let Some(key) = value.key() { self.vault_key(key)?; }
@@ -1966,6 +1990,7 @@ mod lookup_memory {
             if let Some(assessment) = &retirement.assessment { self.assessment(assessment)?; }
             self.add(retirement.vault.data_bytes().ok_or(Problem::Capacity)?)?;
             if let Some(source) = retirement.vault.apple_profile_source() { self.apple_profile_source(source)?; }
+            self.apple_distribution_key_sources(retirement.vault.apple_distribution_key_work())?;
             if let Some(vault) = &retirement.vault.session { self.vault_session(vault)?; }
             for key in retirement.vault.keys.iter().flatten() { self.vault_key(key)?; }
             if let Some(payload) = &retirement.vault.loaded { self.payload(payload)?; }
@@ -1990,6 +2015,10 @@ mod lookup_memory {
                 self.add(work.own_bytes())?;
                 if let Some(sources)=work.census_sources().map_err(|_|Problem::CleanupUnknown)? { self.profile_sources(&sources)?; }
             }
+            if let Some(work)=owner.apple_key.get() {
+                self.add(work.own_bytes())?;
+                if let Some(sources)=work.census_sources().map_err(|_|Problem::CleanupUnknown)? { self.key_sources(&sources)?; }
+            }
             // The same parent clock/receive/journal backing is quoted by the
             // SavedSession. Only the Arc/OnceLock cells live inline here.
             if let Some(selectors) = owner.backup_selection.get() {
@@ -2002,6 +2031,8 @@ mod lookup_memory {
             self.add(vault.backup_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(vault.upload_key_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(vault.apple_profile_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(vault.apple_distribution_key_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.apple_distribution_key_sources(vault.apple_distribution_key_work())?;
             if let Some(source) = vault.apple_profile_source() { self.apple_profile_source(source)?; }
             if owner.upload_key_clock.get().is_some() { self.arc_cells::<vault::UploadKeyClock>()?; }
             if let Some(store) = vault.store_ref() { self.vault_store(store)?; }
@@ -2036,6 +2067,16 @@ mod lookup_memory {
             if !self.secret_loans.insert(sources)? { return Ok(()); }
             self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
             for loan in sources.loans() { self.vault_loan(loan)?; }
+            Ok(())
+        }
+        fn key_sources(&mut self, sources:&Arc<vault::key_sources::AppleKeySources>)->Result<(),Problem>{
+            if !self.secret_loans.insert(sources)? { return Ok(()); }
+            self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.vault_loan(sources.loan())?;
+            if let Some(inventory)=sources.inventory() {
+                if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
+                self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
+            }
             Ok(())
         }
         fn secret_loan(&mut self,loan:&Arc<GitHubSecretMaterial>)->Result<(),Problem>{
@@ -2206,6 +2247,7 @@ mod lookup_memory {
         let(context,payload)=loan.census_parts();census.context(context)?;census.payload(payload)?;
         for(_,payload)in loan.supplemental_census(){census.payload(payload)?;}
         if let Some(sources)=loan.profile_sources(){census.profile_sources(sources)?;}
+        if let Some(sources)=loan.key_sources(){census.key_sources(sources)?;}
         census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(loan.supplemental_frame_bytes())?;
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
@@ -3217,6 +3259,9 @@ impl DocumentBinding {
         self.local_store_base_gate_current_profile(state,None)
     }
     fn local_store_base_gate_current_profile(&self,state:&DocumentState,profile:Option<&Arc<vault::profile_sources::AppleProfileSources>>)->crate::local_store_preflight_protocol::Availability {
+        self.local_store_base_gate_current_profile_key(state,profile,None)
+    }
+    fn local_store_base_gate_current_profile_key(&self,state:&DocumentState,profile:Option<&Arc<vault::profile_sources::AppleProfileSources>>,key:Option<&Arc<vault::key_sources::AppleKeySources>>)->crate::local_store_preflight_protocol::Availability {
         use crate::local_store_preflight_protocol::Availability;
         if ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled()) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
         if ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping()) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
@@ -3233,7 +3278,8 @@ impl DocumentBinding {
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| (slot.phase != Phase::Idle || !slot.owner.resources_settled())
-                && !profile.is_some_and(|sources| apple_profile::current_slot(slot,sources)))
+                && !profile.is_some_and(|sources| apple_profile::current_slot(slot,sources))
+                && !key.is_some_and(|sources| apple_key::current_slot(slot,sources)))
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
             || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
@@ -5027,6 +5073,8 @@ enum Job {
     Vault(vault::Job),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     AppleProfile(apple_profile::Request),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    AppleKey(apple_key::Request),
 }
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
@@ -5039,7 +5087,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
         failed_cleanup = vault::retain_failed_child_for_release(owner);
     }
     if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && !failed_cleanup { return Err(Reason::CleanupUnknown); }
-    if owner.interrupted() && !cleanup_child(&job) { return Err(Reason::UserCancelled); }
+    if owner.interrupted() && !cleanup_child(&job) && !key_preservation_child(owner, &job) { return Err(Reason::UserCancelled); }
     // Reciprocal to lookup_memory::enter: retain this exact child mutex while
     // checking the charge and registering the original blocking dispatch.
     if !child_allocation_admitted(owner, &job) { return Err(Reason::Busy); }
@@ -5072,7 +5120,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
 }
 fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     let mut stop = || owner.interrupted();
-    if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
+    if stop() && !cleanup_child(&job) && !key_preservation_child(owner, &job) { return ChildEnd::Refused(Reason::UserCancelled); }
     match job {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         ChildJob::GitHubAuth(call) => ChildEnd::GitHubAuth(gh_auth::execute_child(owner, call)),
@@ -5145,6 +5193,11 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
         },
     }
 }
+fn key_preservation_child(_owner: &Arc<OriginalWork>, _job: &ChildJob) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::SaveAppleDistributionKey(request)) = _job { return request.admitted(_owner); }
+    false
+}
 fn cleanup_child(_job: &ChildJob) -> bool {
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup())
@@ -5155,6 +5208,10 @@ fn cleanup_child(_job: &ChildJob) -> bool {
     { false }
 }
 fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_))) = _job {
+        return vault::distribution_key::child_admitted(_owner, job);
+    }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(_job, ChildJob::Vault(vault::Child::Release)) { return vault::release_child_admitted(_owner); }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -5545,12 +5602,17 @@ impl DocumentBinding {
                 slot.stop(reason, Instant::now()); self.bump(&mut state);
             }
         }
-        if joined == Some(true) && resources && slot.cleanup_end.is_none() {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let key_preservation_publication = slot.staged.as_ref().is_some_and(|staged|
+            vault::distribution_key::key_store::publication_ready(&state, &slot, staged));
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let key_preservation_publication = false;
+        if joined == Some(true) && resources && (slot.cleanup_end.is_none() || key_preservation_publication) {
             // The actual original normal join was observed inside its endpoint.
             // A pending quit confirmation may defer publication, not retain or
             // renew a completed work clock. Review remains absolute.
             slot.owner.set_endpoint(None);
-            if !state.quit_pending && !state.unknown {
+            if !state.quit_pending && !state.unknown || key_preservation_publication {
                 if let Some(staged) = slot.staged.take() {
                     self.publish_published(&mut state, &mut slot, staged,publisher.as_deref_mut());
                     self.bump(&mut state);
@@ -5563,10 +5625,16 @@ impl DocumentBinding {
         let cleanup_data_ready = false;
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let profile_retirement_deferred = apple_profile::retirement_deferred(&slot)
-            || vault::apple_profile_retirement_deferred(&slot);
+            || apple_key::retirement_deferred(&slot)
+            || vault::apple_profile_retirement_deferred(&slot)
+            || vault::distribution_key::retirement_deferred(&slot);
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let profile_retirement_deferred = false;
-        if !profile_retirement_deferred && (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let key_disposal_ready = vault::distribution_key::retirement_ready(&slot.owner);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let key_disposal_ready = false;
+        if !profile_retirement_deferred && (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready || key_disposal_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
                 payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
@@ -6160,7 +6228,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-    let job = match job { Job::AppleProfile(request) => return apple_profile::run(document,owner,request).await, other=>other };
+    let job = match job { Job::AppleProfile(request) => return apple_profile::run(document,owner,request).await, Job::AppleKey(request) => return apple_key::run(document,owner,request).await, other=>other };
     if owner.interrupted() {
         owner.gui.not_created(Reason::UserCancelled);
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -6174,6 +6242,8 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
         Job::Vault(job) => vault::run(document, owner, job).await,
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Job::AppleProfile(_) => Staged::Refused(Reason::CleanupUnknown), // consumed only by the fixed branch above
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        Job::AppleKey(_) => Staged::Refused(Reason::CleanupUnknown),
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
         Job::ChooseEvidenceFolder { app, purpose } => {

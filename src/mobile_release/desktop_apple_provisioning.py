@@ -55,8 +55,12 @@ class AppleProvisioningRun:
         self.context = wire.core_context(request.native["provisioning"])
         self.target = wire.target(request.native["target"])
         self._profile = self._p12_extraction = self._profile_output = None
+        self._key_steps = self._distribution_key = self._key_output = None
         if request.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_protocol import target
+            self.target = target(request)
+        if request.context["mode"] in wire.KEY_MODES:
+            from ._desktop_apple_key_protocol import target
             self.target = target(request)
         self.plan = self.attempt = self.approval = None
         self._wire_phase = "new"
@@ -67,6 +71,9 @@ class AppleProvisioningRun:
         if request.context["mode"] in wire.PROFILE_MODES:
             from ._desktop_apple_profile_worker import ProfileSteps
             ProfileSteps(self)
+        if request.context["mode"] in wire.KEY_MODES:
+            from ._desktop_apple_key_worker import KeySteps
+            KeySteps(self)
 
     # Reuse the actual fixed source readers/material/scratch cleanup. Their
     # checks call THIS exact operation and its original cancellation owner.
@@ -83,9 +90,13 @@ class AppleProvisioningRun:
         StorePreflightRun.close(self)
         if self._p12_extraction is not None:
             self._p12_extraction.retire(self)
+        if self._key_output is not None:
+            self._key_output.retire_worker()
         self.material = None
 
     def remember(self, error):
+        if self.request.context["mode"] == "key-prepare" and not isinstance(error, KeyboardInterrupt):
+            self.source._key_body_failed = True  # Every later ordinary failure also vetoes the custody tail.
         StorePreflightRun.remember(self, error)
         if self.source.stop_reason == "cancelled" and self.attempt is not None:
             self.attempt.request_cancel()
@@ -106,6 +117,8 @@ class AppleProvisioningRun:
         layouts = ("online-runner", "store-selection", "store-selection")
         if self._profile is not None:
             layouts += ("apple-provisioning-p12",) + ("online-runner",) * 8
+        elif self._key_steps is not None:
+            layouts += ("online-runner",) * (6 if self.request.context["mode"] == "key-review" else 1)
         else:
             layouts += ("online-runner",) * (3 if self.request.context["mode"] == "register" else 1)
         wire.require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
@@ -115,8 +128,13 @@ class AppleProvisioningRun:
         if scratch.layout == "apple-provisioning-p12":
             wire.require(self._profile is not None and self._p12_extraction is not None)
             self._p12_extraction.bind_scratch(scratch)
+        elif self.request.context["mode"] == "key-prepare" and len(self.scratches) == 4:
+            wire.require(self._distribution_key is not None)
+            self._distribution_key.bind_scratch(scratch)
 
     def _helper_argv(self):
+        if self._key_steps is not None:
+            return self._key_steps.helper_argv()
         if self._profile is not None:
             return self._profile.helper_argv()
         return ("bundle", "exec", "ruby", str(self.runtime.tooling_root / "fastlane/apple_provisioning_bundle_registration.rb"))
@@ -128,6 +146,8 @@ class AppleProvisioningRun:
         return environment
 
     def _helper_environment(self):
+        if self._key_steps is not None:
+            return self._key_steps.helper_environment()
         if self._profile is not None:
             return self._profile.helper_environment()
         wire.require(type(self.material) is SelectedStoreMaterial and self._wire_request is not None)
@@ -157,6 +177,9 @@ class AppleProvisioningRun:
             expected = self.apple_material_command(self._apple_material)
         elif index < 6:
             expected = _fastlane_probe_commands(runtime.tooling_root)[index - 1]
+        elif index == 6 and self.request.context["mode"] == "key-prepare":
+            wire.require(self._distribution_key is not None and self._wire_request is None)
+            expected = self._distribution_key.argv(runtime)
         elif index == 6 and self._profile is not None:
             wire.require(self._p12_extraction is not None and self._wire_request is None)
             expected = self._p12_extraction.argv(runtime)
@@ -186,13 +209,18 @@ class AppleProvisioningRun:
             expected_env, expected_cwd, limit, expected_text = self.runtime.environment(), self.runtime.tooling_root, 4096, True
         elif self._pending < 6:
             expected_env, expected_cwd, limit, expected_text = self._base_environment(), self.runtime.tooling_root, PRIVATE_OUTPUT_LIMIT, True
+        elif self._pending == 6 and self.request.context["mode"] == "key-prepare":
+            from ._desktop_apple_distribution_key import PRIVATE_LIMIT
+            self._private_current()
+            self._distribution_key.admit_command(self.runtime, argv, environ=environ)
+            expected_env, expected_cwd, limit, expected_text = self._base_environment(), self._distribution_key._scratch._path, PRIVATE_LIMIT, False
         elif self._pending == 6 and self._profile is not None:
             self._p12_extraction.admit_command(self.runtime, argv, environ=environ)
             expected_env, expected_cwd, limit, expected_text = self._base_environment(), self.runtime.tooling_root, PRIVATE_OUTPUT_LIMIT, False
         else:
             self._private_current()
             expected_env, expected_cwd, limit, expected_text = self._helper_environment(), self._wire_runner._path, (
-                PRIVATE_OUTPUT_LIMIT if self._profile is not None else bundles.FRAME_LIMIT), False
+                PRIVATE_OUTPUT_LIMIT if self._profile is not None else self._key_steps.frame_limit() if self._key_steps is not None else bundles.FRAME_LIMIT), False
         wire.require(type(environ) is dict and environ == expected_env and cwd == expected_cwd
                      and type(output_limit) is int and output_limit == limit and text is expected_text)
         # The original run_owned seam repeats current source/material checks;
@@ -202,8 +230,12 @@ class AppleProvisioningRun:
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         wire.require(self._pending is not None and self._command_claimed and capture is True)
-        return min(timeout, 30 if self._pending == 0 else 60), min(output_limit,
+        if self._pending == 6 and self.request.context["mode"] == "key-prepare":
+            from ._desktop_apple_distribution_key import PRIVATE_LIMIT
+            return min(timeout, 60), min(output_limit, PRIVATE_LIMIT)
+        limit = (self._key_steps.frame_limit() if self._pending >= 6 and self._key_steps is not None else
             bundles.FRAME_LIMIT if self._pending >= 6 and self._profile is None else PRIVATE_OUTPUT_LIMIT)
+        return min(timeout, 30 if self._pending == 0 else 60), min(output_limit, limit)
 
     def _target_current(self):
         self.checkpoint()
@@ -233,6 +265,8 @@ class AppleProvisioningRun:
         self._private_current()
 
     def send(self, request):
+        if self._key_steps is not None:
+            return self._key_steps.send(request)
         if self._profile is not None:
             return self._profile.send(request)
         self.check(self.context)
@@ -395,7 +429,7 @@ class AppleProvisioningRun:
         try:
             self.config, _ = self._saved()
             self._target_current()
-            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create"} and any(
+            if self.request.context["mode"] in {"register", "profile-reuse", "profile-create", "key-prepare"} and any(
                     row.unresolved for row in wire.pending(self.request.native["pending"], self.context.account_ref)):
                 raise _Refused("journal-unavailable")
             with invocation_custody(self.root, mode="online", cancellation=self.guard) as invocation:
@@ -416,6 +450,8 @@ class AppleProvisioningRun:
                             if any(row.status in FAILING_STATUSES for row in findings):
                                 raise _Refused("credentials-unavailable")
                             needed = ("apple_provisioning.rb", "apple_provisioning_bundle_read.rb") + (
+                                ("apple_distribution_key.rb",) if self.request.context["mode"] == "key-prepare" else
+                                ("apple_provisioning_signing.rb",) if self.request.context["mode"] == "key-review" else
                                 ("apple_provisioning_p12.rb", "apple_provisioning_signing.rb") if self._profile is not None else
                                 ("apple_provisioning_bundle_registration.rb",))
                             tooling = self.runtime.tooling_root
@@ -424,7 +460,9 @@ class AppleProvisioningRun:
                                 raise _Refused("query-prerequisites")
                             self.check(self.context)
                             _require_fastlane_bundle(tooling, cancellation=self.guard, runtime_context=self.runtime)
-                            if self._profile is not None:
+                            if self._key_steps is not None:
+                                self._key_steps.run()
+                            elif self._profile is not None:
                                 self._profile.run()
                             else:
                                 self._register() if self.request.context["mode"] == "register" else self._read_only()
@@ -441,6 +479,8 @@ class AppleProvisioningRun:
         invocation_closed = self.invocation is None or self.invocation._apple_provisioning_closed(self)
         return (self._close_claimed and self._pending is None and invocation_closed
             and (self._p12_extraction is None or self._p12_extraction.private_closed())
+            and (self._key_output is None or self._key_output.worker_closed())
+            and (self._distribution_key is None or self._distribution_key.private_closed())
             and all(directory.slots and all(slot.number is None and slot.close_state == "CLOSED" for slot in directory.slots)
                     for directory in self.directories)
             and all(s.claimed and not s.active and s._cleanup_complete and not s.created

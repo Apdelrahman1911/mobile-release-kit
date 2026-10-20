@@ -2105,7 +2105,7 @@ export function App() {
               navigate('credentials');
             }}
             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
-          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}

@@ -69,6 +69,10 @@ pub(crate) use store::document_backing_bytes as store_document_backing_bytes;
 mod apple_provisioning;
 #[path = "saved_command_apple_signing.rs"]
 mod apple_signing;
+#[path = "saved_command_apple_key.rs"]
+mod apple_key;
+pub(crate) use apple_key::{AppleKeySession, AppleKeyPendingAck, AppleKeySavePermit,
+    AppleKeyNeverGeneratedJoined, AppleKeyUseJoined, AppleKeyNativeJoined, AppleCertificateNativeJoined};
 pub(crate) use apple_signing::{AppleProfileNativeJoined, AppleProfileSession, AppleProvisioningClock,
     AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
@@ -1452,6 +1456,7 @@ struct Session { agent_build: Option<Arc<crate::agent_build_requests::NativeLink
     upload_key: upload_key::State,
     apple: apple_provisioning::State,
     apple_profile: apple_signing::State,
+    apple_key: apple_key::State,
     tools: tool_acquisition::State,
     local_history_consent:Option<Arc<crate::asset_session::LocalHistoryConsent>>,
     history:local_history::State,
@@ -1502,6 +1507,7 @@ impl Session {
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn observe_failure_at(&self, reason: Reason, at: Instant, unknown: bool) {
         apple_signing::stopped(self, reason, at);
+        apple_key::stopped(self, reason, at);
         // The caller already captured F. Preserve its finite reason without
         // acquiring Registry or replacing this original Session's min latch.
         upload_key::forward_failure(self,reason,at);
@@ -2537,7 +2543,7 @@ impl SavedCommandOwner {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
         let requires_private_material = context.requires_private_material();
-        let owner = Arc::new(Session { agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple: apple_provisioning::State::new(prepared.apple), apple_profile: apple_signing::State::default(), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+        let owner = Arc::new(Session { agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple: apple_provisioning::State::new(prepared.apple), apple_profile: apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
@@ -2628,6 +2634,7 @@ impl SavedCommandOwner {
         let mut manager = owner.manager.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         apple_signing::initialize(&owner)?;
+        apple_key::initialize(&owner)?;
         r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false, context_invalidated: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false });
         *watchdog_slot = Some(executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
@@ -3267,6 +3274,7 @@ impl Inner {
     }
     fn stop_locked(&self, r: &mut Registry, owner: &Session, reason: Reason, at: Instant) {
         apple_signing::stopped(owner, reason, at);
+        apple_key::stopped(owner, reason, at);
         let Some(active) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         owner.note_android_local(at,reason==Reason::CleanupUnknown);
         upload_key::forward_failure(owner,reason,at);
@@ -3402,7 +3410,7 @@ impl Inner {
         let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         match incoming {
             Incoming::Apple(event) if owner.domain==SavedCommandDomain::AppleProvisioning && a.accepted && !a.terminal && !a.unknown
-                && (a.first_stop.is_none() || (now < *owner.native_audit_cutoff.borrow() && owner.apple.accepts_audit(&event))) => {
+                && (a.first_stop.is_none() || (apple_provisioning::audit_open(owner, now) && owner.apple.accepts_audit(&event))) => {
                 if owner.apple.receive(event,now).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             },
             Incoming::Prepare(event) if owner.domain==SavedCommandDomain::LocalStorePrepare&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
@@ -3774,6 +3782,9 @@ async fn enqueue_frame(inner: &Inner, owner: &Session, frame: Frame) -> bool {
 }
 async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, owner: Arc<Session>,
     slot: Arc<AsyncMutex<Pipe<T>>>, stderr: bool, mut guard: Guard) -> ReadEnd {
+    if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::KeyPrepare) {
+        return apple_key::read_output(inner, owner, slot, guard).await;
+    }
     if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.profile()) {
         return apple_signing::read_output(inner, owner, slot, guard).await;
     }
@@ -5315,9 +5326,10 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         let native=apple_provisioning::finish_after_manager(&inner,&owner).await;
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         let private = if owner.apple_profile.get().is_some() && native { apple_signing::finish_private(&owner).await }
-            else { owner.apple_profile.get().is_none() };
+            else if owner.apple_key.get().is_some() && native { apple_key::finish_private(&owner).await }
+            else { owner.apple_profile.get().is_none() && owner.apple_key.get().is_none() };
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
-        let private = owner.apple_profile.get().is_none();
+        let private = owner.apple_profile.get().is_none() && owner.apple_key.get().is_none();
         settled && native && private && inner.endpoint(&owner).is_some()
     }else{settled};
     if !settled { inner.unknown(&owner); }
@@ -5513,7 +5525,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
         let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
         let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
-        let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+        let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
             recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),

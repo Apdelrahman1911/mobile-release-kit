@@ -37,6 +37,12 @@ pub(crate) use profile::{ProfileAction, ProfileTarget, ProfileBundle, ProfileCer
     ProfileSetupIntent, ProfileCreateAction, ProfileAttemptRecord, ProfileProvider, ProfileDownload,
     ProfileSaveState, ProfileUpdate, ProfileSetupRow, PROFILE_PROTOCOL, PROFILE_BYTES};
 
+#[path = "apple_provisioning_key_journal_data.rs"]
+pub(super) mod key;
+pub(crate) use key::{KeyAlgorithm, KeyPrepareIntent, KeyOutputMetadata, KeyGeneration, KeyDisposition,
+    KeyPrepareUpdate, KeyPrepareRow, CertificateIssuanceIntent, CertificateCreateAction,
+    CertificateAttemptRecord, CertificateCreationReceipt, CertificateUpdate, CertificateIssuanceRow, KEY_PROTOCOL};
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128

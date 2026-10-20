@@ -1,4 +1,6 @@
 import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
+import { AppleDistributionKeySetup } from './AppleDistributionKeySetup.tsx';
+import { isAppleDistributionKeyMode } from '../appleDistributionKeySetupProtocol.ts';
 import { AppleSigningSetup } from './AppleSigningSetup.tsx';
 import { isAppleProfileMode } from '../appleProfileSetup.ts';
 import type { AppleProvisioningMode, AppleProvisioningResult } from '../appleProvisioningTypes.ts';
@@ -10,7 +12,7 @@ interface Props {
   // Display-only saved-configuration labels, not account/team authority.
   savedBundleId?: string | null; configuredTeamId?: string | null;
 }
-const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation', 'profile-review': 'signing setup check', 'profile-reuse': 'reuse and save profile', 'profile-create': 'create and save profile', 'profile-reconcile': 'read-only profile check' };
+const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation', 'profile-review': 'signing setup check', 'profile-reuse': 'reuse and save profile', 'profile-create': 'create and save profile', 'profile-reconcile': 'read-only profile check', 'key-review': 'existing-key check', 'key-prepare': 'create and save local key' };
 const consent: Record<'review' | 'register' | 'reconcile', string> = {
   review: 'Read Bundle ID registration visible to my selected App Store Connect key. Prepare or upgrade MRK’s private provisioning journal if needed. No registration write is authorized.',
   register: 'For this declared new app, recheck existing Bundle IDs, durably record the attempt, and send at most one registration request if still needed. Do not retry an uncertain write. No certificate, profile, build or release is authorized.',
@@ -50,7 +52,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
   return <section className="card" aria-labelledby="apple-bundle-registration-title">
     <h2 id="apple-bundle-registration-title">Apple setup</h2>
     <p>Reuse first. Review the saved Bundle ID with the selected API key before considering one new-app registration.</p>
-    <p><strong>Bundle ID step only:</strong> no App Store listing, certificate or profile issuance, private-key generation, signing assignment, build or release.</p>
+    <p><strong>Separate steps:</strong> Bundle ID registration, existing-profile setup and local-key preparation each need their own confirmation below. None starts a build or release.</p>
     {(savedBundleId || configuredTeamId) && <p>Saved Bundle ID: <code>{savedBundleId ?? 'not available'}</code> · Configured team (not verified): <code>{configuredTeamId ?? 'not available'}</code></p>}
     <p>Prepare is an explicit local action: it may initialize or reuse MRK’s private state. It does not grant external agents access. Apple requests require the separate confirmation below.</p>
     <label>Apple setup display name
@@ -71,7 +73,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <button disabled={!state.ios || !!state.registerReason} onClick={() => void controller.prepare('register')}>Prepare one registration</button>
       {state.registerReason && <p className="save-note">{state.registerReason}</p>}
     </details>
-    {state.consent && !isAppleProfileMode(state.consent.mode) && <div className="notice">
+    {state.consent && !isAppleProfileMode(state.consent.mode) && !isAppleDistributionKeyMode(state.consent.mode) && <div className="notice">
       <h3>Confirm {modeLabel[state.consent.mode]}</h3>
       <p>{consent[state.consent.mode as 'review' | 'register' | 'reconcile']}</p>
       <p>Apple may log or rate-limit requests. Cancel cannot undo a request already sent. The native operation keeps uncertain outcomes for read-only reconciliation.</p>
@@ -110,6 +112,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <details><summary>What these saved records mean</summary><p>These are historical local records, not a new Apple result or permission to register. The selected key and current project are checked again. A missing, denied or incomplete response never clears an uncertain attempt.</p></details>
     </section>}
     <AppleSigningSetup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
+    <AppleDistributionKeySetup controller={controller} state={state} onKeyCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
     <details open={!!state.registrationReference}>
       <summary>Read back a prior registration without retrying</summary>
       <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>

@@ -31,6 +31,9 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.hard_end = started + wire.FINALITY_SECONDS
         self._revision = self._pending_ack = self._profile_identity = None
         self._ack_attempted = self._ack_consumed = False
+        self._key_stop_seen = self._key_pipe_eof = self._key_ack_lost = self._key_tail_writing = False
+        self._key_retained_ack = None
+        self._key_body_failed = False
 
     def _bind_engine(self, engine):
         from ._desktop_apple_provisioning_engine import _Engine
@@ -96,6 +99,9 @@ class AppleProvisioningInput(_SavedCommandInput):
 
     def poll(self, guard):
         self._require(guard is self.guard)
+        from ._desktop_apple_key_control import poll_active
+        if poll_active(self, guard):
+            return
         if not self.close_claimed and self.raw_clock is not None:
             try:
                 self._clock()
@@ -111,6 +117,10 @@ class AppleProvisioningInput(_SavedCommandInput):
         return min(self.hard_end, self.first_failure + 10) if self.first_failure is not None else self.hard_end
 
     def audit_endpoint(self):
+        if self._key_tail_writing:
+            from ._desktop_apple_key_control import tail_endpoint
+            self._require(self.initial.context["mode"] == "key-prepare")
+            return tail_endpoint(self)
         return min(self.work_end, self.hard_endpoint())
 
     def audit_point(self):
@@ -135,6 +145,10 @@ class AppleProvisioningInput(_SavedCommandInput):
         if terminal:
             self._owner(); self._clock(terminal=True)
             self._require(time.monotonic() < self.hard_endpoint())
+        elif self._key_tail_writing:
+            from ._desktop_apple_key_control import tail_point
+            self._require(self.initial.context["mode"] == "key-prepare" and self.reply_step == 2)
+            tail_point(self)
         elif self.audit_writing:
             self._require(self.reading and (3 if self.initial.context["mode"] in wire.PROFILE_MODES else 2)
                           <= self.reply_step <= wire.max_events(self.initial.context["mode"]))
@@ -213,6 +227,10 @@ class AppleProvisioningInput(_SavedCommandInput):
             self.read_remaining = 0
         operation.checkpoint() if not audit else self.audit_point()
         return ack
+
+    def consume_key_pending_ack(self, operation, child):
+        from ._desktop_apple_key_control import consume_pending
+        return consume_pending(self, operation, child)
 
     def consume_pending_ack(self, operation, request):
         if self.initial.context["mode"] in wire.PROFILE_MODES:

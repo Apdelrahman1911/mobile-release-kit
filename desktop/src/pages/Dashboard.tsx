@@ -118,7 +118,7 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
       {versionEditor}
     </ProgressiveDisclosure>
 
-    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple Bundle ID · reuse or register"
+    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple setup · Bundle ID and signing"
       needsAttention={appleProvisioningNeedsAttention}
       description="A separate optional Store task. Review an existing ID first; a new registration needs its own approval. This does not make signing or release ready.">
       {appleProvisioningPanel}

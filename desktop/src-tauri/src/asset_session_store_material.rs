@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 mod apple_provisioning;
 #[path="asset_session_apple_profile_material.rs"]
 mod apple_profile;
+#[path="asset_session_apple_key_material.rs"]
+mod apple_key;
 #[path="asset_session_store_versions.rs"]
 mod store_versions;
 #[path="asset_session_paired_store_material.rs"]
@@ -22,6 +24,7 @@ pub(crate) struct SelectedStoreMaterial {
     execute_tools:Option<Arc<crate::saved_command_owner::ExecuteToolLoan>>,
     supplemental:[Option<(RecordKey,Arc<Payload>)>;3],
     profile_sources: Option<Arc<vault::profile_sources::AppleProfileSources>>,
+    key_sources: Option<Arc<vault::key_sources::AppleKeySources>>,
 }
 #[derive(Clone,PartialEq,Eq)]
 enum StoreCommand {Provisioning(crate::apple_provisioning_protocol::Context),Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
@@ -167,6 +170,7 @@ impl SelectedStoreMaterial {
                 &&payload.kind==kind&&payload.fields.is_some()&&github_secret::assigned(state,key,kind,&self.native).is_some_and(|p|Arc::ptr_eq(p,payload)),_=>false})
     }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
+        if self.key_sources.is_some() { return self.key_current(state, registration, root); }
         if self.profile_sources.is_some() { return self.profile_current(state, registration, root); }
         let apple=self.apple_material();
         self.native.execution_mode == commands::ExecutionMode::Local
@@ -212,7 +216,7 @@ fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,
             }
         }
     }
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None,supplemental,profile_sources:None });
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None,supplemental,profile_sources:None,key_sources:None });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }

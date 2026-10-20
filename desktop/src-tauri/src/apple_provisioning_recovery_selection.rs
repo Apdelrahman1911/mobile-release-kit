@@ -60,7 +60,7 @@ pub(crate) fn recovery_history(
     scope: &ScopeData,
 ) -> Result<RecoveryHistory, BridgeError> {
     need(account.account == scope.provisioning.account_ref
-        && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS)?;
+        && account.rows.len().checked_add(account.profile_rows.len()).and_then(|n|n.checked_add(account.key_rows.len())).and_then(|n|n.checked_add(account.certificate_rows.len())).is_some_and(|n| n <= ROWS))?;
     let mut seen = BTreeSet::new();
     let mut attempts = Vec::with_capacity(account.rows.len());
     let mut hidden_unresolved = 0;
@@ -98,6 +98,14 @@ pub(crate) fn recovery_history(
     for row in &account.profile_rows {
         need(row.intent.context.account_ref == account.account
             && seen.insert(row.intent.context.operation_id.clone()))?;
+        if row.unresolved() { hidden_unresolved += 1; }
+    }
+    for row in &account.key_rows {
+        need(row.intent.context.account_ref == account.account && seen.insert(row.intent.context.operation_id.clone()))?;
+        if row.unresolved() { hidden_unresolved += 1; }
+    }
+    for row in &account.certificate_rows {
+        need(row.intent.context.account_ref == account.account && seen.insert(row.intent.context.operation_id.clone()))?;
         if row.unresolved() { hidden_unresolved += 1; }
     }
     // Deterministic display only, not an automatic selection or latest-result
@@ -151,7 +159,7 @@ pub(crate) mod tests {
                 "status":"unknown","reason":"provider_outcome_unknown","possibleSend":true,"responseResourceId":null,
                 "responseResourceSha256":null,"observedResourceId":null,"cancelRequested":false}}})).unwrap();
         let mut scope = ScopeData {
-            signing: None,
+            signing: None, key: None,
             provisioning: intent.context.clone(),
             provenance,
             target: intent.target,
@@ -165,7 +173,7 @@ pub(crate) mod tests {
                 revision: Revision(7),
                 account,
                 rows: vec![row],
-                profile_rows: Vec::new(),
+                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![],
             },
             scope,
         )
@@ -200,7 +208,7 @@ pub(crate) mod tests {
         let (account, scope) = sample();
         for field in 0..14 {
             let mut changed = ScopeData {
-            signing: None,
+            signing: None, key: None,
                 provisioning: scope.provisioning.clone(),
                 provenance: scope.provenance.clone(),
                 target: scope.target.clone(),

@@ -4,8 +4,9 @@ import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelectio
 import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
 import type { SavedConfigContent, OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
+import type { AppleDistributionKeyMode, AppleDistributionKeyResult, AppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
 import type { AppleProfileMode, AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
-export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode;
+export type AppleProvisioningMode = 'review' | 'register' | 'reconcile' | AppleProfileMode | AppleDistributionKeyMode;
 export interface AppleProvisioningIdentity { operationId: string; ownerGeneration: string }
 export interface PrepareAppleProvisioning {
   projectId: string; draftRevision: number; baselineGeneration: number;
@@ -16,7 +17,7 @@ export interface PrepareAppleProvisioning {
   p12RecordId?: string; p12RecordRevision?: number;
 }
 export interface AppleProvisioningContext extends PrepareAppleProvisioning { operation: 'apple-bundle-provisioning' }
-export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1';
+export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1';
 export interface StartAppleProvisioning extends AppleProvisioningIdentity { consentVersion: AppleProvisioningConsent }
 export type AppleProvisioningReason = 'none' | 'cancelled' | 'context-changed' | 'document-lost' | 'shutdown' | 'timed-out' |
   'protocol-error' | 'runtime-unavailable' | 'intent-expired' | 'stale-intent' | 'saved-source-changed' | 'saved-source-invalid' |
@@ -53,8 +54,9 @@ export interface AppleRecoveryHistory {
 }
 export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
-  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | null;
+  outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | AppleDistributionKeyResult | null;
   savedProfile?: AppleProfileSavedReference;
+  savedKey?: AppleDistributionKeySavedReference;
   profileRecovery?: AppleProfileRecoveryHistory;
   recovery: AppleRecoveryHistory | null;
 }

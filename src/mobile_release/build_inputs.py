@@ -2035,6 +2035,23 @@ class InvocationCustody:
               "Store access closure requires its original invocation")
         return self._store_online_closed()
 
+    def _apple_key_returned_runtime(self, operation) -> None:
+        """Same active online environment at a returned key-command exit only."""
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        self._owner(cleanup=True)
+        _need(type(operation) is AppleProvisioningRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation
+              and self.cancellation._apple_provisioning_source is operation.source
+              and operation.request.context["mode"] == "key-prepare" and operation._pending == 6
+              and self.root == operation.root and self.mode == "online" and self.lane_evidence is None
+              and self.active and self.reserved and not self.claimed and not self._cleanup_complete
+              and self.reservation_state == "ACQUIRED" and self.lock_result is True
+              and self.environment_lock is _ENV_LOCK and _ENV_OWNER is self and not _ENV_TAINTED
+              and self.child is None and not self.frames and not self.project_started
+              and self.project_owner is None and self._original_project is None
+              and self.signing_lease is None and self.store_namespace is None,
+              "returned key command requires its same active online environment")
+
     def _apple_provisioning_closed(self, operation) -> bool:
         from .desktop_apple_provisioning import AppleProvisioningRun
         self._owner(cleanup=True)

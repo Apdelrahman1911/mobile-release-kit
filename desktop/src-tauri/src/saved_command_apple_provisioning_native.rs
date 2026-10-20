@@ -26,6 +26,8 @@ const PROFILE_RETIRE: usize = 10;
 const JOBS: usize = 11;
 #[path = "saved_command_apple_profile_native.rs"]
 mod profile;
+#[path = "saved_command_apple_key_native.rs"]
+mod key_phases;
 const STATE_CALL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -37,6 +39,7 @@ enum Value {
     Account(AccountSnapshot),
     Written(JournalAck),
     ProfileWritten(crate::apple_provisioning_journal::ProfileJournalAck),
+    KeyWritten(crate::apple_provisioning_journal::KeyJournalAck),
     Retired,
 }
 enum Call {
@@ -49,6 +52,9 @@ enum Call {
         AppleProvisioningNativeJoined,
     ),
     Retire(AppleProvisioningAllJobsJoined),
+    KeyReserve(crate::apple_provisioning_journal::KeyPrepareIntent, crate::apple_provisioning_journal::KeyPrepareUpdate),
+    KeyRecord(Revision, Arc<crate::apple_provisioning_journal::KeyOriginalReservation>, crate::apple_provisioning_journal::KeyPrepareUpdate),
+    KeyFinish(Revision, Arc<crate::apple_provisioning_journal::KeyOriginalReservation>, super::super::apple_key::AppleKeyNativeJoined),
     ProfileReserve(crate::apple_provisioning_journal::ProfileSetupIntent, crate::apple_provisioning_journal::ProfileUpdate),
     ProfileRecord(Revision, Arc<crate::apple_provisioning_journal::ProfileOriginalReservation>, crate::apple_provisioning_journal::ProfileUpdate),
     ProfileFinish(Revision, Arc<crate::apple_provisioning_journal::ProfileOriginalReservation>, AppleProfileNativeJoined),
@@ -101,6 +107,11 @@ impl Jobs {
     fn last_profile_ack(&self) -> Option<&crate::apple_provisioning_journal::ProfileJournalAck> {
         self.slots.iter().rev().find_map(|slot| match slot.returned.as_ref() {
             Some(Ok(Value::ProfileWritten(ack))) => Some(ack), _ => None,
+        })
+    }
+    fn last_key_ack(&self) -> Option<&crate::apple_provisioning_journal::KeyJournalAck> {
+        self.slots.iter().rev().find_map(|slot| match slot.returned.as_ref() {
+            Some(Ok(Value::KeyWritten(ack))) => Some(ack), _ => None,
         })
     }
     fn last_ack(&self) -> Option<&JournalAck> {
@@ -172,20 +183,27 @@ pub(super) fn work_clear(owner: &Session) -> Result<(), BridgeError> {
         }
     }
     if intent.profile_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) { return Err(apple_wire::invalid()); }
+    if intent.key_review.as_ref().is_some_and(|review| !review.current_claim(&intent.input)) {
+        return Err(apple_wire::invalid());
+    }
     intent.input.current()
+}
+fn journal_cutoff(owner: &Session) -> Instant {
+    // Local key cleanup jobs (including final CAS/NativeUse retirement) use
+    // the SAME original cleanup window. Every new effect still work_clear;
+    // private preservation additionally checks its fixed all-failure permit.
+    owner.apple_key.get().map_or(*owner.native_audit_cutoff.borrow(), |key| key.clock().cleanup_end())
 }
 fn audit_clear(owner: &Session, end: Instant) -> bool {
     !owner.resource_unknown.load(Ordering::SeqCst)
-        && Instant::now() < end
-        && Instant::now() < *owner.native_audit_cutoff.borrow()
+        && Instant::now() < end && Instant::now() < journal_cutoff(owner)
 }
 fn call_end(owner: &Session) -> Result<Instant, BridgeError> {
     let now = Instant::now();
     let end = now
         .checked_add(STATE_CALL)
         .ok_or_else(apple_wire::invalid)?
-        .min(owner.clocks.work)
-        .min(*owner.native_audit_cutoff.borrow());
+        .min(journal_cutoff(owner));
     if !audit_clear(owner, end) {
         return Err(BridgeError::cleanup_unknown());
     }
@@ -202,8 +220,10 @@ async fn call(
     index: usize,
     selected: Call,
 ) -> Result<(), BridgeError> {
-    let profile_mode = owner.apple.input()?.context().mode.profile();
-    let role_ok = !profile_mode && matches!(
+    let mode = owner.apple.input()?.context().mode;
+    let profile_mode = mode.profile();
+    let key_mode = mode.local_key();
+    let role_ok = !profile_mode && !key_mode && matches!(
         (&selected, index),
         (Call::Initialize, INITIAL)
             | (Call::Reserve(_, _), 1)
@@ -213,14 +233,18 @@ async fn call(
     ) || profile_mode && matches!((&selected, index),
         (Call::Initialize, INITIAL) | (Call::ProfileReserve(_, _), 1)
         | (Call::ProfileRecord(_, _, _), 2 | 3 | PROFILE_ARM | PROFILE_SAVED)
-        | (Call::ProfileFinish(_, _, _), PROFILE_FINISH) | (Call::Retire(_), PROFILE_RETIRE));
-    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode { PROFILE_RETIRE } else { RETIRE }) {
+        | (Call::ProfileFinish(_, _, _), PROFILE_FINISH) | (Call::Retire(_), PROFILE_RETIRE))
+        || key_mode && matches!((&selected, index), (Call::Initialize, INITIAL) | (Call::Retire(_), PROFILE_RETIRE))
+        || mode == apple_wire::Mode::KeyPrepare && matches!((&selected, index),
+            (Call::KeyReserve(_, _), 1) | (Call::KeyRecord(_, _, _), 2 | AUDIT | PROFILE_SAVED)
+            | (Call::KeyFinish(_, _, _), PROFILE_FINISH));
+    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode { PROFILE_RETIRE } else { RETIRE }) {
         return Err(local_error(owner, apple_wire::invalid()));
     }
     let end = call_end(owner)?;
     // New effects require currentness; an already-armed audit uses only the
     // original immutable reservation and cannot authorize a provider call.
-    if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _)) {
+    if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _)) {
         work_clear(owner).map_err(|error| local_error(owner, error))?;
     }
     let input = owner.apple.input()?.clone();
@@ -236,7 +260,7 @@ async fn call(
         if !audit_clear(&original, end) {
             return Err(local_error(&original, BridgeError::cleanup_unknown()));
         }
-        if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _)) {
+        if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _)) {
             work_clear(&original).map_err(|error| local_error(&original, error))?;
         }
         // This mutex is ONLY the finite operation's journal backing. Neither
@@ -294,6 +318,15 @@ async fn call(
                 .ok_or_else(apple_wire::invalid)?
                 .finish_native(revision, &reservation, &joined)
                 .map(Value::Written),
+            Call::KeyReserve(intent, update) => {
+                let binding = original.apple.request_binding()?;
+                held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                    .reserve_key(binding.revision, intent, update).map(Value::KeyWritten)
+            },
+            Call::KeyRecord(revision, reservation, update) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .record_key(revision, &reservation, update).map(Value::KeyWritten),
+            Call::KeyFinish(revision, reservation, joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .finish_key_native(revision, &reservation, &joined).map(Value::KeyWritten),
             Call::ProfileReserve(intent, update) => {
                 let binding = original.apple.request_binding()?;
                 held.journal.as_mut().ok_or_else(apple_wire::invalid)?
@@ -374,6 +407,7 @@ pub(super) async fn initialize(
 ) -> Result<(), BridgeError> {
     work_clear(owner).map_err(|error| local_error(owner, error))?;
     super::super::apple_signing::wait_source(inner, owner).await?;
+    super::super::apple_key::wait_source(owner).await?;
     let mut jobs = owner.apple.native.lock().await;
     call(inner, owner, &mut jobs, INITIAL, Call::Initialize).await?;
     drop(jobs);
@@ -395,12 +429,18 @@ pub(super) fn request(
             .as_ref()
             .and_then(|intent| intent.review.as_ref())
             .map(|review| review.observed_at.clone())
-            .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data().observed_at)),
+            .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data().observed_at))
+            .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.key_review.as_ref()).map(|review|review.data().observed_at)),
     )?;
     if input.context().mode.profile() {
         let parent=owner.apple_profile.get().ok_or_else(apple_wire::invalid)?;
         let review=owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data());
         scope.signing=Some(input.profile_scope(parent,review)?);
+    }
+    if input.context().mode.local_key() {
+        let parent = owner.apple_key.get().ok_or_else(apple_wire::invalid)?;
+        let review = owner.apple.intent.as_ref().and_then(|intent| intent.key_review.as_ref()).map(|review| review.data());
+        scope.key = Some(input.key_scope(parent, review)?);
     }
     let jobs = owner
         .apple
@@ -464,6 +504,7 @@ pub(super) fn request(
         return Err(apple_wire::invalid());
     }
     super::super::apple_signing::bind_request(owner, &encoded.bytes)?;
+    super::super::apple_key::bind_request(owner, &encoded.binding, &encoded.bytes)?;
     *binding = Some(encoded.binding);
     Ok(encoded.bytes)
 }
@@ -490,6 +531,9 @@ pub(super) async fn write_phases(
     writer: &mut ChildStdin,
 ) -> Result<(), BridgeError> {
     let mode = owner.apple.input()?.context().mode;
+    if mode == apple_wire::Mode::KeyPrepare {
+        return key_phases::write_phases(inner, owner, writer).await;
+    }
     if mode != apple_wire::Mode::Register && !mode.profile() {
         return Ok(());
     }
@@ -709,6 +753,9 @@ pub(super) async fn finish_after_manager(inner: &Arc<Inner>, owner: &Arc<Session
     };
     if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.profile()) {
         return profile::finish(inner, owner).await;
+    }
+    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key()) {
+        return key_phases::finish(inner, owner).await;
     }
     let mut jobs = owner.apple.native.lock().await;
     if jobs.sealed || !jobs.pre_joined() || !worker {

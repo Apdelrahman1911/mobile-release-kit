@@ -32,7 +32,7 @@ pub(super) fn active_with_agent(agent_local_check: Option<Arc<crate::agent_local
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
-    let session = Arc::new(Session { agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+    let session = Arc::new(Session { agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),

@@ -57,7 +57,7 @@ pub(crate) struct ProfileTarget {
     pub(crate) entitlements_sha256: String,
 }
 impl ProfileTarget {
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         // Reuse the existing modern Bundle grammar without changing its
         // new-application-only rule. This copied value is validation DATA.
         BundleTarget {
@@ -70,7 +70,7 @@ impl ProfileTarget {
         .valid()
             && sha(&self.entitlements_sha256)
     }
-    fn core_value(&self) -> Value {
+    pub(super) fn core_value(&self) -> Value {
         json!({"bundle_id":self.bundle_id,"team_id":self.team_id,
             "app_id_prefix":self.app_id_prefix,"display_name":self.display_name,
             "existing_application":self.existing_application,
@@ -87,13 +87,13 @@ pub(crate) struct ProfileBundle {
     pub(crate) seed_id: String,
 }
 impl ProfileBundle {
-    fn valid(&self, target: &ProfileTarget) -> bool {
+    pub(super) fn valid(&self, target: &ProfileTarget) -> bool {
         identifier(&self.resource_id)
             && self.identifier == target.bundle_id
             && matches!(self.platform.as_str(), "IOS" | "UNIVERSAL")
             && self.seed_id == target.app_id_prefix
     }
-    fn core_hash(&self) -> Result<String> {
+    pub(super) fn core_hash(&self) -> Result<String> {
         hash(&json!([
             "bundleIds",
             self.resource_id,
@@ -140,7 +140,7 @@ impl ProfileCertificate {
             "team_id":target.team_id,"not_before":self.not_before,"not_after":self.expires_at})
     }
 }
-fn key_value(key: &KeyReference) -> Value {
+pub(super) fn key_value(key: &KeyReference) -> Value {
     json!({"vault_id":key.vault_id,"generation_id":key.generation_id,
         "record_id":key.record_id,"revision_id":key.revision_id,
         "revision_counter":key.revision_counter})
