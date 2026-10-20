@@ -877,7 +877,7 @@ mod tests {
             code: Error::StateUnknown,
             effect: Effect::Applied,
             durability: Durability::Unknown,
-            cleanup: Cleanup::Settled,
+            cleanup: Cleanup::Known,
         };
         control.state_failed(original, now);
         assert_eq!(control.state_failure(), Some(original));

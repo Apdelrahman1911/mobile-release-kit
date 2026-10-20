@@ -171,7 +171,7 @@ pub(crate) fn not_started(error: BridgeError) -> BridgeError {
     if error.code == "cleanup_unknown" {
         error
     } else {
-        BridgeError::new("version_reserve_not_started", error.message)
+        BridgeError::new("version_reserve_not_started", &error.message)
     }
 }
 #[cfg(test)]

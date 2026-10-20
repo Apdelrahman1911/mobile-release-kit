@@ -697,7 +697,7 @@ export class ReleaseVersionEditController {
             !attempt.prepareClaimed && !attempt.applyClaimed && !attempt.invalidated && !attempt.closeRequested && usable(this.state.edit)) {
           const request = { sessionId, revision: attempt.projection.checkout.revision, ...attempt.submission };
           if (!versionEditRequestFits('release_version_edit_prepare', request)) { this.observationFailed(true); continue; }
-          const api = this.api;
+          const api: DesktopApi = this.api;
           this.attempt({ prepareClaimed: true });
           if (binding.reserved && (this.api !== api || !this.sameContext(binding) || this.configReason() ||
               this.context.otherEditReason(binding.projectId) || this.operationReason(true))) { this.invalidate(); continue; }

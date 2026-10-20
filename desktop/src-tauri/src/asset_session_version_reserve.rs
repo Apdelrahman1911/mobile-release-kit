@@ -186,15 +186,35 @@ fn host_error(
     control: &VersionReserveControl,
     error: crate::service_protocol::Error,
 ) -> BridgeError {
-    if matches!(
-        error,
-        crate::service_protocol::Error::StateUnknown | crate::service_protocol::Error::Closed
-    ) {
+    // The Host reports Retiring/Closed as Unavailable after checking its
+    // retained failure fence. STOP below is not a close/retirement receipt:
+    // the original lane stays pending until its actual cleanup returns.
+    if error == crate::service_protocol::Error::StateUnknown {
         control.unknown();
         BridgeError::cleanup_unknown()
     } else {
         control.stop();
         p::unavailable()
+    }
+}
+#[cfg(test)]
+mod host_error_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_host_refusal_never_returns_or_clears_unknown_control() {
+        // Original control DATA only; no Host/ticket/IO/finality is fabricated.
+        let control = VersionReserveControl::new(Instant::now()).unwrap();
+        let refusal = host_error(&control, crate::service_protocol::Error::Unavailable);
+        assert_eq!(refusal.code, "version_reserve_unavailable");
+        assert!(!control.current() && control.pending() && !control.uncertain());
+
+        let error = host_error(&control, crate::service_protocol::Error::StateUnknown);
+        assert_eq!(error.code, BridgeError::cleanup_unknown().code);
+        assert!(control.pending() && control.uncertain());
+        let _ = host_error(&control, crate::service_protocol::Error::Unavailable);
+        assert!(control.pending() && control.uncertain());
+        assert!(control.returned().is_err() && control.pending());
     }
 }
 impl DocumentBinding {
