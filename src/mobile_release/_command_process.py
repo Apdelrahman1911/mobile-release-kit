@@ -1115,6 +1115,7 @@ class _Context:
         self.role, self.nonce, self.run, self.hard = role, nonce, run, hard
         self.pid, self.owner = os.getpid(), threading.current_thread()
         self.guard, self.parent, self.suppress_cancel = guard, parent, suppress_cancel
+        self.git_remote_binding = None  # Only the fixed GitRemote map-v2 source.
         self.lock = threading.Lock()
         self.primary: BaseException | None = None
         self.secondary: list[BaseException] = []
@@ -1756,7 +1757,12 @@ def _command_spec(context: _Context, role: str,
                   ("-X", "pycache_prefix=/run/mrk-gnome-python-empty-pycache-v1"))
     context.check()
     _require(role in ("C", "A", "W") and {"O": "C", "C": "A", "A": "W"}.get(context.role) == role
-             and len(sources) == 8)
+             and len(sources) == (8 if context.git_remote_binding is None else 9))
+    remote = context.git_remote_binding
+    if remote is not None:
+        from ._git_remote_command_channel import binding_of
+        _require(binding_of(sources[8], context.nonce) is remote
+                 and sources[5].account_binding is None)
     executable = os.path.abspath(sys.executable)
     module_root = str(Path(__file__).resolve().parent.parent)
     hold = sources[5].account_binding
@@ -1764,11 +1770,15 @@ def _command_spec(context: _Context, role: str,
     _require(role != "W" or account == "-")
     argv = (executable, "-I", "-S", "-B", *cache_args, "-c", _BOOTSTRAP, module_root, role,
             str(context.pid), str(os.getsid(0)), str(os.getpgrp()),
-            str(context.run), str(context.hard), context.nonce.hex(), account, "1")
+            str(context.run), str(context.hard), context.nonce.hex(), account,
+            "1" if remote is None else "2")
+    if remote is not None:
+        argv += (remote._wire(),)
     environment = (("PATH", os.defpath), ("LC_ALL", "C"), ("LANG", "C"))
     permit = native._issue_command_map(
         context.child_acquisition, role=role, command_nonce=context.nonce,
         executable=executable, argv=argv, env=environment, fd_sources=sources,
+        git_remote_binding=remote,
     )
     return native.SpawnSpec(executable, argv, environment, sources, command_map=permit)
 
@@ -1795,21 +1805,31 @@ def _bootstrap_map(context: _Context, bootstrap: native.CommandBootstrapMap,
         result[5] = account.adopt_account_hold(bootstrap, binding=bootstrap.account_binding)
     else:
         result[5] = account.adopt_fd(5, access=os.O_RDONLY, kind="null")
+    if bootstrap.fd_map_version == 2:
+        from ._git_remote_command_channel import adopt
+        _require(context.git_remote_binding is bootstrap.git_remote_binding)
+        result[8] = adopt(bootstrap, relay)
+    else:
+        _require(context.git_remote_binding is None)
     return result
 
 
 def _hello(context: _Context) -> bytes:
     return _scalar(context.nonce, role=context.role, pid=context.pid,
-                   parent=os.getppid(), session=os.getsid(0), group=os.getpgrp(), map=1)
+                   parent=os.getppid(), session=os.getsid(0), group=os.getpgrp(),
+                   map=1 if context.git_remote_binding is None else 2)
 
 
 def _admit_hello(context: _Context, child: native.Child, content: bytes, role: str,
                  session: int, group: int) -> None:
+    if context.git_remote_binding is not None:
+        context.git_remote_binding._check(context.nonce)
     value = _scalar_fields(content, context.nonce, {"role", "pid", "parent", "session", "group", "map"})
     _require(child is context.child_acquisition.child and child.wait_state == "OWNED"
              and not child.numeric_retired and value["role"] == role and value["pid"] == child.pid
              and all(_integer(value[key], 1, PID_LIMIT) for key in ("pid", "parent", "session", "group"))
-             and type(value["map"]) is int and value["map"] == 1
+             and type(value["map"]) is int
+             and value["map"] == (1 if context.git_remote_binding is None else 2)
              and value["parent"] == context.pid and value["session"] == session and value["group"] == group
              and os.getsid(child.pid) == session and os.getpgid(child.pid) == group)
 
@@ -2415,6 +2435,13 @@ class _Worker:
                 _require(self._setup("stderr_dup", os.dup2, self.mapping[7].fileno(), 2, inheritable=True) == 2)
             for fd in (0, 1, 2):
                 _require(self._setup("stdio_inheritance", os.set_inheritable, fd, True) is None)
+            if ctx.git_remote_binding is not None:
+                from ._git_remote_command_channel import binding_of
+                endpoint = self.mapping[8]
+                _require(binding_of(endpoint, ctx.nonce) is ctx.git_remote_binding)
+                endpoint._validate()
+                _require(self._setup("git_remote_inheritance", os.set_inheritable,
+                                    endpoint.fileno(), True) is None)
             stage = "cwd"
             _require(self._setup("cwd", os.chdir, decoded.cwd) is None)
             stage = "signals"
@@ -2526,7 +2553,8 @@ class _Anchor:
         incoming, command_writer = self.producer.pipe()
         status_reader, outgoing = self.producer.pipe()
         null_hold = self.producer.open_null(writable=False)
-        sources = (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7])
+        remote = () if ctx.git_remote_binding is None else (self.mapping[8],)
+        sources = (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7], *remote)
         spec = _command_spec(ctx, "W", sources)
         # Publish the original control pair before any creator can exist. An
         # interrupted creation/return therefore still has an EOF withdrawal
@@ -2536,7 +2564,7 @@ class _Anchor:
         self.create_route.queue()
         self.create_route.attempt()  # Original CREATE_W consumption before start.
         self.child = _spawn(ctx, spec, self._parent)
-        for lease in (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7]):
+        for lease in (*nulls, incoming, outgoing, null_hold, self.mapping[6], self.mapping[7], *remote):
             ctx.close(lease)
         hello = _receive(self.downstream, Tag.HELLO, self._parent)
         _admit_hello(ctx, self.child, hello, "W", self.session, ctx.pid)
@@ -2867,12 +2895,13 @@ class _Custodian:
         self.source_readers = [stdout, stderr]
         for source in self.source_readers:
             os.set_blocking(source.fileno(), False)
-        sources = (*nulls, child_input, child_status, self.mapping[5], child_stdout, child_stderr)
+        remote = () if ctx.git_remote_binding is None else (self.mapping[8],)
+        sources = (*nulls, child_input, child_status, self.mapping[5], child_stdout, child_stderr, *remote)
         self.downstream = _Wire(ctx, reader, writer)
         self.downstream.expected_manifest = manifest
         self.child = _spawn(ctx, _command_spec(ctx, "A", sources), self._parent)
         self.group = _AnchorGroup(ctx, self.child)
-        for lease in (*nulls, child_input, child_status, child_stdout, child_stderr):
+        for lease in (*nulls, child_input, child_status, child_stdout, child_stderr, *remote):
             ctx.close(lease)
         hello = _receive(self.downstream, Tag.HELLO, self._parent)
         _admit_hello(ctx, self.child, hello, "A", ctx.pid, self.child.pid)
@@ -3112,8 +3141,14 @@ def helper_main(argv: list[str], policy: int | None) -> int:
     """Only the fixed loader calls this; W's loader guards this entire call."""
     context: _Context | None = None
     try:
-        _require(type(argv) is list and len(argv) == 9 and argv[0] in ("C", "A", "W")
-                 and argv[8] == "1")
+        _require(type(argv) is list and argv and argv[0] in ("C", "A", "W")
+                 and (len(argv) == 9 and argv[8] == "1"
+                      or len(argv) == 10 and argv[8] == "2"))
+        version = int(argv[8])
+        remote_identity = None
+        if version == 2:
+            from ._git_remote_command_channel import parsed_binding
+            remote_identity = parsed_binding(argv[9])
         role = argv[0]
         parent, session, group, run, hard = (int(value) for value in argv[1:6])
         _require(all(_integer(value, 1, PID_LIMIT) for value in (parent, session, group))
@@ -3121,7 +3156,8 @@ def helper_main(argv: list[str], policy: int | None) -> int:
                  and len(argv[6]) == 32 and all(char in "0123456789abcdef" for char in argv[6]))
         nonce = bytes.fromhex(argv[6])
         account = None if argv[7] == "-" else tuple(int(value) for value in argv[7].split(","))
-        _require(account is None or len(account) == 3 and all(type(value) is int for value in account))
+        _require(account is None or version == 1 and len(account) == 3
+                 and all(type(value) is int for value in account))
         _require(os.getppid() == parent and os.getsid(0) == session and os.getpgrp() == group
                  and time.monotonic_ns() < run and hard - run == CLEANUP_NS)
         if role == "C":
@@ -3139,7 +3175,9 @@ def helper_main(argv: list[str], policy: int | None) -> int:
             signal.signal(signum, context.helper_signal)
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         bootstrap = native._issue_command_bootstrap(role=role, command_nonce=nonce,
-                    parent_pid=parent, parent_session=session, parent_group=group, account_binding=account)
+                    parent_pid=parent, parent_session=session, parent_group=group, account_binding=account,
+                    fd_map_version=version, git_remote_identity=remote_identity)
+        context.git_remote_binding = bootstrap.git_remote_binding
         if role == "W":
             _Worker(context, bootstrap).run()
             return HELPER_UNKNOWN  # Only into the loader's non-returning tail.
@@ -3158,7 +3196,7 @@ class _Outer:
     def __init__(self, guard: DefaultCancellation, owns: bool, timeout: int,
                  scope: AccountExecutionScope | None, binding: JournalledCommandBinding | None,
                  *, suppress_cancel: bool, evidence: CommandCallEvidence | None = None,
-                 text: bool = True) -> None:
+                 text: bool = True, git_remote_channel=None) -> None:
         self._store_timing = (None if evidence is None else evidence._fixed_timing(
             guard, timeout=timeout, owns=owns, scope=scope, binding=binding))
         self.nonce = os.urandom(16) if scope is None else scope.nonce
@@ -3169,6 +3207,12 @@ class _Outer:
         self.ctx = _Context("O", self.nonce, run, hard,
                             guard=guard, suppress_cancel=suppress_cancel)
         self.guard, self.owns, self.scope, self.binding = guard, owns, scope, binding
+        self.git_remote_channel = git_remote_channel
+        if git_remote_channel is not None:
+            from ._git_remote_command_channel import OriginalChannel
+            _require(type(git_remote_channel) is OriginalChannel and scope is None
+                     and binding is None and evidence is None and not suppress_cancel)
+            git_remote_channel.bind_context(self.ctx)
         self.slot = CommandOutcomeSlot(None, self.nonce, _key=_KEY) if scope is None else scope.outcome
         if scope is None:
             _require(binding is None)
@@ -3388,11 +3432,13 @@ class _Outer:
             os.set_blocking(reader.fileno(), False)
         hold = (self.io.open_null(writable=False) if self.scope is None else
                 self.io.export_account_hold(self.scope._source._locked_source, command_nonce=self.nonce))
-        sources = (*nulls, child_input, child_status, hold, child_stdout, child_stderr)
+        remote = (() if self.git_remote_channel is None else
+                  (self.git_remote_channel.export(ctx, self.io),))
+        sources = (*nulls, child_input, child_status, hold, child_stdout, child_stderr, *remote)
         self.wire = _Wire(ctx, status_reader, input_writer, diagnostics=self.observation is not None)
         self.wire.expected_manifest = self.frozen.manifest
         self.child = _spawn(ctx, _command_spec(ctx, "C", sources), lambda: None)
-        for lease in (*nulls, child_input, child_status, hold, child_stdout, child_stderr):
+        for lease in (*nulls, child_input, child_status, hold, child_stdout, child_stderr, *remote):
             ctx.close(lease)
         self.phase = "STARTING"
         self._until(lambda: self.hello is not None)
@@ -3619,6 +3665,38 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                 journal_binding: JournalledCommandBinding | None,
                 _evidence: CommandCallEvidence | None = None, text: bool = True,
                 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    # Ordinary public/internal callers cannot append a descriptor or choose a map.
+    return _run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
+                        cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,
+                        _evidence=_evidence, text=text)
+
+
+def _run_git_remote_command(channel, argv: Sequence[str], *, environ: Mapping[str, str],
+                            cwd: Path, timeout: int, output_limit: int, text: bool = False):
+    from ._git_remote_command_channel import OriginalChannel
+    _require(type(channel) is OriginalChannel and _integer(timeout, 1, 45)
+             and type(text) is bool and _integer(output_limit, 1, 256 * 1024))
+    guard = channel.guard
+    _require(type(guard) is DefaultCancellation)
+    argv, environ = tuple(argv), dict(environ)
+    channel.admit_command(guard, argv, environ=environ, cwd=cwd, capture=True,
+        text=text, output_limit=output_limit, on_start=None, cleanup=False,
+        execution_scope=None, journal_binding=None, evidence=None)
+    timeout, output_limit = channel.source.command_limits(timeout, True, output_limit)
+    return _run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=True,
+        output_limit=output_limit, cancellation=guard, on_start=None, cleanup=False,
+        execution_scope=None, journal_binding=None, text=text, _git_remote_channel=channel)
+
+
+def _run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: Path | None,
+                timeout: int, capture: bool, output_limit: int,
+                cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
+                cleanup: bool, execution_scope: AccountExecutionScope | None,
+                journal_binding: JournalledCommandBinding | None,
+                _evidence: CommandCallEvidence | None = None, text: bool = True,
+                _git_remote_channel=None,
+                ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     _require(type(text) is bool)
     if _evidence is not None:
         _require(type(_evidence) is CommandCallEvidence)
@@ -3648,7 +3726,8 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                                      "owned command cancellation handlers could not be restored")
     suppress = cleanup and guard.cancelled and guard.depth > 0
     engine = _Outer(guard, owns, timeout, execution_scope, journal_binding,
-                    suppress_cancel=suppress, evidence=_evidence, text=text)
+                    suppress_cancel=suppress, evidence=_evidence, text=text,
+                    git_remote_channel=_git_remote_channel)
 
     def fork_relinquish() -> None:
         if engine.ctx.pid != os.getpid():
