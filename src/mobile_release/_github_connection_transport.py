@@ -823,14 +823,21 @@ def _header_control(head: _Head, budget: _Budget, *,
     return _control(reason, delay, blocked)
 
 
-def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delivery=None) -> ReadResult:
+def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delivery=None, _remote_failure=None) -> ReadResult:
     head = response.head
-    control = _header_control(head, budget, _role=response.role)
+    # GitRemote's original FixedResponse parses this before stdlib can close
+    # inside getresponse. Reuse that exact wall-clock sample, not a later one.
+    control = (response.control if budget.profile is _ExchangeProfile.GIT_REMOTE and response.control is not None
+               else _header_control(head, budget, _role=response.role))
     response.control = control  # Retain a validated hint if a later IO read fails.
     if head.error is not None:
         return _failed(head.error, control)
     if control["reason"] == "response-invalid":
         return _failed("response-invalid", control)
+    if budget.profile is _ExchangeProfile.GIT_REMOTE and control["reason"] != "none":
+        # The same Entry has already observed its first failure. No error body
+        # read may use a failed work clock or turn a known limit into new work.
+        return _failed(control["reason"], control)
     if response.role in _GIT_REMOTE_BINARY:
         # This private delegate streams only inside THIS original exchange.
         # No full pack body, response generator or socket can escape finally.
@@ -841,7 +848,7 @@ def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delive
             return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
         if head.status != 200:
             return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
-        return stream_response(response, budget, _remote_delivery)
+        return stream_response(response, budget, _remote_delivery, failure=_remote_failure)
     if head.status == 204 and response.role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
         try:
             # No body/chunk stream is allowed by this exact successful role.
@@ -1103,7 +1110,7 @@ def observe(request: ReadRequest, reader: _Reader, *, observed_at: str) -> dict[
     return finish()
 
 
-def _fixed_ca(runtime_dir: str, budget: _Budget) -> str:
+def _fixed_ca(runtime_dir: str, budget: _Budget, *, _failure=None) -> str:
     # This is a fixed sibling input, not a discovery/API/file-picker interface.
     # Byte/identity checks are defense in depth, NOT immutable runtime custody.
     import os
@@ -1136,6 +1143,10 @@ def _fixed_ca(runtime_dir: str, budget: _Budget) -> str:
                 or state(os.lstat(path)) != state(before)):
             raise ValueError("Fixed GitHub trust is unavailable")
         return b"".join(chunks).decode("ascii", errors="strict")
+    except BaseException:
+        if _failure is not None:
+            _failure("cleanup-unknown")  # SAME Entry, before the sole input close.
+        raise
     finally:
         retired, owned = owned, -1
         os.close(retired)  # Sole close; failure cannot be reported as success.
@@ -1168,7 +1179,9 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                         _profile: _ExchangeProfile = _ExchangeProfile.STANDARD,
                         _setup_budget: _Budget | None = None,
                         _git_remote_login: str | None = None,
-                        _git_remote_current: Callable[[], None] | None = None) -> Callable[..., ReadResult]:
+                        _git_remote_current: Callable[[], None] | None = None,
+                        _git_remote_failure: Callable[[str], None] | None = None,
+                        _git_remote_control: Callable[[dict[str, Any]], None] | None = None) -> Callable[..., ReadResult]:
     """Private bounded TLS/framing shared by two closed native action profiles.
 
     This is not a renderer/API URL interface. The calling profile separately
@@ -1183,10 +1196,11 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     if _profile is _ExchangeProfile.GIT_REMOTE:
         from .git_remote_transport import _LOGIN
         if (_setup_budget is None or type(_git_remote_login) is not str
-                or _LOGIN.fullmatch(_git_remote_login) is None or not callable(_git_remote_current)):
+                or _LOGIN.fullmatch(_git_remote_login) is None or not callable(_git_remote_current)
+                or not callable(_git_remote_failure) or not callable(_git_remote_control)):
             raise ValueError("Original Git remote clock/account is unavailable")
         _git_remote_current()
-    elif _git_remote_login is not None or _git_remote_current is not None:
+    elif _git_remote_login is not None or _git_remote_current is not None or _git_remote_failure is not None or _git_remote_control is not None:
         raise ValueError("Git remote inputs belong to another action")
     if _setup_budget is not None:
         if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
@@ -1201,6 +1215,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     # entry, not at pure frame/schedule import or fixture construction time.
     import http.client
     import ssl
+    import sys
 
     # SAME instance and absolute endpoint; optional owner was claimed once
     # before even the lazy network module imports above.
@@ -1212,7 +1227,8 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.keylog_filename = None
     context.set_alpn_protocols(["http/1.1"])
-    context.load_verify_locations(cadata=_fixed_ca(runtime_dir, budget))
+    context.load_verify_locations(cadata=_fixed_ca(runtime_dir, budget, _failure=_git_remote_failure)
+        if _profile is _ExchangeProfile.GIT_REMOTE else _fixed_ca(runtime_dir, budget))
     # Never create_default_context/load_default_certs/default_verify_paths;
     # never urllib, proxies, netrc, environment credentials or workflow clients.
 
@@ -1264,6 +1280,58 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
         original_response: list[Any] = [None]
         close_failed = [False]
         original_socket: list[Any] = [None]
+        observing = [False]
+        control_observing = [False]
+
+        def observe_failure(reason: str) -> None:
+            # GitRemote alone carries the SAME Entry's first-F recorder. A
+            # callback cannot replace cleanup or prevent a claimed close.
+            if _profile is not _ExchangeProfile.GIT_REMOTE:
+                return
+            if observing[0]:
+                close_failed[0] = True
+                return
+            observing[0] = True
+            try:
+                _git_remote_failure(reason)
+            except BaseException:
+                close_failed[0] = True
+            finally:
+                observing[0] = False
+
+        def observe_control(control: dict[str, Any] | None) -> None:
+            # Same private owner, before any original response/socket close.
+            # Unknown closure cannot erase a known cooldown/credential refusal.
+            if _profile is not _ExchangeProfile.GIT_REMOTE or control is None:
+                return
+            if control_observing[0]:
+                close_failed[0] = True
+                observe_failure("cleanup-unknown")
+                return
+            control_observing[0] = True
+            try:
+                _git_remote_control(dict(_check_control(control)))
+            except BaseException:
+                close_failed[0] = True
+                observe_failure("cleanup-unknown")
+            finally:
+                control_observing[0] = False
+
+        def observe_exception(error: BaseException) -> None:
+            if isinstance(error, ReadFailure):
+                reason = error.reason
+            elif isinstance(error, ssl.SSLError):
+                reason = "tls-failed"
+            elif isinstance(error, http.client.HTTPException):
+                reason = "response-invalid"
+            elif isinstance(error, OSError):
+                reason = "network-unavailable"
+            elif _profile is _ExchangeProfile.GIT_REMOTE:
+                from .git_remote_transport import failure_reason
+                reason = failure_reason(error)
+            else:
+                return
+            observe_failure(reason)
 
         def timeout(remaining: float) -> None:
             if _profile is _ExchangeProfile.GIT_REMOTE:
@@ -1286,7 +1354,16 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             def begin(self) -> None:
                 if self.headers is not None:
                     return
-                self.bounded = _ResponseBody(self.fp, budget, before_read=timeout, _role=_role)
+                try:
+                    self.bounded = _ResponseBody(self.fp, budget, before_read=timeout, _role=_role)
+                    if _profile is _ExchangeProfile.GIT_REMOTE:
+                        self.bounded.control = _header_control(self.bounded.head, budget, _role=_role)
+                        observe_control(self.bounded.control)
+                        if self.bounded.control["reason"] != "none":
+                            observe_failure(self.bounded.control["reason"])
+                except BaseException as error:
+                    observe_exception(error)
+                    raise
                 head = self.bounded.head
                 self.code = self.status = head.status
                 self.reason = ""  # Raw upstream reason phrases are discarded.
@@ -1302,16 +1379,25 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 self.will_close = head.framing == "eof" or self._check_close()
 
             def read(self, amt: int | None = None) -> bytes:
-                return self.bounded.read(amt)
+                try:
+                    return self.bounded.read(amt)
+                except BaseException as error:
+                    observe_exception(error)
+                    raise
 
             def close(self) -> None:
                 if self._close_claimed:
                     return
                 self._close_claimed = True  # Includes stdlib failure closes.
+                observe_control(prior_control())
+                active = sys.exception()
+                if active is not None:
+                    observe_exception(active)
                 try:
                     super().close()
                 except BaseException:
                     close_failed[0] = True
+                    observe_failure("cleanup-unknown")
                     raise
 
         class FixedConnection(http.client.HTTPSConnection):
@@ -1337,13 +1423,19 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 if self._close_claimed:
                     return
                 self._close_claimed = True
+                observe_control(prior_control())
+                active = sys.exception()
+                if active is not None:
+                    observe_exception(active)
                 try:
                     super().close()
                 except BaseException:
                     close_failed[0] = True
+                    observe_failure("cleanup-unknown")
                     raise
 
         connection: Any = None
+        result = None
         try:
             connection = FixedConnection()
             connection.connect()
@@ -1366,16 +1458,31 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             connection.endheaders(body)
             timeout(budget.remaining())
             response = connection.getresponse()
-            result = _response_result(response.bounded, budget, _remote_delivery=_remote_delivery)
+            result = _response_result(response.bounded, budget, _remote_delivery=_remote_delivery,
+                _remote_failure=observe_failure if _profile is _ExchangeProfile.GIT_REMOTE else None)
+            if _profile is _ExchangeProfile.GIT_REMOTE:
+                reason = result.control["reason"]
+                if reason == "none":
+                    reason = result.observation["failure"]
+                if reason != "none":
+                    observe_failure(reason)  # Converted failure, before finally.
         except ReadFailure as error:
+            observe_failure(error.reason)
             result = _failed(error.reason, prior_control())
         except ssl.SSLError:
+            observe_failure("tls-failed")
             result = _failed("tls-failed", prior_control())
         except http.client.HTTPException:
+            observe_failure("response-invalid")
             result = _failed("response-invalid", prior_control())
         except OSError:
+            observe_failure("network-unavailable")
             result = _failed("network-unavailable", prior_control())
+        except BaseException as error:
+            observe_exception(error)
+            raise
         finally:
+            observe_control(result.control if result is not None else prior_control())
             # Each original response/connection has one synchronous close
             # claim, even if stdlib already closed it on its own failure path.
             # No retry, scan, replacement joiner or cleanup timeout is added.
@@ -1385,6 +1492,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                         original.close()
                     except BaseException:
                         close_failed[0] = True
+                        observe_failure("cleanup-unknown")
             if close_failed[0]:
                 raise _CloseFailure("Original GitHub close did not return") from None
         return result

@@ -24,8 +24,7 @@ class Transcript:
 class _Helper:
     def __init__(self, transport: _RemoteTransport, *, read, write, current) -> None:
         require(type(transport) is _RemoteTransport and callable(read) and callable(write)
-                and callable(current) and transport.current is current
-                and transport.target.selected.oid is not None)
+                and callable(current) and transport.current is current)
         self.transport, self.read, self.write, self.current = transport, read, write, current
         self.entered = self.finished = self.failed = False
 
@@ -86,6 +85,17 @@ class _Helper:
             self._emit(advertisement)
             ls_refs = self._request()
             self._emit(self.transport.ls_refs(ls_refs))
+            if self.transport.target.selected.oid is None:
+                # The fixed native Prepare starts stock ls-remote only. Before
+                # its sole response-end, rematch the same account/repository;
+                # no fetch request or pack/body producer is admitted here.
+                self.transport.after_metadata()
+                self._emit(b"0002")
+                require(self._read(1, eof=True) == b"")
+                self.current()
+                require(self.transport.phase == 6 and not self.transport.failed)
+                self.finished = True
+                return Transcript(self.transport.selected.reference, self.transport.selected.oid)
             self._emit(b"0002")  # Only after that SAME HTTP exchange closed.
             fetch = self._request()
             self.transport.fetch(fetch, self._emit)

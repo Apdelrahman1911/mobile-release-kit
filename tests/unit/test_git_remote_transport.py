@@ -159,10 +159,10 @@ class FakeLive:
                           (ssl, "create_default_context")):
             test.enterContext(patch.object(obj, name, side_effect=AssertionError("forbidden actual network/TLS effect")))
 
-    def transport(self, *, clock=None, current=lambda: None):
+    def transport(self, *, clock=None, current=lambda: None, failure=lambda reason: None):
         clock = clock or budget()
         return t._make_transport(TARGET, "SYNTHETIC-NON-CREDENTIAL", started=0.0,
-                                 runtime_dir="/synthetic/original-runtime", budget=clock, current=current)
+                                 runtime_dir="/synthetic/original-runtime", budget=clock, current=current, failure=failure)
 
 
 class GitRemoteTransportTests(unittest.TestCase):

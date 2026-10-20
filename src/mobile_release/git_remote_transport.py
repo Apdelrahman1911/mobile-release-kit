@@ -14,7 +14,7 @@ import re
 from typing import Callable
 
 from . import git_remote_wire as wire
-from ._desktop_github_engine import _check_control
+from . import git_remote_control as controls
 from . import _github_connection_transport as http
 from .api._github_connection import _account, _coordinate, _id, _read, _repository
 
@@ -203,7 +203,14 @@ class _Delivery:
         return self.value, raw
 
 
-def stream_response(response, budget, delivery: _Delivery):
+def failure_reason(error: BaseException) -> str:
+    """Fixed private classification; never forwards exception/body text."""
+    if isinstance(error, (wire.WireError, RemoteError, http.ReadFailure)):
+        return error.reason if error.reason in _REASONS else "response-invalid"
+    return "cleanup-unknown"
+
+
+def stream_response(response, budget, delivery: _Delivery, *, failure=None):
     """Delegate invoked INSIDE existing _response_result/finally custody."""
     require(type(delivery) is _Delivery and delivery.claimed
             and response.role.value == delivery.role and budget is response.budget)
@@ -227,12 +234,16 @@ def stream_response(response, budget, delivery: _Delivery):
         return http.ReadResult({"status": 200, "body": None, "failure": "none"}, response.control)
     except (wire.WireError, RemoteError, http.ReadFailure) as error:
         delivery.failed = True
+        if failure is not None:
+            failure(failure_reason(error))  # Same Entry's first F, before HTTP closes.
         if error.reason == "cleanup-unknown":
             raise  # Original custody uncertainty is not an ordinary HTTP error.
         reason = error.reason if error.reason in {"response-limit", "cancelled", "network-unavailable"} else "response-invalid"
         return http._failed(reason, response.control)
-    except BaseException:
+    except BaseException as error:
         delivery.failed = True
+        if failure is not None:
+            failure(failure_reason(error))
         raise
 
 
@@ -245,6 +256,11 @@ class _RemoteTransport:
         self.entered = self.failed = False
         self.control = http._control()
         self.offered = self.selected = None
+
+    def observe_control(self, control):
+        # Same original HTTP owner calls this BEFORE its original finalizers.
+        # Only finite validated DATA is retained; no clock, IO or dispatch.
+        self.control = controls.merge(self.control, control)
 
     def _call(self, phase: int, role: str, body: bytes | None = None, delivery: _Delivery | None = None):
         require(not self.failed and not self.entered and self.phase == phase)
@@ -259,7 +275,7 @@ class _RemoteTransport:
             validate_endpoint(role, method, path); validate_body(role, body)
             result = self.exchange(method, path, body, _role=http._ResponseRole(role), _remote_delivery=delivery)
             require(type(result) is http.ReadResult)
-            self.control = dict(_check_control(result.control))
+            self.control = controls.merge(self.control, result.control)
             require(self.control["reason"] == "none", self.control["reason"])
             if delivery is not None:
                 require(result.observation == {"status": 200, "body": None, "failure": "none"},
@@ -282,8 +298,9 @@ class _RemoteTransport:
                 value = None
             self.current(); self.budget.remaining()
             return value
-        except BaseException:
+        except BaseException as error:
             self.failed = True
+            self.control = controls.refusal(self.control, failure_reason(error))
             raise
         finally:
             self.entered = False
@@ -324,9 +341,13 @@ class _RemoteTransport:
     def after(self) -> None:
         self._call(5, ACCOUNT); self._call(6, REPOSITORY)
 
+    def after_metadata(self) -> None:
+        require(self.target.selected.oid is None and self.selected is not None)
+        self._call(4, ACCOUNT); self._call(5, REPOSITORY)
+
 
 def _make_transport(target: Target, token: str, *, started: float, runtime_dir: str,
-                    budget, current: Callable[[], None]) -> _RemoteTransport:
+                    budget, current: Callable[[], None], failure: Callable[[str], None]) -> _RemoteTransport:
     """Future original helper entry only; no native issuer/route is installed.
 
     `budget` MUST be the original operation's already-bridged/clamped clock.
@@ -337,10 +358,13 @@ def _make_transport(target: Target, token: str, *, started: float, runtime_dir: 
     require(profile is not None and type(budget) is http._Budget and budget.profile is profile
             and type(started) in (int, float) and math.isfinite(started)
             and budget.started == started and started < budget.end <= started + WORK_SECONDS
-            and type(target) is Target and callable(current))
+            and type(target) is Target and callable(current) and callable(failure))
     current(); budget.remaining()
+    remote = _RemoteTransport(target, None, budget, current)
     exchange = http._make_live_exchange(token, started=started, runtime_dir=runtime_dir,
         api_version="2026-03-10", _profile=profile, _setup_budget=budget,
-        _git_remote_login=target.login, _git_remote_current=current)
+        _git_remote_login=target.login, _git_remote_current=current, _git_remote_failure=failure,
+        _git_remote_control=remote.observe_control)
     current(); budget.remaining()
-    return _RemoteTransport(target, exchange, budget, current)
+    remote.exchange = exchange
+    return remote

@@ -208,6 +208,11 @@ def run_owned(
                 capture=capture, text=text, output_limit=output_limit, on_start=on_start,
                 cleanup=cleanup, execution_scope=execution_scope,
                 journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.GitRemote:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
         if domain is SavedCommandDomain.GitLocal:
             source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
                 capture=capture, text=text, output_limit=output_limit, on_start=on_start,
