@@ -44,6 +44,10 @@ on:
         type: choice
         default: both
         options: [both, arm64, x86_64]
+      apple_key_component:
+        description: Also run the local Apple key/vault component with app-typecheck and arm64
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -434,7 +438,7 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
+    if: github.event_name == 'workflow_dispatch' && (inputs.apple_key_component || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
     name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -446,17 +450,23 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON((inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
+        include: ${{ fromJSON((inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
     steps:
       - name: Require the explicit ARM-only focused selection
-        if: inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests'
+        if: inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests'
         shell: bash
         env:
           SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+          SELECTED_COMPONENT: ${{ inputs.component }}
+          APPLE_KEY_REQUESTED: ${{ inputs.apple_key_component }}
         run: |
           set -euo pipefail
           if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
             printf '%s\n' 'app-typecheck/app-native-tests require architecture=arm64; no other architecture was compiled.' >&2
+            exit 1
+          fi
+          if [[ "$APPLE_KEY_REQUESTED" == true && "$SELECTED_COMPONENT" != app-typecheck ]]; then
+            printf '%s\n' 'apple_key_component requires component=app-typecheck and architecture=arm64.' >&2
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -613,10 +623,10 @@ jobs:
               vault_store::macos::tests::apple_key_inventory_compares_old_full_witnesses_and_only_one_new_record \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
             grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            # Current Apple certificate, shared CLI repository and Fetch logic.
-            # Same library binary/cache: 67 new cases plus 24 affected cases.
-            # Six use existing exclusive private Store fixtures and synchronous
-            # close; none invokes Git, a provider, Keychain or a system tool.
+            # Current Apple certificate/P12, shared CLI and Fetch/Push logic.
+            # Same library binary/cache: 107 new cases plus 24 affected cases.
+            # Cases with Store I/O use existing exclusive private fixtures and
+            # synchronous close; none invokes Git, a provider or a system tool.
             # Prefix selectors intentionally omit --exact; the count prevents
             # a missing/renamed test from silently becoming a pass.
             (
@@ -666,8 +676,48 @@ jobs:
                 supervisor::git_local::tests::local_known_post_go_stop_needs_private_closed_control_and_cancelled_terminal \
                 supervisor::git_local::switch_tests::generic_or_absent_publication_cannot_authorize_switch_old_fd_successors \
                 github_connection_session::tests::supplied_unknown_stays_absorbing_after_late_final_data_and_disconnect \
+                asset_commands::apple_p12_fields::tests::p12_password_is_one_fixed_entropy_attempt_in_existing_private_fields \
+                asset_commands::apple_p12_fields::tests::p12_private_output_is_borrowed_and_strict_before_any_copy \
+                vault_crypto::apple_p12::tests::p12_reserved_identity_cannot_be_recreated_or_corrected_after_failed_seal \
+                vault_crypto::apple_p12::tests::p12_reserved_cipher_requires_full_password_file_and_revision_readback \
+                asset_session::vault::distribution_key::p12::tests::p12_derived_no_save_predicate_never_launders_an_attempted_store \
+                saved_command_owner::apple_key::p12::private::tests::p12_receiver_requires_complete_body_ack_eof_and_close_on_original_backing \
+                saved_command_owner::apple_key::p12::private::tests::p12_receiver_partial_wrong_request_or_lost_ack_never_becomes_empty_or_reusable \
+                saved_command_owner::apple_key::p12::tests::original_normal_terminal_pipe_stop_is_not_failure_and_never_substitutes_for_save_joins \
+                saved_command_owner::apple_provisioning::p12_review::tests::p12_review_never_renews_at_received_or_retired_status \
+                apple_provisioning_journal::p12::tests::p12_local_intent_never_encodes_a_provider_post_or_private_package \
+                apple_provisioning_journal::p12::tests::known_no_save_is_distinct_from_save_attempt_unknown_and_readback \
+                apple_provisioning_journal::p12::tests::p12_no_save_data_cannot_clear_unknown_or_rearm_a_refused_original \
+                apple_provisioning_journal::p12::tests::p12_v4_preserves_prior_canonical_rows_and_default_version \
+                apple_provisioning_journal::p12::tests::p12_actual_cas_lost_ack_stays_original_and_cannot_reserve_again \
+                apple_provisioning_protocol::tests::p12_prepare_requires_explicit_selection_and_never_borrows_issuer_ack_modes \
+                git_push_protocol::tests::only_existing_branch_nonforce_action_and_exact_connection_data_decode \
+                git_push_protocol::tests::review_binds_exact_upstream_oids_commit_set_and_no_message_author_payload \
+                git_push_protocol::tests::candidate_binds_complete_review_not_only_new_oid_and_does_not_mean_sent \
+                git_push_protocol::tests::journal_keeps_same_review_and_refuses_candidate_replacement_or_unbound_finality \
+                git_local_protocol::push_worker::tests::push_200_quote_adds_real_remote_and_body_backing_without_borrowing_old_caps \
+                git_local_protocol::push_worker::tests::original_request_binds_attached_head_and_review_account_while_go_is_private \
+                git_local_protocol::push_worker::tests::exact_candidate_ack_once_revision_has_no_fetch_keep_or_mutable_body_permission \
+                git_local_protocol::push_worker::tests::review_dry_run_accepts_only_exact_no_transmission_result_and_no_child_authority \
+                git_local_protocol::push_worker::tests::apply_requires_complete_same_original_return_and_late_stop_cannot_be_success \
+                git_local_protocol::push_worker::tests::cleanup_unknown_never_returns_progress_or_reconstructs_a_send_receipt \
+                git_local_protocol::push_worker::tests::known_retained_apply_accepts_only_original_flat_or_nested_diagnostic_shape \
+                git_local_state::push_tests::push_first_preparing_cas_uses_schema_eight_and_keeps_exact_old_rows \
+                git_local_state::push_tests::wrong_schema_or_mixed_old_fields_never_become_an_empty_or_adopted_push \
+                git_local_state::push_tests::candidate_amends_only_same_account_refs_and_review_without_erasing_original \
+                git_local_state::push_tests::pending_or_acknowledged_unknown_stays_fenced_after_restart_without_retry \
+                git_local_state::push_tests::remote_receipt_data_does_not_supply_native_finality_or_turn_recovery_into_success \
+                git_local_state::push_tests::shared_row_limit_refuses_new_project_without_evicting_any_unknown \
+                github_connection_session::push::tests::local_git_read_session_rechecks_actual_idle_registration_facts_and_expiry \
+                github_connection_session::push::tests::local_git_read_session_distinguishes_original_disconnect_and_connection_aba \
+                github_connection_session::push::tests::push_requires_reported_write_permission_and_same_account_session_and_revision \
+                github_connection_session::push::tests::prepared_push_binds_all_selected_refs_oids_and_account_not_just_target_name \
+                github_connection_session::push::tests::known_control_cooldown_and_original_expiry_never_renew_push_permission \
+                supervisor::git_local::push::tests::returned_push_only_compares_exact_original_request_and_never_local_publication \
+                supervisor::git_local::push::tests::original_known_receipt_and_joined_control_are_both_required_without_retaining_owner \
+                runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider \
                 --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
-              grep -Eq '^test result: ok\. 91 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 131 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
             )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
@@ -953,12 +1003,12 @@ jobs:
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
           grep -Eq '^test result: ok\. 74 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: inputs.component == 'app-native-tests'
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
         id: apple-key-python
         with:
           python-version: '3.14.7'
       - name: Restore the SOURCE-selected signed Ruby for the local Apple key component
-        if: inputs.component == 'app-native-tests'
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
         timeout-minutes: 5
         shell: bash
         env:
@@ -973,7 +1023,7 @@ jobs:
           "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
             "$WORK_ROOT/component" --target aarch64-apple-darwin
       - name: Verify real local Apple key generation, encrypted NEW and fresh reuse
-        if: inputs.component == 'app-native-tests'
+        if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
         id: apple-key-component
         timeout-minutes: 10
         shell: bash
@@ -1248,7 +1298,7 @@ jobs:
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           CARGO_CACHE_OWNED: ${{ steps.work.outputs.cache_owned }}
-          APP_CHECKS: ${{ inputs.component }}
+          RUN_APPLE_KEY_COMPONENT: ${{ inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component) }}
           APPLE_KEY_OUTCOME: ${{ steps.apple-key-component.outcome }}
           APPLE_KEY_ROOT_IDENTITY: ${{ steps.apple-key-component.outputs.root_identity }}
         run: |
@@ -1258,7 +1308,7 @@ jobs:
           work = Path(os.environ["WORK_ROOT"])
           assert work.parent == Path(os.environ["RUNNER_TEMP"])
           assert work.name.startswith("mrk-app-check.") and not work.is_symlink()
-          if os.environ["APP_CHECKS"] == "app-native-tests":
+          if os.environ["RUN_APPLE_KEY_COMPONENT"] == "true":
               info = work.lstat()
               identity = ":".join(map(str, (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)))
               if (os.environ["APPLE_KEY_OUTCOME"] != "success" or identity != os.environ["APPLE_KEY_ROOT_IDENTITY"]
