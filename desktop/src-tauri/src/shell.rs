@@ -2748,6 +2748,12 @@ fn trusted_document(url: &tauri::Url) -> bool {
         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct RepositorySummaryRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for RepositorySummaryRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.repository_summary_relay_lost(); } }
+}
 struct LocalHistoryRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for LocalHistoryRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_release_history_relay_lost(); } }
@@ -2807,6 +2813,8 @@ impl Drop for IdentityActionsRelayGuard {
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
@@ -2840,6 +2848,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let handle = tauri::async_runtime::spawn(async move {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut identity_actions_guard = identity_actions_guard;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut repository_summary_guard = repository_summary_guard;
         let mut local_history_guard = local_history_guard;
         let mut local_history_revision = None;
         let mut local_history_relay_failed = false;
@@ -2900,7 +2910,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // Optional history performs bounded synchronous service IO only
@@ -2908,6 +2918,10 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // SAME retained relay owns the call; no detached writer is created.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let _ = application_history.publish_identity_history();
+            // Fixed DATA tap in this SAME retained relay; no new task, Git
+            // command, status IPC, Store write or native read is introduced.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            document.service_repository_summary_tick();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             document.service_identity_actions_tick();
             #[cfg(any(target_os = "linux", target_os = "macos"))]

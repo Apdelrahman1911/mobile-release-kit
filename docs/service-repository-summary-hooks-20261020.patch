@@ -1,0 +1,460 @@
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -76,6 +76,7 @@
+
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
++    repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+     local_checks: Arc<crate::agent_local_checks::Inbox>, build_requests: Arc<crate::agent_build_requests::Inbox> }
+ #[path = "application_service_identity_actions.rs"]
+@@ -89,6 +90,11 @@
+     // only so relay loss can invalidate it without waiting behind store IO.
+     pub(crate) fn open_with_android_tools(store: Arc<PrivateStateDirectory>,
+         android_tools: Arc<crate::service_android_tools::ObservationSlot>) -> Result<Self, Error> {
++        Self::open_with_observations(store, android_tools, Arc::new(crate::service_repository_summary::ObservationSlot::default()))
++    }
++    pub(crate) fn open_with_observations(store: Arc<PrivateStateDirectory>,
++        android_tools: Arc<crate::service_android_tools::ObservationSlot>,
++        repository_summary: Arc<crate::service_repository_summary::ObservationSlot>) -> Result<Self, Error> {
+         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
+         let mut saved = if snapshot.bytes.is_empty() && snapshot.revision == Revision(0) { Persisted::empty() }
+             else { serde_json::from_slice::<Persisted>(&snapshot.bytes).map_err(|_| Error::RecoveryRequired)? };
+@@ -104,7 +110,7 @@
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -388,6 +394,15 @@
+                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
+                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
+                 p::RequestBody::Observe(query) => { allowed(&query.project_id)?; p::ResponseBody::Observation(project(&query.project_id)?) }
++                p::RequestBody::Repository(query) => {
++                    allowed(&query.project_id)?;
++                    let (runtime_id, _) = state.runtime_aliases.iter().find(|(_, id)| *id == &query.project_id).ok_or(Error::Conflict)?;
++                    let binding = &state.saved.projects.iter().find(|row| row.binding.project_id == query.project_id).ok_or(Error::Conflict)?.binding;
++                    // SAME grant/alias guard through the bounded DATA copy;
++                    // private source comparison prevents another root's row.
++                    p::ResponseBody::Repository(self.repository_summary.view(query.project_id,
++                        runtime_id, &binding.canonical_root, binding.device, binding.inode))
++                }
+                 p::RequestBody::AndroidTools(query) => {
+                     allowed(&query.project_id)?;
+                     if !state.runtime_aliases.values().any(|id| id == &query.project_id) { return Err(Error::Conflict); }
+@@ -410,7 +425,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+@@ -475,6 +490,94 @@
+         assert!(poisoned.is_err());
+     }
+     fn request(body: p::RequestBody) -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: body } }
++    #[test]
++    fn repository_read_preserves_scope_binding_revoke_and_no_store_write() {
++        use crate::service_repository_summary as data;
++        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let slot = Arc::new(data::ObservationSlot::default());
++        let service = ApplicationService::open_with_observations(store.clone(), Arc::new(crate::service_android_tools::ObservationSlot::default()), slot.clone()).unwrap();
++        let (id, _) = register_fixture(&service, &f.app, "project", "project-1");
++        let (other, _) = register_fixture(&service, &f.app, "other", "project-2");
++        let binding = service.native_binding("project-1").unwrap();
++        let source = data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root.clone(),
++            device: binding.device, inode: binding.inode, registration_generation: 1 };
++        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++        let client = service.admit_client().unwrap();
++        let before = store.read(Namespace::Projects).unwrap();
++        with_state_locked(&service, || slot.publish(source, data::tests::captured(1)));
++        let read = |id: Id| request(p::RequestBody::Repository(p::ProjectQuery { project_id: id }));
++        match service.dispatch(&client, read(id.clone())).response {
++            p::ResponseBody::Repository(view) => {
++                assert_eq!(view.capture, data::Capture::Observed); assert_eq!(view.project_id, id);
++                assert_eq!(view.freshness, data::Freshness::HistoricalNotRevalidated);
++                assert_eq!(view.basis, data::Basis::LocalRefsNoFetch);
++            }, _ => panic!("wrong response"),
++        }
++        assert_eq!(service.dispatch(&client, read(other)).response, p::ResponseBody::Error(Error::AccessDenied));
++        let after = store.read(Namespace::Projects).unwrap(); assert_eq!(before.revision, after.revision); assert_eq!(before.bytes, after.bytes);
++        service.state.lock().unwrap().runtime_aliases.remove("project-1");
++        assert_eq!(service.dispatch(&client, read(id.clone())).response, p::ResponseBody::Error(Error::Conflict));
++        assert_eq!(service.android_tools_client_current(&client, &id), Err(Error::Conflict));
++        service.state.lock().unwrap().runtime_aliases.insert("project-1".into(), id.clone());
++        service.revoke_agent_read().unwrap();
++        assert_eq!(service.dispatch(&client, read(id.clone())).response, p::ResponseBody::Error(Error::AccessDenied));
++        assert_eq!(service.android_tools_client_current(&client, &id), Err(Error::AccessDenied));
++        service.stop().unwrap(); store.close().unwrap();
++    }
++    #[test]
++    fn repository_read_cannot_attach_an_old_row_to_a_rebound_alias_and_unknown_is_not_empty() {
++        use crate::service_repository_summary as data;
++        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let slot = Arc::new(data::ObservationSlot::default());
++        let service = ApplicationService::open_with_observations(store.clone(), Arc::new(crate::service_android_tools::ObservationSlot::default()), slot.clone()).unwrap();
++        let (id, _) = register_fixture(&service, &f.app, "project", "project-1");
++        let (other, _) = register_fixture(&service, &f.app, "other", "project-2");
++        let binding = service.native_binding("project-1").unwrap();
++        slot.publish(data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root,
++            device: binding.device, inode: binding.inode, registration_generation: 1 }, data::tests::captured(1));
++        service.allow_agent_read(vec![id, other.clone()], Duration::from_secs(30)).unwrap();
++        let client = service.admit_client().unwrap();
++        // Inert corruption seam: production register_native forbids this alias
++        // reassignment. Even this cannot disclose the first root's summary.
++        {
++            let mut state = service.state.lock().unwrap(); state.runtime_aliases.remove("project-2");
++            state.runtime_aliases.insert("project-1".into(), other.clone());
++        }
++        let read = || request(p::RequestBody::Repository(p::ProjectQuery { project_id: other.clone() }));
++        match service.dispatch(&client, read()).response {
++            p::ResponseBody::Repository(view) => assert_eq!(view.capture, data::Capture::Unavailable),
++            _ => panic!("wrong response"),
++        }
++        service.fence_native_history();
++        assert_eq!(service.dispatch(&client, read()).response, p::ResponseBody::Error(Error::StateUnknown));
++        service.stop().unwrap(); store.close().unwrap();
++    }
++    #[test]
++    fn repository_restart_retains_project_identity_but_restores_neither_observation_nor_grant() {
++        use crate::service_repository_summary as data;
++        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let service = ApplicationService::open(store.clone()).unwrap();
++        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
++        let binding = service.native_binding("project-1").unwrap();
++        service.repository_summary.publish(data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root,
++            device: binding.device, inode: binding.inode, registration_generation: 1 }, data::tests::captured(1));
++        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++        let previous = service.admit_client().unwrap(); service.stop().unwrap(); store.close().unwrap(); drop(service); drop(store);
++        let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let service = ApplicationService::open(store.clone()).unwrap();
++        assert!(matches!(service.admit_client(), Err(Error::AccessDenied)));
++        let rejoined = service.register_native("project-1", &root, binding.device, binding.inode).unwrap();
++        assert_eq!(rejoined.project_id, id);
++        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++        let read = || request(p::RequestBody::Repository(p::ProjectQuery { project_id: id.clone() }));
++        assert_eq!(service.dispatch(&previous, read()).response, p::ResponseBody::Error(Error::AccessDenied));
++        let client = service.admit_client().unwrap();
++        match service.dispatch(&client, read()).response {
++            p::ResponseBody::Repository(view) => assert_eq!(view.capture, data::Capture::Unobserved),
++            _ => panic!("wrong response"),
++        }
++        service.stop().unwrap(); store.close().unwrap();
++    }
+     #[test]
+     fn android_tools_read_keeps_scope_alias_revoke_and_store_checks() {
+         use crate::service_android_tools::{Capture, Compatibility, Freshness, ObservationSlot};
+diff --git a/desktop/src-tauri/src/application_service_host.rs b/desktop/src-tauri/src/application_service_host.rs
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -22,6 +22,8 @@
+
+ #[path = "application_service_android_tools.rs"]
+ mod android_tools;
++#[path = "application_service_repository_summary.rs"]
++mod repository_summary;
+
+ #[path = "application_service_identity_history.rs"]
+ mod identity_history;
+@@ -197,6 +199,7 @@
+     identity: Arc<()>, control: Mutex<Control>, originals: AsyncMutex<Originals>,
+     history: Arc<identity_history::History>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
++    repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+ }
+ impl ApplicationHost {
+     /// No path lookup, directory, reservation, socket or background task.
+@@ -206,7 +209,8 @@
+             native_location: None, native_roots: Vec::new(), store: None, service: None,
+             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
+         }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()),
+-            android_tools: Arc::new(crate::service_android_tools::ObservationSlot::default()) }
++            android_tools: Arc::new(crate::service_android_tools::ObservationSlot::default()),
++            repository_summary: Arc::new(crate::service_repository_summary::ObservationSlot::default()) }
+     }
+     fn lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
+         match self.control.lock() {
+@@ -474,7 +478,7 @@
+             // agent grant. Native setup needs its stable IDs without an IPC
+             // listener; later explicit Allow reuses these same originals.
+             if originals.service.is_none() {
+-                let service = match ApplicationService::open_with_android_tools(store.clone(), self.android_tools.clone()) {
++                let service = match ApplicationService::open_with_observations(store.clone(), self.android_tools.clone(), self.repository_summary.clone()) {
+                     Ok(service) => Arc::new(service),
+                     Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::OpenService, error))),
+                 };
+@@ -651,6 +655,7 @@
+     /// Accepted exit/document retirement only. A cancelled quit does not call
+     /// this method, and therefore does not silently destroy existing consent.
+     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
++        self.repository_summary.retire(); // SAME relay DATA, no late publication after retirement.
+         self.android_tools.unavailable(); // Memory-only; no late relay publication can revive it.
+         self.history.retire_capture(); // Memory-only barrier before existing Host/Service work.
+         let mut state = self.lock()?;
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -32,6 +32,9 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_application_service.rs"]
+ pub(crate) mod application_service;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "asset_session_repository_summary.rs"]
++mod repository_summary;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_agent_identity.rs"]
+ pub(crate) mod agent_identity;
+@@ -2007,6 +2010,8 @@
+             self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2748,6 +2748,12 @@
+         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
+ }
+
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++struct RepositorySummaryRelayGuard { document: DocumentBinding, closed: bool }
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++impl Drop for RepositorySummaryRelayGuard {
++    fn drop(&mut self) { if !self.closed { self.document.repository_summary_relay_lost(); } }
++}
+ struct LocalHistoryRelayGuard { document: DocumentBinding, closed: bool }
+ impl Drop for LocalHistoryRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.local_release_history_relay_lost(); } }
+@@ -2807,6 +2813,8 @@
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
+     let mut revisions = edits.subscribe();
+     let mut assets = document.subscribe();
+     let mut diagnostics = document.environment_diagnostics_subscribe();
+@@ -2840,6 +2848,8 @@
+     let handle = tauri::async_runtime::spawn(async move {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         let mut identity_actions_guard = identity_actions_guard;
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let mut repository_summary_guard = repository_summary_guard;
+         let mut local_history_guard = local_history_guard;
+         let mut local_history_revision = None;
+         let mut local_history_relay_failed = false;
+@@ -2900,7 +2910,7 @@
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+         let mut removal_notice_open=removal_notice.is_some();
+         loop {
+-            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
++            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+             document.finish_macos_maintenance(app.clone());
+             // Optional history performs bounded synchronous service IO only
+@@ -2908,6 +2918,10 @@
+             // SAME retained relay owns the call; no detached writer is created.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let _ = application_history.publish_identity_history();
++            // Fixed DATA tap in this SAME retained relay; no new task, Git
++            // command, status IPC, Store write or native read is introduced.
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            document.service_repository_summary_tick();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             document.service_identity_actions_tick();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -211,6 +211,7 @@
+     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+     #[serde(rename = "android-tools.observation")] AndroidTools(ProjectQuery),
+     #[serde(rename = "request.list")] Requests(ProjectQuery),
++    #[serde(rename = "repository.observation")] Repository(ProjectQuery),
+     #[serde(rename = "operation.list")] Operations(ProjectQuery),
+     #[serde(rename = "operation.status")] Operation(OperationQuery),
+     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
+@@ -252,6 +253,7 @@
+     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+     AndroidTools(crate::service_android_tools::View),
+     Requests(crate::service_request_catalogue::Catalogue),
++    Repository(crate::service_repository_summary::View),
+     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+     IdentityAction(crate::agent_identity_requests::actions::Status),
+     LocalCheck(crate::agent_local_checks::Status),
+@@ -358,6 +360,7 @@
+         }
+         ResponseBody::Observation(row) => project(row)?,
+         ResponseBody::AndroidTools(row) => row.validate()?,
++        ResponseBody::Repository(row) => row.validate()?,
+         ResponseBody::Requests(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::Operations(rows) => {
+             if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -25,6 +25,7 @@
+   mrk observe PROJECT_ID [--json]\n\
+   mrk android-tools PROJECT_ID [--json]\n\
+   mrk requests PROJECT_ID [--json]\n\
++  mrk repository PROJECT_ID [--json]\n\
+   mrk operations PROJECT_ID [--json]\n\
+   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
+   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
+@@ -50,6 +51,7 @@
+ Reads return observations; they do not rerun actions or validate a release.\n\
+ requests lists retained local-check/build request IDs in this Desktop instance, not complete history or replay permission.\n\
+ android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
++repository returns historical Desktop Git counts; local refs only, no inspection, fetch or current-checkout claim.\n\
+ observe --json may include optional setup state codes, not a passed check or release approval.\n\
+ Identity requests additionally need the separate 15-minute Desktop request permission.\n\
+ In Desktop, read the requested source, then either continue locally or allow only that exact change once.\n\
+@@ -81,6 +83,7 @@
+         ["observe", project] => p::RequestBody::Observe(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["android-tools", project] => p::RequestBody::AndroidTools(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["requests", project] => p::RequestBody::Requests(p::ProjectQuery { project_id: Id::parse(project)? }),
++        ["repository", project] => p::RequestBody::Repository(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["operations", project] => p::RequestBody::Operations(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["operation", project, operation] => p::RequestBody::Operation(p::OperationQuery { project_id: Id::parse(project)?, operation_id: Id::parse(operation)? }),
+         _ => return Err(Error::InvalidRequest),
+@@ -95,12 +98,13 @@
+     arguments: &'static [&'static str],
+     description: &'static str,
+ }
+-const READ_COMMANDS: [CommandCapability; 7] = [
++const READ_COMMANDS: [CommandCapability; 8] = [
+     CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
+     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
+     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
+     CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
+     CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover current-instance local-check/Android/iOS request IDs; not complete history or replay permission." },
++    CommandCapability { command: "repository", arguments: &["PROJECT_ID"], description: "Read historical Desktop Git counts; local refs only, no inspection or fetch." },
+     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
+     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
+ ];
+@@ -184,6 +188,7 @@
+                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                 "commands": IDENTITY_ACTION_COMMANDS,
+             },
++            "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+@@ -303,6 +308,7 @@
+         p::ResponseBody::Operation(value) => operation(value),
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
++        p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+         p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
+@@ -363,6 +369,29 @@
+     use super::*;
+     fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
+     #[test]
++    fn repository_is_a_closed_historical_query_without_git_action_parameters() {
++        let id = "11111111111111111111111111111111";
++        let Parsed::Request(options) = parse(args(&["repository", id, "--json"])).unwrap() else { panic!("wrong command") };
++        let wire = p::encode_request(&options.request).unwrap();
++        assert!(matches!(p::decode_request(&wire).unwrap().request, p::RequestBody::Repository(_)));
++        for extra in ["--fetch", "--diff", "--root", "--run", "--remote"] {
++            assert!(parse(args(&["repository", id, extra])).is_err());
++        }
++        let mut input: serde_json::Value = serde_json::from_slice(&wire).unwrap(); input["request"]["params"]["fetch"] = serde_json::json!(true);
++        assert!(p::decode_request(&serde_json::to_vec(&input).unwrap()).is_err());
++        let data = crate::service_repository_summary::ObservationSlot::default();
++        let source = crate::service_repository_summary::tests::source(); data.publish(source.clone(), crate::service_repository_summary::tests::captured(1));
++        let mut response = p::Response { version: p::VERSION, request_id: options.request.request_id,
++            service_instance: Id::parse(id).unwrap(), client_id: Id::parse(id).unwrap(), session_id: Id::parse(id).unwrap(),
++            response: p::ResponseBody::Repository(data.view(Id::parse(id).unwrap(), &source.runtime_id, &source.canonical_root, source.device, source.inode)) };
++        let bytes = p::encode_response(&response).unwrap(); assert!(bytes.len() < crate::service_repository_summary::VIEW_BYTES);
++        assert!(human(&response.response).contains("historical") && human(&response.response).contains("no fetch"));
++        if let p::ResponseBody::Repository(view) = &mut response.response { view.capture = crate::service_repository_summary::Capture::Unavailable; }
++        assert!(p::encode_response(&response).is_err());
++        let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
++        assert_eq!(caps["repository"]["startsInspection"], false); assert_eq!(caps["repository"]["includesPaths"], false);
++    }
++    #[test]
+     fn requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance() {
+         let id = "11111111111111111111111111111111";
+         let Parsed::Request(options) = parse(args(&["requests", id, "--json"])).unwrap() else { panic!("wrong command") };
+@@ -457,7 +486,7 @@
+         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
+         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
+         let commands = value["commands"].as_array().unwrap();
+-        assert_eq!(commands.len(), 7);
++        assert_eq!(commands.len(), 8);
+         // Each advertised command/argument order is accepted by the actual
+         // parser, not a separate documentation-only command implementation.
+         for command in commands {
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -256,6 +256,7 @@
+     match &response.response {
+         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
+         p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
++        p::ResponseBody::Repository(view) => service.android_tools_client_current(&client, &view.project_id)?,
+         _ => service.client_current(&client)?,
+     }
+     write_frame(stream, &bytes).await
+@@ -382,6 +383,16 @@
+                 }
+                 _ => panic!("wrong response"),
+             }
++            let repository = p::Request { version: 1, request_id: Id::random().unwrap(), request:
++                p::RequestBody::Repository(p::ProjectQuery { project_id: id.clone() }) };
++            match request(&f.app, &repository).await.unwrap().response {
++                p::ResponseBody::Repository(view) => {
++                    assert_eq!(view.project_id, id);
++                    assert_eq!(view.capture, crate::service_repository_summary::Capture::Unobserved);
++                    assert_eq!(view.basis, crate::service_repository_summary::Basis::LocalRefsNoFetch);
++                }
++                _ => panic!("wrong response"),
++            }
+             observations.publish(crate::service_android_tools::tests::catalogue());
+             match request(&f.app, &tools).await.unwrap().response {
+                 p::ResponseBody::AndroidTools(view) => {
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -113,6 +113,7 @@
+ mod service_setup_guidance;
+ mod service_android_tools;
+ mod service_request_catalogue;
++mod service_repository_summary;
+ mod agent_identity_requests;
+ mod agent_local_checks;
+ mod agent_android_build;
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -6,6 +6,7 @@
+ mod service_setup_guidance;
+ mod service_android_tools;
+ mod service_request_catalogue;
++mod service_repository_summary;
+ mod agent_identity_requests;
+ mod agent_local_checks;
+ mod agent_android_build;
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -22,6 +22,7 @@
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/service_android_tools.rs"] mod service_android_tools;
+ #[path = "../src/service_request_catalogue.rs"] mod service_request_catalogue;
++#[path = "../src/service_repository_summary.rs"] mod service_repository_summary;
+ #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
+ #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
+ #[path = "../src/agent_android_build.rs"] mod agent_android_build;

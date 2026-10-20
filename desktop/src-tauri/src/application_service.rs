@@ -76,6 +76,7 @@ mod request_catalogue;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+    repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
     local_checks: Arc<crate::agent_local_checks::Inbox>, build_requests: Arc<crate::agent_build_requests::Inbox> }
 #[path = "application_service_identity_actions.rs"]
@@ -89,6 +90,11 @@ impl ApplicationService {
     // only so relay loss can invalidate it without waiting behind store IO.
     pub(crate) fn open_with_android_tools(store: Arc<PrivateStateDirectory>,
         android_tools: Arc<crate::service_android_tools::ObservationSlot>) -> Result<Self, Error> {
+        Self::open_with_observations(store, android_tools, Arc::new(crate::service_repository_summary::ObservationSlot::default()))
+    }
+    pub(crate) fn open_with_observations(store: Arc<PrivateStateDirectory>,
+        android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+        repository_summary: Arc<crate::service_repository_summary::ObservationSlot>) -> Result<Self, Error> {
         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
         let mut saved = if snapshot.bytes.is_empty() && snapshot.revision == Revision(0) { Persisted::empty() }
             else { serde_json::from_slice::<Persisted>(&snapshot.bytes).map_err(|_| Error::RecoveryRequired)? };
@@ -104,7 +110,7 @@ impl ApplicationService {
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -388,6 +394,15 @@ impl ApplicationService {
                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
                 p::RequestBody::Observe(query) => { allowed(&query.project_id)?; p::ResponseBody::Observation(project(&query.project_id)?) }
+                p::RequestBody::Repository(query) => {
+                    allowed(&query.project_id)?;
+                    let (runtime_id, _) = state.runtime_aliases.iter().find(|(_, id)| *id == &query.project_id).ok_or(Error::Conflict)?;
+                    let binding = &state.saved.projects.iter().find(|row| row.binding.project_id == query.project_id).ok_or(Error::Conflict)?.binding;
+                    // SAME grant/alias guard through the bounded DATA copy;
+                    // private source comparison prevents another root's row.
+                    p::ResponseBody::Repository(self.repository_summary.view(query.project_id,
+                        runtime_id, &binding.canonical_root, binding.device, binding.inode))
+                }
                 p::RequestBody::AndroidTools(query) => {
                     allowed(&query.project_id)?;
                     if !state.runtime_aliases.values().any(|id| id == &query.project_id) { return Err(Error::Conflict); }
@@ -410,7 +425,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {
@@ -475,6 +490,94 @@ pub(crate) mod tests {
         assert!(poisoned.is_err());
     }
     fn request(body: p::RequestBody) -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: body } }
+    #[test]
+    fn repository_read_preserves_scope_binding_revoke_and_no_store_write() {
+        use crate::service_repository_summary as data;
+        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let slot = Arc::new(data::ObservationSlot::default());
+        let service = ApplicationService::open_with_observations(store.clone(), Arc::new(crate::service_android_tools::ObservationSlot::default()), slot.clone()).unwrap();
+        let (id, _) = register_fixture(&service, &f.app, "project", "project-1");
+        let (other, _) = register_fixture(&service, &f.app, "other", "project-2");
+        let binding = service.native_binding("project-1").unwrap();
+        let source = data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root.clone(),
+            device: binding.device, inode: binding.inode, registration_generation: 1 };
+        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+        let client = service.admit_client().unwrap();
+        let before = store.read(Namespace::Projects).unwrap();
+        with_state_locked(&service, || slot.publish(source, data::tests::captured(1)));
+        let read = |id: Id| request(p::RequestBody::Repository(p::ProjectQuery { project_id: id }));
+        match service.dispatch(&client, read(id.clone())).response {
+            p::ResponseBody::Repository(view) => {
+                assert_eq!(view.capture, data::Capture::Observed); assert_eq!(view.project_id, id);
+                assert_eq!(view.freshness, data::Freshness::HistoricalNotRevalidated);
+                assert_eq!(view.basis, data::Basis::LocalRefsNoFetch);
+            }, _ => panic!("wrong response"),
+        }
+        assert_eq!(service.dispatch(&client, read(other)).response, p::ResponseBody::Error(Error::AccessDenied));
+        let after = store.read(Namespace::Projects).unwrap(); assert_eq!(before.revision, after.revision); assert_eq!(before.bytes, after.bytes);
+        service.state.lock().unwrap().runtime_aliases.remove("project-1");
+        assert_eq!(service.dispatch(&client, read(id.clone())).response, p::ResponseBody::Error(Error::Conflict));
+        assert_eq!(service.android_tools_client_current(&client, &id), Err(Error::Conflict));
+        service.state.lock().unwrap().runtime_aliases.insert("project-1".into(), id.clone());
+        service.revoke_agent_read().unwrap();
+        assert_eq!(service.dispatch(&client, read(id.clone())).response, p::ResponseBody::Error(Error::AccessDenied));
+        assert_eq!(service.android_tools_client_current(&client, &id), Err(Error::AccessDenied));
+        service.stop().unwrap(); store.close().unwrap();
+    }
+    #[test]
+    fn repository_read_cannot_attach_an_old_row_to_a_rebound_alias_and_unknown_is_not_empty() {
+        use crate::service_repository_summary as data;
+        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let slot = Arc::new(data::ObservationSlot::default());
+        let service = ApplicationService::open_with_observations(store.clone(), Arc::new(crate::service_android_tools::ObservationSlot::default()), slot.clone()).unwrap();
+        let (id, _) = register_fixture(&service, &f.app, "project", "project-1");
+        let (other, _) = register_fixture(&service, &f.app, "other", "project-2");
+        let binding = service.native_binding("project-1").unwrap();
+        slot.publish(data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root,
+            device: binding.device, inode: binding.inode, registration_generation: 1 }, data::tests::captured(1));
+        service.allow_agent_read(vec![id, other.clone()], Duration::from_secs(30)).unwrap();
+        let client = service.admit_client().unwrap();
+        // Inert corruption seam: production register_native forbids this alias
+        // reassignment. Even this cannot disclose the first root's summary.
+        {
+            let mut state = service.state.lock().unwrap(); state.runtime_aliases.remove("project-2");
+            state.runtime_aliases.insert("project-1".into(), other.clone());
+        }
+        let read = || request(p::RequestBody::Repository(p::ProjectQuery { project_id: other.clone() }));
+        match service.dispatch(&client, read()).response {
+            p::ResponseBody::Repository(view) => assert_eq!(view.capture, data::Capture::Unavailable),
+            _ => panic!("wrong response"),
+        }
+        service.fence_native_history();
+        assert_eq!(service.dispatch(&client, read()).response, p::ResponseBody::Error(Error::StateUnknown));
+        service.stop().unwrap(); store.close().unwrap();
+    }
+    #[test]
+    fn repository_restart_retains_project_identity_but_restores_neither_observation_nor_grant() {
+        use crate::service_repository_summary as data;
+        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let service = ApplicationService::open(store.clone()).unwrap();
+        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
+        let binding = service.native_binding("project-1").unwrap();
+        service.repository_summary.publish(data::Source { runtime_id: "project-1".into(), canonical_root: binding.canonical_root,
+            device: binding.device, inode: binding.inode, registration_generation: 1 }, data::tests::captured(1));
+        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+        let previous = service.admit_client().unwrap(); service.stop().unwrap(); store.close().unwrap(); drop(service); drop(store);
+        let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let service = ApplicationService::open(store.clone()).unwrap();
+        assert!(matches!(service.admit_client(), Err(Error::AccessDenied)));
+        let rejoined = service.register_native("project-1", &root, binding.device, binding.inode).unwrap();
+        assert_eq!(rejoined.project_id, id);
+        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+        let read = || request(p::RequestBody::Repository(p::ProjectQuery { project_id: id.clone() }));
+        assert_eq!(service.dispatch(&previous, read()).response, p::ResponseBody::Error(Error::AccessDenied));
+        let client = service.admit_client().unwrap();
+        match service.dispatch(&client, read()).response {
+            p::ResponseBody::Repository(view) => assert_eq!(view.capture, data::Capture::Unobserved),
+            _ => panic!("wrong response"),
+        }
+        service.stop().unwrap(); store.close().unwrap();
+    }
     #[test]
     fn android_tools_read_keeps_scope_alias_revoke_and_store_checks() {
         use crate::service_android_tools::{Capture, Compatibility, Freshness, ObservationSlot};

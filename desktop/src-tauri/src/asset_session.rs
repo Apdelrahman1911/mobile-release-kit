@@ -33,6 +33,9 @@ pub(crate) use version_enrollment::VersionEnrollmentGoGate;
 #[path = "asset_session_application_service.rs"]
 pub(crate) mod application_service;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_repository_summary.rs"]
+mod repository_summary;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "asset_session_agent_identity.rs"]
 pub(crate) mod agent_identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2007,6 +2010,8 @@ mod lookup_memory {
             self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;

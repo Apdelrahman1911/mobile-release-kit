@@ -22,6 +22,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
 #[path = "../src/service_android_tools.rs"] mod service_android_tools;
 #[path = "../src/service_request_catalogue.rs"] mod service_request_catalogue;
+#[path = "../src/service_repository_summary.rs"] mod service_repository_summary;
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
 #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
 #[path = "../src/agent_android_build.rs"] mod agent_android_build;

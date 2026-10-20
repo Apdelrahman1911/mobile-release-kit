@@ -6,6 +6,7 @@ mod service_protocol;
 mod service_setup_guidance;
 mod service_android_tools;
 mod service_request_catalogue;
+mod service_repository_summary;
 mod agent_identity_requests;
 mod agent_local_checks;
 mod agent_android_build;

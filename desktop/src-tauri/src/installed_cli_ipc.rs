@@ -256,6 +256,7 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     match &response.response {
         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
         p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
+        p::ResponseBody::Repository(view) => service.android_tools_client_current(&client, &view.project_id)?,
         _ => service.client_current(&client)?,
     }
     write_frame(stream, &bytes).await
@@ -379,6 +380,16 @@ mod tests {
                     assert_eq!(view.service_instance, response.service_instance);
                     assert_eq!(view.project_id, id);
                     assert!(view.requests.is_empty() && view.do_not_replay);
+                }
+                _ => panic!("wrong response"),
+            }
+            let repository = p::Request { version: 1, request_id: Id::random().unwrap(), request:
+                p::RequestBody::Repository(p::ProjectQuery { project_id: id.clone() }) };
+            match request(&f.app, &repository).await.unwrap().response {
+                p::ResponseBody::Repository(view) => {
+                    assert_eq!(view.project_id, id);
+                    assert_eq!(view.capture, crate::service_repository_summary::Capture::Unobserved);
+                    assert_eq!(view.basis, crate::service_repository_summary::Basis::LocalRefsNoFetch);
                 }
                 _ => panic!("wrong response"),
             }

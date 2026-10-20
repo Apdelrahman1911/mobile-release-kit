@@ -25,6 +25,7 @@ Usage:\n\
   mrk observe PROJECT_ID [--json]\n\
   mrk android-tools PROJECT_ID [--json]\n\
   mrk requests PROJECT_ID [--json]\n\
+  mrk repository PROJECT_ID [--json]\n\
   mrk operations PROJECT_ID [--json]\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
@@ -50,6 +51,7 @@ For the other commands, open Desktop, select a project, then enable agent read a
 Reads return observations; they do not rerun actions or validate a release.\n\
 requests lists retained local-check/build request IDs in this Desktop instance, not complete history or replay permission.\n\
 android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
+repository returns historical Desktop Git counts; local refs only, no inspection, fetch or current-checkout claim.\n\
 observe --json may include optional setup state codes, not a passed check or release approval.\n\
 Identity requests additionally need the separate 15-minute Desktop request permission.\n\
 In Desktop, read the requested source, then either continue locally or allow only that exact change once.\n\
@@ -81,6 +83,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Error> {
         ["observe", project] => p::RequestBody::Observe(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["android-tools", project] => p::RequestBody::AndroidTools(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["requests", project] => p::RequestBody::Requests(p::ProjectQuery { project_id: Id::parse(project)? }),
+        ["repository", project] => p::RequestBody::Repository(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["operations", project] => p::RequestBody::Operations(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["operation", project, operation] => p::RequestBody::Operation(p::OperationQuery { project_id: Id::parse(project)?, operation_id: Id::parse(operation)? }),
         _ => return Err(Error::InvalidRequest),
@@ -95,12 +98,13 @@ struct CommandCapability {
     arguments: &'static [&'static str],
     description: &'static str,
 }
-const READ_COMMANDS: [CommandCapability; 7] = [
+const READ_COMMANDS: [CommandCapability; 8] = [
     CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
     CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
     CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover current-instance local-check/Android/iOS request IDs; not complete history or replay permission." },
+    CommandCapability { command: "repository", arguments: &["PROJECT_ID"], description: "Read historical Desktop Git counts; local refs only, no inspection or fetch." },
     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
 ];
@@ -184,6 +188,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
                 "commands": IDENTITY_ACTION_COMMANDS,
             },
+            "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
@@ -303,6 +308,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Operation(value) => operation(value),
         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+        p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
         p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
@@ -362,6 +368,29 @@ fn execute(options: Options) -> Result<(u8, Vec<u8>), Error> {
 mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
+    #[test]
+    fn repository_is_a_closed_historical_query_without_git_action_parameters() {
+        let id = "11111111111111111111111111111111";
+        let Parsed::Request(options) = parse(args(&["repository", id, "--json"])).unwrap() else { panic!("wrong command") };
+        let wire = p::encode_request(&options.request).unwrap();
+        assert!(matches!(p::decode_request(&wire).unwrap().request, p::RequestBody::Repository(_)));
+        for extra in ["--fetch", "--diff", "--root", "--run", "--remote"] {
+            assert!(parse(args(&["repository", id, extra])).is_err());
+        }
+        let mut input: serde_json::Value = serde_json::from_slice(&wire).unwrap(); input["request"]["params"]["fetch"] = serde_json::json!(true);
+        assert!(p::decode_request(&serde_json::to_vec(&input).unwrap()).is_err());
+        let data = crate::service_repository_summary::ObservationSlot::default();
+        let source = crate::service_repository_summary::tests::source(); data.publish(source.clone(), crate::service_repository_summary::tests::captured(1));
+        let mut response = p::Response { version: p::VERSION, request_id: options.request.request_id,
+            service_instance: Id::parse(id).unwrap(), client_id: Id::parse(id).unwrap(), session_id: Id::parse(id).unwrap(),
+            response: p::ResponseBody::Repository(data.view(Id::parse(id).unwrap(), &source.runtime_id, &source.canonical_root, source.device, source.inode)) };
+        let bytes = p::encode_response(&response).unwrap(); assert!(bytes.len() < crate::service_repository_summary::VIEW_BYTES);
+        assert!(human(&response.response).contains("historical") && human(&response.response).contains("no fetch"));
+        if let p::ResponseBody::Repository(view) = &mut response.response { view.capture = crate::service_repository_summary::Capture::Unavailable; }
+        assert!(p::encode_response(&response).is_err());
+        let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+        assert_eq!(caps["repository"]["startsInspection"], false); assert_eq!(caps["repository"]["includesPaths"], false);
+    }
     #[test]
     fn requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance() {
         let id = "11111111111111111111111111111111";
@@ -457,7 +486,7 @@ mod tests {
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
         let commands = value["commands"].as_array().unwrap();
-        assert_eq!(commands.len(), 7);
+        assert_eq!(commands.len(), 8);
         // Each advertised command/argument order is accepted by the actual
         // parser, not a separate documentation-only command implementation.
         for command in commands {
