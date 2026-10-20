@@ -9,7 +9,7 @@ impl GitLocalRuntimeSlots {
         crate::macos_history_inventory::CODE_CONTROL_RESERVE
             .checked_add(std::mem::size_of::<Self>())?
             .checked_add(crate::git_local_protocol::DATA_BACKING)?
-            .checked_add(crate::asset_source::GitLocalSources::working_bytes()?)
+            .checked_add(crate::asset_source::GitLocalSources::working_bytes()?)?
             .checked_add(crate::git_local_state::STATE_BACKING)
     }
     pub(crate) fn reserve_once(&mut self) -> Result<usize> {
