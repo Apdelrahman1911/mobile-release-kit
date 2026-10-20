@@ -39,18 +39,25 @@ impl PrivateStateDirectory {
         if !native_use_is_current(&book, original) {
             return Err(Error::Conflict.into());
         }
+        Self::enable_apple_provisioning_locked(&mut book)
+    }
+
+    // Fixed prerequisite for the explicit Git upgrade. The caller has already
+    // checked the SAME NativeUse and retains this SAME Book guard throughout;
+    // neither stage reopens the directory or borrows another operation's use.
+    fn enable_apple_provisioning_locked(book: &mut Book) -> Result<Snapshot> {
         let preflight = (|| {
             book.check()?;
             let dir = book.directory()?.file()?;
-            if named(dir, APPLE_UPGRADE_INTENT)?.is_some()
-                || named(dir, RESERVATION_V2_CANDIDATE)?.is_some()
-            {
-                return Err(Error::RecoveryRequired.into());
+            for name in UPGRADE_FILES {
+                if named(dir, name)?.is_some() {
+                    return Err(Error::RecoveryRequired.into());
+                }
             }
             let (_, reservation) = read_private(
                 dir,
                 "reservation",
-                RESERVATION_V2.len(),
+                MAX_RESERVATION_BYTES,
                 Some(book.reservation),
             )?;
             if StoreVersion::parse(&reservation)? != book.version {
@@ -83,14 +90,12 @@ impl PrivateStateDirectory {
                     intent.extend_from_slice(&Sha256::digest(&bytes));
                 }
             }
-            if book.version == StoreVersion::V1 {
-                for name in [
-                    Namespace::AppleProvisioning.file(),
-                    Namespace::AppleProvisioning.candidate(),
-                    Namespace::AppleProvisioning.intent(),
-                ] {
-                    if named(dir, name)?.is_some() {
-                        return Err(Error::RecoveryRequired.into());
+            for namespace in [Namespace::AppleProvisioning, Namespace::GitOperations] {
+                if !book.version.supports(namespace) {
+                    for name in [namespace.file(), namespace.candidate(), namespace.intent()] {
+                        if named(dir, name)?.is_some() {
+                            return Err(Error::RecoveryRequired.into());
+                        }
                     }
                 }
             }
@@ -141,7 +146,7 @@ impl PrivateStateDirectory {
                 .map_err(|_| StateError::unknown(effect))?;
             apple_upgrade_checkpoint(AppleUpgradePoint::ReservationRenamed)?;
             sync(dir)?;
-            let (published, actual) = read_private(dir, "reservation", RESERVATION_V2.len(), None)?;
+            let (published, actual) = read_private(dir, "reservation", MAX_RESERVATION_BYTES, None)?;
             let (current_apple, actual_apple) = read_private(
                 dir,
                 Namespace::AppleProvisioning.file(),

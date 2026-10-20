@@ -25,33 +25,40 @@ const HEADER: usize = 52;
 const MAGIC: &[u8; 8] = b"MRKST001";
 const RESERVATION: &[u8] = b"MRK application references v1\nprojects\ncredential-references\nversion-allocations\n";
 const RESERVATION_V2: &[u8] = b"MRK application references v2\nprojects\ncredential-references\nversion-allocations\napple-provisioning\n";
+const RESERVATION_V3: &[u8] = b"MRK application references v3\nprojects\ncredential-references\nversion-allocations\napple-provisioning\ngit-operations\n";
+const MAX_RESERVATION_BYTES: usize = RESERVATION_V3.len();
 const APPLE_UPGRADE_INTENT: &str = "apple-provisioning.upgrade-intent";
 const RESERVATION_V2_CANDIDATE: &str = ".reservation-v2.next";
+const GIT_UPGRADE_INTENT: &str = "git-operations.upgrade-intent";
+const RESERVATION_V3_CANDIDATE: &str = ".reservation-v3.next";
+const UPGRADE_FILES: [&str; 4] = [APPLE_UPGRADE_INTENT, RESERVATION_V2_CANDIDATE, GIT_UPGRADE_INTENT, RESERVATION_V3_CANDIDATE];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Namespace { Projects, CredentialReferences, VersionAllocations, AppleProvisioning }
+pub(crate) enum Namespace { Projects, CredentialReferences, VersionAllocations, AppleProvisioning, GitOperations }
 impl Namespace {
-    fn file(self) -> &'static str { match self { Self::Projects => "projects.state", Self::CredentialReferences => "credential-references.state", Self::VersionAllocations => "version-allocations.state", Self::AppleProvisioning => "apple-provisioning.state" } }
-    fn candidate(self) -> &'static str { match self { Self::Projects => ".projects.next", Self::CredentialReferences => ".credential-references.next", Self::VersionAllocations => ".version-allocations.next", Self::AppleProvisioning => ".apple-provisioning.next" } }
-    fn intent(self) -> &'static str { match self { Self::Projects => "projects.intent", Self::CredentialReferences => "credential-references.intent", Self::VersionAllocations => "version-allocations.intent", Self::AppleProvisioning => "apple-provisioning.intent" } }
-    fn tag(self) -> u8 { match self { Self::Projects => 1, Self::CredentialReferences => 2, Self::VersionAllocations => 3, Self::AppleProvisioning => 4 } }
+    fn file(self) -> &'static str { match self { Self::Projects => "projects.state", Self::CredentialReferences => "credential-references.state", Self::VersionAllocations => "version-allocations.state", Self::AppleProvisioning => "apple-provisioning.state", Self::GitOperations => "git-operations.state" } }
+    fn candidate(self) -> &'static str { match self { Self::Projects => ".projects.next", Self::CredentialReferences => ".credential-references.next", Self::VersionAllocations => ".version-allocations.next", Self::AppleProvisioning => ".apple-provisioning.next", Self::GitOperations => ".git-operations.next" } }
+    fn intent(self) -> &'static str { match self { Self::Projects => "projects.intent", Self::CredentialReferences => "credential-references.intent", Self::VersionAllocations => "version-allocations.intent", Self::AppleProvisioning => "apple-provisioning.intent", Self::GitOperations => "git-operations.intent" } }
+    fn tag(self) -> u8 { match self { Self::Projects => 1, Self::CredentialReferences => 2, Self::VersionAllocations => 3, Self::AppleProvisioning => 4, Self::GitOperations => 5 } }
 }
 // Ordinary first initialization deliberately remains exactly v1/old3.
 const NAMESPACES: [Namespace; 3] = [Namespace::Projects, Namespace::CredentialReferences, Namespace::VersionAllocations];
 const NAMESPACES_V2: [Namespace; 4] = [Namespace::Projects, Namespace::CredentialReferences, Namespace::VersionAllocations, Namespace::AppleProvisioning];
+const NAMESPACES_V3: [Namespace; 5] = [Namespace::Projects, Namespace::CredentialReferences, Namespace::VersionAllocations, Namespace::AppleProvisioning, Namespace::GitOperations];
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StoreVersion { V1, V2 }
+enum StoreVersion { V1, V2, V3 }
 impl StoreVersion {
     fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes == RESERVATION { Ok(Self::V1) }
         else if bytes == RESERVATION_V2 { Ok(Self::V2) }
+        else if bytes == RESERVATION_V3 { Ok(Self::V3) }
         else { Err(Error::RecoveryRequired.into()) }
     }
     fn namespaces(self) -> &'static [Namespace] {
-        match self { Self::V1 => &NAMESPACES, Self::V2 => &NAMESPACES_V2 }
+        match self { Self::V1 => &NAMESPACES, Self::V2 => &NAMESPACES_V2, Self::V3 => &NAMESPACES_V3 }
     }
     fn supports(self, namespace: Namespace) -> bool {
-        self == Self::V2 || namespace != Namespace::AppleProvisioning
+        self.namespaces().contains(&namespace)
     }
 }
 
@@ -434,14 +441,16 @@ mod native {
                     let dir = directory.file()?;
                     // A mixed/unfinished upgrade is never an empty namespace
                     // or permission to repair it during ordinary startup.
-                    if named(dir, APPLE_UPGRADE_INTENT)?.is_some() || named(dir, RESERVATION_V2_CANDIDATE)?.is_some() {
-                        return Err(Error::RecoveryRequired.into());
+                    for name in UPGRADE_FILES {
+                        if named(dir, name)?.is_some() { return Err(Error::RecoveryRequired.into()); }
                     }
-                    let (reservation, contents) = read_private(dir, "reservation", RESERVATION_V2.len(), None)?;
+                    let (reservation, contents) = read_private(dir, "reservation", MAX_RESERVATION_BYTES, None)?;
                     let version = StoreVersion::parse(&contents)?;
-                    if version == StoreVersion::V1 {
-                        for name in [Namespace::AppleProvisioning.file(), Namespace::AppleProvisioning.candidate(), Namespace::AppleProvisioning.intent()] {
-                            if named(dir, name)?.is_some() { return Err(Error::RecoveryRequired.into()); }
+                    for namespace in [Namespace::AppleProvisioning, Namespace::GitOperations] {
+                        if !version.supports(namespace) {
+                            for name in [namespace.file(), namespace.candidate(), namespace.intent()] {
+                                if named(dir, name)?.is_some() { return Err(Error::RecoveryRequired.into()); }
+                            }
                         }
                     }
                     let mut originals = BTreeMap::new();
@@ -594,6 +603,7 @@ mod native {
     // escape for caller-selected filesystem names is introduced.
     include!("application_state_store_native_use.rs");
     include!("application_state_store_apple_upgrade.rs");
+    include!("application_state_store_git_upgrade.rs");
 
     #[cfg(test)]
     mod tests {
