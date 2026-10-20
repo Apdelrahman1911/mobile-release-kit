@@ -59,8 +59,13 @@ function token(value: unknown): value is string { return typeof value === 'strin
 function projectId(value: unknown): value is string { return typeof value === 'string' && value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(value); }
 function scope(value: unknown): boolean {
   const names = object(value) && Object.hasOwn(value, 'executionMode') ? ['platform', 'stage', 'purpose', 'executionMode'] : ['platform', 'stage', 'purpose'];
-  return keys(value, names) && one(value.platform, ASSET_PLATFORMS) && one(value.stage, ASSET_STAGES) && one(value.purpose, ASSET_PURPOSES)
-    && (!Object.hasOwn(value, 'executionMode') || one(value.executionMode, ASSET_EXECUTION_MODES));
+  if (!keys(value, names) || !one(value.platform, ASSET_PLATFORMS) || !one(value.stage, ASSET_STAGES) ||
+      Object.hasOwn(value, 'executionMode') && !one(value.executionMode, ASSET_EXECUTION_MODES)) return false;
+  // Apple setup is a separate local scope, not another generic release mode.
+  // Omitted executionMode still means GitHub for the existing three purposes.
+  return value.purpose === 'provisioning'
+    ? value.platform === 'ios' && value.stage === 'candidate' && value.executionMode === 'local'
+    : one(value.purpose, ASSET_PURPOSES);
 }
 function list(value: unknown, maximum: number, check: (value: unknown) => boolean): value is unknown[] {
   return Array.isArray(value) && value.length <= maximum && value.every(check);
@@ -122,6 +127,7 @@ function assessment(value: unknown): value is CredentialAssessment {
       !scope(value.context) || !one(value.state, states) || !one(value.identity, ['not-applicable', 'not-assessed', 'match', 'mismatch']) ||
       !keys(value.applicability, ['state', 'reason']) || !one(value.applicability.state, ['required', 'not-applicable']) ||
       !one(value.applicability.reason, ['selected', 'wrong-platform', 'platform-disabled', 'not-required'])) return false;
+  if ((value.context as ObjectValue).purpose === 'provisioning' && !one(value.kind, ['asc-p8', 'apple-p12', 'apple-profile'])) return false;
   const layout = fieldLayout[value.kind as AssetKind];
   if (!Array.isArray(value.fields) || value.fields.length !== layout.length || !value.fields.every((field, index) => {
     const expected = layout[index];

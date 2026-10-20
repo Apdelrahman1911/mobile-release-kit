@@ -6,7 +6,7 @@ export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-revie
 export type AssetKind = AssetFileKind | AssetScalarKind;
 export type AssetPlatform = 'android' | 'ios' | 'project';
 export type AssetStage = 'candidate' | 'external-testing' | 'production';
-export type AssetPurpose = 'full' | 'signing' | 'store';
+export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning';
 export type AssetExecutionMode = 'github' | 'local';
 export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose; executionMode?: AssetExecutionMode }
 export interface AssetContextRequest extends AssetScope { projectId: string; draft: JsonObject }

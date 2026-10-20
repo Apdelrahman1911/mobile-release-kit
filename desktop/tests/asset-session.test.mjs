@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason, assetStorageReason } from '../src/assetSessionController.ts';
-import { ASSET_KINDS, ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { ASSET_KINDS, ASSET_PURPOSES, ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
@@ -188,6 +188,52 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
   let read = false;
   const accessor = []; Object.defineProperty(accessor, 0, { enumerable: true, get() { read = true; return null; } });
   assert.equal(assetJsonFits(accessor, 32768), false); assert.equal(read, false);
+});
+
+test('Provisioning wire scope requires explicit local iOS candidate without expanding the manual release selector', () => {
+  assert.deepEqual(ASSET_PURPOSES, ['full', 'signing', 'store']);
+  const scope = { platform: 'ios', stage: 'candidate', purpose: 'provisioning', executionMode: 'local' };
+  const request = (value) => ({ projectId: 'project-a', draft: {}, ...value });
+  const observed = (value) => status(2, { context: { revision: 1, projectId: 'project-a', ...value } });
+  assert.equal(assetRequestFits('asset_context', request(scope)), true);
+  assert.deepEqual(parseAssetStatus(observed(scope)), observed(scope));
+  for (const mutate of [
+    (s) => { delete s.executionMode; }, (s) => { s.executionMode = 'github'; },
+    (s) => { s.platform = 'android'; }, (s) => { s.platform = 'project'; },
+    (s) => { s.stage = 'external-testing'; }, (s) => { s.stage = 'production'; },
+  ]) {
+    const changed = { ...scope }; mutate(changed);
+    assert.equal(assetRequestFits('asset_context', request(changed)), false);
+    assert.equal(parseAssetStatus(observed(changed)), null);
+  }
+});
+
+test('Provisioning assessments accept only the three Apple inputs and remain format-only with exact context', () => {
+  const scope = { platform: 'ios', stage: 'candidate', purpose: 'provisioning', executionMode: 'local' };
+  const observed = (evaluated) => status(2, {
+    context: { ...context, ...scope },
+    operation: operation({ source: 'captured', assessment: { ...evaluated, context: { ...scope } },
+      preview: { token: A, action: 'save', expiresInMs: 10000,
+        subject: { type: 'record', kind: evaluated.kind, change: 'new', recordId: null, recordRevision: null } } }),
+  });
+  for (const kind of ['asc-p8', 'apple-p12', 'apple-profile']) {
+    const value = observed(appleAssessment(kind));
+    assert.deepEqual(parseAssetStatus(value), value);
+    for (const mutate of [
+      (s) => { delete s.operation.assessment.context.executionMode; },
+      (s) => { s.operation.assessment.context.purpose = 'signing'; },
+      (s) => { s.operation.assessment.context.stage = 'production'; },
+      ...['selectedFilesRead', 'keyringAccessed', 'storageWritesPerformed', 'projectCodeExecuted'].map((field) =>
+        (s) => { s.operation.assessment.assurance[field] = true; }),
+      ...['sourceCustody', 'nativeValidation', 'serviceValidation', 'releaseReadiness'].map((field) =>
+        (s) => { s.operation.assessment.assurance[field] = 'verified'; }),
+    ]) {
+      const changed = structuredClone(value); mutate(changed);
+      assert.equal(parseAssetStatus(changed), null);
+    }
+  }
+  assert.equal(parseAssetStatus(observed(assessment())), null);
+  assert.equal(parseAssetStatus(observed(firebaseAssessment('ios-firebase'))), null);
 });
 
 test('iOS Firebase and separately admitted Apple and ASC files extend only the exact closed session kinds', () => {
