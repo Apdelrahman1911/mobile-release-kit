@@ -647,7 +647,7 @@ impl Observation {
                     document
                         .installed_upload_vault(match case {
                             Case::RoundTrip | Case::ColdProduce => Action::Relock,
-                            Case::ColdReopen => return Err(BridgeError::invalid()),
+                            Case::ColdReopen | Case::BackupRoundTrip => return Err(BridgeError::invalid()),
                             Case::StopBeforeGo => Action::RecoveredRelock,
                             Case::StopAfterNew => Action::BoundRelock,
                         })
