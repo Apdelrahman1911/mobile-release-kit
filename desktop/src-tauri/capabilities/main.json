@@ -62,6 +62,7 @@
     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
     "allow-version-enrollment-status", "allow-version-enrollment-review", "allow-version-enrollment-confirm", "allow-version-enrollment-cancel",
+    "allow-version-reserve-status", "allow-version-reserve-review", "allow-version-reserve-start", "allow-version-reserve-cancel", "allow-version-reserve-edit",
     "allow-git-local-status", "allow-git-local-prepare", "allow-git-local-apply", "allow-git-local-discard", "allow-git-local-cancel",
     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",

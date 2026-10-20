@@ -8,13 +8,13 @@ use crate::supervisor::{
 };
 use std::sync::atomic::AtomicU8;
 
-const RESERVED: u8 = 0;
-const ARMED: u8 = 1;
-const COMPLETING: u8 = 2;
-const RETURNED: u8 = 3;
-const UNKNOWN: u8 = 4;
+pub(super) const RESERVED: u8 = 0;
+pub(super) const ARMED: u8 = 1;
+pub(super) const COMPLETING: u8 = 2;
+pub(super) const RETURNED: u8 = 3;
+pub(super) const UNKNOWN: u8 = 4;
 
-fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
+pub(super) fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
     let result = slot.lock();
     if result.is_err() {
         // Preserve the original slot and its poison. Only STOP/first ticket
@@ -25,29 +25,47 @@ fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<Mu
 }
 
 pub(super) struct Lane {
-    saved: Arc<SavedObservationLane>,
-    input: Arc<VersionAllocationSourceInput>,
-    stage: AtomicU8,
-    completion_returned: AtomicBool,
-    request: Mutex<Option<(String, Arc<VersionAllocationSourceRequest>)>>,
-    ticket: Mutex<Option<VersionAllocationSourceTicket>>,
-    result: Mutex<Option<VersionAllocationSourceReceipt>>,
-    reservation_bytes: usize,
+    pub(super) saved: Arc<SavedObservationLane>,
+    pub(super) input: Arc<VersionAllocationSourceInput>,
+    pub(super) stage: AtomicU8,
+    pub(super) completion_returned: AtomicBool,
+    pub(super) request: Mutex<Option<(String, Arc<VersionAllocationSourceRequest>)>>,
+    pub(super) ticket: Mutex<Option<VersionAllocationSourceTicket>>,
+    pub(super) result: Mutex<Option<VersionAllocationSourceReceipt>>,
+    pub(super) reservation_bytes: usize,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) reserve: Option<Arc<version_reserve::Lane>>,
 }
 impl Lane {
-    fn returned(&self) -> bool {
+    pub(super) fn returned(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&self.reserve {
+            return self.stage.load(Ordering::SeqCst)!=UNKNOWN && reserve.returned()
+                && lock(&self.ticket,&self.stage).is_ok_and(|ticket|ticket.is_none());
+        }
         self.stage.load(Ordering::SeqCst) == RETURNED
             && self.completion_returned.load(Ordering::SeqCst)
             && lock(&self.result, &self.stage).is_ok_and(|result| result.is_some())
             && lock(&self.ticket, &self.stage).is_ok_and(|ticket| ticket.is_none())
     }
-    fn retained_bytes(&self) -> Option<usize> {
+    pub(super) fn retained_bytes(&self) -> Option<usize> {
         // The whole original fixed reservation stays charged while this ticket
         // is retained, even if its public result is much smaller. No shrinking
         // clone or early FIN releases native/code backing for another owner.
         let has_ticket = lock(&self.ticket, &self.stage).ok()?.is_some();
-        let original = if has_ticket {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let reserve=self.reserve.as_ref();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let reserving=false;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let reserving=reserve.is_some();
+        let original = if has_ticket || reserving && !self.returned() {
             self.reservation_bytes
+        } else if reserving {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            { self.input.retained_bytes()?.checked_add(reserve?.keep_bytes()?)? }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            { return None; }
         } else if self.returned() {
             self.input.retained_bytes()?.checked_add(4096)?
         } else {
@@ -60,6 +78,8 @@ impl Lane {
     }
     fn fail_unknown(&self, document: &DocumentBinding) {
         self.stage.store(UNKNOWN, Ordering::SeqCst);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&self.reserve {reserve.unknown();}
         // Do not call ControlSlot.poisoned here: its read-host retirement may
         // perform IO, and some callers still hold Doc. This original lane
         // remains an absorbing busy/exit fence; no new control owner is minted.
@@ -77,6 +97,8 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
 }
 pub(super) fn stop(state: &DocumentState) {
     if let Some(lane) = &state.version_allocation_source {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&lane.reserve {reserve.stop();}
         // This is STOP on the same actual ticket; no fabricated terminal or
         // lane removal. Unknown/late result keeps ordinary operations blocked.
         let ticket = lock(&lane.ticket, &lane.stage).unwrap_or_else(|poison| poison.into_inner());
@@ -90,8 +112,8 @@ pub(super) fn stop(state: &DocumentState) {
 /// original completion independently retains that same Document until its
 /// actual return; loss/unknown never substitutes a new gate or completion.
 pub(crate) struct VersionAllocationSourceGoGate {
-    document: Weak<Inner>,
-    lane: Weak<Lane>,
+    pub(super) document: Weak<Inner>,
+    pub(super) lane: Weak<Lane>,
 }
 impl VersionAllocationSourceGoGate {
     fn original(&self, input: &Arc<VersionAllocationSourceInput>) -> Result<(DocumentBinding, Arc<Lane>), BridgeError> {
@@ -103,7 +125,11 @@ impl VersionAllocationSourceGoGate {
         Ok((document, lane))
     }
     pub(crate) fn current_control(&self, input: &Arc<VersionAllocationSourceInput>) -> bool {
-        self.original(input).is_ok_and(|(document, lane)| lane.saved.current_version_source(&document.inner, input))
+        self.original(input).is_ok_and(|(document, lane)| {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if lane.reserve.as_ref().is_some_and(|v|!v.current_control()) {return false;}
+            lane.saved.current_version_source(&document.inner, input)
+        })
     }
     pub(crate) fn check_current(&self, input: &Arc<VersionAllocationSourceInput>) -> Result<(), BridgeError> {
         let (document, lane) = self.original(input)?;
@@ -128,6 +154,31 @@ impl VersionAllocationSourceGoGate {
         }
         *slot = Some((id.to_owned(), request));
         Ok(())
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn claim_reserve(&self,input:&Arc<VersionAllocationSourceInput>,id:&str,
+        request:&Arc<VersionAllocationSourceRequest>,claim:impl FnOnce()->bool)
+        ->Result<zeroize::Zeroizing<Vec<u8>>,BridgeError> {
+        let(document,lane)=self.original(input)?;
+        let state=document.lock();
+        let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
+        document.version_source_current_with_edit(&state,&lane,&edit)?;
+        {
+            let original=lock(&lane.request,&lane.stage).map_err(|_|BridgeError::cleanup_unknown())?;
+            if !original.as_ref().is_some_and(|(key,bound)|key==id&&Arc::ptr_eq(bound,request))
+                ||!request.same_input(input) {return Err(changed());}
+        }
+        document.reserve_source_go(&state,&lane,request,claim)
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn check_reserve(&self,input:&Arc<VersionAllocationSourceInput>,id:&str,
+        request:&Arc<VersionAllocationSourceRequest>)->Result<(),BridgeError> {
+        let(document,lane)=self.original(input)?;
+        let state=document.lock();
+        document.version_source_current(&state,&lane)?;
+        let original=lock(&lane.request,&lane.stage).map_err(|_|BridgeError::cleanup_unknown())?;
+        if lane.reserve.is_none()||!original.as_ref().is_some_and(|(key,bound)|key==id&&Arc::ptr_eq(bound,request))
+            ||!request.same_input(input){return Err(changed());}Ok(())
     }
     pub(crate) fn claim(
         &self,
@@ -158,8 +209,8 @@ impl VersionAllocationSourceGoGate {
 }
 
 pub(crate) struct VersionAllocationSourceCompletion {
-    document: DocumentBinding,
-    lane: Arc<Lane>,
+    pub(super) document: DocumentBinding,
+    pub(super) lane: Arc<Lane>,
 }
 impl VersionAllocationSourceCompletion {
     pub(crate) fn arm(&self) -> Result<(), BridgeError> {
@@ -218,11 +269,11 @@ fn busy() -> BridgeError {
 }
 
 impl DocumentBinding {
-    fn version_source_current(&self, state: &DocumentState, lane: &Arc<Lane>) -> Result<(), BridgeError> {
+    pub(super) fn version_source_current(&self, state: &DocumentState, lane: &Arc<Lane>) -> Result<(), BridgeError> {
         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
         self.version_source_current_with_edit(state, lane, &edit)
     }
-    fn version_source_current_with_edit(
+    pub(super) fn version_source_current_with_edit(
         &self,
         state: &DocumentState,
         lane: &Arc<Lane>,
@@ -245,12 +296,14 @@ impl DocumentBinding {
         if !input.matches_version_source(&self.inner, &lane.saved, &lane.input, edit) {
             return Err(changed());
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.reserve_source_current(state,lane,edit)?;
         Ok(())
     }
     /// Native admission only. The root, saved hashes/path, account/provider
     /// projection and private filesystem data are never renderer arguments.
     /// This action does not select/mint a candidate or reserve/change a version.
-    fn start_version_allocation_source(&self, project_id: &str, reference: &str) -> Result<Arc<Lane>, BridgeError> {
+    pub(super) fn start_version_allocation_source(&self, project_id: &str, reference: &str) -> Result<Arc<Lane>, BridgeError> {
         let started = Instant::now();
         if !crate::protocol::valid_id(project_id) || !crate::supervisor::version_allocation_source_branch(reference) {
             return Err(BridgeError::invalid());
@@ -259,7 +312,7 @@ impl DocumentBinding {
         if pending(&state) {
             return Err(busy());
         }
-        self.saved_observation_gate(&state, None)?;
+        self.version_source_observation_gate(&state)?;
         if !self.inner.android_registration_control.idle_for_saved_observation()
             || !self.inner.bridge.supervisor.version_allocation_source_available()
         {
@@ -311,6 +364,8 @@ impl DocumentBinding {
                 ticket: Mutex::new(None),
                 result: Mutex::new(None),
                 reservation_bytes: quote,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                reserve: None,
             });
             let gate =
                 VersionAllocationSourceGoGate { document: Arc::downgrade(&self.inner), lane: Arc::downgrade(&lane) };
@@ -357,6 +412,9 @@ impl DocumentBinding {
         reference: &str,
     ) -> Result<VersionAllocationSource, BridgeError> {
         let lane = self.start_version_allocation_source(project_id, reference)?;
+        self.finish_version_source_read(lane).await
+    }
+    pub(super) async fn finish_version_source_read(&self,lane:Arc<Lane>)->Result<VersionAllocationSource,BridgeError>{
         let wait = lock(&lane.ticket, &lane.stage)
             .map_err(|_| BridgeError::cleanup_unknown())?
             .as_ref()

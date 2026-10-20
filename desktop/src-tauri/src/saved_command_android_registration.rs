@@ -229,6 +229,21 @@ impl Publisher {
         // Same exact sole-publisher proof, no widening of ordinary epoch().
         self.tool_source_epoch()
     }
+    // Closed reserved-version chain comparison, not a new publisher/acceptance.
+    // Wait-only observation for the retained reserved-version native job.
+    // Other pending publishers are NOT acceptance; their eventual epoch is
+    // still compared exactly and never adopted. Existing strict API unchanged.
+    pub(crate) fn reserved_version_epoch(&self)->Result<Option<u64>,BridgeError>{
+        let book=match self.slot.book.try_lock(){Ok(b)=>b,Err(TryLockError::WouldBlock)=>return Ok(None),
+            Err(TryLockError::Poisoned(_))=>return Err(BridgeError::cleanup_unknown())};
+        if self.finished||self.index>=8||self.slot.is_unknown()
+            ||!book.pending[self.index].is_some_and(|p|p.serial==self.serial&&p.accepted==self.accepted){return Err(BridgeError::cleanup_unknown());}
+        if book.cancel.is_some()||book.pending.iter().enumerate().any(|(i,p)|i!=self.index&&p.is_some()){return Ok(None);}
+        Ok(Some(book.epoch))
+    }
+    pub(crate) fn reserved_version_serial(&self) -> Result<u64, BridgeError> {
+        self.tool_source_epoch()?; Ok(self.serial)
+    }
     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
         let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()

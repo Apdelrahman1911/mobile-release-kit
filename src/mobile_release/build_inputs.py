@@ -1765,8 +1765,11 @@ class InvocationCustody:
               "allocation source requires its original cancellation borrower")
         if allocation is not None:
             from ._desktop_version_allocation_source_control import BorrowedAllocationInput
-            _need(type(guard) is DefaultCancellation and type(allocation) is BorrowedAllocationInput
-                  and allocation.guard is guard and guard._saved_command_input() is allocation,
+            from .reserved_version_edit import BorrowedReservedVersionInput
+            _need(type(guard) is DefaultCancellation and allocation.guard is guard
+                  and (type(allocation) is BorrowedAllocationInput and guard._saved_command_input() is allocation
+                       or type(allocation) is BorrowedReservedVersionInput
+                       and guard._edit_source is allocation.owner.input and allocation.owner.active is allocation),
                   "allocation source borrower is not original")
         _need((mode == "store") == (lane_evidence is not None),
               "Store invocation requires exactly its original composite record")

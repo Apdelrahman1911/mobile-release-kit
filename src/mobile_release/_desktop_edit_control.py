@@ -50,6 +50,7 @@ class EditInput:
         self.custody_unknown = False
         self.buffer = bytearray()
         self.frames = 0
+        self.reserved = None  # Closed native reserved-version handoff only.
 
     def _owner(self) -> None:
         if (self.pid != os.getpid() or self.thread is not threading.current_thread()
@@ -92,6 +93,13 @@ class EditInput:
                 guard.cancelled = True
             return
         now = time.monotonic()
+        if self.reserved is not None:
+            try:
+                self.reserved.check_clock()
+            except BaseException:
+                self.reserved.failure_observed()
+                self._stop()
+                return
         if ((not self.apply_active and now >= self.review_end)
                 or self.active_end is not None and now >= self.active_end):
             self._stop()
@@ -155,6 +163,8 @@ class EditInput:
                 self.apply_active = request.op == "apply"
                 if sequence != 0:
                     self.active_end = time.monotonic() + 30.0
+                    if self.reserved is not None:
+                        self.active_end = min(self.active_end, self.reserved.work_end)
                 return request
             if self.fd is None:
                 raise ProtocolError("Original edit input is unavailable")

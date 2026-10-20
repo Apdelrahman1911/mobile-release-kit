@@ -44,6 +44,8 @@ pub(crate) use version_allocation::{VersionAllocationSource, VersionAllocationSo
     VersionAllocationSourceInput, VersionAllocationSourceReceipt, VersionAllocationSourceRequest,
     VersionAllocationSourceTicket};
 pub(crate) use version_allocation::source_branch as version_allocation_source_branch;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use version_allocation::{VersionReserveControl,VersionReserveInvocation,VersionReserveJoined};
 #[path = "supervisor_history.rs"]
 mod history;
 pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
@@ -1191,7 +1193,7 @@ impl Owner {
                 let outcome = result.and_then(|value| match value {
                     ReadOutcome::VersionAllocationSource => Ok(()), _ => Err(BridgeError::protocol()),
                 });
-                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown); }
+                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown, cleanup_endpoint); }
             }
             Profile::GitHubAuth => {
                 drop(reply);
@@ -1572,7 +1574,7 @@ impl Supervisor {
             // Arm immediately before the original roster insertion. Every normal
             // Err above is known nonentry; an armed panic/loss retains the lane.
             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
-            if let Some(source) = &owner.version_allocation_source { source.arm()?; }
+            if let Some(source) = &owner.version_allocation_source { source.arm(&owner)?; }
             if let Some(enrollment) = &owner.version_enrollment { enrollment.arm(&owner)?; }
             owners.insert(key, owner.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
@@ -3006,7 +3008,7 @@ async fn observe_installed_original(resources: &mut Resources, inner: &Arc<Inner
     true
 }
 
-enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourceWork(version_allocation::Work), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
 
 async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
     let mut resources = owner.resources.lock().await;
@@ -3799,7 +3801,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         let out_pending = resources.stdout.is_some();
         let err_pending = resources.stderr.is_some();
         let post_pending=resources.history_post.is_some();
-        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.before_go_pending());
+        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.work_pending());
         let local_candidate_pending=resources.git_local.as_ref().is_some_and(|local|local.candidate_pending());
         if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none()
             && !source_post_pending && source_post_receive.is_none() && !local_candidate_pending { break; }
@@ -3810,8 +3812,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                     if local_candidate_pending=>Event::GitLocalCandidate(candidate),
                 request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
                     if source_post_receive.is_some() => Event::SourcePostRequest(request),
-                result = async { match version_allocation_source { Some(source) => source.join_before_go().await, None => std::future::pending().await } },
-                    if source_post_pending => Event::SourcePost(result),
+                result = async { match version_allocation_source { Some(source) => source.next_work().await, None => std::future::pending().await } },
+                    if source_post_pending => Event::SourceWork(result),
                 request = async { match &mut history_post_receive {Some(value)=>value.await,None=>std::future::pending().await} }, if history_post_receive.is_some() => Event::HistoryPostRequest(request),
                 result = join_slot(history_post), if post_pending => Event::HistoryPost(result),
                 status = wait_original(child), if wait_pending => Event::Wait(status),
@@ -3832,11 +3834,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                     (Err(_), _) => owner.fail(BridgeError::cleanup_unknown()),
                 }
             },
-            Event::SourcePost(result) => {
+            Event::SourceWork(result) => {
                 let Some(source) = resources.version_allocation_source.as_mut() else {
                     owner.unknown(&inner); return DriverEnd::RetainedUnknown;
                 };
-                if !source.before_go_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
+                if !source.work_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
             },
             Event::HistoryPostRequest(request)=>{
                 history_post_receive.take();

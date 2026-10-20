@@ -717,6 +717,7 @@ impl ConnectionState {
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
             || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+            || self.version_reserve_pending()
         {
             return Err(refused(p::Reason::Busy));
         }

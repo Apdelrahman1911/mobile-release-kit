@@ -157,6 +157,16 @@ def run_owned(
     from ._command_process import CommandCallEvidence, run_command
 
     source = None if cancellation is None else getattr(cancellation, "_saved_command_source", None)
+    reserved = None if cancellation is None else getattr(cancellation, "_version_allocation_source", None)
+    from .reserved_version_edit import BorrowedReservedVersionInput
+    if type(reserved) is BorrowedReservedVersionInput:
+        if source is not None or type(cancellation) is not DefaultCancellation:
+            raise ValueError("Reserved edit requires its original input")
+        reserved.admit_selected(reserved.owner.data.reservation.request)
+        reserved.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+            capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+            cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding, evidence=_evidence)
+        timeout, output_limit = reserved.command_limits(timeout, capture, output_limit)
     if source is not None:
         from ._desktop_saved_command_control import SavedCommandDomain, source_domain
         domain = source_domain(source)

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 pub(crate) const PROTOCOL: &str = "mrk-version-allocation-runtime/1";
+pub(crate) const NATIVE_PROTOCOL: &str = "mrk-version-reserve/1";
 pub(crate) const INITIAL_LIMIT: usize = 8192;
 pub(crate) const READY_LIMIT: usize = 512;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -74,10 +75,22 @@ pub(crate) struct Request {
     selected: AllocationRequest, initial: Vec<u8>, initial_digest: String,
     initial_revision: Revision, initial_state_sha256: String,
     go_prefix: Vec<u8>, go_suffix: Vec<u8>,
+    native: bool, hard_ns: Option<u64>,
 }
 impl Request {
     pub(crate) fn from_port(port: &VersionAllocationStatePort, id: &str, kind: Kind,
         account_id: &str, clock: Clock, observations: &[Value]) -> Result<Self> {
+        Self::from_port_inner(port,id,kind,account_id,clock,observations,None)
+    }
+    /// Called by the original SOURCE inspection after its held native facet
+    /// and already-durable selection. These values do not create that custody.
+    pub(crate) fn from_source(port: &VersionAllocationStatePort, id: &str, kind: Kind,
+        account_id: &str, clock: Clock, observations: &[Value], source:Value, provider:Value) -> Result<Self> {
+        require(port.bounded)?;
+        Self::from_port_inner(port,id,kind,account_id,clock,observations,Some((source,provider)))
+    }
+    fn from_port_inner(port: &VersionAllocationStatePort, id: &str, kind: Kind,
+        account_id: &str, clock: Clock, observations: &[Value], native_source:Option<(Value,Value)>) -> Result<Self> {
         require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2)?;
         let selected = AllocationRequest(data(port.selected_request())?.clone());
         // Exact pending reconciliation is read-only and must remain possible
@@ -92,9 +105,21 @@ impl Request {
         require(!snapshot.bytes.is_empty() && snapshot.bytes.len() <= STATE_LIMIT)?;
         let authority = port.authority.clone();
         let local_project_id = port.project.project_id.as_str().to_owned();
-        let initial = encoded(&json!({"protocol":PROTOCOL,"id":id,"action":{
+        let native = native_source.is_some();
+        let protocol = if native { NATIVE_PROTOCOL } else { PROTOCOL };
+        let hard_ns = if native { Some(clock.hard_end_ns.parse::<u64>().map_err(|_|BridgeError::protocol())?) } else { None };
+        let mut action = json!({
             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
-            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock}}), INITIAL_LIMIT)?;
+            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock});
+        if let Some((source,provider)) = native_source {
+            require(selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"])
+                && source["ref"]==selected.0["source"]["ref"]
+                && source["savedConfig"]["sha256"]==selected.0["source"]["configurationSha256"]
+                && source["savedVersion"]["sha256"]==selected.0["source"]["versionSha256"]
+                && provider["kind"]=="macos-clt-git/1" && snapshot.bytes.len()<=256*1024)?;
+            action["source"]=source; action["provider"]=provider;
+        }
+        let initial = encoded(&json!({"protocol":protocol,"id":id,"action":action}), INITIAL_LIMIT)?;
         let initial_digest = digest(&initial);
         let public = json!({"observations":observations,"request":selected,
             "requestSha256":initial_digest,"state":{"revision":snapshot.revision.0,"payload":base64(&snapshot.bytes)?}});
@@ -105,20 +130,24 @@ impl Request {
         let mut public = data(canonical(&public, GO_LIMIT - 2 * TOKEN_LIMIT - 256))?;
         require(public.pop() == Some(b'}'))?;
         go_prefix.extend(public); go_prefix.extend(b",\"token\":");
-        let go_suffix = format!("}},\"id\":\"{id}\",\"protocol\":\"{PROTOCOL}\"}}\n").into_bytes();
+        let go_suffix = format!("}},\"id\":\"{id}\",\"protocol\":\"{protocol}\"}}\n").into_bytes();
         require(go_prefix.len().checked_add(2 * TOKEN_LIMIT + 2).and_then(|n| n.checked_add(go_suffix.len()))
             .is_some_and(|n| n <= GO_LIMIT))?;
         Ok(Self { id:id.to_owned(), kind, authority, local_project_id, store:port.store.clone(), project:port.project.clone(),
             selected, initial, initial_digest,
-            initial_revision:snapshot.revision, initial_state_sha256:digest(&snapshot.bytes), go_prefix, go_suffix })
+            initial_revision:snapshot.revision, initial_state_sha256:digest(&snapshot.bytes), go_prefix, go_suffix, native, hard_ns })
     }
     pub(crate) fn initial(&self) -> &[u8] { &self.initial }
     pub(crate) fn initial_digest(&self) -> &str { &self.initial_digest }
     pub(crate) fn selected(&self) -> &Value { &self.selected.0 }
+    pub(crate) fn matches_repository(&self,repository:&str,id:&str)->bool {
+        self.authority.repository==repository&&self.authority.repository_id==id
+    }
     pub(crate) fn kind(&self) -> Kind { self.kind }
+    fn protocol(&self)->&'static str { if self.native { NATIVE_PROTOCOL } else { PROTOCOL } }
     pub(crate) fn ready(&self, raw: &[u8]) -> Result<()> {
         let value = frame(raw, READY_LIMIT)?;
-        require(value == json!({"protocol":PROTOCOL,"id":self.id,"ready":{"requestSha256":self.initial_digest}}))
+        require(value == json!({"protocol":self.protocol(),"id":self.id,"ready":{"requestSha256":self.initial_digest}}))
     }
     /// Called only from the native token/GO gate. Its successful return is still
     /// bytes, not permission; the original owner separately claims and writes.
@@ -166,7 +195,7 @@ impl Step {
     pub(crate) fn ack(&self, request: &Request, ack: &WriteAck) -> Result<Vec<u8>> {
         require(self.request_digest == request.initial_digest && self.expected_revision.0.checked_add(1) == Some(ack.revision.0)
             && self.payload_sha256 == ack.payload_sha256)?;
-        encoded(&json!({"protocol":PROTOCOL,"id":request.id,"ack":{"requestSha256":request.initial_digest,
+        encoded(&json!({"protocol":request.protocol(),"id":request.id,"ack":{"requestSha256":request.initial_digest,
             "sequence":self.sequence,"revision":ack.revision.0,"payloadSha256":ack.payload_sha256,
             "effect":"committed","durability":"durable","cleanup":"settled"}}), ACK_LIMIT)
     }
@@ -191,7 +220,7 @@ impl Cursor {
         let usable = !self.poisoned && self.outstanding.is_none() && !self.finished && self.stage != Stage::Terminal;
         self.poisoned = true; require(usable && self.request_digest == request.initial_digest)?;
         let value = frame(raw, STATE_FRAME_LIMIT)?;
-        require(closed(&value, &["protocol","id","state"]) && value["protocol"] == PROTOCOL && value["id"] == request.id)?;
+        require(closed(&value, &["protocol","id","state"]) && value["protocol"] == request.protocol() && value["id"] == request.id)?;
         let state = &value["state"];
         require(closed(state, &["requestSha256","sequence","expectedRevision","payloadSha256","transition"])
             && state["requestSha256"] == request.initial_digest && self.sequence < MAX_TRANSITIONS
@@ -249,9 +278,10 @@ impl Cursor {
         self.poisoned = true; require(usable && self.request_digest == request.initial_digest)?;
         require(request.matches_port(port))?;
         let value = frame(raw, FIN_LIMIT)?;
-        require(closed(&value,&["protocol","id","finished"]) && value["protocol"] == PROTOCOL && value["id"] == request.id)?;
+        require(closed(&value,&["protocol","id","finished"]) && value["protocol"] == request.protocol() && value["id"] == request.id)?;
         let row = &value["finished"];
-        require(closed(row,&["requestSha256","sequence","revision","payloadSha256","outcome"])
+        require(closed(row,if request.native { &["requestSha256","sequence","revision","payloadSha256","outcome","source","firstFailureNs","lifetime"] }
+            else { &["requestSha256","sequence","revision","payloadSha256","outcome"] })
             && row["requestSha256"] == request.initial_digest && row["sequence"].as_u64() == Some(self.sequence as u64)
             && row["revision"].as_u64() == Some(self.revision.0) && row["payloadSha256"] == self.state_sha256)?;
         let snapshot = data(port.snapshot())?;
@@ -282,15 +312,36 @@ impl Cursor {
                 && checkpoint.as_ref() == Some(&local.checkpoint) && candidate.reservation.as_ref() == Some(&reservation)
                 && self.stage == Stage::Terminal)?;
         }
+        let (source,first_failure_ns) = if request.native {
+            let life=&row["lifetime"];
+            require(closed(life,&["originalsClosed","borrowEnded","handlersRestored","commands","profileCalls"])
+                && life["originalsClosed"]==true && life["borrowEnded"]==true && life["handlersRestored"]==true
+                && life["profileCalls"].as_u64()==Some(0))?;
+            let commands=life["commands"].as_u64().filter(|n|*n<=8).ok_or_else(BridgeError::protocol)?;
+            let source=if row["source"].is_null() {None} else {
+                require(row["source"]==request.selected.0["source"] && [7,8].contains(&commands))?;
+                Some(row["source"].clone())
+            };
+            let first=if row["firstFailureNs"].is_null() {None} else {
+                let text=row["firstFailureNs"].as_str().ok_or_else(BridgeError::protocol)?;
+                let n=text.parse::<u64>().map_err(|_|BridgeError::protocol())?;
+                require(n>0 && request.hard_ns.is_some_and(|hard|n<hard) && n.to_string()==text)?; Some(n)
+            };
+            require(if status=="reserved" { source.is_some() && first.is_none() && commands==(if claimed {8}else{7}) }
+                else { first.is_some() })?;
+            (source,first)
+        } else { (None,None) };
         self.finished = true; self.poisoned = false;
-        Ok(Finished { outcome:outcome.clone(), control })
+        Ok(Finished { outcome:outcome.clone(), control, source, first_failure_ns })
     }
 }
 
 /// Private worker DATA only, before stdin shutdown/stdout EOF and actual joins.
 /// Never serialize this as a public success or feed its reservation to an edit
 /// without the current original RELEASE_VERSION checkout and explicit Apply.
-pub(crate) struct Finished { pub(crate) outcome:Value, pub(crate) control:GitHubReadControl }
+#[derive(Clone)]
+pub(crate) struct Finished { pub(crate) outcome:Value, pub(crate) control:GitHubReadControl,
+    pub(crate) source:Option<Value>, pub(crate) first_failure_ns:Option<u64> }
 fn reason(value: &str) -> bool {
     matches!(value,"none"|"invalid-input"|"invalid-policy"|"manual-policy"|"ambiguous-rule"|"ref-not-allowed"
         |"unsupported-version"|"build-exhausted"|"ios-integer-build-exhausted"|"store-observation-incomplete"

@@ -30,6 +30,12 @@ use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, Conf
     saved_text_recovery_protocol as saved_recovery,
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path="edit_owner_version_reserve.rs"]
+mod version_reserve;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use version_reserve::{NativeReservedVersionHandoff,ReservedVersionStep};
+
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
@@ -627,7 +633,9 @@ pub(crate) struct RegisteredEditRoot {
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
 pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    agent_identity: Option<Arc<agent_identity::Link>> }
+    agent_identity: Option<Arc<agent_identity::Link>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    reserved_version: Option<NativeReservedVersionHandoff> }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -960,6 +968,8 @@ struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool, configuration_recovery: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_identity: Option<Arc<agent_identity::Link>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    reserved_version: Option<NativeReservedVersionHandoff>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1578,6 +1588,8 @@ impl Inner {
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
             target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         installed_macos_observation::retire(&a.session);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if reason!=Reason::None {if let Some(handoff)=&a.session.reserved_version {handoff.fail(reason==Reason::CleanupUnknown,at);}}
         let earlier = a.cleanup_start.is_none_or(|first| at < first);
         if earlier { a.cleanup_start = Some(at); }
         if (earlier || a.projection.native_reason == Reason::None) && reason != Reason::None { a.projection.native_reason = reason; }
@@ -2097,6 +2109,8 @@ impl EditOwner {
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
         Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
+            reserved_version:None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity: None })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
@@ -2194,7 +2208,7 @@ impl EditOwner {
             .map_err(|error| image_open_admission_error(recovery, claimed, error))
     }
     fn open_domain_attempt(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
-        registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
+        registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
         images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
@@ -2225,6 +2239,11 @@ impl EditOwner {
         let agent_identity = {
             if ticket.as_ref().is_some_and(|ticket| ticket.agent_identity.is_some() && domain != EditDomain::ProjectIdentity) { return Err(invalid_owner()); }
             ticket.as_ref().and_then(|ticket| ticket.agent_identity.clone())
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let reserved_version={
+            if ticket.as_ref().is_some_and(|t|t.reserved_version.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner());}
+            ticket.as_mut().and_then(|t|t.reserved_version.take())
         };
         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
@@ -2275,6 +2294,8 @@ impl EditOwner {
             _ => return Err(invalid_owner()),
         };
         if workflow_recovery || saved_text_recovery || configuration_recovery { params["intent"] = json!("recover"); }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(handoff)=&reserved_version {params["reservedVersion"]=handoff.open_data(&mut publication)?;}
         let bytes = request_with_configuration_intent(domain, configuration_recovery, &id, 0, "open", params)?;
         let (commands, receiver) = mpsc::channel(1);
         let (stop, _) = watch::channel(false);
@@ -2283,6 +2304,8 @@ impl EditOwner {
         let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            reserved_version,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2316,6 +2339,8 @@ impl EditOwner {
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
             manager: AsyncMutex::new(None), observer: AsyncMutex::new(None) });
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(handoff)=&session.reserved_version {handoff.bind(&session)?;}
         let admission = {
             let mut r = self.inner.lock();
             self.inner.admission(&r, window, domain)?;
@@ -2339,7 +2364,7 @@ impl EditOwner {
             *claimed = true;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity::claim_entered(&session);
-            r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
+            r.active = Some(ActiveOwner { session: session.clone(), review_end: reserved_review_end(&session,now+REVIEW), phase_end: Some(reserved_review_end(&session,now+ACTIVE)), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 history: identity_history::Link::default(),
@@ -2496,6 +2521,9 @@ impl EditOwner {
                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
                 },
                 (EditDomain::ReleaseVersion, Some(SavedTextSubmission::ReleaseVersion(submission))) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if let Some(handoff)=&a.session.reserved_version {if !handoff.values(&submission.values)||submission.intent!=version_wire::Intent::Edit{return Err(invalid_owner());}
+                        handoff.publication(&mut publication,ReservedVersionStep::Prepare)?;}
                     let valid = a.projection.release_version.as_ref().is_some_and(|detail| detail.recovery.is_none() && detail.submission.is_none() && submission.valid());
                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.release_version.as_mut() { detail.submission = Some(submission); }
@@ -2646,6 +2674,8 @@ impl EditOwner {
             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -2875,6 +2905,8 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
             _ = stop.changed() => break,
             next = receiver.recv() => match next { Some(bytes) => bytes, None => { failed = true; break; } },
         };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
         sent += 1;
         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
@@ -3081,12 +3113,16 @@ fn terminal_admissible(a: &ActiveOwner, seq: u32, plan_token: Option<&str>, core
 
 fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     let mut publication = inner.mandatory_publication();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let reserved_current=owner.reserved_version.as_ref().is_none_or(|h|h.check_document(publication.ticket()).is_ok());
     let result = (|| {
     let mut r = inner.lock();
     let now = Instant::now();
     inner.expire_locked(&mut publication,&mut r, &owner.id, now); // Receipt and expiry serialize.
     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;} }
     let mut terminal = false;
     let mut uncertain = false;
     if !invalid {
@@ -3415,8 +3451,25 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     result
 }
 
+fn reserved_review_end(owner:&Session,end:Instant)->Instant {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(h)=&owner.reserved_version{return end.min(h.work_end());}
+    end
+}
+fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(h)=&owner.reserved_version{return h.cleanup_end(end);}
+    end
+}
+fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if owner.reserved_version.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+    end
+}
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
     loop {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(handoff)=&owner.reserved_version {if !*owner.stop.borrow()&&handoff.ready().is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());}}
         inner.expire(&owner.id, Instant::now());
         let (phase, review, applying, cleanup, unknown) = {
             let r = inner.lock();
@@ -3425,18 +3478,18 @@ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
         };
         let now = Instant::now();
         return if let Some(start) = cleanup {
-            if now >= start + FINALIZATION && !unknown { inner.unknown(&owner.id); continue; }
+            if now >= reserved_cleanup_end(owner,start + FINALIZATION) && !unknown { inner.unknown(&owner.id); continue; }
             if now >= start + SOFT_STOP {
                 if !owner.force_due.swap(true, Ordering::SeqCst) { owner.wake.notify_waiters(); }
-                if unknown { None } else { Some(start + FINALIZATION) }
-            } else { Some(start + SOFT_STOP) }
+                if unknown { None } else { Some(reserved_cleanup_end(owner,start + FINALIZATION)) }
+            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) }
         } else {
             let end = phase_deadline(review, phase, applying).unwrap_or(review);
             if now >= end {
                 inner.expire(&owner.id, now); // Recheck the live serialized phase.
                 continue;
             }
-            Some(end)
+            Some(reserved_poll_end(owner,end))
         };
     }
 }
@@ -3497,6 +3550,8 @@ fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>
 fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
     let mut publication = inner.mandatory_publication();
     let result = (|| {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    if version_reserve::post(owner,publication.ticket()).is_err(){inner.trigger_published(&mut publication,&owner.id,Reason::CallerLost,Instant::now());return;}
     if !installed_edit_selected(owner.domain, &inner.runtime) {
         inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
@@ -3749,6 +3804,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let result=result.and_then(|runtime|version_reserve::inspect(&inspection_owner).map(|()|runtime));
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
             || None, &mut |first| inspection_owner.observe_native_failure(first));
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
@@ -3818,6 +3875,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
 }
 
 fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    if !version_reserve::settled(owner){return false;}
     let selected = installed_edit_selected(owner.domain, &inner.runtime);
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = book; !selected }
@@ -3892,14 +3951,17 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 let mut expired = |_first| {
                     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-                    { closing_owner.native_cleanup_expired(cleanup_end, _first) }
+                    { closing_owner.native_cleanup_expired(reserved_cleanup_end(&closing_owner,cleanup_end), _first) }
                     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                     { let _ = &closing_owner; false }
                 };
-                match closing.lock() {
+                let runtime_close=match closing.lock() {
                     Ok(mut slots) => slots.settle_originals(domain, &mut expired),
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals(domain, &mut expired) },
-                }
+                };
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                if version_reserve::close(&closing_owner,cleanup_end)!=CloseOutcome::Settled{return CloseOutcome::Unknown;}
+                runtime_close
             }));
             let _ = release.send(()); // Original consuming close worker registered before ANY close.
         }
@@ -4351,14 +4413,21 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         return;
     }
     let mut publication = inner.mandatory_publication();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let reserved_current=owner.reserved_version.as_ref().is_none_or(|h|h.check_document(publication.ticket()).is_ok());
     let result = (|| {
     let mut r = inner.lock();
     inner.expire_locked(&mut publication,&mut r, &owner.id, Instant::now());
     let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)) else { guard.completed = true; return; };
-    let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION);
+    let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= reserved_cleanup_end(&owner,start + FINALIZATION));
     if expired && !a.unknown { drop(r); inner.unknown_published(&mut publication, &owner.id); r = inner.lock(); }
     if let Some(mut a) = r.active.take() {
         if !Arc::ptr_eq(&a.session, &owner) { r.active = Some(a); guard.completed = true; return; }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if !version_reserve::retired(&owner,&mut publication,reserved_current){
+            if a.projection.native_reason==Reason::None{a.projection.native_reason=Reason::CallerLost;}
+            if owner.resource_unknown.load(Ordering::SeqCst){a.unknown=true;}
+        }
         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
             // IDs only, bounded by the native 64-project picker registry. No
             // retained private history or guessed recovery controller.

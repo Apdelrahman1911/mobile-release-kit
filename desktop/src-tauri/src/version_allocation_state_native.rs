@@ -31,6 +31,8 @@ pub(crate) mod jobs;
 pub(crate) mod enrollment;
 #[path="version_allocation_ios_inventory.rs"]
 pub(crate) mod ios_inventory;
+#[path="version_reserve_state_native.rs"]
+pub(crate) mod reserve;
 
 const PROTOCOL: &str = "mrk-version-allocation-state/1";
 const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
@@ -323,7 +325,7 @@ struct Attempt { state: State, bytes: Vec<u8>, returned: Option<Snapshot> }
 pub(crate) struct VersionAllocationStatePort {
     store: Arc<PrivateStateDirectory>, project: ProjectBinding, authority: Authority,
     snapshot: Option<Snapshot>, state: Option<State>, bound: Option<Request>,
-    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8,
+    attempted: Option<Attempt>, failure: Option<StateError>, poisoned: bool, remote_writes: u8, bounded: bool,
 }
 impl VersionAllocationStatePort {
     /// Pure construction. The original caller retains this object BEFORE load.
@@ -332,7 +334,7 @@ impl VersionAllocationStatePort {
         let authority: Authority = decode(authority)?;
         need(authority.valid() && project.inode != 0 && Id::parse(project.project_id.as_str()).is_ok())?;
         Ok(Self { store, project, authority, snapshot: None, state: None, bound: None,
-            attempted: None, failure: None, poisoned: false, remote_writes: 0 })
+            attempted: None, failure: None, poisoned: false, remote_writes: 0, bounded: false })
     }
     /// Pure rematch only. Fresh native service/root/Document checks belong to
     /// the original caller; this does NOT check the filesystem or claim a lease.
@@ -352,6 +354,7 @@ impl VersionAllocationStatePort {
     // the exact 1MiB / 50k-node behavior. There is no caller-selected decoder.
     fn load_bounded(&mut self, limit: usize) -> Result<()> {
         self.usable()?; need(self.snapshot.is_none() && [256 * 1024, STATE_LIMIT].contains(&limit))?;
+        self.bounded = limit != STATE_LIMIT;
         self.poisoned = true;
         let loaded = self.store.read(Namespace::VersionAllocations);
         match loaded {
@@ -378,6 +381,10 @@ impl VersionAllocationStatePort {
         let expected = self.snapshot()?.revision;
         let next_revision = Revision(expected.0.checked_add(1).ok_or_else(|| StateError::from(Error::RecoveryRequired))?);
         let bytes = state.bytes()?;
+        if self.bounded {
+            strict_version_enrollment_state_json(&bytes).map_err(|error|
+                StateError::from(if error.code == "version_enrollment_state_limit" { Error::Unavailable } else { Error::RecoveryRequired }))?;
+        }
         // Retain attempted input and latch BEFORE the sole native call. A panic
         // or cancellation cannot expose a second usable writer. The original
         // native Store retains its own intent fence and exact error facts too.

@@ -728,6 +728,7 @@ impl ConnectionState {
             || self.repository_create.native_work_pending()
             || self.activity.native_work_pending()
             || self.enrollment.is_some()
+            || self.version_reserve_pending()
         {
             return Err(refused(p::Reason::Busy));
         }

@@ -1962,6 +1962,67 @@ async fn version_enrollment_cancel(webview: Webview, request: tauri::ipc::Reques
     state.document.cancel_version_enrollment(&id)
 }
 
+// One closed reserve dialogue. The separate Edit command transfers only a
+// native retained reservation into the SAME existing version EditOwner.
+fn version_reserve_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::version_reserve_protocol::Command, BridgeError> {
+    edit_window(webview)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    crate::version_reserve_protocol::decode(name, bytes)
+}
+#[tauri::command]
+async fn version_reserve_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    version_reserve_command("version_reserve_status", &webview, &request)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { Ok(state.document.version_reserve_status()) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { Err(crate::version_reserve_protocol::unavailable()) }
+}
+#[tauri::command]
+async fn version_reserve_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Review(input) = version_reserve_command("version_reserve_review", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.review_version_reservation(input).await }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = input; Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
+}
+#[tauri::command]
+async fn version_reserve_start(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Reserve { project_id, review_id } = version_reserve_command("version_reserve_start", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        // Fixed native app-data location only; no renderer path or CLI grant.
+        let location = app.path().app_local_data_dir().map_err(|_| crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable()))?;
+        state.document.reserve_version(&project_id, &review_id, &location).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (app, project_id, review_id); Err(crate::version_reserve_protocol::not_started(crate::version_reserve_protocol::unavailable())) }
+}
+#[tauri::command]
+async fn version_reserve_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Cancel(id) = version_reserve_command("version_reserve_cancel", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.cancel_version_reserve(&id) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = id; Err(crate::version_reserve_protocol::unavailable()) }
+}
+#[tauri::command]
+async fn version_reserve_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
+    let crate::version_reserve_protocol::Command::Edit { project_id, reservation_id } = version_reserve_command("version_reserve_edit", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { state.document.edit_reserved_version(&project_id, &reservation_id) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (project_id, reservation_id); Err(crate::version_reserve_protocol::unavailable()) }
+}
+
 fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
@@ -4897,6 +4958,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
             git_read_status, git_read_start, git_read_cancel,
             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
+            version_reserve_status, version_reserve_review, version_reserve_start, version_reserve_cancel, version_reserve_edit,
             git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,

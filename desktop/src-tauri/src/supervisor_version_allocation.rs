@@ -7,6 +7,11 @@ use crate::asset_source::RegisteredRoot;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path="supervisor_version_reserve.rs"]
+pub(super) mod reserve;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use reserve::{VersionReserveControl,VersionReserveInvocation,VersionReserveJoined};
 
 pub(crate) const SOURCE_PROTOCOL: &str = "mrk-version-allocation-source/1";
 const PROVIDER: &str = "macos-clt-git/1";
@@ -157,7 +162,7 @@ impl VersionAllocationSourceInput {
             .checked_add(self.version_sha256.capacity())?
             .checked_add(self.reference.capacity())
     }
-    fn matches(&self, source: &VersionAllocationSource) -> bool {
+    pub(crate) fn matches(&self, source: &VersionAllocationSource) -> bool {
         self.configuration_sha256 == source.configuration_sha256
             && self.version_sha256 == source.version_sha256
             && self.reference == source.reference
@@ -207,6 +212,8 @@ pub(crate) struct VersionAllocationSourceRequest {
     digest: String,
     initial: Vec<u8>,
     hard_ns: u64,
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+    allocation: Option<Arc<crate::version_allocation_state_native::dialogue::Request>>,
 }
 impl VersionAllocationSourceRequest {
     fn from_original(
@@ -241,7 +248,9 @@ impl VersionAllocationSourceRequest {
         // The whole native projection must fit the existing fixed child parser.
         frame(&initial, INITIAL_LIMIT, 256, 8)?;
         let digest = format!("{:x}", Sha256::digest(&initial));
-        Ok(Self { input, id: id.into(), digest, initial, hard_ns })
+        Ok(Self { input, id: id.into(), digest, initial, hard_ns,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            allocation:None })
     }
     pub(crate) fn same_input(&self, input: &Arc<VersionAllocationSourceInput>) -> bool {
         Arc::ptr_eq(&self.input, input)
@@ -252,7 +261,11 @@ impl VersionAllocationSourceRequest {
                 == json!({"protocol":SOURCE_PROTOCOL,"id":self.id,"ready":{"requestSha256":self.digest}}),
         )
     }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn allocation_request(&self)->Option<&Arc<crate::version_allocation_state_native::dialogue::Request>> {self.allocation.as_ref()}
     pub(crate) fn go(&self) -> Result<Vec<u8>, BridgeError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        need(self.allocation.is_none())?;
         encoded(&json!({"protocol":SOURCE_PROTOCOL,"id":self.id,"go":{"requestSha256":self.digest}}), READY_LIMIT)
     }
     fn terminal(&self, raw: &[u8]) -> Result<Terminal, BridgeError> {
@@ -300,12 +313,14 @@ impl VersionAllocationSourceRequest {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
+    Allocation,
     Source,
     Cancelled,
 }
 impl Refusal {
     fn error(self) -> BridgeError {
         match self {
+            Self::Allocation => BridgeError::new("version_reserve_refused", "The reservation needs attention; no saved version was changed."),
             Self::Source => changed(),
             Self::Cancelled => BridgeError::new("cancelled", "The original saved-source inspection was stopped."),
         }
@@ -375,6 +390,8 @@ pub(super) struct Invocation {
     completion: Mutex<Option<crate::asset_session::VersionAllocationSourceCompletion>>,
     pub(super) mailbox: Arc<Mutex<Mailbox>>,
     request: Mutex<Option<Arc<VersionAllocationSourceRequest>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    reserve: Option<Arc<VersionReserveInvocation>>,
 }
 impl Invocation {
     pub(super) fn request(&self) -> Result<Arc<VersionAllocationSourceRequest>, BridgeError> {
@@ -384,7 +401,9 @@ impl Invocation {
             .clone()
             .ok_or_else(BridgeError::cleanup_unknown)
     }
-    pub(super) fn arm(&self) -> Result<(), BridgeError> {
+    pub(super) fn arm(&self,owner:&Arc<Owner>) -> Result<(), BridgeError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&self.reserve {reserve.control.arm(owner)?;}
         self.completion
             .lock()
             .map_err(|_| BridgeError::cleanup_unknown())?
@@ -393,6 +412,8 @@ impl Invocation {
             .arm()
     }
     pub(super) fn unknown(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&self.reserve {reserve.control.unknown();}
         lock(&self.mailbox).unknown();
         if let Some(completion) = lock(&self.completion).as_ref() {
             completion.unknown();
@@ -400,7 +421,9 @@ impl Invocation {
     }
     // Called by Owner.retire OUTSIDE Supervisor/Resources locks, after all real
     // driver/watchdog/IO/native joins. FIN reader never publishes completion.
-    pub(super) fn retire(&self, result: Result<(), BridgeError>, settled_at: Instant, was_unknown: bool) {
+    pub(super) fn retire(&self, result: Result<(), BridgeError>, settled_at: Instant, was_unknown: bool, cutoff:Option<Instant>) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let (Some(reserve),Some(cutoff))=(&self.reserve,cutoff) {reserve.control.retain_cutoff(cutoff);}
         let retained_unknown = matches!(lock(&self.mailbox).receipt, VersionAllocationSourceReceipt::RetainedUnknown);
         let mut outcome = result.and_then(|_| {
             let mailbox = lock(&self.mailbox);
@@ -510,6 +533,8 @@ impl VersionAllocationSourceAdmission {
                     completion: Mutex::new(Some(completion)),
                     mailbox: Arc::new(Mutex::new(Mailbox::new())),
                     request: Mutex::new(None),
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    reserve: None,
                 },
                 endpoints,
                 originals,
@@ -526,8 +551,58 @@ impl VersionAllocationSourceAdmission {
             Err(unavailable())
         }
     }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn with_reserve(mut self,reserve:Arc<VersionReserveInvocation>)->Result<Self,BridgeError> {
+        need(reserve.control.current()&&reserve.control.work_end()==self.endpoints.work&&self.invocation.reserve.is_none())?;
+        self.bytes=self.bytes.checked_add(VersionReserveInvocation::reservation_bytes().ok_or_else(unavailable)?).ok_or_else(unavailable)?;
+        self.invocation.reserve=Some(reserve);Ok(self)
+    }
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
+    }
+}
+
+pub(super) enum Work {
+    Post(Result<Result<(),BridgeError>,tokio::task::JoinError>),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    State(Option<reserve::StateRequest>),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Joined(Result<crate::version_allocation_state_native::jobs::Joined,crate::version_allocation_state_native::jobs::Failure>),
+}
+impl SourceResources {
+    pub(super) fn work_pending(&self)->bool {
+        let pending=self.before_go_pending();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { return pending||self.remote.as_ref().is_some_and(reserve::RemoteJobs::pending); }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { pending }
+    }
+    pub(super) async fn next_work(&mut self)->Work {
+        let post=&mut self.posts[0];let post_pending=post.handle.is_some()&&!post.failed;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(remote)=&mut self.remote {
+            let join_pending=remote.jobs.join_pending();let receive=remote.requests.is_some()&&!join_pending;
+            return tokio::select! {
+                result=join_slot(&mut post.handle),if post_pending=>Work::Post(result),
+                request=async{match &mut remote.requests {Some(rx)=>rx.recv().await,None=>std::future::pending().await}},if receive=>Work::State(request),
+                result=remote.jobs.join_current(),if join_pending=>Work::Joined(result),
+            }
+        }
+        Work::Post(join_slot(&mut post.handle).await)
+    }
+    pub(super) fn work_returned(&mut self,work:Work,owner:&Arc<Owner>,inner:&Inner)->bool {
+        let result:Result<(),BridgeError>=match work {
+            Work::Post(result)=>return self.before_go_returned(result,owner,inner),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Work::State(request)=>self.remote.as_mut().ok_or_else(BridgeError::cleanup_unknown).and_then(|r|r.accept(request,owner)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Work::Joined(result)=>self.remote.as_mut().ok_or_else(BridgeError::cleanup_unknown).and_then(|r|r.returned(result,owner)),
+        };
+        if let Err(error)=result {owner.fail(error);}
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { return !owner.version_allocation_source.as_ref().and_then(|s|s.reserve.as_ref()).is_some_and(|r|r.control.uncertain()); }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { true }
     }
 }
 
@@ -804,13 +879,19 @@ impl Invocation {
                 changed()
             }
         })?;
-        let request = Arc::new(VersionAllocationSourceRequest::from_original(
+        let mut request = VersionAllocationSourceRequest::from_original(
             self.input.clone(),
             &owner.id,
             original.source.native_snapshot().map_err(|_| changed())?,
             work_ns,
             hard_ns,
-        )?);
+        )?;
+        // The same inspection original retains native custody, but drops its
+        // SourceBook mutex before Store/NativeUse IO or any final Doc gate.
+        drop(original);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reserve)=&self.reserve {reserve.prepare(&mut request,work_ns,hard_ns)?;}
+        let request=Arc::new(request);
         {
             let mut slot = self.request.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if slot.is_some() {
@@ -818,7 +899,6 @@ impl Invocation {
             }
             *slot = Some(request.clone());
         }
-        drop(original);
         self.gate.bind_request(&self.input, &owner.id, request)?;
         Ok(selected)
     }
@@ -1031,6 +1111,8 @@ pub(super) struct SourceResources {
     ))]
     pub(super) originals: Option<Arc<Mutex<Originals>>>,
     posts: [Post; 2],
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+    remote: Option<reserve::RemoteJobs>,
 }
 impl SourceResources {
     pub(super) fn from_admission(admission: &VersionAllocationSourceAdmission) -> Self {
@@ -1052,6 +1134,13 @@ impl SourceResources {
     }
     pub(super) fn jobs_settled(&self) -> bool {
         self.posts.iter().all(|p| p.handle.is_none() && !p.failed && (!p.entered || p.returned.is_some()))
+            && self.remote_jobs_settled()
+    }
+    fn remote_jobs_settled(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { return self.remote.as_ref().is_none_or(reserve::RemoteJobs::settled); }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { true }
     }
     pub(super) fn before_go_pending(&self) -> bool {
         self.posts[0].handle.is_some() && !self.posts[0].failed
@@ -1423,6 +1512,10 @@ pub(super) fn install_io(
     stderr: tokio::process::ChildStderr,
     faults: &mpsc::Sender<BridgeError>,
 ) -> Result<oneshot::Receiver<oneshot::Sender<Result<(), BridgeError>>>, BridgeError> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if owner.version_allocation_source.as_ref().is_some_and(|s|s.reserve.is_some()) {
+        return reserve::install_io(resources,inner,owner,stdin,stdout,stderr,faults);
+    }
     need(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none())?;
     let request = owner.version_allocation_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.request()?;
     let original =
@@ -1498,6 +1591,8 @@ mod tests {
             digest: "c".repeat(64),
             initial: Vec::new(),
             hard_ns: 70_000_000_000,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            allocation:None,
         }
     }
     fn terminal_data(request: &VersionAllocationSourceRequest) -> Value {

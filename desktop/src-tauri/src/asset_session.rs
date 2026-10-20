@@ -26,6 +26,11 @@ pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInp
 #[path = "asset_session_version_allocation.rs"]
 mod version_allocation;
 pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "asset_session_version_reserve.rs"]
+mod version_reserve;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::ReservedVersionEditGate;
 #[path = "asset_session_version_enrollment.rs"]
 mod version_enrollment;
 pub(crate) use version_enrollment::VersionEnrollmentGoGate;
@@ -824,6 +829,8 @@ struct DocumentState {
     apple_provisioning_ready: Option<Arc<crate::application_service_host::NativeStateReady>>,
     version_allocation_source: Option<Arc<version_allocation::Lane>>,
     version_enrollment: version_enrollment::State,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    version_reserve: version_reserve::State,
     session_owner_reason: Option<Reason>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     first_origin: Option<installed_session_observation::FirstOrigin>,
@@ -2021,6 +2028,8 @@ mod lookup_memory {
             self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(version_enrollment::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(version_reserve::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
@@ -2760,7 +2769,7 @@ impl DocumentBinding {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -8212,7 +8221,7 @@ pub(crate) fn assert_project_path_document_contracts() {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
@@ -8350,7 +8359,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
@@ -8451,7 +8460,7 @@ mod tests {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]

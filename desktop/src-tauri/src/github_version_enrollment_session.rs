@@ -35,7 +35,7 @@ pub(crate) fn connection_reason(reason: Reason) -> p::Reason {
         .unwrap_or(p::Reason::InvalidInput)
 }
 impl ConnectionState {
-    fn enrollment_pins(
+    pub(super) fn enrollment_pins(
         &self,
         project_id: &str,
         generation: u32,
@@ -155,6 +155,7 @@ impl ConnectionState {
         now: Instant,
     ) -> Result<(), BridgeError> {
         if !control.current()
+            || self.version_reserve_pending()
             || !self
                 .enrollment
                 .as_ref()

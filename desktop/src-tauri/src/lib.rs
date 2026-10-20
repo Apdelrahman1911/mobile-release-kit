@@ -105,6 +105,7 @@ pub mod error;
 pub mod protocol;
 mod git_read_protocol;
 mod version_enrollment_protocol;
+mod version_reserve_protocol;
 mod git_local_protocol;
 mod git_branch_protocol;
 mod git_switch_protocol;

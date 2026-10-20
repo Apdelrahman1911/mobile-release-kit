@@ -606,11 +606,21 @@ impl DesktopBridge {
     pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        return document.release_version_phase_admit(&session_id,crate::edit_owner::ReservedVersionStep::Prepare,|bridge,registration,publisher|
+            bridge.edits.prepare_release_version_published(publisher,window,args,registration));
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
             bridge.edits.prepare_release_version_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if let Some(observed)=self.edits.reserved_version_apply_observation(window,session_id,plan_token)? {return Ok(observed);}
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        return document.release_version_phase_admit(session_id,crate::edit_owner::ReservedVersionStep::Apply,|bridge,registration,publisher|
+            bridge.edits.apply_release_version_published(publisher,window,session_id,plan_token,registration));
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
             bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
     }

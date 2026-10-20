@@ -302,21 +302,40 @@ class _Journal(state.NativeAllocationJournal):
 
 
 class _CheckedTransport:
-    def __init__(self, original, dialogue: _Dialogue) -> None:
+    def __init__(self, original, dialogue: _Dialogue, source=None, journal=None) -> None:
         self.original, self.dialogue = original, dialogue
+        self.source, self.journal = source, journal
         self.control = _control()
 
     def exchange(self, step, request):
         self.dialogue.checkpoint()
+        if self.source is not None:
+            self.source.held_checkpoint()
+            if step == "write":
+                # Only this fixed PUT boundary consumes the seventh source
+                # command, AFTER the original Pending CAS/ACK returned.
+                self.source.before_put(self.journal)
         result = self.original.exchange(step, request)
         self.control = dict(_check_control(result.control))
         self.dialogue.checkpoint()
+        if self.source is not None:
+            self.source.held_checkpoint()
         return result
 
 
-def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str) -> tuple[allocation.AllocationOutcome, _StatePort]:
+def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str, source=None,
+            retained_port=None) -> tuple[allocation.AllocationOutcome, _StatePort]:
     dialogue.checkpoint()
-    port = _StatePort(dialogue, go)
+    if source is not None:
+        from .version_allocation_source import AllocationSourceRun
+        wire.require(type(source) is AllocationSourceRun and source.input.dialogue is dialogue
+                     and source.selected is go.request and source.provider is not None
+                     and dialogue.initial.source is source.request and type(retained_port) is _StatePort
+                     and retained_port.dialogue is dialogue and retained_port.go is go)
+        source.held_checkpoint()
+    else:
+        wire.require(dialogue.initial.source is None and retained_port is None)
+    port = _StatePort(dialogue, go) if retained_port is None else retained_port
     journal = _Journal(port)
     initial = dialogue.initial
     journal.admit_request(initial.authority, go.request)
@@ -336,10 +355,13 @@ def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str) -> tuple[allo
                                          go.request.version_policy, now=math.floor(time.time()))
         except policy.VersionPolicyError as error:
             return allocation.AllocationOutcome("rejected", error.reason, control=_control()), port
-    original = _make_allocation_transport(go.token, started=dialogue.started, runtime_dir=runtime_dir,
+    # The native 60/70 began BEFORE its state/source stages. No fresh HTTP
+    # minute is granted by the worker launch or by completion of source reads.
+    started = dialogue.started if source is None else min(dialogue.started, dialogue.work_end - wire.WORK_SECONDS)
+    original = _make_allocation_transport(go.token, started=started, runtime_dir=runtime_dir,
         selected=go.request, authority=initial.authority, checkpoint=journal.checkpoint(initial.authority),
         reconcile=initial.kind == "reconcile")
-    transport = _CheckedTransport(original, dialogue)
+    transport = _CheckedTransport(original, dialogue, source, journal)
     result = allocation.allocate_version(go.request, initial.authority, transport, journal,
         observations=go.observations, clock=lambda: math.floor(time.time()))
     dialogue.checkpoint()
@@ -351,6 +373,7 @@ def run_owned(control: int, output: int, raw_initial: bytes, *, started: float, 
     """Borrow the existing bootstrap originals; it alone consumes their closes."""
     wire.require(type(runtime_dir) is str and os.path.isabs(runtime_dir))
     initial = wire.parse_initial(raw_initial)
+    wire.require(initial.source is None)  # Native SOURCE/Reserve has its own closed composition.
     dialogue = _Dialogue(control, output, initial, started)
     dialogue.bind()
     go = dialogue.go()

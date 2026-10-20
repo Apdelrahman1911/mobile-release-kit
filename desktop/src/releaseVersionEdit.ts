@@ -40,7 +40,7 @@ export interface PrepareVersionEditRequest {
   sessionId: string; revision: string; expectedBaseline: VersionBaseline; intent: VersionIntent; values: VersionValues; draftRevision: number; baselineGeneration: number;
 }
 export interface ReleaseVersionEditApi {
-  openReleaseVersionEdit(input: { projectId: string } | SavedTextRecoveryOpenRequest): Promise<VersionEditStatus>;
+  openReleaseVersionEdit(input: { projectId: string } | { projectId: string; reservationId: string } | SavedTextRecoveryOpenRequest): Promise<VersionEditStatus>;
   prepareReleaseVersionEdit(input: PrepareVersionEditRequest | SavedTextRecoveryPrepareRequest): Promise<VersionEditStatus>;
   applyReleaseVersionEdit(sessionId: string, planToken: string, intent?: 'recover'): Promise<VersionEditStatus>;
   closeReleaseVersionEdit(sessionId: string): Promise<VersionEditStatus>;
@@ -206,10 +206,11 @@ export function viewMatchesVersionCheckout(view: VersionPreparedView, opened: Ve
     view.intent === (opened.baseline.savedVersion.state === 'absent' ? 'create' : 'edit') &&
     equal(before.state === 'absent' ? { state: 'absent' } : { state: 'present', bytes: before.bytes, sha256: before.sha256 }, opened.baseline.savedVersion);
 }
-export type VersionEditCommand = 'release_version_edit_open' | 'release_version_edit_prepare' | 'release_version_edit_apply' | 'release_version_edit_close' | 'release_version_edit_status';
+export type VersionEditCommand = 'version_reserve_edit' | 'release_version_edit_open' | 'release_version_edit_prepare' | 'release_version_edit_apply' | 'release_version_edit_close' | 'release_version_edit_status';
 export function versionEditRequestFits(command: VersionEditCommand, value: unknown): boolean {
   if (!boundedJson(value, 16 * 1024, 256, 16)) return false;
   switch (command) {
+    case 'version_reserve_edit': return keys(value, ['projectId', 'reservationId']) && projectId(value.projectId) && token(value.reservationId) && value.reservationId !== '0'.repeat(32);
     case 'release_version_edit_open': return (keys(value, ['projectId']) ||
       keys(value, ['projectId', 'intent']) && value.intent === 'recover') && projectId(value.projectId);
     case 'release_version_edit_prepare':

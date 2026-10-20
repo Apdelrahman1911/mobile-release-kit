@@ -1391,6 +1391,7 @@ slots!(ProjectIdentityRuntimeSlots, ProjectIdentityInstalledRuntime, runtime::Pr
 slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::MetadataTextInstalledProfile);
 slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
+impl ReleaseVersionRuntimeSlots { pub(crate) fn source_runtime_fd_bound()->usize{MAC_RUNTIME_FDS} }
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
 slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
 slots!(ToolAcquisitionRuntimeSlots, ToolAcquisitionInstalledRuntime, runtime::ToolAcquisitionInstalledProfile);

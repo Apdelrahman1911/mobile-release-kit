@@ -14,6 +14,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 // observer executable. No library duplicate owner, helper/publisher/CLI entry.
 #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
 #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
+#[path = "../src/version_reserve_protocol.rs"] mod version_reserve_protocol;
 #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
 #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
 #[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;

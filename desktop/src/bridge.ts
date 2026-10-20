@@ -89,6 +89,7 @@ import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
 import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
+import { createVersionReservePort } from './versionReserve.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
 import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
 import { createGitHubActivityPort } from './githubActivityProtocol.ts';
@@ -382,7 +383,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     try {
       if (mode !== 'native') throw { code: 'VersionEditUnavailable' };
       if (!versionEditRequestFits(command, args)) throw { code: 'VersionEditInvalid' };
-      const status = parseVersionEditStatus(await invoke<unknown>(command, structuredClone(args) as Record<string, unknown>));
+      const status = parseVersionEditStatus(await invoke<unknown>(command, command === 'version_reserve_edit' ?
+        new TextEncoder().encode(JSON.stringify(args)) : structuredClone(args) as Record<string, unknown>));
       if (!status) throw { code: 'VersionEditStatusInvalid' };
       return status;
     } catch (error) { throw versionEditError(error); }
@@ -409,6 +411,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
+    versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
@@ -726,7 +729,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         return await listen('github-workflow-edit-status', onStatus);
       } catch (error) { throw workflowEditError(error); }
     },
-    openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
+    openReleaseVersionEdit: (request) => versionCall('reservationId' in request ? 'version_reserve_edit' : 'release_version_edit_open', request),
     prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
     applyReleaseVersionEdit: (sessionId, planToken, intent) => versionCall('release_version_edit_apply',
       intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }),

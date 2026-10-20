@@ -40,7 +40,7 @@ impl StoreVersionMaterial {
     pub(crate) fn matches_context(&self, context: &wire::Context) -> bool {
         &self.context == context
     }
-    fn current(
+    pub(in crate::asset_session) fn current(
         &self,
         state: &DocumentState,
         registration: u32,

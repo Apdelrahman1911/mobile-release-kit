@@ -92,6 +92,12 @@ impl StoreVersionObservation {
     pub(crate) fn matches_root(&self, registration: u32, project: &RegisteredRoot) -> bool {
         self.registration == registration && self.project == *project
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    pub(crate) fn current_for_reserved_edit(&self,handoff:&crate::edit_owner::NativeReservedVersionHandoff,now:Instant,wall:SystemTime,max_age:u64)->bool {
+        // The original remains invalid globally; this exact consume-once
+        // handoff proves only its own finite registration publication chain.
+        handoff.permits_observation(self)&&self.clock.fresh(now,wall,max_age)
+    }
     pub(crate) fn current(&self, now: Instant, wall: SystemTime, max_age: u64) -> bool {
         !self.invalid.load(Ordering::SeqCst) && self.clock.fresh(now, wall, max_age)
     }
@@ -189,6 +195,18 @@ impl Slot {
     }
 }
 impl SavedCommandOwner {
+    pub(crate) fn current_store_versions_for_saved(&self,project_id:&str,registration:u32,project:&RegisteredRoot,
+        configuration:&str,version:&str)->Result<Arc<StoreVersionObservation>,BridgeError> {
+        self.require_domain(SavedCommandDomain::LocalStorePreflight)?;
+        let r=self.inner.lock();
+        if r.disabled||r.exhausted||r.stopping||r.document_lost||r.active.is_some()||r.prepared.is_some()
+            ||self.inner.poisoned.load(Ordering::SeqCst){return Err(store_wire::invalid());}
+        r.store_versions.observation.as_ref().filter(|o|o.context.project_id==project_id
+            &&o.context.saved_config.sha256==configuration&&o.context.saved_version.sha256==version
+            &&o.matches_root(registration,project)&&o.current(Instant::now(),SystemTime::now(),3600))
+            .cloned().ok_or_else(store_wire::invalid)
+    }
+
     /// Native-only original. Caller must additionally rematch its actual Doc,
     /// source and weak credential assignment immediately before CAS and edit.
     pub(crate) fn current_store_versions(
