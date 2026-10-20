@@ -549,6 +549,12 @@ jobs:
             fi
           fi
           if [[ "$APP_CHECKS" == app-typecheck ]]; then
+            # Check the actual nonshipping native observation target before
+            # spending time signing or packaging it. This does not run the app
+            # or add observation features to the separate shipping invocation.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features desktop-shell,custom-protocol,macos-installed-observation \
+              --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
             # Fixed DATA only in the ordinary native library graph, separate
             # from the shipping image check above. No service, tool, credential
             # or app is launched; do not fall through into the broad suites.

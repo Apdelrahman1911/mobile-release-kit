@@ -57,6 +57,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_auth_nomination.rs"] mod github_auth_nomination;
 #[path = "../src/github_auth_native_owner.rs"] mod github_auth_native_owner;
 #[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
+#[path = "../src/github_auth_accounts.rs"] mod github_auth_accounts;
 #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
