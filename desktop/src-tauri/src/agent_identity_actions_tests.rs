@@ -410,11 +410,52 @@ fn bounded_public_review_refuses_extra_authority_and_false_success() {
     let mut v = serde_json::to_value(status).unwrap();
     v["root"] = serde_json::json!("/forged");
     assert!(serde_json::from_value::<Status>(v).is_err());
+}
+#[test]
+fn required_nullable_fields_are_typed_and_never_default_missing() {
+    let f = Fixture::new(true);
+    let mut empty = serde_json::to_value(f.entry.action_status().unwrap()).unwrap();
+    assert!(empty["observation"].is_null());
+    assert!(serde_json::from_value::<Status>(empty.clone())
+        .unwrap()
+        .observation
+        .is_none());
+    empty.as_object_mut().unwrap().remove("observation");
+    assert!(serde_json::from_value::<Status>(empty).is_err());
+
+    f.prepared();
+    let mut typed = serde_json::to_value(f.entry.action_status().unwrap()).unwrap();
+    typed["observation"]["effect"] = serde_json::json!("not_started");
+    typed["observation"]["journal"] = serde_json::json!("not_created");
+    let decoded = serde_json::from_value::<Status>(typed.clone()).unwrap();
+    decoded.validate().unwrap();
+    let observation = decoded.observation.unwrap();
+    assert_eq!(observation.review, Some(review()));
+    assert_eq!(observation.effect, Some(Effect::NotStarted));
+    assert_eq!(observation.journal, Some(Journal::NotCreated));
+
+    let mut nulls = typed.clone();
     for key in ["review", "effect", "journal"] {
-        let mut v = serde_json::to_value(f.entry.action_status().unwrap()).unwrap();
+        nulls["observation"][key] = serde_json::Value::Null;
+    }
+    let observation = serde_json::from_value::<Status>(nulls)
+        .unwrap()
+        .observation
+        .unwrap();
+    assert!(observation.review.is_none());
+    assert!(observation.effect.is_none());
+    assert!(observation.journal.is_none());
+
+    for key in ["review", "effect", "journal"] {
+        let mut v = typed.clone();
         v["observation"].as_object_mut().unwrap().remove(key);
         assert!(serde_json::from_value::<Status>(v).is_err());
+        let mut v = typed.clone();
+        v["observation"][key] = serde_json::json!(17);
+        assert!(serde_json::from_value::<Status>(v).is_err());
     }
+    typed["observation"] = serde_json::json!(17);
+    assert!(serde_json::from_value::<Status>(typed).is_err());
 }
 #[test]
 fn original_noop_has_no_journal_and_remains_a_valid_settled_result() {

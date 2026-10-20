@@ -17,6 +17,16 @@ const SENT: u8 = 3;
 const DENIED: u8 = 4;
 const DOUBT: u8 = 5;
 
+// Explicit null is valid, but serde must still reject an absent field. The
+// parent helper is intentionally String-only for Selection.project.
+fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Original {
@@ -172,11 +182,11 @@ pub struct Observation {
     pub state: OperationState,
     pub settlement: Settlement,
     pub apply_submitted: bool,
-    #[serde(deserialize_with = "required_option")]
+    #[serde(deserialize_with = "required_nullable")]
     pub review: Option<Review>,
-    #[serde(deserialize_with = "required_option")]
+    #[serde(deserialize_with = "required_nullable")]
     pub effect: Option<Effect>,
-    #[serde(deserialize_with = "required_option")]
+    #[serde(deserialize_with = "required_nullable")]
     pub journal: Option<Journal>,
 }
 impl Observation {
@@ -234,7 +244,7 @@ pub struct Status {
     pub remaining_ms: u64,
     pub cancel_requested: bool,
     pub unconfirmed: bool,
-    #[serde(deserialize_with = "required_option")]
+    #[serde(deserialize_with = "required_nullable")]
     pub observation: Option<Observation>,
     pub do_not_replay: bool,
     pub history_must_be_queried: bool,
