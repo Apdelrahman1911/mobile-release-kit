@@ -565,7 +565,7 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Five Mac-only cache lifecycle/comparison tests in the ordinary
+            # Seven Mac-only cache and Git-source comparisons in the ordinary
             # library, never in the shipping image. No files, services or tools
             # are opened by these exact methods; native acquisition is separate.
             rustup run 1.98.1 cargo test --locked --no-default-features \
@@ -575,8 +575,10 @@ jobs:
               saved_command_owner::tool_acquisition::cache::tests::application_expectation_preserves_missing_and_all_original_fields \
               saved_command_owner::tool_acquisition::cache::tests::missing_application_never_adopts_appearance_or_recreates_previous_cache \
               saved_command_owner::tool_acquisition::cache::tests::interrupted_application_creation_retains_first_failure_and_finishes_unentered_slots \
+              asset_source::macos::git_local_sources::tests::exact_own_unlink_allows_ctime_only_without_replacing_old_identity \
+              asset_source::macos::git_local_sources::tests::foreign_index_metadata_never_uses_unlink_exception \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             exit 0
           fi
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
