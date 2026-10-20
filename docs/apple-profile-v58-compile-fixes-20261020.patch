@@ -1,0 +1,33 @@
+diff --git a/desktop/src/appleProvisioningController.ts b/desktop/src/appleProvisioningController.ts
+--- a/desktop/src/appleProvisioningController.ts
++++ b/desktop/src/appleProvisioningController.ts
+@@ -1,7 +1,7 @@
+ // App-held UI coordination only. Neither promises, events nor comparison
+ // counters can settle the original native Session or its account-wide journal.
+ import { appleProfileInputBase, retainedAppleProfileInput, isAppleProfileMode } from './appleProfileSetup.ts';
+-import type { AppleProfileMode, AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
++import type { AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
+ import { localStoreRequest } from './localStorePreflight.ts';
+ import type { LocalStoreProject } from './localStorePreflight.ts';
+ import type { AssetDisplayState } from './assetSessionTypes.ts';
+@@ -98,7 +98,7 @@
+     try {
+       if (this.selectionPending) return null;
+       const project = this.source.project(), assets = this.source.assets();
+-      let base: Base | null = assets?.scope.purpose === 'provisioning' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
++      let base = assets?.scope.purpose === 'provisioning' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
+       const a = this.attempt;
+       if (!base && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
+         base = retainedAppleProfileInput(project, assets, a.witness.base);
+diff --git a/desktop/src-tauri/src/offline_preflight_owner_tests.rs b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+--- a/desktop/src-tauri/src/offline_preflight_owner_tests.rs
++++ b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+@@ -32,7 +32,7 @@
+     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
+     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+-    let session = Arc::new(Session { agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let session = Arc::new(Session { agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
+         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),

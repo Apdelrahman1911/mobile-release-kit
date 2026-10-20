@@ -1,7 +1,7 @@
 // App-held UI coordination only. Neither promises, events nor comparison
 // counters can settle the original native Session or its account-wide journal.
 import { appleProfileInputBase, retainedAppleProfileInput, isAppleProfileMode } from './appleProfileSetup.ts';
-import type { AppleProfileMode, AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
+import type { AppleProfileSetupResult, AppleProfileSavedReference } from './appleProfileSetup.ts';
 import { localStoreRequest } from './localStorePreflight.ts';
 import type { LocalStoreProject } from './localStorePreflight.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
@@ -98,7 +98,7 @@ export class AppleProvisioningController {
     try {
       if (this.selectionPending) return null;
       const project = this.source.project(), assets = this.source.assets();
-      let base: Base | null = assets?.scope.purpose === 'provisioning' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
+      let base = assets?.scope.purpose === 'provisioning' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
       const a = this.attempt;
       if (!base && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
         base = retainedAppleProfileInput(project, assets, a.witness.base);
