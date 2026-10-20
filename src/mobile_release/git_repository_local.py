@@ -282,6 +282,7 @@ class _LocalSession(read._ReadSession):
         self.recensusing = False
         self.object_parents: dict[str, tuple[int, ...] | None] | None = None
         self.object_additions: dict[str, tuple[int, ...]] = {}
+        self._resolved_head: tuple[str | None, str | None] | None = None
 
     def guard_current(self) -> None:
         self.checkpoint()
@@ -366,10 +367,42 @@ class _LocalSession(read._ReadSession):
         assert self.originals is not None
         core._need(branch.rsplit("/", 1)[0] in dict(self.originals.directories), "unsupported-repository")
 
+    def _check_frozen(self) -> None:
+        """Rematch this existing scratch owner's exact finite file/dir roster.
+
+        A changed private ref must not be hidden by a resolved-head cache. This
+        neither resolves Git refs nor adopts a new entry into the original view.
+        """
+        core._need(not self.repository._unknown and self.frozen is not None and not self.frozen.unknown, "unknown")
+        core._need(any(session is self for session in self.repository._active_sessions)
+                   and self.frozen.root in self.frozen.directories, "already-used")
+        for path, identity in self.frozen.directories.items():
+            self.checkpoint()
+            before = core._identity(path.lstat())
+            core._need(before[:2] == identity and stat.S_ISDIR(before[2]), "stale-observation")
+            expected = {entry.name for entry in (*self.frozen.directories, *self.frozen.files)
+                        if entry != path and entry.parent == path}
+            core._need(set(self.names(path)) == expected and core._identity(path.lstat()) == before,
+                       "stale-observation")
+        for path, stamp in self.frozen.files.items():
+            self.checkpoint()
+            core._need(core._read(path, 65536)[0] == stamp, "stale-observation")
+
     def head(self) -> tuple[str | None, str | None]:
-        # A private frozen HEAD can never stand in for current original refs.
+        # Git resolves the exact copied refs once. Reuse only within this same
+        # view while BOTH real originals and every private entry remain exact;
+        # the cached tuple supplies no publication or process-finality receipt.
+        self.guard_current()
+        self._check_frozen()
         self.check_original()
-        return core._Session.head(self)
+        resolved = self._resolved_head
+        if resolved is None:
+            resolved = core._Session.head(self)
+        self.check_original()
+        self.guard_current()
+        self._check_frozen()
+        self._resolved_head = resolved
+        return resolved
 
     def recensus(self) -> None:
         core._need(not self.recensusing and self.frozen is not None, "already-used")
@@ -457,6 +490,9 @@ class _LocalSession(read._ReadSession):
         plan = self.repository._active_plan
         core._need(plan is not None and self.successor is None and self.commit_oid is not None,
                    "recovery-required")
+        # A positive CAS changes this view. Invalidate BEFORE accepting or
+        # writing any successor; the next head() requires fresh Git resolution.
+        self._resolved_head = None
         assert self.git_dir is not None and self.originals is not None and self.frozen is not None
         branch = plan._snapshot.public.branch
         core._need(branch is not None and core._ref(branch), "recovery-required")

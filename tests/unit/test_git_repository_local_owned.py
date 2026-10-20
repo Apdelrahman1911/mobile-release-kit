@@ -55,19 +55,34 @@ class OwnedLocalTests(unittest.TestCase):
         self.git("commit", "--no-gpg-sign", "-m", "Inert local fixture initial commit")
 
     def local_apply(self, action, paths=()):
+        started, initial_calls = time.monotonic(), self.calls
+        observer = local.GitLocalRepository(self.root, git_executable=Path("/usr/bin/git"),
+            work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
+        self.repositories.append(observer)
+        observed = observer.observe()
+        observed_at, observed_calls = time.monotonic(), self.calls
+        self.assertFalse(observer._unknown or observer._retained or observer._active_sessions or observer._retained_sessions)
+        self.remember_fixture()  # Original read/scratch close returned.
+        # Observe is a distinct, now-completed read action. The actual native
+        # Apply packet uses one fresh prepare+apply under its SAME 45s bound;
+        # never renew a running repository or the enclosing 120s fixture.
         repository = local.GitLocalRepository(self.root, git_executable=Path("/usr/bin/git"),
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
-        observed = repository.observe()
-        self.remember_fixture()  # Original read/scratch close returned.
         kwargs = {"paths": paths}
         if action == "commit":
             kwargs.update(message="Reviewed complete staged set", identity=core.CommitIdentity("Local Fixture", "fixture@example.invalid"))
         review = repository.prepare_local(action, expected_revision=observed.revision, **kwargs)
+        prepared_at, prepared_calls = time.monotonic(), self.calls
         self.remember_fixture()  # Real prepare and all its original commands returned.
         owner = passive_fixture.Owner(self.root, review.plan)
         result = repository.apply_review(review, owner, expected_digest=review.digest)
-        self.assertEqual((result.state, result.settlement), ("succeeded", "settled"))
+        returned_at = time.monotonic()
+        diagnostic = (f"reason={result.reason}; observe={observed_at-started:.3f}s/{observed_calls-initial_calls}calls; "
+            f"prepare={prepared_at-observed_at:.3f}s/{prepared_calls-observed_calls}calls; "
+            f"apply={returned_at-prepared_at:.3f}s/{self.calls-prepared_calls}calls; "
+            f"remaining={repository.work_end-returned_at:.3f}s")
+        self.assertEqual((result.state, result.settlement), ("succeeded", "settled"), diagnostic)
         self.assertFalse(repository._unknown)
         self.assertFalse(repository._retained)
         self.remember_fixture()  # Positive real apply + exact known cleanup only.

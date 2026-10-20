@@ -255,6 +255,133 @@ class LocalFacetTests(unittest.TestCase):
     def writes(self):
         return [row[0] for row in self.fake.calls if row[0][0] in ("add", "restore", "update-index", "write-tree", "commit-tree", "update-ref")]
 
+    def test_resolved_head_reuses_no_commands_only_in_same_checked_session(self):
+        repository = self.repo()
+        session = repository._session()
+        self.assertIsNone(session._resolved_head)
+        before = len(self.fake.calls)
+        self.assertEqual(session.head(), (HEAD, BRANCH))
+        self.assertEqual(len(self.fake.calls) - before, 3)
+        before = len(self.fake.calls)
+        with patch.object(session, "check_original", wraps=session.check_original) as originals, \
+                patch.object(session, "guard_current", wraps=session.guard_current) as current, \
+                patch.object(session, "_check_frozen", wraps=session._check_frozen) as frozen:
+            self.assertEqual(session.head(), (HEAD, BRANCH))
+        self.assertEqual((originals.call_count, current.call_count, frozen.call_count), (2, 2, 2))
+        self.assertEqual(len(self.fake.calls), before)
+        self.assertTrue(repository._finish_sessions(False))
+        before = len(self.fake.calls)
+        self.refused("already-used", session.head)
+        self.assertEqual(len(self.fake.calls), before)
+        successor_session = repository._session()
+        self.assertIsNone(successor_session._resolved_head)
+        before = len(self.fake.calls)
+        self.assertEqual(successor_session.head(), (HEAD, BRANCH))
+        self.assertEqual(len(self.fake.calls) - before, 3)
+        self.assertTrue(repository._finish_sessions(False))
+
+    def test_resolved_head_reuse_refuses_unknown_original_or_scratch_even_without_drift(self):
+        for target in ("repository", "frozen"):
+            with self.subTest(target=target):
+                repository = self.repo()
+                session = repository._session()
+                self.assertEqual(session.head(), (HEAD, BRANCH))
+                before = len(self.fake.calls)
+                if target == "repository":
+                    repository._unknown = True
+                else:
+                    session.frozen.unknown = True
+                self.refused("unknown", session.head)
+                self.assertEqual(len(self.fake.calls), before)
+                self.assertEqual(session._resolved_head, (HEAD, BRANCH))
+                self.assertFalse(repository._finish_sessions(True))
+
+    def test_resolved_head_reuse_cannot_hide_actual_ref_drift_or_unborn_addition(self):
+        for unborn in (False, True):
+            with self.subTest(unborn=unborn):
+                path = self.root / ".git/refs/heads/main"
+                if unborn:
+                    path.unlink()
+                repository = self.repo()
+                session = repository._session()
+                expected = (None if unborn else HEAD, BRANCH)
+                self.assertEqual(session.head(), expected)
+                before = len(self.fake.calls)
+                path.write_bytes((OTHER + "\n").encode())
+                self.refused("stale-observation", session.head)
+                self.assertEqual(len(self.fake.calls), before)
+                self.assertEqual(session._resolved_head, expected)
+                self.assertTrue(repository._finish_sessions(False))
+
+    def test_resolved_head_reuse_checks_exact_frozen_files_and_directory_roster(self):
+        for change in ("HEAD", BRANCH, "extra-file", "extra-directory"):
+            with self.subTest(change=change):
+                repository = self.repo()
+                session = repository._session()
+                self.assertEqual(session.head(), (HEAD, BRANCH))
+                before = len(self.fake.calls)
+                if change == "extra-directory":
+                    (session.frozen.root / "refs/heads/foreign").mkdir(mode=0o700)
+                else:
+                    path = session.frozen.root / ("refs/heads/foreign" if change == "extra-file" else change)
+                    path.write_bytes((OTHER + "\n").encode())
+                self.refused("stale-observation", session.head)
+                self.assertEqual(len(self.fake.calls), before)
+                self.assertEqual(session._resolved_head, (HEAD, BRANCH))
+                # Exact original scratch cleanup refuses the altered fixture.
+                # All producers are inert; only test TemporaryDirectory later
+                # removes this synthetic data, never as a settlement receipt.
+                self.assertFalse(repository._finish_sessions(False))
+                self.assertTrue(repository._unknown)
+
+    def test_resolved_head_reuse_rechecks_original_mutation_owner_stop(self):
+        repository, review, owner = self.prepared()
+        session = repository._session()
+        self.assertEqual(session.head(), (HEAD, BRANCH))
+        repository._active_plan, repository._active_owner = review.plan, owner
+        owner.stopped = True
+        before = len(self.fake.calls)
+        self.refused("authorization", session.head)
+        self.assertEqual(len(self.fake.calls), before)
+        self.assertTrue(repository._finish_sessions(False))
+
+    def test_failed_head_resolution_never_populates_session_cache(self):
+        repository = self.repo()
+        session = repository._session()
+        def after(args, _, __):
+            if args == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]:
+                raise core.GitError("command-failed")
+        self.fake.after = after
+        self.refused("command-failed", session.head)
+        self.assertIsNone(session._resolved_head)
+        self.assertTrue(repository._finish_sessions(False))
+
+    def test_positive_cas_invalidates_cache_before_frozen_successor_then_resolves_once(self):
+        self.fake.status = b"M  a.txt\0M  b.txt\0"
+        repository, review, owner = self.prepared("commit")
+        captured = []
+        original = core._FrozenGitDirectory.write
+        def write(frozen, name, body):
+            transaction = repository._transaction
+            if transaction is not None and name == BRANCH:
+                self.assertIs(frozen, transaction.session.frozen)
+                self.assertIsNone(transaction.session._resolved_head)
+                captured.append(body)
+            return original(frozen, name, body)
+        def before(args, _, __):
+            if args[0] == "update-ref":
+                self.assertEqual(repository._transaction.session._resolved_head, (HEAD, BRANCH))
+        self.fake.before = before
+        with patch.object(core._FrozenGitDirectory, "write", write):
+            result = self.apply(repository, review, owner)
+        self.assertEqual((result.state, result.settlement), ("succeeded", "settled"))
+        self.assertEqual(captured, [(COMMIT + "\n").encode()])
+        self.assertEqual(repository._transaction.session._resolved_head, (COMMIT, BRANCH))
+        cas = next(i for i, (args, _, __) in enumerate(self.fake.calls) if args[0] == "update-ref")
+        resolutions = [args for args, _, __ in self.fake.calls[cas + 1:]
+                       if args == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")]
+        self.assertEqual(len(resolutions), 1)
+
     def test_stage_only_selected_path_preserves_unrelated_index_and_worktree(self):
         repository, review, owner = self.prepared()
         before = (self.root / "b.txt").read_bytes()
@@ -310,6 +437,7 @@ class LocalFacetTests(unittest.TestCase):
         self.assertEqual(self.writes()[-1][-1], "0" * 40)
         self.assertNotIn("-p", next(args for args in self.writes() if args[0] == "commit-tree"))
         self.assertEqual((self.root / ".git/HEAD").read_bytes(), b"ref: refs/heads/main\n")
+        self.assertEqual(repository._transaction.session._resolved_head, (COMMIT, BRANCH))
 
     def test_mutation_command_config_is_frozen_except_locked_original_ref_cas(self):
         self.fake.status = b"M  a.txt\0M  b.txt\0"
@@ -382,6 +510,7 @@ class LocalFacetTests(unittest.TestCase):
         self.assertEqual((self.root / ".git/refs/heads/main").read_bytes(), (OTHER + "\n").encode())
         self.assertEqual(sum(args[0] == "update-ref" for args in self.writes()), 1)
         self.assertIsNone(repository._transaction.session.successor)
+        self.assertEqual(repository._transaction.session._resolved_head, (HEAD, BRANCH))
 
     def test_head_switch_after_lock_release_keeps_candidate_and_reports_recovery(self):
         self.fake.status = b"M  a.txt\0M  b.txt\0"
@@ -440,6 +569,7 @@ class LocalFacetTests(unittest.TestCase):
         self.assertEqual((result.state, result.settlement), ("unknown", "unknown"))
         self.assertEqual((self.root / ".git/refs/heads/main").read_bytes(), (COMMIT + "\n").encode())
         self.assertIsNone(repository._transaction.session.successor)
+        self.assertEqual(repository._transaction.session._resolved_head, (HEAD, BRANCH))
         count = len(self.fake.calls)
         self.refused("already-used", lambda: self.apply(repository, review, owner))
         self.assertEqual(len(self.fake.calls), count)
