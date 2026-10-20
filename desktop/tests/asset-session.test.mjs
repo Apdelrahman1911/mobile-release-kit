@@ -143,6 +143,59 @@ test('status DTO detaches the provider and refuses raw material, extra authority
   assert.equal(parseAssetStatus(lost), null);
 });
 
+test('stored-only Apple distribution keys remain listable but never become ordinary credential intents', async () => {
+  const kind = 'apple-distribution-key';
+  const ordinary = vaultRecord();
+  const pending = vaultRecord({ recordId: D, kind });
+  const observed = vaultStatus(2, { records: [ordinary, pending] });
+  assert.deepEqual(parseAssetStatus(observed), observed, 'one pending key must not hide unrelated stored credentials');
+  assert.deepEqual(parseAssetStatus(vaultStatus(2, { records: [ordinary, { ...pending, availability: 'mutation-pending' }] })),
+    vaultStatus(2, { records: [ordinary, { ...pending, availability: 'mutation-pending' }] }));
+  for (const mutate of [
+    (s) => { s.records[1].availability = 'assigned'; },
+    (s) => { s.records[1].payloadState = 'assessed'; },
+    (s) => { s.records[1].label = 'not-a-manual-entry'; },
+    (s) => { s.records[1].csrPem = 'inert-public-data'; },
+    (s) => { s.records[1].storage = 'session'; },
+    (s) => { s.assignments = [{ kind, recordId: D, recordRevision: 1, contextRevision: 1, availability: 'available' }]; },
+    (s) => { s.operation = operation(); s.operation.assessment.kind = kind; },
+    (s) => { s.operation = operation(); s.operation.preview.subject.kind = kind; },
+  ]) {
+    const changed = structuredClone(observed); mutate(changed);
+    assert.equal(parseAssetStatus(changed), null);
+  }
+  assert.equal(parseAssetStatus(status(2, { records: [{ ...pending, storage: 'session' }] })), null);
+  assert.equal(ASSET_KINDS.includes(kind), false);
+  assert.equal(isAssetFileKind(kind), false);
+  assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
+  assert.equal(assetRequestFits('credential_prepare', {
+    contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields: {},
+  }), false);
+
+  const h = harness(vaultStatus(0, { records: [ordinary, pending] }));
+  try {
+    await ready(h, { mode: 'encrypted', persistence: vaultStatus().persistence, records: [ordinary, pending] });
+    const before = h.calls.length;
+    const retained = h.controller.getSnapshot();
+    assert.equal(assetStorageWritable(retained.status), true);
+    assert.equal(h.controller.prepareRecord({ recordId: D, expectedRevision: 1 }), false);
+    assert.equal(h.controller.prepareDelete({ recordId: D, expectedRevision: 1 }), false);
+    assert.equal(h.calls.length, before, 'direct controller calls cannot bypass the disabled row controls');
+    assert.equal(h.controller.getSnapshot().intent, retained.intent);
+    assert.equal(h.controller.getSnapshot().status, retained.status);
+    assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), true,
+      'the refusal is kind-specific, not a disabled or stale session');
+    assert.deepEqual(h.latest('prepare').args,
+      { contextRevision: 1, source: { type: 'record', recordId: C, expectedRevision: 1 } });
+    h.latest('prepare').resolve(vaultStatus(2, { records: [{ ...ordinary, payloadState: 'assessed' }, pending],
+      operation: operation({ preview: { token: A, action: 'bind', expiresInMs: 10000,
+        subject: { type: 'record', kind: ordinary.kind, change: 'assign', recordId: C, recordRevision: 1 } } }) }));
+    await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    assert.equal(h.calls.some((call) => call.command === 'bind' || call.command === 'delete'), false);
+  } finally { h.controller.dispose(); }
+});
+
 test('review and commitment scalar records use the existing private prepare owner and exact fields', async () => {
   const kinds = {
     'apple-review-contact': { contactFirstName: 'Fictional', contactLastName: 'Reviewer', contactEmail: 'review@example.invalid', contactPhone: '+15555550100' },
