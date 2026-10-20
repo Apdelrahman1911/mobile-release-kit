@@ -381,7 +381,7 @@ fn source_worker(original: Arc<Operation>, mut input: SourceInputs) -> SourceRet
     let mut sources = match original.sources.lock() {
         Ok(sources) => sources, Err(_) => {
             client.fail(&original, wire::Reason::CleanupUnknown);
-            return SourceReturn { known: false, entered: false, first: original.control.failure(), retained_bytes: None, review: None };
+            return SourceReturn { known: false, entered: false, first: original.control.failure(), retained_bytes: None, diagnostic: None, review: None };
         }
     };
     let permit = receive(&mut input.reproof, &original, false);
@@ -426,7 +426,7 @@ fn source_worker(original: Arc<Operation>, mut input: SourceInputs) -> SourceRet
         retained_bytes.is_none_or(|bytes| bytes > reservation.source)) {
         client.fail(&original, wire::Reason::CleanupUnknown);
     }
-    SourceReturn { known, entered, first: original.control.failure(), retained_bytes, review: None }
+    SourceReturn { known, entered, first: original.control.failure(), retained_bytes, diagnostic: None, review: None }
 }
 
 fn failure_reason(failure: native::Failure) -> wire::Reason {
@@ -1234,7 +1234,7 @@ mod tests {
             let (release, enter) = oneshot::channel();
             let mut source = Some(tokio::spawn(async move {
                 enter.await.unwrap();
-                SourceReturn { known: true, entered: true, first: None, retained_bytes: Some(0), review: None }
+                SourceReturn { known: true, entered: true, first: None, retained_bytes: Some(0), diagnostic: None, review: None }
             }));
             let waker = Waker::from(Arc::new(FinalWake(Weak::new())));
             let mut cx = TaskContext::from_waker(&waker);

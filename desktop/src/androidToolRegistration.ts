@@ -44,7 +44,8 @@ export interface AndroidToolRegistrationAccounting {
   complete: boolean; contentFiles: number; contentAliases: number;
 }
 export type AndroidToolRegistrationProblem = 'binding' | 'bounds' | 'supplier-unavailable' | 'inventory' | 'ownership' |
-  'collision' | 'native' | 'stopped' | 'unknown' | 'transfer' | 'persist' | 'admission' | 'unavailable';
+  'collision' | 'native' | 'stopped' | 'unknown' | 'transfer' | 'persist' | 'admission' | 'unavailable' |
+  'jdk-source' | 'sdk-source' | 'gradle-source' | 'app-support-source';
 export interface AndroidToolRegistrationProblems {
   recorded: number; shown: number; omitted: number; first: AndroidToolRegistrationProblem | null;
   items: AndroidToolRegistrationProblem[];
@@ -125,7 +126,8 @@ const reasons = ['none', 'not-inspected', 'cancelled', 'context-changed', 'sourc
   'review-expired', 'stale-review', 'timed-out', 'document-lost', 'shutdown', 'busy', 'input-limit', 'result-limit', 'protocol-error',
   'registration-refused', 'cleanup-unknown'] as const;
 const problems = ['binding', 'bounds', 'supplier-unavailable', 'inventory', 'ownership', 'collision', 'native', 'stopped', 'unknown',
-  'transfer', 'persist', 'admission', 'unavailable'] as const;
+  'transfer', 'persist', 'admission', 'unavailable', 'jdk-source', 'sdk-source', 'gradle-source', 'app-support-source'] as const;
+const sourceInspectionProblems = ['jdk-source', 'sdk-source', 'gradle-source', 'app-support-source'] as const;
 const oneOf = <T extends string>(value: unknown, values: readonly T[]): value is T =>
   typeof value === 'string' && values.includes(value as T);
 const integer = (value: unknown, maximum: number, minimum = 0): value is number =>
@@ -264,6 +266,9 @@ export function parseAndroidToolRegistrationStatus(value: unknown): AndroidToolR
         if (!['complete', 'refused', 'cancelled'].includes(data.phase)) return null;
         report = reportData(data.report, original.kind);
         if (!report) return null;
+        if (report.problems.items.some((problem) => (sourceInspectionProblems as readonly string[]).includes(problem))
+            && (original.kind !== 'inspection' || data.phase !== 'refused' || data.reason !== 'source-refused'
+              || report.problems.recorded !== 1)) return null;
       }
       if (data.phase === 'complete' && (!report || report.protectedCopy !== 'published' || !sourceData(report.sources, true)
           || report.accounting?.complete !== true || report.problems.recorded !== 0)) return null;

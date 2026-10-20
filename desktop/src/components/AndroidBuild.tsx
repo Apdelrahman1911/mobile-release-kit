@@ -13,6 +13,7 @@ import { androidToolRegistrationActive, androidToolRegistrationPrerequisiteText,
   sameAndroidToolRegistrationIdentity, androidToolServiceActive, sameAndroidToolServiceIdentity } from '../androidToolRegistration.ts';
 import type { AndroidToolRegistrationProblem, AndroidToolRegistrationStatus, AndroidToolServiceStatus,
   AndroidToolServiceState, AndroidToolServiceOutcome } from '../androidToolRegistration.ts';
+import { sourceInspectionContinuation, sourceInspectionProblemText } from '../androidToolSourceDiagnostics.ts';
 
 const phases: Record<AndroidBuildPhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting build',
   running: 'Build running', stopping: 'Stopping · waiting for cleanup', terminal: 'Build request finished', unknown: 'Cleanup needs attention' };
@@ -329,6 +330,7 @@ const registrationPhases: Record<AndroidToolRegistrationStatus['phase'], string>
   unknown: 'Original cleanup is unconfirmed',
 };
 const registrationProblems: Record<AndroidToolRegistrationProblem, string> = {
+  ...sourceInspectionProblemText,
   binding: 'Original input binding changed', bounds: 'A fixed input or result limit was reached',
   'supplier-unavailable': 'Official supplier correspondence is unavailable', inventory: 'Content inventory was refused',
   ownership: 'Required file ownership was not established', collision: 'A protected destination already exists',
@@ -352,6 +354,7 @@ export function AndroidToolRegistration({ state, controller, onHelp }: {
   const status = state.toolRegistration, consent = state.registrationConsent, review = status?.review;
   if (status?.availability === 'unsupported-platform') return null;
   const inspectReason = controller.inspectToolSourcesReason(), registerReason = controller.registerToolSourcesReason();
+  const explainSource = controller.canExplainCurrentSourceInspection();
   const report = state.mode === 'native' && !state.integrityFailed && !state.nativeBlocked
     && status && ['complete', 'refused', 'cancelled'].includes(status.phase) ? status.report : null;
   return <section className="session-review" aria-label="Inspect and register Android tools">
@@ -393,7 +396,10 @@ export function AndroidToolRegistration({ state, controller, onHelp }: {
       {report.sources.length > 0 && <ul>{report.sources.map((source) => <li key={source.role}>{androidToolSourceHelp[source.role].label}: {source.version ?? 'version not established'} · {source.logicalBytes} observed logical bytes · {source.files} files · {source.aliases} aliases · {source.complete ? 'complete role observation' : 'partial observed subtotal; omitted input is not zero'} · {source.compatibility}.</li>)}</ul>}
       {report.accounting && <p>Helper observations: {report.accounting.writtenBytes} written bytes · {report.accounting.observedLogicalBytes} logical bytes · {report.accounting.observedAllocatedBytes} allocated bytes · {report.accounting.contentFiles} content files · {report.accounting.contentAliases} aliases. {report.accounting.complete ? 'The bounded accounting observation is complete for this original.' : 'Accounting is partial; it is not a census of all retained files or disk usage.'}</p>}
       <p>{report.problems.recorded} recorded problems · {report.problems.shown} shown · {report.problems.omitted} omitted. This is a bounded recorded prefix, not a census of all possible errors.</p>
-      {report.problems.items.length > 0 && <ol>{report.problems.items.map((problem, index) => <li key={index}>{registrationProblems[problem]}</li>)}</ol>}
+      {report.problems.items.length > 0 && <ol>{report.problems.items.map((problem, index) => {
+        const continuation = sourceInspectionContinuation(problem, explainSource);
+        return <li key={index}>{registrationProblems[problem]}{continuation && <p>{continuation}</p>}</li>;
+      })}</ol>}
       {report.protectedCopy === 'published' && <p>After settlement, explicitly Refresh tool list, Recover the copy for full verification, then Choose it. Nothing is auto-recovered, selected or built.</p>}
       <p>Cancel does not undo a protected copy. Retained partial output is neither build-ready nor permission to remove shared directories or caches.</p>
     </section>}

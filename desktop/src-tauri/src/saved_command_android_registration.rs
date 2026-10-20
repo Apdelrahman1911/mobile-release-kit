@@ -799,8 +799,17 @@ impl Checked {
 }
 struct SourceReturn {
     known:bool,entered:bool,first:Option<(wire::Reason,Instant)>,retained_bytes:Option<usize>,
+    diagnostic:Option<wire::Problem>,
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     review:Option<AndroidRegistrationSourceReview>,
+}
+impl SourceReturn {
+    // DATA comparison only, called after the existing coordinator/source joins.
+    fn inspection_problem(&self, first:Option<(wire::Reason,Instant)>)->Option<wire::Problem>{
+        if !self.known || !self.entered || self.first!=first
+            || !first.is_some_and(|(reason,_)|reason==wire::Reason::SourceRefused){return None;}
+        self.diagnostic.filter(|problem|problem.is_source_inspection())
+    }
 }
 struct Reservation {whole:usize,source:usize}
 struct Operation {
@@ -1081,7 +1090,7 @@ fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceRe
         Ok(sources)=>sources,
         Err(_)=>{
             original.control.mark_unknown(Instant::now());
-            return SourceReturn{known:false,entered:false,first:original.control.failure(),retained_bytes:None,review:None};
+            return SourceReturn{known:false,entered:false,first:original.control.failure(),retained_bytes:None,diagnostic:None,review:None};
         },
     };
     let now=Instant::now();original.control.advance(now);
@@ -1126,7 +1135,11 @@ fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceRe
         source_bytes.is_none_or(|bytes|bytes>reservation.source)){
         original.control.mark_unknown(Instant::now());
     }
-    SourceReturn{known,entered,first:original.control.failure(),retained_bytes,review}
+    let first=original.control.failure();
+    let diagnostic=if known && entered && !original.control.unknown.load(Ordering::SeqCst){
+        sources.inspection_problem(first)
+    }else{None};
+    SourceReturn{known,entered,first,retained_bytes,diagnostic,review}
 }
 fn poll_source(original:&Operation,slot:&mut Option<JoinHandle<SourceReturn>>,
     context:&mut TaskContext<'_>,at:Instant)->Poll<bool>{
@@ -1337,6 +1350,7 @@ impl Registration {
             }else{
                 let reason=failure.map_or_else(||prerequisite_reason(setup),|(reason,_)|reason);
                 let problem=match reason{
+                    wire::Reason::SourceRefused=>source.inspection_problem(failure).unwrap_or(wire::Problem::Inventory),
                     wire::Reason::SupplierUnavailable=>wire::Problem::SupplierUnavailable,
                     wire::Reason::InputLimit|wire::Reason::ResultLimit=>wire::Problem::Bounds,
                     wire::Reason::Cancelled|wire::Reason::TimedOut=>wire::Problem::Stopped,
@@ -1869,6 +1883,49 @@ mod lifecycle_book_tests {
     // Inert control DATA and scoped std WAIT workers only. No Document, runtime,
     // source/native book, Review or positive production qualification is made.
     use super::*;
+
+    #[test]
+    fn source_return_diagnostic_requires_closed_prefix_and_exact_first_failure_data() {
+        // DATA-only checks of the same SourceReturn consumed by finalization;
+        // true fields here are not a native source/coordinator join fixture.
+        let at=Instant::now();let first=Some((wire::Reason::SourceRefused,at));
+        let mut returned=SourceReturn{known:true,entered:true,first,retained_bytes:Some(0),diagnostic:Some(wire::Problem::JdkSource),
+            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+            review:None};
+        assert_eq!(returned.inspection_problem(first),Some(wire::Problem::JdkSource));
+        returned.known=false;assert_eq!(returned.inspection_problem(first),None);returned.known=true;
+        returned.entered=false;assert_eq!(returned.inspection_problem(first),None);returned.entered=true;
+        for changed in [None,Some((wire::Reason::Cancelled,at)),Some((wire::Reason::ContextChanged,at)),
+            Some((wire::Reason::CleanupUnknown,at)),Some((wire::Reason::SourceRefused,at+std::time::Duration::from_nanos(1)))] {
+            assert_eq!(returned.inspection_problem(changed),None);
+        }
+        returned.diagnostic=Some(wire::Problem::Inventory);assert_eq!(returned.inspection_problem(first),None);
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    #[test]
+    fn source_diagnostic_keeps_original_refusal_when_work_gate_normalizes_stop() {
+        // SAME original ControlSlot/WorkGate, no native source or join fixture.
+        let at=Instant::now();
+        let (_slot,control,_cohort,gate)=control_at(at);
+        gate.source_note(AdmissionFailure::Native,at);
+        assert_eq!(gate.source_first(),Some((AdmissionFailure::Stopped,at)));
+        assert_eq!(control.failure(),Some((wire::Reason::SourceRefused,at)));
+        let mut diagnostic=wire::InspectionDiagnostic::default();
+        diagnostic.enter(Some(wire::InspectionStage::AppSupport));
+        diagnostic.capture(gate.first());
+        assert_eq!(diagnostic.problem(control.failure()),Some(wire::Problem::AppSupportSource));
+
+        let (_slot,control,_cohort,gate)=control_at(at);
+        gate.note(wire::Reason::Cancelled,at);
+        gate.source_note(AdmissionFailure::Native,at+std::time::Duration::from_nanos(1));
+        assert_eq!(gate.source_first(),Some((AdmissionFailure::Stopped,at)));
+        let mut diagnostic=wire::InspectionDiagnostic::default();
+        diagnostic.enter(Some(wire::InspectionStage::AppSupport));
+        diagnostic.capture(gate.first());
+        assert_eq!(control.failure(),Some((wire::Reason::Cancelled,at)));
+        assert_eq!(diagnostic.problem(control.failure()),None);
+    }
 
     #[test]
     fn tool_acquisition_allows_counted_history_but_not_partial_or_unsettled_state() {

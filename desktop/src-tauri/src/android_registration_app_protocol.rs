@@ -9,6 +9,10 @@ use crate::{
     android_tool_sources::Role, edit_protocol::token, error::BridgeError,
 };
 
+#[path = "android_tool_source_diagnostics.rs"]
+mod source_diagnostics;
+pub(crate) use source_diagnostics::{InspectionDiagnostic, InspectionStage};
+
 pub(crate) const EVENT: &str = "android-tool-registration-state-changed";
 pub(crate) const CONSENT: &str = "android-tool-protected-copy-v1";
 pub(crate) const SERVICE_EVENT: &str = "android-tool-service-state-changed";
@@ -92,6 +96,7 @@ pub(crate) struct Accounting {
 pub(crate) enum Problem {
     Binding, Bounds, SupplierUnavailable, Inventory, Ownership, Collision,
     Native, Stopped, Unknown, Transfer, Persist, Admission, Unavailable,
+    JdkSource, SdkSource, GradleSource, AppSupportSource,
 }
 /// A prefix of the recorded bounded errors, not a census of all possible errors.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -422,6 +427,9 @@ impl Status {
         } else if self.review.is_some() { return false; }
         if let Some(report) = &self.report {
             if !report.valid(operation.kind) { return false; }
+            if report.problems.items.iter().any(|problem| problem.is_source_inspection())
+                && (operation.kind != Kind::Inspection || self.phase != Phase::Refused || self.reason != Reason::SourceRefused
+                    || report.problems.recorded != 1) { return false; }
         }
         if self.phase == Phase::Complete {
             let Some(report) = &self.report else { return false; };
@@ -613,6 +621,22 @@ mod tests {
         stopped.review = None; assert!(stopped.valid());
         let mut partial = good; partial.review.as_mut().unwrap().sources.pop();
         assert!(!partial.valid());
+    }
+    #[test]
+    fn source_stage_problem_is_only_one_refused_inspection_observation() {
+        let mut status=review_status();status.review=None;status.phase=Phase::Refused;status.reason=Reason::SourceRefused;
+        status.report=Some(Report{sources:Vec::new(),protected_copy:ProtectedCopy::NotCreated,accounting:None,
+            problems:Problems{recorded:1,shown:1,omitted:0,first:Some(Problem::SdkSource),items:vec![Problem::SdkSource]}});
+        assert!(status.valid());
+        for reason in [Reason::Cancelled,Reason::ContextChanged,Reason::SourceChanged,Reason::TimedOut,Reason::CleanupUnknown] {
+            let mut changed=status.clone();changed.reason=reason;assert!(!changed.valid());
+        }
+        let mut copy=status.clone();copy.operation.as_mut().unwrap().kind=Kind::Registration;assert!(!copy.valid());
+        let mut repeated=status.clone();let problems=&mut repeated.report.as_mut().unwrap().problems;
+        problems.items.push(Problem::SdkSource);problems.recorded=2;problems.shown=2;assert!(!repeated.valid());
+        let mut original=status;let problems=&mut original.report.as_mut().unwrap().problems;
+        problems.first=Some(Problem::Inventory);problems.items=vec![Problem::Inventory];
+        assert!(original.valid()); // Existing generic reports retain their old shape.
     }
     #[test]
     fn output_accounting_is_exact_u64_data_and_errors_are_only_the_recorded_prefix() {

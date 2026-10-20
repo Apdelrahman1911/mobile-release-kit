@@ -13,6 +13,7 @@ import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, ANDROID_BUILD_CORE
   ANDROID_BUILD_SCOPE, ANDROID_BUILD_TOOLCHAIN_PROFILE } from '../src/androidBuildProtocol.ts';
 import { ANDROID_TOOL_SERVICE_CONSENT, ANDROID_TOOL_REGISTRATION_CONSENT, parseAndroidToolRegistrationStatus } from '../src/androidToolRegistration.ts';
 import { parseAndroidToolchainCatalogStatus } from '../src/androidToolchainCatalogProtocol.ts';
+import { sourceInspectionContinuation, sourceInspectionProblemText } from '../src/androidToolSourceDiagnostics.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
@@ -1080,6 +1081,86 @@ async function reviewInToolSetup(h) {
 }
 const discardedSourceReview = review => ({ ...review, statusRevision: review.statusRevision + 1,
   phase: 'cancelled', reason: 'cancelled', review: null });
+
+function sourceRefusal(inspect, problem = 'sdk-source') {
+  return { ...sourceReview(inspect), phase: 'refused', reason: 'source-refused', review: null,
+    report: { sources: [], protectedCopy: 'not-created', accounting: null,
+      problems: { recorded: 1, shown: 1, omitted: 0, first: problem, items: [problem] } } };
+}
+
+test('source inspection diagnostics use closed failure stages, never missing or compatibility claims', async (t) => {
+  const h = toolSetupHarness(t); await h.ready;
+  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
+  for (const problem of ['jdk-source', 'sdk-source', 'gradle-source', 'app-support-source']) {
+    const refused = sourceRefusal(inspect, problem);
+    assert.ok(parseAndroidToolRegistrationStatus(refused));
+    assert.match(sourceInspectionProblemText[problem], /source check stopped/);
+    assert.ok(sourceInspectionContinuation(problem, true));
+    assert.equal(sourceInspectionContinuation(problem, false), null);
+    for (const reason of ['cancelled', 'source-changed', 'context-changed', 'timed-out', 'cleanup-unknown'])
+      assert.equal(parseAndroidToolRegistrationStatus({ ...refused, reason }), null);
+    const copy = clone(refused); copy.operation.kind = 'registration';
+    assert.equal(parseAndroidToolRegistrationStatus(copy), null);
+    const extra = clone(refused); extra.report.missing = true;
+    assert.equal(parseAndroidToolRegistrationStatus(extra), null);
+    const duplicate = clone(refused); duplicate.report.problems.recorded = duplicate.report.problems.shown = 2;
+    duplicate.report.problems.items.push(problem); assert.equal(parseAndroidToolRegistrationStatus(duplicate), null);
+  }
+  assert.equal(sourceInspectionContinuation('inventory', true), null);
+  assert.equal(sourceInspectionContinuation('unknown', true), null);
+  assert.match(sourceInspectionContinuation('jdk-source', true), /Do not change global Java settings/);
+  assert.match(sourceInspectionContinuation('sdk-source', true), /If a required package is missing/);
+  assert.match(sourceInspectionContinuation('gradle-source', true), /Do not run a project wrapper/);
+  assert.match(sourceInspectionContinuation('app-support-source', true), /Do not replace your JDK, SDK or Gradle/);
+  assert.ok(parseAndroidToolRegistrationStatus(sourceRefusal(inspect, 'inventory')));
+  h.replyRegistration(inspect, sourceRefusal(inspect)); await inspecting;
+  assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
+});
+
+test('source inspection diagnostics wait for the same invoke and retire on equal-byte snapshot replacement', async (t) => {
+  const h = toolSetupHarness(t); await h.ready;
+  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0], refused = sourceRefusal(inspect);
+  h.emitRegistration(refused);
+  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
+  h.replyRegistration(inspect, refused); await inspecting;
+  assert.equal(h.controller.canExplainCurrentSourceInspection(), true);
+  assert.match(sourceInspectionContinuation(refused.report.problems.first, true), /SDK root/);
+  assert.equal(h.state.registrationConsent, null); assert.equal(h.state.consent, null);
+  h.replace({ ...h.project, snapshot: clone(h.project.snapshot) });
+  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
+  assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
+  assert.equal(h.controller.canCheckToolRegistration(), true);
+});
+
+test('source inspection diagnostics keep original cancel and status without suggesting a repair', async (t) => {
+  const h = toolSetupHarness(t); await h.ready;
+  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
+  const refused = { ...sourceRefusal(inspect), statusRevision: 2 };
+  h.emitRegistration({ ...refused, statusRevision: 1, availability: 'busy', phase: 'inspecting', reason: 'none', report: null });
+  assert.equal(h.controller.cancelToolRegistration(), true);
+  const cancel = h.registrationCalls[1]; assert.equal(cancel.kind, 'cancel');
+  h.emitRegistration(refused);
+  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
+  h.replyRegistration(inspect, refused); await inspecting;
+  assert.equal(h.state.registrationCancelPending, true);
+  h.replyRegistration(cancel, refused); await flush();
+  assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
+  assert.equal(h.controller.canCheckToolRegistration(), true);
+  assert.equal(h.state.toolRegistration.operation.operationId, OP);
+  assert.equal(h.registrationCalls.length, 2); assert.equal(h.calls.length, 0);
+});
+
+test('source inspection diagnostics never use a previous project or API as current guidance', async (t) => {
+  for (const retire of [h => h.dispatch({ type: 'select', project: { id: 'p2', name: 'Other', path: '/inert/other' } }),
+    h => h.controller.beginConnection()]) {
+    const h = toolSetupHarness(t); await h.ready;
+    const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
+    h.replyRegistration(inspect, sourceRefusal(inspect, 'jdk-source')); await inspecting;
+    assert.equal(h.controller.canExplainCurrentSourceInspection(), true);
+    retire(h); assert.equal(h.controller.canExplainCurrentSourceInspection(), false);
+    assert.equal(h.registrationCalls.length, 1); assert.equal(h.calls.length, 0);
+  }
+});
 
 test('tool setup view is passive and cannot prepare or approve an Android build', async (t) => {
   const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false);

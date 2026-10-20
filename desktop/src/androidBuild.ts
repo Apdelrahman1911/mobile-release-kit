@@ -735,6 +735,17 @@ export class AndroidBuildController {
       && sameAndroidBuildData(op.context, attempt.binding.context)
       && (!attempt.identity || sameAndroidToolRegistrationIdentity(attempt.identity, op));
   }
+  // Presentation only. A retained failure from another original/context may be
+  // described, but must not tell the user to change the current tool folders.
+  canExplainCurrentSourceInspection(): boolean {
+    const attempt = this.registrationAttempt, status = this.state.toolRegistration;
+    return !!attempt && !!status && attempt.kind === 'inspection' && attempt.sent && attempt.replySettled && attempt.settled
+      && this.state.mode === 'native' && !this.state.nativeBlocked && !this.state.integrityFailed && !this.state.generationLost
+      && this.state.registrationListening && !this.state.registrationIssue && !this.state.registrationUnconfirmed
+      && this.state.registrationPending === null && !this.state.registrationCancelPending && !this.state.registrationCancelClaimed
+      && status.phase === 'refused' && status.reason === 'source-refused' && status.report?.protectedCopy === 'not-created'
+      && this.registrationCandidate(attempt, status) && this.registrationMatches(attempt);
+  }
   private registrationProgress(before: AndroidToolRegistrationStatus, after: AndroidToolRegistrationStatus): boolean {
     if (!sameAndroidBuildData(before.operation, after.operation)) return false;
     if (before.phase === 'unknown') return after.phase === 'unknown';

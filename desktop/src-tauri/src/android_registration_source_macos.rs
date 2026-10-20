@@ -183,6 +183,7 @@ pub(crate) struct SourceSlots {
     account: Option<u32>, begun: bool, settled: bool, unknown: bool, reproof: bool, streamed: bool,
     first: Option<(AdmissionFailure, Instant)>, audit: watch::Receiver<Instant>,
     gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
+    inspection_diagnostic: app::InspectionDiagnostic,
 }
 impl SourceSlots {
     #[cfg(test)]
@@ -199,7 +200,8 @@ impl SourceSlots {
             closure: None, recipe: None, optional_sdk_metadata: [None, None], sdk_metadata_parents: [None; 2],
             proposal: None, instance: None, support: FixedSupportSlots::new_registered(gate.clone()),
             frame: None, frame_entered: false, frame_settled: false, live: 0, read_bytes: 0, account: None,
-            begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate }
+            begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate,
+            inspection_diagnostic: app::InspectionDiagnostic::default() }
     }
     /// One real source phase, not a new pool. The caller adds previous Review,
     /// client/control/task/status/request storage under its same64MiB cap.
@@ -478,6 +480,8 @@ impl SourceSlots {
         let mut identities: [Vec<Identity>; 3] = std::array::from_fn(|_| Vec::new());
         let mut jdk_home = None; let mut layout = None;
         for (role, root) in roots.iter().enumerate() {
+            self.inspection_diagnostic.enter(Some([app::InspectionStage::Jdk, app::InspectionStage::Sdk,
+                app::InspectionStage::Gradle][role]));
             let chain = self.chain(root, end, stop)?;
             let picked = *chain.last().ok_or(AdmissionFailure::Unknown)?;
             let mut observed = vec_with(chain.len() + 4)?;
@@ -501,6 +505,7 @@ impl SourceSlots {
                 } else { return Err(AdmissionFailure::Inventory); }
             } else { self.roots[role] = Some(picked); }
         }
+        self.inspection_diagnostic.enter(Some(app::InspectionStage::Jdk));
         let release = self.child(jdk_home.ok_or(AdmissionFailure::Inventory)?, "release", false, end, stop)?;
         let size = u64::try_from(self.identity(release)?.size).map_err(native_error)?;
         if size == 0 || size > BLOCK as u64 { return Err(AdmissionFailure::Bounds); }
@@ -535,7 +540,20 @@ impl SourceSlots {
             self.check_remaining(end, stop)
         })();
         if let Err(failure) = result { self.note(failure, Instant::now(), publish); }
+        // Freeze before cleanup, using the actual returned source error and
+        // original wire reason/F. source_first() deliberately normalizes even
+        // SourceRefused to Stopped for WORK; that is not diagnostic provenance.
+        // Identity drift, STOP, bounds and uncertain owners get no tool advice.
+        let first = if matches!(result, Err(AdmissionFailure::Inventory | AdmissionFailure::Ownership | AdmissionFailure::Native)) {
+            self.gate.as_ref().and_then(|gate| gate.first())
+        } else { None };
+        self.inspection_diagnostic.capture(first);
         result
+    }
+    pub(crate) fn inspection_problem(&self, first: Option<(app::Reason, Instant)>) -> Option<app::Problem> {
+        // Source-worker DATA only; the caller still owns both original joins.
+        if !self.settled() || self.reproof || self.streamed { return None; }
+        self.inspection_diagnostic.problem(first)
     }
     pub(crate) fn reprove_once(&mut self, roots: &[RegisteredRoot; 3], reviewed: &SourceReview,
         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
@@ -565,6 +583,7 @@ impl SourceSlots {
         result
     }
     fn observe(&mut self, recipe: &Recipe, mut roots: [Vec<Identity>; 3], end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.inspection_diagnostic.enter(None);
         let roster = recipe.source_roster();
         optional_sdk_metadata_roster(roster)?;
         if roster.members.is_empty() || roster.members.len() > policy::ENTRY_LIMIT
@@ -575,6 +594,10 @@ impl SourceSlots {
         self.observed = vec_with(roster.members.len())?;
         for _ in roster.members { self.observed.push(None); }
         for tree in roster.trees {
+            self.inspection_diagnostic.enter(match tree.group {
+                SourceGroup::Jdk => Some(app::InspectionStage::Jdk), SourceGroup::Sdk => Some(app::InspectionStage::Sdk),
+                SourceGroup::Gradle => Some(app::InspectionStage::Gradle), SourceGroup::FixedSupport => None,
+            });
             let role = group_index(tree.group).ok_or(AdmissionFailure::Inventory)?;
             let root = self.roots[role].ok_or(AdmissionFailure::Unknown)?;
             let mut parent = root; let mut prefix = String::new();
@@ -595,6 +618,7 @@ impl SourceSlots {
             self.walk(parent, tree.group, tree.prefix, roster, 0, end, stop)?;
             if parent != root && !self.originals[parent].retained { self.close_checked(parent, end, stop)?; }
         }
+        self.inspection_diagnostic.enter(None);
         if self.observed.iter().any(Option::is_none) { return Err(AdmissionFailure::Inventory); }
         let sdk_metadata_parents = self.frozen_sdk_metadata_parents()?;
         let mut members = vec_with(self.observed.len())?; let mut counts = [Count::default(); 3];
@@ -621,7 +645,9 @@ impl SourceSlots {
             count.bytes = count.bytes.checked_add(metadata.file.size).ok_or(AdmissionFailure::Bounds)?;
         }
         let support_end=end.min(*self.audit.borrow());
+        self.inspection_diagnostic.enter(Some(app::InspectionStage::AppSupport));
         self.support.inspect_once(recipe, support_end, stop)?;
+        self.inspection_diagnostic.enter(None); // Native OS providers are not the app's support-tool files.
         let (provider_roots, provider) = self.provider(end, stop)?;
         let picked = counts.iter().try_fold((0u64, 0u32, 0u32, 0u32), |(b, f, e, a), c|
             Some((b.checked_add(c.bytes)?, f.checked_add(c.files)?, e.checked_add(c.entries)?, a.checked_add(c.aliases)?)))
