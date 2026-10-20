@@ -109,9 +109,9 @@ export class CredentialUploadKeyController {
   }
   recoveryCompleted(assets: AssetDisplayState): UploadKeyRecoveryAction | null {
     const attempt = this.recoveryAttempt, status = this.state.status, operation = status?.recovery?.operation;
-    if (!attempt || this.pending || this.recoveryFailed || assets.blocked || assets.observationFailed || assets.originPending ||
+    if (!attempt || !status || this.pending || this.recoveryFailed || assets.blocked || assets.observationFailed || assets.originPending ||
         uploadKeyContext(assets) !== attempt.context || attempt.context !== this.context ||
-        status?.assets.statusRevision !== assets.status?.statusRevision || operation?.phase !== 'completed' ||
+        status.assets.statusRevision !== assets.status?.statusRevision || operation?.phase !== 'completed' ||
         operation.operationId !== this.recoveryOriginal || operation.action !== attempt.request.action ||
         operation.preferenceRevision === null || BigInt(operation.preferenceRevision) !== BigInt(attempt.request.expectedPreferenceRevision) + 1n)
       return null;
