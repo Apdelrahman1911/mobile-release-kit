@@ -88,12 +88,13 @@ import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
 import { createGitLocalApi } from './gitLocalProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -403,6 +404,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     gitLocal: createGitLocalApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),

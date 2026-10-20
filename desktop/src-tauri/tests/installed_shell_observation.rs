@@ -66,6 +66,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
 #[path = "../src/github_auth_accounts.rs"] mod github_auth_accounts;
 #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
+#[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;

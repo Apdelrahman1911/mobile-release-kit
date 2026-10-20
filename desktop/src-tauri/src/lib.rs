@@ -291,6 +291,7 @@ mod github_release_protocol;
 mod github_release_session;
 mod github_setup_protocol;
 mod github_publication_protocol;
+mod github_repository_create_protocol;
 mod github_setup_session;
 mod github_history_protocol;
 mod github_history_session;

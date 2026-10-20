@@ -2161,6 +2161,50 @@ async fn github_remote_setup_cancel(webview: Webview, request: tauri::ipc::Reque
     state.document.github_remote_setup_command("github_remote_setup_cancel", request_body(&request)?)
 }
 
+// Closed empty-repository requests only; the original document derives the
+// account, project, native home and token. No URL/body/private input route.
+fn repository_create_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_repository_create_protocol::raw_input(bytes)?;
+    state.document.repository_create_command(name, &value)
+}
+#[tauri::command]
+async fn github_repository_create_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_prepare", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_create(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_create", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_pending", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_reconcile", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_discard", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_repository_create_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_repository_create_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Repository creation has no fixture admission."));
+    repository_create_command("github_repository_create_cancel", &webview, &request, &state)
+}
+
 #[tauri::command]
 async fn github_setup_publication_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
@@ -2723,6 +2767,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut github_release_revision = None;
         let mut github_setup_revision = None;
         let mut github_publication_revision = None;
+        let mut repository_create_revision = None;
         let mut github_history_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
@@ -2852,6 +2897,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if github_publication_revision!=Some(status.revision){
                 github_publication_revision=Some(status.revision);
                 let _=app.emit_to(MAIN_WINDOW,crate::github_publication_protocol::EVENT,&status);
+            }
+            let status=document.repository_create_status();
+            if repository_create_revision!=Some(status.revision){
+                repository_create_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_repository_create_protocol::EVENT,&status);
             }
             let status=document.github_history_status();
             if github_history_revision!=Some(status.revision){
@@ -4658,6 +4708,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
             github_release_reconcile, github_release_pending, github_release_cancel,
             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
+            github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,

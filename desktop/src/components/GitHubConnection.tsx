@@ -46,16 +46,16 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
   const account = status?.account.value; const repository = status?.repository.value; const automation = status?.automation.value;
   const repositoryHelp = state.help?.inputs.find((entry) => entry.id === 'repository');
   const tokenHelp = state.help?.inputs.find((entry) => entry.id === 'token');
-  const connected = !retained && !state.busy && status?.session?.state === 'connected' &&
-    status.account.state === 'observed' && status.repository.state === 'observed';
+  const accountConnected = !retained && !state.busy && status?.session?.state === 'connected' && status.account.state === 'observed';
+  const connected = accountConnected && status?.repository.state === 'observed';
   return <>
     <section className="card" aria-label="GitHub connection and observations">
       <SectionHeading title="Connect GitHub" description="Check your account and app repository. Connecting does not change files or start a release.">
         <Icon name="github" size={24} />
       </SectionHeading>
       <div className="notice notice-info" role="status"><Icon name="github" size={18} /><div>
-        <strong>{connected ? 'Connected for read-only checks' : state.busy ? 'Finishing the original connection task' : retained && account ? 'Previous account check — not a current connection' : 'Not connected'}</strong>
-        {account && <p>{connected ? 'Account' : 'Last checked account'}: <strong>{account.login}</strong>{repository && <> · {repository.fullName}</>}</p>}
+        <strong>{connected ? 'Connected for read-only checks' : accountConnected ? 'Account verified — repository not yet checked' : state.busy ? 'Finishing the original connection task' : retained && account ? 'Previous account check — not a current connection' : 'Not connected'}</strong>
+        {account && <p>{accountConnected ? 'Account' : 'Last checked account'}: <strong>{account.login}</strong>{repository && <> · {repository.fullName}</>}</p>}
         <p>A connection is not permission to change repository settings, start a workflow or publish an app. Those tasks have their own review and approval.</p>
       </div></div>
       {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Check status and Disconnect remain available for the original connection.</p>}
@@ -68,7 +68,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
         {repositoryHelp && <HelpButton content={helpContent(repositoryHelp)} onHelp={onHelp} />}</div>
       <input id={repositoryId} type="text" disabled={!projectSelected} value={repositoryInput} onChange={(event) => onRepository(event.target.value)}
         placeholder="OWNER/REPO" maxLength={140} autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby={`${repositoryId}-help`} />
-      <p id={`${repositoryId}-help`} className="save-note">Enter OWNER/REPO from your app’s GitHub URL, without https://github.com/ or .git. This is a manual choice, not automatic repository discovery. Changing it ends use of the original connection. Do not paste credentials here.</p>
+      <p id={`${repositoryId}-help`} className="save-note">Enter OWNER/REPO from GitHub, or the intended name for a new repository below, without https://github.com/ or .git. OWNER is your username or organization; REPO is the repository name. This is a manual choice, not automatic repository discovery. Changing it ends use of the original connection. Do not paste credentials here.</p>
       {repositoryInput !== '' && !connectionRepository(repositoryInput) && <p className="review-caution" role="status">Use OWNER/REPO, not a URL, path or token. A malformed target cannot start a connection.</p>}
       {ghEntry}
       <details className="progressive-disclosure">

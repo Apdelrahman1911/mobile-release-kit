@@ -126,6 +126,9 @@ pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, 
 #[path = "asset_session_github_publication.rs"]
 mod github_publication;
 pub(crate) use github_publication::GitHubPublicationGoGate;
+#[path = "asset_session_repository_create.rs"]
+mod repository_create;
+pub(crate) use repository_create::RepositoryCreateGoGate;
 pub(crate) use github_variable::GitHubVariableMaterial;
 
 #[path = "asset_session_android_signing.rs"]
@@ -3946,6 +3949,7 @@ impl DocumentBinding {
         gh_auth::retire_joined(self, state);
         self.github_setup_observe_locked(state, now, gate);
         self.github_publication_observe_locked(state, now, gate);
+        self.repository_create_observe_locked(state, now, gate);
         self.github_history_observe_locked(state, now, gate);
     }
     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {

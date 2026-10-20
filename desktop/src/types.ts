@@ -428,6 +428,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+  readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
   readonly gitLocal?: import('./gitLocalProtocol.ts').GitLocalApi | null;
   // Fixed original native owner only; no preview or generic transport fallback.
   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
