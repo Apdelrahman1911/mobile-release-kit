@@ -16,6 +16,7 @@ from . import _desktop_git_branches as branch
 from . import git_fast_forward_worker as ff
 from . import _desktop_git_switch as switch
 from . import _desktop_git_rename as rename
+from . import _desktop_git_init as initialize
 from . import git_repository_local as local
 from . import git_repository_read as read
 from . import git_service as core
@@ -53,7 +54,9 @@ class Action:
                 {"name": self.identity.name, "email": self.identity.email}}
 
 
-def action(value) -> Action | branch.Action | switch.Action | rename.Action | ff.Action:
+def action(value) -> Action | branch.Action | switch.Action | rename.Action | ff.Action | initialize.Action:
+    if type(value) is dict and value.get("kind") == "initialize":
+        return initialize.action(value)
     if type(value) is dict and value.get("kind") == "fast-forward":
         return ff.action(value)
     if type(value) is dict and value.get("kind") == "branch-rename":
@@ -85,7 +88,7 @@ def action(value) -> Action | branch.Action | switch.Action | rename.Action | ff
 class Request:
     id: str
     phase: str
-    action: Action | branch.Action | switch.Action | rename.Action
+    action: Action | branch.Action | switch.Action | rename.Action | ff.Action | initialize.Action
     review_digest: str | None
     journal_revision: int | None
     project_id: str  # Runtime context alias; NOT the durable service project ID.
@@ -104,12 +107,15 @@ class Request:
     switch_sources: switch.Sources | None = None
     rename_sources: rename.Sources | None = None
     fast_forward_sources: ff.Sources | None = None
+    init_sources: initialize.Sources | None = None
 
 
 def parse_request(raw: bytes) -> Request:
     try:
         decoded = source_fields._decode(raw, REQUEST_LIMIT)
         is_ff = (type(decoded) is dict and type(decoded.get("action")) is dict and decoded["action"].get("kind") == "fast-forward")
+        is_init = (type(decoded) is dict and type(decoded.get("action")) is dict
+                   and decoded["action"].get("kind") == "initialize")
         is_switch = (type(decoded) is dict and type(decoded.get("action")) is dict
                      and decoded["action"].get("kind") == "branch-switch")
         is_rename = (type(decoded) is dict and type(decoded.get("action")) is dict
@@ -123,18 +129,23 @@ def parse_request(raw: bytes) -> Request:
             source_fields._hex(row["reviewDigest"])
             source_fields._integer(row["journalRevision"], 1, (1 << 64) - 2)
         context = source_fields._keys(row["context"], ("projectId", "generation", "revision"))
-        native = source_fields._keys(row["native"], ("uid", "gid", "root", "directories", "tool", "files"))
-        uid, gid = source_fields._integer(native["uid"], 1, (1 << 32) - 1), source_fields._integer(native["gid"], 0, (1 << 32) - 1)
-        root = source_fields._path(native["root"])
-        directories = source_fields._keys(native["directories"], ("root", "git", "objects"))
-        directories = tuple((root / relative, source_fields._directory(directories[name], uid))
-            for name, relative in (("root", ""), ("git", ".git"), ("objects", ".git/objects")))
-        tool = source_fields._snapshot(TOOL_PATH, native["tool"], 0, TOOL_LIMIT, executable=True)
-        files = source_fields._keys(native["files"], ("HEAD", "config", "index"))
-        snapshots = tuple(source_fields._snapshot(root / ".git" / name, files[name], uid, maximum)
-            for name, maximum in (("HEAD", 2048), ("config", 65536), ("index", core.MAX_INDEX_BYTES))
-            if name != "index" or files[name] is not None)
-        require(snapshots[0].identity[6] > 0)
+        initialized = None
+        if is_init:
+            uid, gid, root, directories, tool, snapshots, initialized = initialize.native(row["native"], row["phase"])
+            files = {"index": False}  # No Git index observation exists in this typed domain.
+        else:
+            native = source_fields._keys(row["native"], ("uid", "gid", "root", "directories", "tool", "files"))
+            uid, gid = source_fields._integer(native["uid"], 1, (1 << 32) - 1), source_fields._integer(native["gid"], 0, (1 << 32) - 1)
+            root = source_fields._path(native["root"])
+            directories = source_fields._keys(native["directories"], ("root", "git", "objects"))
+            directories = tuple((root / relative, source_fields._directory(directories[name], uid))
+                for name, relative in (("root", ""), ("git", ".git"), ("objects", ".git/objects")))
+            tool = source_fields._snapshot(TOOL_PATH, native["tool"], 0, TOOL_LIMIT, executable=True)
+            files = source_fields._keys(native["files"], ("HEAD", "config", "index"))
+            snapshots = tuple(source_fields._snapshot(root / ".git" / name, files[name], uid, maximum)
+                for name, maximum in (("HEAD", 2048), ("config", 65536), ("index", core.MAX_INDEX_BYTES))
+                if name != "index" or files[name] is not None)
+            require(snapshots[0].identity[6] > 0)
         clock = source_fields._keys(row["clock"], ("workEndNs", "hardEndNs"))
         work, hard = (source_fields._integer(clock[name], 1, (1 << 63) - 1) for name in ("workEndNs", "hardEndNs"))
         require(hard - work == 10_000_000_000)
@@ -146,7 +157,7 @@ def parse_request(raw: bytes) -> Request:
         return Request(source_fields._id(row["id"]), row["phase"], selected,
             row["reviewDigest"], row["journalRevision"], source_fields._id(context["projectId"]),
             source_fields._integer(context["generation"], 0, (1 << 32) - 1), source_fields._id(context["revision"]),
-            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded)
+            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded, initialized)
     except (source_fields.ProtocolError, core.GitError, UnicodeError, ValueError, TypeError, OverflowError):
         raise ProtocolError(_ERROR) from None
 
@@ -169,6 +180,8 @@ def go(request: Request) -> bytes:
 
 
 def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
+    if type(request) is Request and type(request.action) is initialize.Action:
+        return initialize.matches_review(request, review)
     if type(request) is Request and type(request.action) is ff.Action:
         return ff.matches_review(request, review)
     if type(request) is Request and type(request.action) is rename.Action:
@@ -197,6 +210,8 @@ class Candidate:
 
 def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
               intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
+    if type(request) is Request and type(request.action) is initialize.Action:
+        return initialize.candidate(request, review, intent)
     if type(request) is Request and type(request.action) is ff.Action:
         return ff.candidate(request, review, intent)
     if type(request) is Request and type(request.action) is rename.Action:
@@ -241,14 +256,15 @@ def terminal(request: Request, status: str, *, reason: str | None,
              publication: str = "not-reported", progress: switch.Progress | None = None,
              first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
     is_ff = type(request) is Request and type(request.action) is ff.Action
+    is_init = type(request) is Request and type(request.action) is initialize.Action
     is_switch = type(request) is Request and type(request.action) is switch.Action
     is_rename = type(request) is Request and type(request.action) is rename.Action
     is_branch = type(request) is Request and type(request.action) is branch.Action
     require(type(request) is Request and status in STATUSES
-            and (reason is None or (ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
+            and (reason is None or (initialize.valid_reason(reason) if is_init else ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
                                   branch.valid_reason(reason) if is_branch else reason in core._REASONS))
             and (is_ff or is_switch or is_rename or progress is None)
-            and publication in (ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
+            and publication in (("not-reported", "init-returned") if is_init else ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
                                 ("not-reported", "index-returned", "ref-returned")))
     try:
         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
@@ -258,7 +274,10 @@ def terminal(request: Request, status: str, *, reason: str | None,
     except source_fields.ProtocolError:
         raise ProtocolError(_ERROR) from None
     data = None
-    if is_ff:
+    if is_init:
+        data = initialize.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
+            publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
+    elif is_ff:
         data = ff.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
             publication=publication, progress=progress, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
     elif is_rename:

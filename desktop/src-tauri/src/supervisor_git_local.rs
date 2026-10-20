@@ -48,16 +48,26 @@ pub(crate) struct GitLocalPublication {
     request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
 }
 impl GitLocalPublication {
+    pub(crate) fn init_for(&self,id:&str,native:&crate::git_init_protocol::Native,review:&wire::Review)
+        ->Result<&crate::git_init_protocol::Intent,crate::asset_commands::Reason> {
+        if self.request.action.kind()!=wire::Kind::Initialize || self.request.id!=id || self.request.native.is_some()
+            || self.request.initialization.as_ref()!=Some(native) || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            || !self.candidate.intent.matches(review) || self.publication!=wire::Publication::InitReturned {
+            return Err(crate::asset_commands::Reason::SourceChanged)
+        }
+        self.candidate.intent.init_details().ok_or(crate::asset_commands::Reason::SourceChanged)
+    }
+
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward) || self.request.id!=id || &self.request.native!=native
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
     }
     pub(crate) fn rename_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_rename_protocol::Sources)
         ->Result<(&crate::git_rename_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
-        if self.request.action.kind()!=wire::Kind::BranchRename || self.request.id!=id || &self.request.native!=native
+        if self.request.action.kind()!=wire::Kind::BranchRename || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
             || self.request.rename_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
             || self.publication==wire::Publication::NotReported || crate::git_rename_protocol::effect(self.publication).is_none() {
@@ -67,7 +77,7 @@ impl GitLocalPublication {
     }
     pub(crate) fn fast_forward_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_fast_forward_protocol::Sources)
         ->Result<(&crate::git_fast_forward_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
-        if self.request.action.kind()!=wire::Kind::FastForward || self.request.id!=id || &self.request.native!=native
+        if self.request.action.kind()!=wire::Kind::FastForward || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
             || self.request.fast_forward_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
             || self.publication==wire::Publication::NotReported || crate::git_fast_forward_protocol::effect(self.publication).is_none() {
@@ -77,7 +87,7 @@ impl GitLocalPublication {
     }
     pub(crate) fn switch_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_switch_protocol::Sources)
         ->Result<(&crate::git_switch_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
-        if self.request.action.kind()!=wire::Kind::BranchSwitch || self.request.id!=id || &self.request.native!=native
+        if self.request.action.kind()!=wire::Kind::BranchSwitch || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
             || self.request.switch_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
             || self.publication==wire::Publication::NotReported || crate::git_switch_protocol::effect(self.publication).is_none() {
@@ -145,12 +155,13 @@ impl GitLocalAdmission {
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {let _=(gate,action,phase,endpoints);Err(BridgeError::unavailable("Local Git writes are unavailable on this installed runtime."))}
     }
-    pub(crate) fn reservation_bytes()->Option<usize> {
+    pub(crate) fn reservation_bytes(kind:wire::Kind)->Option<usize> {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {crate::installed_runtime::GitLocalRuntimeSlots::working_reservation_bytes()?
-            .checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>())}
+            .checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>())?
+            .checked_add(if kind==wire::Kind::Initialize {crate::git_init_protocol::MANIFEST_BACKING}else{0})}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
-        {None}
+        {let _=kind;None}
     }
 }
 impl Supervisor {
@@ -221,11 +232,19 @@ impl Invocation {
             let result=runtime.resolve_git_local_installed(&mut native,owner.endpoint(),&stop);
             owner.observe_native_failure(native.first_failure());result?};
         let review=self.gate.review();
-        let (snapshot,switch_sources,rename_sources,fast_forward_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        // Initialization's exclusive private mkdir is an effect. Refuse the
+        // wrong/missing original Preparing ACK BEFORE entering SourceBook,
+        // not merely while formatting the later child request.
+        if self.action.kind()==wire::Kind::Initialize && !matches!((self.phase,review.as_ref(),preparing),
+            (wire::Phase::Prepare,None,None)|(wire::Phase::Apply,Some(_),Some(_))) {
+            return Err(BridgeError::cleanup_unknown())
+        }
+        let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
-                &owner.id,review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+                &owner.id,self.action.kind(),review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
-            (sources.native_snapshot().map_err(source_error)?.clone(),sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned())};
+            (if self.action.kind()==wire::Kind::Initialize {None}else{Some(sources.native_snapshot().map_err(source_error)?.clone())},
+                sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned())};
         let binding=match (self.phase,review,preparing) {
             (wire::Phase::Prepare,None,None)=>None,
             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
@@ -235,13 +254,15 @@ impl Invocation {
         let mut clock=mrk_macos_installed_native::vault_helper_wire::ClockBridge::capture().ok_or_else(BridgeError::cleanup_unknown)?;
         let clock_data=wire::Clock {work_end_ns:clock.endpoint(ends.work).ok_or_else(BridgeError::cleanup_unknown)?,
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
-        let request=Arc::new(if self.action.kind()==wire::Kind::FastForward {
-            wire::Request::from_fast_forward_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,fast_forward_sources)?
+        let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
+            wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
+        } else if self.action.kind()==wire::Kind::FastForward {
+            wire::Request::from_fast_forward_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,fast_forward_sources)?
         } else if self.action.kind()==wire::Kind::BranchSwitch {
-            wire::Request::from_switch_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,switch_sources)?
+            wire::Request::from_switch_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,switch_sources)?
         } else if self.action.kind()==wire::Kind::BranchRename {
-            wire::Request::from_rename_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,rename_sources)?
-        } else {wire::Request::from_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding)?});
+            wire::Request::from_rename_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,rename_sources)?
+        } else {wire::Request::from_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?});
         let mut slot=self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let mut bridge=self.clock.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
@@ -253,7 +274,17 @@ impl Invocation {
     pub(super) fn before_candidate(&self,owner:&Owner)->Result<(),BridgeError> {
         if self.phase!=wire::Phase::Apply {return Err(BridgeError::protocol())}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
-        {self.post_before_effect(owner)}
+        {
+            if self.action.kind()==wire::Kind::Initialize {
+                self.gate.check_current(&owner.id)?;
+                let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
+                let stop=owner.stop.subscribe();
+                {let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                    let result=sources.capture_init(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+                    observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;}
+            }
+            self.post_before_effect(owner)
+        }
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {let _=owner;Err(BridgeError::unavailable("The original Git writer is unavailable."))}
     }

@@ -30,7 +30,7 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
-      result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+      result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
     <div><h3>{title}</h3>
@@ -41,6 +41,7 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
       {result?.action === 'branch-rename' && <GitRenameRecovery result={result} />}
       {result?.action === 'branch-switch' && <GitSwitchRecovery result={result} />}
       {state.issue && !state.uncertain && !state.recovery && <p className="review-caution" role="status">{gitLocalIssueHelp(state.issue)}</p>}
+      {result?.action === 'initialize' && result.state === 'succeeded' && !active && <p>No files were staged or committed. Git is local only; no remote was configured.</p>}
       {result?.state === 'succeeded' && !active && <p>Your drafts are kept. Refresh changes explicitly to read the files again; nothing was pushed to GitHub.</p>}
       {!active && (!state.status || !state.status.available) && <p className="save-note">{state.status ?
         'Local Git changes are not enabled in this installed session. You can still keep a draft and use your Git client; a read-only view does not enable writes.' :

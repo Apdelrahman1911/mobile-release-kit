@@ -20,6 +20,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
 #[path = "../src/git_fast_forward_protocol.rs"] mod git_fast_forward_protocol;
 #[path = "../src/git_rename_protocol.rs"] mod git_rename_protocol;
+#[path = "../src/git_init_protocol.rs"] mod git_init_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;

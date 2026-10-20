@@ -381,7 +381,7 @@ impl DocumentBinding {
             if state.git_local_review.is_some() {return Err(BridgeError::new("busy","Use or close the current Git review first."))}
             if state.revision!=args.expected_document_revision {return Err(changed())}if !args.action.valid(){return Err(BridgeError::invalid())}
             let (generation,root)=self.inner.bridge.native_project(&args.project_id).map_err(|_|changed())?;
-            let future=GitLocalAdmission::reservation_bytes().ok_or_else(BridgeError::invalid)?;
+            let future=GitLocalAdmission::reservation_bytes(args.action.kind()).ok_or_else(BridgeError::invalid)?;
             lookup_memory::git_local_admission_bytes(&self.inner,&state,future).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
             let epoch=self.inner.android_registration_control.epoch()?;
             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
@@ -427,7 +427,7 @@ impl DocumentBinding {
                     ||Instant::now()>=review.expires||epoch!=review.epoch
                     ||!scope_current(&self.inner,&state,&review.public.context,&review.root,args.expected_document_revision) {return Err(changed())}
                 if !app_data.is_absolute()||app_data.as_os_str().len()>4096 {return Err(BridgeError::invalid())}
-                let future=GitLocalAdmission::reservation_bytes().ok_or_else(BridgeError::invalid)?;
+                let future=GitLocalAdmission::reservation_bytes(review.action.kind()).ok_or_else(BridgeError::invalid)?;
                 lookup_memory::git_local_admission_bytes(&self.inner,&state,future).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
                 let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
                 if !edit.matches(&review.stamp) {return Err(changed())}

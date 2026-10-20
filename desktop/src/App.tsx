@@ -101,6 +101,7 @@ import { GitReadController } from './gitReadController.ts';
 import { GitLocalController } from './gitLocalController.ts';
 import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
 import { GitBranches } from './components/GitBranches.tsx';
+import { GitInitialization } from './components/GitInitialization.tsx';
 import { GitRepositoryController } from './gitRepositoryController.ts';
 import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
@@ -2174,7 +2175,10 @@ export function App() {
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
-            localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+            localActions={gitRepository ? <>
+              <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+                originalProjectName={gitLocalProjectName} />
+              <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}

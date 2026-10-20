@@ -188,7 +188,7 @@ fn native_sources_bind_both_logs_current_ref_and_same_tracking_lock_before_apply
         &r.id,
         &r.action,
         &r.context,
-        &r.native,
+        r.native.as_ref().unwrap(),
         r.clock,
         Some(local::ApplyBinding {
             review: local::Review::FastForward(review()),

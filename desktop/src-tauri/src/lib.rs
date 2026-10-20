@@ -111,6 +111,7 @@ mod git_branch_protocol;
 mod git_switch_protocol;
 mod git_fast_forward_protocol;
 mod git_rename_protocol;
+mod git_init_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;

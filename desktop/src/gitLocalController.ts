@@ -8,7 +8,8 @@ import { gitReadPathOrder, sameGitReadContext } from './gitReadProtocol.ts';
 import { gitStagedPaths } from './gitRepositoryProtocol.ts';
 import type { GitLocalAction, GitLocalApi, GitLocalCommand, GitLocalFileInput, GitLocalIssue, GitLocalMutationResult, GitLocalOperation, GitLocalPrepared, GitLocalStartRequest, GitLocalStartResult, GitLocalStatus } from './gitLocalProtocol.ts';
 import type { GitAction, GitCommitDraft, GitIssue, GitObservation } from './gitRepositoryProtocol.ts';
-import type { GitRepositoryController } from './gitRepositoryController.ts';
+import type { GitRepositoryController, GitRepositoryView } from './gitRepositoryController.ts';
+import type { GitInitAction } from './gitInitProtocol.ts';
 import type { GitReadController } from './gitReadController.ts';
 import { gitBranchName } from './gitBranchesProtocol.ts';
 import type { GitBranchAction, GitBranches } from './gitBranchesProtocol.ts';
@@ -19,7 +20,7 @@ import type { GitRenameAction } from './gitRenameProtocol.ts';
 export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
   readonly reader?: GitReadController | null }
-interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation;
+interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
   readonly tracking: GitReadObservation | null; readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string } }
 interface HeldReview { readonly api: GitLocalApi; readonly binding: GitLocalBinding; readonly prepared: GitLocalPrepared; readonly capture: Capture | null;
@@ -93,6 +94,9 @@ export class GitLocalController {
   }
   private captureCurrent(c: Capture, peers = true): boolean {
     const now = this.current(), r = c.repository.getSnapshot();
+    if (c.action.kind === 'initialize') return same(c.binding, now) && (!peers || !now.blocked) &&
+      r.projectId === now.projectId && r.active && !r.blocked && r.busy === null && !r.checkingStatus &&
+      r.observation === null && c.observation === null && r === c.initialization;
     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
       (c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
@@ -182,6 +186,38 @@ export class GitLocalController {
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
   }
+  private initializationReason(): GitLocalIssue | null {
+    const now = this.current();
+    if (!now.api || !now.session) return 'unavailable';
+    if (!now.projectId || !now.repository || now.repository.getSnapshot().projectId !== now.projectId) return 'inactive';
+    if (now.blocked) return 'busy';
+    if (!this.observed || !same(this.observed, now) || !this.state.status?.available ||
+        this.state.status.documentRevision === 0 || this.state.status.documentRevision === 0xffffffff) return 'unavailable';
+    const r = now.repository.getSnapshot();
+    // No GitRead observation is invented for a non-repository. Only this
+    // read-only Prepare may ask the native owner to prove actual absence.
+    return !r.active ? 'inactive' : r.busy || r.checkingStatus ? 'busy' : r.blocked ??
+      (r.observation !== null ? 'git-already-present' : null);
+  }
+  prepareInitializeReason(): GitLocalIssue | null {
+    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+    return this.initializationReason();
+  }
+  async prepareInitialize(): Promise<boolean> {
+    const reason = this.prepareInitializeReason(); if (reason) return this.report(reason);
+    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot();
+    const action: GitInitAction = Object.freeze({ kind: 'initialize' });
+    const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
+      expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
+    const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+    if (!raw) return this.report('invalid-input');
+    const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, initialization: r, tracking: null,
+      selected: r.selected, draft: r.draft, branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft,
+      action, branches: null, paths: Object.freeze([]) });
+    const attempt = this.newAttempt(binding, request, action, capture, null);
+    this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+  }
   prepareBranchReason(): GitLocalIssue | null {
     if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
     const reason = this.currentReason(); if (reason) return reason;
@@ -265,7 +301,8 @@ export class GitLocalController {
   }
   private preparedMatchesCapture(prepared: GitLocalPrepared, capture: Capture): boolean {
     const r = prepared.review;
-    if (r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
+    if (capture.action.kind === 'initialize') return r.action === 'initialize' && capture.observation === null && !!capture.initialization;
+    if (r.action === 'initialize' || !capture.observation || r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
     if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
       r.targetRef === capture.action.targetRef && r.targetOid === capture.action.targetOid &&
       r.expectedReferenceRevision === capture.tracking.referenceRevision;
@@ -277,7 +314,7 @@ export class GitLocalController {
     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
       r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
   }
-  reviewReason(): GitIssue | null {
+  reviewReason(): GitLocalIssue | null {
     const h = this.held;
     if (!h) return 'review-first';
     if (this.state.uncertain || this.attempt?.hardUnknown) return 'unknown';
@@ -287,7 +324,7 @@ export class GitLocalController {
     if (h.stale || !h.capture || !this.captureCurrent(h.capture) || !this.observed || !same(h.binding, this.observed) ||
         this.state.status?.review?.reviewId !== h.prepared.reviewId || !sameGitLocalData(this.state.status.review, h.prepared) ||
         h.prepared.context.revision !== `document-${this.state.status.documentRevision}`) return 'review-changed';
-    return this.currentReason();
+    return h.prepared.action.kind === 'initialize' ? this.initializationReason() : this.currentReason();
   }
   approve(checked: boolean): boolean {
     if (typeof checked !== 'boolean') return false;

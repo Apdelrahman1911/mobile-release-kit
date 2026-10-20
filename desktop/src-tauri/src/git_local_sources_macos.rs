@@ -19,6 +19,8 @@ mod switch_sources;
 mod rename_sources;
 #[path="git_fast_forward_sources_macos.rs"]
 mod fast_forward_sources;
+#[path="git_init_sources_macos.rs"]
+mod init_sources;
 
 const SOURCE_LIMIT: usize = 128;
 struct RefEdge {
@@ -77,6 +79,7 @@ pub(crate) struct GitLocalSources {
     switch:Option<switch_sources::State>,
     rename:Option<rename_sources::State>,
     fast_forward:Option<fast_forward_sources::State>,
+    initialization:Option<init_sources::State>,
 }
 impl Drop for GitLocalSources {
     fn drop(&mut self) {
@@ -102,7 +105,7 @@ impl GitLocalSources {
             git: None,
             indices: [None; 4],
             operation_id: None, review: None, reference: None, replacement: None,
-            post_claimed: false, switch:None, rename:None, fast_forward:None,
+            post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,
         }
     }
     pub(crate) fn not_started(&self) -> bool {
@@ -316,6 +319,7 @@ impl GitLocalSources {
         }
         self.post_claimed = true;
         let result = (|| {
+            if self.initialization.is_some() {return self.init_returned(publication,stop)}
             if let Some(publication) = publication {
                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
@@ -343,7 +347,7 @@ impl GitLocalSources {
                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
                     },
-                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward=>return Err(Reason::SourceChanged),
+                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize=>return Err(Reason::SourceChanged),
                 };
                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
@@ -352,6 +356,7 @@ impl GitLocalSources {
             }
             self.post_inner(stop)
         })();
+        if result.is_err() && self.initialization.is_some() {self.first=Some(Reason::CleanupUnknown);self.close_failed=true;return Err(Reason::CleanupUnknown)}
         // After a child return, a missing/failed exact switch-source rematch
         // cannot release the target lock as a harmless stale-source refusal.
         if result.is_err() && self.fast_forward.is_some() {self.retain_fast_forward_unknown();return Err(Reason::CleanupUnknown)}
@@ -360,14 +365,14 @@ impl GitLocalSources {
         self.remember(result)
     }
     pub(crate) fn inspect(&mut self, root: &RegisteredRoot, runtime_live: usize, id: &str,
-        review: Option<&wire::Review>, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        kind:wire::Kind, review: Option<&wire::Review>, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         if !self.not_started() {
             return Err(Reason::CleanupUnknown);
         }
         self.started = true;
         let result = (|| {
             checkpoint(stop)?;
-            if !crate::protocol::valid_id(id) || review.is_some_and(|v| !v.valid()) { return Err(Reason::SourceRefused); }
+            if !crate::protocol::valid_id(id) || review.is_some_and(|v| !v.valid() || v.action()!=kind) { return Err(Reason::SourceRefused); }
             self.operation_id = Some(id.into()); self.review = review.cloned();
             self.account.acquire().map_err(|_| Reason::SourceRefused)?;
             checkpoint(stop)?;
@@ -378,7 +383,8 @@ impl GitLocalSources {
             let extra=(42usize).checked_add(source_extra(&project_parts))
                 .and_then(|n|switch_sources::State::extra(review).and_then(|s|n.checked_add(s)))
                 .and_then(|n|rename_sources::State::extra(review).and_then(|s|n.checked_add(s)))
-                .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s))).ok_or(Reason::Capacity)?;
+                .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s)))
+                .and_then(|n|n.checked_add(init_sources::State::extra(kind))).ok_or(Reason::Capacity)?;
             let capacity = roster_limit([project_parts.len(), parent_parts.len()], extra)?;
             if capacity > SOURCE_LIMIT
                 || capacity
@@ -398,9 +404,12 @@ impl GitLocalSources {
             if self.book.directory(project)? != root.identity.posix()? {
                 return Err(Reason::SourceChanged);
             }
-            let git = self.book.child(project, b".git", false, stop)?;
-            self.git = Some(git);
-            let objects = self.book.child(git, b"objects", false, stop)?;
+            // Ordinary repository opens/order stay unchanged. Init has no
+            // existing Git directory and must never manufacture these facts.
+            let ordinary=if kind!=wire::Kind::Initialize {
+                let git=self.book.child(project,b".git",false,stop)?;self.git=Some(git);
+                Some((git,self.book.child(git,b"objects",false,stop)?))
+            } else {None};
             let (tool_chain, _) = self.book.chain(parent_parts, false, stop)?;
             // This fixed provider is not nominated through a user-writable
             // executable prefix. Held and named identities are rechecked by
@@ -414,6 +423,8 @@ impl GitLocalSources {
             let tool_parent = *tool_chain.last().ok_or(Reason::SourceRefused)?;
             let tool = self.file(tool_parent, b"git", 0, wire::TOOL_LIMIT, true, stop)?;
             self.indices[0] = Some(tool);
+            if kind==wire::Kind::Initialize {return self.inspect_init(root,project_chain,tool,uid,gid,stop)}
+            let (git,objects)=ordinary.ok_or(Reason::SourceRefused)?;
             let head = self.file(git, b"HEAD", uid, 2048, false, stop)?;
             self.indices[1] = Some(head);
             let config = self.file(git, b"config", uid, 65536, false, stop)?;
@@ -478,7 +489,9 @@ impl GitLocalSources {
             } else if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
                 self.old_identity(index,&held)?;
             } else {
-                let named = if let Some(parent) = slot.parent {
+                let named = if let Some((parent,name))=self.init_named(index) {
+                    stat::fstatat(self.book.fd(parent)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW)
+                } else if let Some(parent) = slot.parent {
                     stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(&slot.name), AtFlags::AT_SYMLINK_NOFOLLOW)
                 } else { stat::lstat(Path::new("/")) }.map_err(|_|Reason::SourceChanged)?;
                 checkpoint(stop)?;
@@ -522,6 +535,7 @@ impl GitLocalSources {
         for alias in &self.book.aliases {
             self.book.check_alias(alias, stop)?;
         }
+        if self.initialization.is_some() {return self.post_init(stop)}
         let original = self.native.as_ref().ok_or(Reason::SourceChanged)?;
         for (index, expected, maximum) in [
             (self.indices[0], Some(&original.tool), wire::TOOL_LIMIT),
@@ -589,6 +603,8 @@ impl GitLocalSources {
         if !self.account.call_settled() || self.first == Some(Reason::CleanupUnknown) || self.acl_entered && self.acl.is_none() {
             return Err(Reason::CleanupUnknown);
         }
+        let original_failure=self.first_failure();
+        if self.retire_init(&mut ||expired(original_failure)).is_err() {return Err(Reason::CleanupUnknown)}
         if let Some(acl) = self.acl.as_mut() {
             if !acl.release(expired) || !acl.settled() {
                 return Err(Reason::CleanupUnknown);
@@ -605,6 +621,7 @@ impl GitLocalSources {
             && !self.close_failed
             && self.account.call_settled()
             && self.book.settled()
+            && self.init_retired()
             && (!self.acl_entered || self.acl.as_ref().is_some_and(SnapshotBook::settled))
     }
 }

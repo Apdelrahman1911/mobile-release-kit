@@ -236,7 +236,7 @@ fn rename_apply_requires_two_distinct_empty_original_locks_and_complete_snapshot
         &r.id,
         &r.action,
         &r.context,
-        &r.native,
+        r.native.as_ref().unwrap(),
         r.clock,
         Some(local::ApplyBinding {
             review: local::Review::Rename(review()),

@@ -95,7 +95,7 @@ fn private_switch_request_needs_same_native_sources_but_no_new_public_grant() {
     let r=request(local::Phase::Apply);let v:Value=serde_json::from_slice(r.bytes()).unwrap();
     assert_eq!(v["switch"],json!(sources()));assert_eq!(v["context"]["revision"],"document-2");
     let prepare=request(local::Phase::Prepare);let p:Value=serde_json::from_slice(prepare.bytes()).unwrap();assert!(p["switch"].is_null());
-    assert!(local::Request::from_original(&r.id,&r.action,&r.context,&r.native,r.clock,
+    assert!(local::Request::from_original(&r.id,&r.action,&r.context,r.native.as_ref().unwrap(),r.clock,
         Some(local::ApplyBinding {review:local::Review::Switch(review()),journal_revision:4})).is_err());
     let mut bad=sources();bad.target_lock.parent_locked.1+=1;assert!(!bad.valid(&native(),&review()));
     bad=sources();bad.target_lock.identity.6=1;assert!(!bad.valid(&native(),&review()));
