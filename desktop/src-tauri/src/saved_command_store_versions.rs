@@ -324,9 +324,24 @@ mod tests {
                         "maxBuild":11000,"marketingVersion":null,"temporaryEdit":"deleted",
                         "historicalUniqueness":"not-established"}});
             }
-            let terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
+            let terminal: store_wire::Terminal = serde_json::from_value(value.clone()).unwrap();
             assert!(terminal.current_inventory_data(&context).is_some());
             assert_eq!(terminal.current_versions_data(&context).is_some(), !android);
+            // The other valid query/context cannot borrow this platform's result.
+            input["platform"] = serde_json::json!(if android { "ios" } else { "android" });
+            input["query"] = serde_json::json!(if android { wire::QUERY } else { play_versions::QUERY });
+            let other = store_wire::prepare(&input).unwrap().context();
+            let mut crossed = value.clone();
+            crossed["context"] = serde_json::json!(other);
+            crossed["lifetime"]["commands"] = serde_json::json!(if android { 7 } else { 6 });
+            let crossed: store_wire::Terminal = serde_json::from_value(crossed).unwrap();
+            assert!(crossed.current_inventory_data(&other).is_none());
+            // A mismatched platform/query is not rescued by a valid result either.
+            let mut mismatch = context.clone();
+            mismatch.platform = other.platform;
+            value["context"] = serde_json::json!(mismatch);
+            let mismatch_terminal: store_wire::Terminal = serde_json::from_value(value).unwrap();
+            assert!(mismatch_terminal.current_inventory_data(&mismatch).is_none());
             application.inner.accept(
                 &owner,
                 Frame::LocalStorePreflight(store_wire::Frame::Accepted),

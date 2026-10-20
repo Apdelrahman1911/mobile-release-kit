@@ -330,9 +330,10 @@ mod tests {
         }
         let (other, _) = super::super::recovery_selection::tests::sample();
         let mut bundle = other.rows[0].clone();
-        bundle.intent.context.operation_id = "a".repeat(32);
+        bundle.intent.context.operation_id = "b".repeat(32);
         bundle.intent.provenance.operation_id =
             Id::parse(&bundle.intent.context.operation_id).unwrap();
+        bundle.attempt.record.context.operation_id = bundle.intent.context.operation_id.clone();
         account.rows.push(bundle);
         assert_eq!(
             profile_recovery_history(&account, &scope)
@@ -342,6 +343,10 @@ mod tests {
         );
         account.rows[0].intent.context.operation_id =
             account.profile_rows[0].intent.context.operation_id.clone();
+        account.rows[0].intent.provenance.operation_id =
+            Id::parse(&account.rows[0].intent.context.operation_id).unwrap();
+        account.rows[0].attempt.record.context.operation_id =
+            account.rows[0].intent.context.operation_id.clone();
         assert!(profile_recovery_history(&account, &scope).is_err());
         let (mut account, scope) = sample();
         account.account = AccountRef::from_selected_issuer([99; 16]);

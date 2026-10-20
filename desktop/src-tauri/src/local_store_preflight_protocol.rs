@@ -211,7 +211,7 @@ pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec
 }
 impl ResultData {
     fn valid(&self, context:&Context) -> bool {
-        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && match query {
+        if let Some(query)=context.query { return context.platform == query.platform() && match query {
             bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
             bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
             bundle_read::Query::IOSCurrentVersions => store_versions::valid_result(self),
