@@ -1761,6 +1761,29 @@ mod callback_lifecycle_tests {
     }
 
     #[test]
+    fn tool_acquisition_counts_service_history_only_after_original_retirement() {
+        // SAME inert callback-lifecycle fixture as the adjacent tests, not a
+        // native service, worker/manager join or production qualification.
+        let (_,_,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Service);
+        let (retirement,held)=callback(gate,false);
+        let mut registration=Registration::default();
+        let baseline=registration.maintenance_retained_bytes().unwrap();
+        registration.service.retirement=Some(retirement.clone());
+        assert!(!registration.busy());
+        assert_eq!(registration.tool_acquisition_generation(),None);
+        *held.returned.lock().unwrap()=Some(returned(Instant::now()));
+        let ExtractedCallback::Returned(serial,returned)=CallbackOriginal::extract(held,&retirement)
+            else{panic!("the original callback capture must retire")};
+        assert!(management_settled(returned.native.unwrap().1));
+        assert!(retirement.callback_retired(serial,false));
+        assert_eq!(registration.tool_acquisition_generation(),None);
+        assert!(retirement.finalize());
+        assert_eq!(registration.pristine_tool_acquisition_generation(),None);
+        assert_eq!(registration.tool_acquisition_generation(),Some(0));
+        assert!(registration.maintenance_retained_bytes().unwrap()>baseline);
+    }
+
+    #[test]
     fn callback_stamp_needs_exclusive_capture_return_then_original_owner_finality(){
         let (_,control,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Service);
         let (retirement,held)=callback(gate,false);

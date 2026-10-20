@@ -943,6 +943,21 @@ impl Registration {
     pub(super) fn pristine_tool_acquisition_generation(&self)->Option<u32>{
         (self.installation_empty()&&!self.busy()&&!self.unknown()).then_some(self.generation)
     }
+    /// Prior joined service/maintenance work is counted, not mistaken for
+    /// unfinished work. This lends no service, source or installation permit.
+    pub(super) fn tool_acquisition_generation(&self)->Option<u32>{
+        if self.active.is_some() || self.review.is_some() || self.busy() || self.unknown()
+            || self.last.as_ref().is_some_and(|last|
+                !matches!(last.phase,wire::Phase::Complete|wire::Phase::Refused|wire::Phase::Cancelled)
+                || last.reason==wire::Reason::CleanupUnknown
+                || last.report.as_ref().is_some_and(|report|report.protected_copy==wire::ProtectedCopy::RetainedPartial)){
+            return None;
+        }
+        // Includes the SAME actual service Retirement::owner_finalized gate
+        // and retained TLS manager; busy=false alone cannot stand in for it.
+        self.maintenance_retained_bytes()?;
+        Some(self.generation)
+    }
     pub(super) fn sources_match(&self,sources:&android_sources::Sources)->bool{
         self.maintenance.sources_match(sources) && self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
             && self.review.as_ref().is_none_or(|review|sources.same_snapshot(&review.original.source))
@@ -1856,6 +1871,37 @@ mod lifecycle_book_tests {
     use super::*;
 
     #[test]
+    fn tool_acquisition_allows_counted_history_but_not_partial_or_unsettled_state() {
+        // Closed state/heap DATA, no native copy, selection or permit.
+        let mut registration=Registration::default();
+        let baseline=registration.maintenance_retained_bytes().unwrap();
+        assert_eq!(registration.tool_acquisition_generation(),Some(0));
+        registration.generation=7;
+        let data=wire::Operation { operation_id:"inert-reuse-history".into(),registration_generation:7,
+            source_generation:3,kind:wire::Kind::Inspection,context:android_wire::Prepare {
+                project_id:"inert-reuse-project".into(),draft_revision:1,baseline_generation:1,
+                saved_config:android_wire::Content{bytes:32,sha256:"a".repeat(64)},
+                saved_version:android_wire::SavedVersion{source:"version.properties".into(),bytes:20,
+                    sha256:"b".repeat(64),name:"1.0.0".into(),build:1},
+                artifact_validation:android_wire::ArtifactValidation{mode:android_wire::ValidationMode::StructureAndVersion,
+                    upload_certificate_sha256:None},signing:None,operation:None,action:None }};
+        registration.last=Some(Last {data,phase:wire::Phase::Refused,reason:wire::Reason::SourceRefused,
+            report:Some(wire::Report {sources:Vec::new(),protected_copy:wire::ProtectedCopy::NotCreated,accounting:None,
+                problems:wire::Problems{recorded:0,shown:0,omitted:0,first:None,items:Vec::new()}})});
+        assert_eq!(registration.pristine_tool_acquisition_generation(),None);
+        assert_eq!(registration.tool_acquisition_generation(),Some(7));
+        assert!(registration.maintenance_retained_bytes().unwrap()>baseline);
+        registration.last.as_mut().unwrap().report.as_mut().unwrap().protected_copy=wire::ProtectedCopy::RetainedPartial;
+        assert_eq!(registration.tool_acquisition_generation(),None);
+        registration.last.as_mut().unwrap().report.as_mut().unwrap().protected_copy=wire::ProtectedCopy::NotCreated;
+        registration.last.as_mut().unwrap().phase=wire::Phase::Unknown;
+        assert_eq!(registration.tool_acquisition_generation(),None);
+        registration.last.as_mut().unwrap().phase=wire::Phase::Refused;
+        registration.last.as_mut().unwrap().reason=wire::Reason::CleanupUnknown;
+        assert_eq!(registration.tool_acquisition_generation(),None);
+    }
+
+    #[test]
     fn whole_operation_budget_keeps_previous_charge_and_rejects_cap_or_overflow() {
         // Arithmetic only: neither these scalar inputs nor a Linux sizeof
         // prove the complete real-catalogue macOS admission high-water.
@@ -2211,13 +2257,13 @@ pub(super) fn execute_owner_census(inner:&Inner,document:&Arc<()>)->Option<(usiz
     Some((bytes,originals))
 }
 
-/// The same original allocation census, narrowed to pristine registration and
-/// an actually empty selected-source set. No Execute/tool permission is lent.
+/// The same original allocation census, including genuinely joined prior
+/// service/maintenance holdings and an empty picked-source set. No tool permit.
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) fn tool_acquisition_owner_bytes(inner:&Inner,document:&Arc<()>)->Option<usize>{
     if !inner.android_original_document_matches(Some(document)){return None;}
     let registry=inner.registry.try_lock().ok()?;
-    registry.android_registration.pristine_tool_acquisition_generation()?;
+    registry.android_registration.tool_acquisition_generation()?;
     if registry.android_sources.census_originals()?.iter().any(Option::is_some){return None;}
     let registration=registry.android_registration.maintenance_retained_bytes()?;
     original_owner_retained_bytes(inner,&registry,document,0,registration,0)

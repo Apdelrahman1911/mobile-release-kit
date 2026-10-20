@@ -244,6 +244,13 @@ impl Operation {
     }
 }
 impl Selection {
+    /// Labels from the SAME positive full-Recover publication, not metadata
+    /// rows or a path/Status rebuilt into selection authority.
+    pub(super) fn tool_preparation_versions(&self,inner:&Inner)->Option<&wire::Versions>{
+        if !self.matches_owner(inner){return None;}
+        self.produced.entries.iter().find(|entry|entry.status==wire::RowStatus::VerifiedThisSession
+            && entry.selection.as_ref()==Some(&self.data) && entry.valid(self.data.catalog_generation))?.versions.as_ref()
+    }
     pub(super) fn data(&self)->&android_wire::MacToolchainSelection{&self.data}
     pub(super) fn matches_owner(&self,inner:&Inner)->bool{
         let original=&self.produced.original;
@@ -255,6 +262,17 @@ impl Selection {
     }
 }
 impl Catalog {
+    pub(super) fn tool_acquisition_selection(&self,inner:&Inner)->Option<Arc<Selection>>{
+        let selected=self.selected.as_ref()?;
+        self.same_tool_acquisition_selection(selected,inner).then(||selected.clone())
+    }
+    pub(super) fn same_tool_acquisition_selection(&self,selected:&Arc<Selection>,inner:&Inner)->bool{
+        self.generation>0 && self.generation<u32::MAX && self.active.is_none() && self.retired.is_none()
+            && self.generation==selected.data.catalog_generation
+            && self.selected.as_ref().is_some_and(|current|Arc::ptr_eq(current,selected))
+            && self.published.as_ref().is_some_and(|current|Arc::ptr_eq(current,&selected.produced))
+            && selected.tool_preparation_versions(inner).is_some()
+    }
     pub(super) fn empty_acquisition_loan(&self)->Option<EmptyLoan>{
         if self.generation==0||self.active.is_some()||self.selected.is_some()||self.retired.is_some(){return None;}
         let published=self.published.as_ref().filter(|p|p.entries.is_empty())?.clone();

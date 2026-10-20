@@ -23,6 +23,8 @@ mod cache;
 ))]
 #[path = "saved_command_tool_acquisition_macos.rs"]
 mod native;
+#[path = "saved_command_tool_acquisition_reuse.rs"]
+mod reuse;
 #[path = "saved_command_tool_acquisition_sources.rs"]
 mod sources;
 pub(crate) use sources::SourceNomination;
@@ -59,7 +61,7 @@ pub(super) struct Binding {
 struct Known {
     android: Arc<Inner>,
     document: Weak<()>,
-    catalog: android_catalog::EmptyLoan,
+    catalog: reuse::CatalogLoan,
     revision: u32,
     source_generation: u32,
     registration_generation: u32,
@@ -90,13 +92,10 @@ impl Known {
         if originals.iter().any(Option::is_some) {
             return None;
         }
-        let catalog = r.android_catalog.empty_acquisition_loan()?;
-        if !catalog.joined_for(&binding.android) {
-            return None;
-        }
+        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android)?;
         let registration_generation = r
             .android_registration
-            .pristine_tool_acquisition_generation()?;
+            .tool_acquisition_generation()?;
         Some(Self {
             android: binding.android.clone(),
             document: binding.document.clone(),
@@ -130,11 +129,11 @@ impl Known {
             && !self.android.poisoned.load(Ordering::SeqCst)
             && !self.android.android_registration_control.owns_work()
             && !self.android.android_registration_control.is_unknown()
-            && r.android_catalog.same_empty_acquisition_loan(&self.catalog)
+            && self.catalog.current(&r.android_catalog, &self.android)
             && r.android_sources.census_generation() == self.source_generation
             && r.android_sources.same_census_originals(&[None, None, None])
             && r.android_registration
-                .pristine_tool_acquisition_generation()
+                .tool_acquisition_generation()
                 == Some(self.registration_generation)
     }
     fn same(&self, other: &Self) -> bool {
@@ -171,6 +170,7 @@ impl Inspection {
             && self.terminal.context == *before
             && self.terminal.outcome == wire::Outcome::Complete
             && self.terminal.lifetime.settled()
+            && self.terminal.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
             && self
                 .terminal
                 .result
@@ -353,7 +353,9 @@ impl SavedCommandOwner {
         if r.active.is_some() || r.disabled || r.exhausted || r.stopping || r.document_lost {
             return Err(wire::invalid());
         }
-        let retained = retained_bytes(&self.inner, &r, document).ok_or_else(wire::invalid)?;
+        let retained = retained_bytes(&self.inner, &r, document)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Known>() + 2 * std::mem::size_of::<usize>()))
+            .ok_or_else(wire::invalid)?;
         Ok(Census {
             owner: Arc::downgrade(&self.inner),
             document: Arc::downgrade(document),
@@ -389,6 +391,7 @@ impl SavedCommandOwner {
                 .map_err(|_| BridgeError::cleanup_unknown())?;
             if !census.matches(&self.inner, &r)
                 || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
+                || !census.known.catalog.permits_action(input.action)
             {
                 return Err(wire::invalid());
             }
@@ -710,7 +713,7 @@ fn application_root(owner: &Session) -> Result<Option<RegisteredRoot>, BridgeErr
         Err(BridgeError::cleanup_unknown())
     }
 }
-pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<Session>) {
+pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
     if owner.domain != SavedCommandDomain::ToolAcquisition {
         return;
     }
@@ -766,6 +769,7 @@ pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<
         && active.first_stop.is_none()
         && active.projection.outcome == Some(Outcome::Complete)
     {
+        observe_protected_tools(owner, active);
         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
             if t.context.action == wire::Action::Acquire {
                 r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
@@ -773,14 +777,23 @@ pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<
             if t.context.action == wire::Action::Inspect
                 && t.outcome == wire::Outcome::Complete
                 && t.lifetime.settled()
+                && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
             {
                 r.tool_acquisition.review = Some(Arc::new(Inspection {
-                    original: owner.clone(),
-                    terminal: t.clone(),
+                    original: owner.clone(), terminal: t.clone(),
                 }));
             }
         }
     }
+}
+fn observe_protected_tools(owner: &Session, active: &mut Active) {
+    let (Some(intent), Profile::ToolAcquisition(profile)) = (&owner.tools.intent, owner.profile) else { return; };
+    let Some(Terminal::ToolAcquisition(terminal)) = &mut active.projection.result else { return; };
+    if terminal.context.action != wire::Action::Inspect || !intent.current() { return; }
+    let finding = intent.known.catalog.finding(&intent.known.android, profile, terminal);
+    // Only post-join public DATA is added. A selected loan creates no download
+    // Review and thus retains no orphaned catalogue/Session after retirement.
+    terminal.observe_protected_tools(finding);
 }
 fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -907,6 +920,10 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Opt
             .checked_add(prepared.projection.operation_id.capacity())?
             .checked_add(prepared.projection.owner_generation.capacity())?;
         if let Some(intent) = &prepared.tools {
+            // A selected loan is read-only and cannot become a producer. Its
+            // actual catalogue backing is counted by the SAME Android census;
+            // a retired prepared selection must be cancelled, not omitted.
+            if intent.known.catalog.empty().is_none() && !intent.known.current() { return None; }
             bytes = bytes
                 .checked_add(std::mem::size_of::<Intent>())?
                 .checked_add(std::mem::size_of::<Known>())?
@@ -975,6 +992,9 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Opt
                 .checked_add(expected.projection_sha256.capacity())?;
         }
         if let Some(intent) = &owner.tools.intent {
+            // Only missing-tool Inspect/Acquire Sessions are retained as cache
+            // producers or download Reviews. No uncounted old selected loan.
+            if intent.known.catalog.empty().is_none() { return None; }
             bytes = bytes
                 .checked_add(std::mem::size_of::<Intent>())?
                 .checked_add(std::mem::size_of::<Known>())?

@@ -2771,7 +2771,7 @@ impl SavedCommandOwner {
                         };
                     }
                 }
-                tool_acquisition::after_final(&mut r,&active,&owner);
+                tool_acquisition::after_final(&mut r,&mut active,&owner);
                 upload_key::after_final(&active,&owner);
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
