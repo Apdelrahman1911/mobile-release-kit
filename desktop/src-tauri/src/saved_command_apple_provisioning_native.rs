@@ -879,3 +879,20 @@ pub(super) fn history(owner: &Session) -> Option<apple_wire::RecoveryHistory> {
     };
     apple_wire::recovery_history(account, &binding.scope).ok()
 }
+
+// Same INITIAL receipt and retirement cut as Bundle history. A profile result
+// or cached row is not a native join. Missing receipt never becomes an empty list.
+pub(super) fn profile_history(owner: &Session) -> Option<apple_wire::ProfileRecoveryHistory> {
+    if owner.apple.input().ok()?.context().mode != apple_wire::Mode::ProfileReview {
+        return None;
+    }
+    let binding = owner.apple.request_binding().ok()?;
+    let jobs = owner.apple.native.try_lock().ok()?;
+    if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) {
+        return None;
+    }
+    let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
+        return None;
+    };
+    apple_wire::profile_recovery_history(account, &binding.scope).ok()
+}

@@ -1,5 +1,6 @@
 // Exactly the original native Bundle-ID protocol. No Access query/consent,
 // provider JSON, journal row, issuer override, secret or local path is accepted.
+import { parseAppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
 import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { APPLE_PROFILE_MODES, isAppleProfileMode, parseAppleProfileSetupResult, parseAppleProfileSavedReference } from './appleProfileSetup.ts';
 import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
@@ -123,7 +124,7 @@ export function parseAppleProvisioningStatus(value: unknown): AppleProvisioningS
         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
     const op = v.operation;
     if (op === null) return v as unknown as AppleProvisioningStatus;
-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : [])]) ||
+    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : [])]) ||
         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
         !keys(op.context, [...requestFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
     const prepared = { ...op.context }; delete prepared.operation;
@@ -133,6 +134,12 @@ export function parseAppleProvisioningStatus(value: unknown): AppleProvisioningS
         [prepared.recordId, prepared.p12RecordId].includes(saved.recordId) ||
         !['profile-reuse', 'profile-create'].includes(prepared.mode) || op.phase !== 'terminal' || op.outcome !== 'complete' ||
         parseAppleProfileSetupResult(op.result, prepared.mode)?.decision !== 'download-returned')) return null;
+    if (Object.hasOwn(op, 'profileRecovery')) {
+      const history = parseAppleProfileRecoveryHistory(op.profileRecovery);
+      if (!history || prepared.mode !== 'profile-review' || op.phase !== 'terminal' || op.outcome !== 'complete' || op.recovery !== null) return null;
+      const unresolved = history.hiddenUnresolved > 0 || history.attempts.some(row => row.unresolved);
+      if (unresolved && parseAppleProfileSetupResult(op.result, prepared.mode)?.decision !== 'blocked') return null;
+    }
     if (op.recovery !== null) {
       const history = parseAppleRecoveryHistory(op.recovery);
       if (!history || op.context.mode !== 'review' || op.phase !== 'terminal' || op.outcome !== 'complete') return null;
@@ -161,6 +168,10 @@ export function appleProvisioningProgress(before: AppleProvisioningOperation, af
     // Context loss may withdraw historical DATA at a newer original status
     // revision. No terminal result, recorded disposition or list is replaced.
     before.recovery !== null && after.recovery === null && sameOfflineData({ ...before, recovery: null }, after) ||
+    // Withdrawing profile history changes no earlier provider/save/native axis.
+    before.profileRecovery !== undefined && after.profileRecovery === undefined && (() => {
+      const { profileRecovery: _history, ...without } = before; return sameOfflineData(without, after);
+    })() ||
     // Native context loss may also withdraw the exact detached saved-record DATA.
     before.savedProfile !== undefined && after.savedProfile === undefined && (() => {
       const { savedProfile: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);

@@ -13,6 +13,8 @@ use super::*;
 use crate::apple_provisioning_protocol as apple_wire;
 #[path="saved_command_apple_profile_review.rs"]
 mod profile_review;
+#[path = "saved_command_apple_profile_recovery.rs"]
+mod profile_recovery;
 
 /// Worker/provider/source and material CONSUMERS, driver/manager and all
 /// PRE-final-CAS jobs have joined. The same material loan remains retained for
@@ -96,6 +98,7 @@ pub(super) struct Registry {
     recovery: Option<RecoveryPublication>,
     profile_review: Option<Arc<profile_review::Review>>,
     profile_saved: Option<profile_review::SavedPublication>,
+    profile_recovery: Option<profile_recovery::Publication>,
 }
 
 // Detached historical DATA only. It must not keep a finished Session,
@@ -191,6 +194,7 @@ impl RunProjection {
             reason: self.reason.apple(),
             result,
             recovery: None,
+            profile_recovery: None,
             saved_profile:None,
         })
     }
@@ -200,13 +204,15 @@ pub(super) fn invalidate_review(registry: &mut Registry) -> bool {
     registry.review = None;
     registry.profile_review = None;
     let saved_changed=registry.profile_saved.take().is_some();
+    let profile_history_changed = registry.profile_recovery.take().is_some();
     // Public historical DATA may be withdrawn, never replaced or upgraded.
     // Idle context invalidation must advance the same original status revision.
-    registry.recovery.take().is_some() || saved_changed
+    registry.recovery.take().is_some() || saved_changed || profile_history_changed
 }
 
 pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
     profile_review::project(registry,projection);
+    profile_recovery::project(registry, projection);
     projection.recovery = None;
     if let Some(stored) = &registry.recovery {
         if projection.operation_id == stored.reference.operation_id
@@ -229,7 +235,8 @@ fn recovery_backing_bytes() -> Option<usize> {
     apple_wire::RECOVERY_LIMIT
         .checked_mul(2)?
         .checked_add(apple_wire::IPC_LIMIT)?
-        .checked_add(std::mem::size_of::<RecoveryPublication>())
+        .checked_add(std::mem::size_of::<RecoveryPublication>())?
+        .checked_add(profile_recovery::backing_bytes()?)
 }
 
 pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
@@ -673,6 +680,7 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
     registry.review = None;
     registry.recovery = None;
     registry.profile_review=None;registry.profile_saved=None;
+    registry.profile_recovery = None;
     if owner.domain != SavedCommandDomain::AppleProvisioning
         || active.unknown
         || active.context_invalidated
@@ -698,6 +706,7 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
     if !native_complete(owner) { return; }
     if context.mode.profile() {
         if owner.apple_profile.get().is_some_and(|profile|profile.clock().completed()) {
+            profile_recovery::publish(registry, owner);
             profile_review::publish(registry,active,owner,terminal);
         }
         return;

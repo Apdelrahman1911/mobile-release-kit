@@ -1,3 +1,4 @@
+import { AppleProfileRecovery } from './AppleProfileRecovery.tsx';
 import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
 import { appleProfileResultCopy, isAppleProfileMode, type AppleProfileMode } from '../appleProfileSetup.ts';
 
@@ -50,6 +51,7 @@ export function AppleSigningSetup({ controller, state, onSigningCredentials, onC
       <button type="button" disabled={!!state.startReason} onClick={() => void controller.start(permission.operationId, permission.ownerGeneration)}>Start</button>
       {state.startReason && <p className="save-note">{state.startReason}</p>}
     </div>}
+    <AppleProfileRecovery controller={controller} state={state} />
     {state.profileAttemptReference && <div className="actions">
       <button type="button" disabled={!!state.profileReconcileReason} onClick={() => void controller.prepare('profile-reconcile')}>Prepare read-only check of earlier request</button>
       {state.profileReconcileReason && <p className="save-note">{state.profileReconcileReason}</p>}

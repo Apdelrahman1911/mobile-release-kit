@@ -29,6 +29,9 @@ pub(crate) use crate::local_store_preflight_protocol::{
 
 #[path = "apple_provisioning_recovery_selection.rs"]
 mod recovery_selection;
+#[path = "apple_provisioning_profile_recovery_selection.rs"]
+mod profile_recovery_selection;
+pub(crate) use profile_recovery_selection::{profile_recovery_history, ProfileRecoveryHistory, PROFILE_RECOVERY_LIMIT};
 pub(crate) use recovery_selection::{
     recovery_history, recovery_scope_matches, RecoveryHistory, RECOVERY_LIMIT,
 };
@@ -1152,6 +1155,8 @@ pub(crate) struct Projection {
     pub(crate) reason: Reason,
     pub(crate) result: Option<ResultData>,
     pub(crate) recovery: Option<RecoveryHistory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_recovery: Option<ProfileRecoveryHistory>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub(crate) saved_profile: Option<crate::credential_setup::KeyReference>,
 }

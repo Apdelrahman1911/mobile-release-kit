@@ -1,5 +1,6 @@
 // Public comparison/status DATA. Native owns the selected P8, issuer-wide
 // journal, consent, single provider write and every original cleanup join.
+import type { AppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
 import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
 import type { SavedConfigContent, OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
@@ -54,6 +55,7 @@ export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
   outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | AppleProfileSetupResult | null;
   savedProfile?: AppleProfileSavedReference;
+  profileRecovery?: AppleProfileRecoveryHistory;
   recovery: AppleRecoveryHistory | null;
 }
 export interface AppleProvisioningStatus {
