@@ -2,7 +2,10 @@ import type { PrepareLocalStoreStage, StagePreparedIntent } from './localStoreSt
 import type { PrepareLocalStorePreflight, LocalStoreIdentity, LocalStoreReason } from './localStorePreflightTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
-export interface PrepareLocalCandidateIntent extends PrepareLocalStorePreflight {
+export interface PrepareLocalCandidateIntent extends Omit<PrepareLocalStorePreflight, 'platform' | 'query' | 'iosRecord'> {
+  // Candidate preparation uses the existing single-platform wire format:
+  // omitted platform for Android, explicit iOS. Inventory queries are not intents.
+  platform?: 'ios';
   candidateOperationId: string;
   candidateSha256: string;
   confirmation: string;

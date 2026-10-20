@@ -6,7 +6,7 @@ import type { PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
 export type LocalStoreStage = 'external-testing' | 'production-submit';
 export interface StageRecord { recordId: string; recordRevision: number }
 export interface StageAssignments { reviewContact: StageRecord; commitment: StageRecord; reviewDemo: StageRecord | null }
-type StageRequestBase = Omit<PrepareLocalStorePreflight, 'platform'> & {
+type StageRequestBase = Omit<PrepareLocalStorePreflight, 'platform' | 'query' | 'iosRecord'> & {
   stage: LocalStoreStage; candidateOperationId: string; candidateSha256: string;
   predecessorOperationId: string; predecessorReceiptSha256: string; confirmation: string;
 };
