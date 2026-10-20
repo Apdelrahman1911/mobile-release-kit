@@ -1,0 +1,439 @@
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -257,6 +257,7 @@
+   private timer: ReturnType<typeof setTimeout> | null = null;
+   private listeners = new Set<() => void>();
+   private disposed = false;
++  private toolSetupVisible = false;
+   constructor(context: Context) { this.context = context; }
+   getSnapshot = (): AndroidBuildState => this.state;
+   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+@@ -351,6 +352,15 @@
+         || !!this.state.toolRegistration?.review))
+       this.retire({ ...this.advance('contextGeneration'), visible });
+     else this.update({ visible, serviceConsent: visible ? this.state.serviceConsent : null }); // Started originals stay app-owned across pages.
++  }
++  // Tools is another view of this owner, not permission to prepare or start a build.
++  setToolSetupVisible(visible: boolean): void {
++    if (this.disposed || visible === this.toolSetupVisible) return;
++    this.toolSetupVisible = visible;
++    if (!visible && (this.registrationAttempt?.kind === 'inspection' && (this.registrationHeld() || !this.registrationAttempt.settled)
++        || !!this.state.toolRegistration?.review))
++      this.retire(this.advance('contextGeneration'));
++    else this.update({ serviceConsent: visible ? this.state.serviceConsent : null });
+   }
+   private needsOriginal(observer: Observer): boolean {
+     return this.attempt?.observer === observer && this.attempt.prepareSent && !this.attempt.settled || active(observer.status?.operation)
+@@ -751,7 +761,7 @@
+     const status = observer.registration, attempt = this.registrationAttempt;
+     if (!status?.review || !status.operation || status.phase !== 'review' || !attempt || attempt.observer !== observer
+         || attempt.kind !== 'inspection' || !attempt.replySettled || !this.registrationCandidate(attempt, status)
+-        || !this.registrationMatches(attempt) || !this.state.visible || this.state.registrationIssue) {
++        || !this.registrationMatches(attempt) || !(this.state.visible || this.toolSetupVisible) || this.state.registrationIssue) {
+       if (observer === this.observer && this.state.registrationConsent) this.update({ registrationConsent: null });
+       return;
+     }
+@@ -858,7 +868,7 @@
+       return 'Finish or cancel the current catalog or prepared/active build before source inspection or registration.';
+     if (status.prerequisite !== 'ready') return androidToolRegistrationPrerequisiteText[status.prerequisite];
+     if (status.availability !== 'available') return androidBuildAvailabilityText[status.availability];
+-    if (!this.state.visible) return 'Open Releases to review the selected source contents and protected-copy consent.';
++    if (!(this.state.visible || this.toolSetupVisible)) return 'Open Set up build tools or Build & release to review the source folders and protected-copy consent.';
+     if (!project || this.state.selectionPending) return 'Choose a registered source project first.';
+     if (project.snapshotPending || project.versionPending || project.saveRecoveryRequired)
+       return 'Finish the current saved-input read or save recovery before source inspection.';
+@@ -1151,7 +1161,7 @@
+     if (status.prerequisite === 'signing-unavailable')
+       return 'This app does not contain the required shipping-signed helper identity. Obtain a correctly signed release from the publisher; local administrator access cannot replace it.';
+     if (status.availability !== 'available') return androidBuildAvailabilityText[status.availability];
+-    if (!this.state.visible) return 'Open Releases to review and choose a service setup action.';
++    if (!(this.state.visible || this.toolSetupVisible)) return 'Open Set up build tools or Build & release to review a helper setup action.';
+     if (!project || this.state.selectionPending) return 'Select a registered mobile project first.';
+     if (project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input observation or save recovery first.';
+     return project.inputIssue ?? (this.currentRegistrationContext() ? this.context.otherOperationReason() : 'Refresh saved configuration and read its saved version first.');
+diff --git a/desktop/src/components/AndroidBuild.tsx b/desktop/src/components/AndroidBuild.tsx
+--- a/desktop/src/components/AndroidBuild.tsx
++++ b/desktop/src/components/AndroidBuild.tsx
+@@ -75,21 +75,9 @@
+   </section>;
+ }
+
+-export function AndroidBuild({ state, controller, projectName, operationProjectName, compact = false, onShow, onRefresh, onReadVersion,
+-  refreshReason = null, versionReason = null, onHelp, onCredentials, onSettings, onRecovery }: {
+-  state: AndroidBuildState; controller: AndroidBuildController; projectName: string | null; operationProjectName: string | null;
+-  compact?: boolean; onShow?: () => void; onRefresh?: () => void; onReadVersion?: () => void;
+-  onCredentials?: () => void; onSettings?: () => void; onRecovery?: () => void;
+-  refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
+-}) {
+-  const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
+-  const owned = androidBuildOwnerReason(state);
+-  if (compact && !owned) return null;
+-  const prepareReason = controller.prepareReason(), startReason = controller.startReason();
+-  const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
+-  const controls = <div className="button-row">
+-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading build status…' : 'Check build status'}</button>
+-    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this Android build'}</button>}
++/** Shared status/cancel controls retain the same original tool operations on either page. */
++export function AndroidToolSetupControls({ state, controller }: { state: AndroidBuildState; controller: AndroidBuildController }) {
++  return <>
+     {state.catalogStatus?.availability !== 'unsupported-platform' && <>
+       <button type="button" className="button secondary small" disabled={!controller.canCheckCatalogStatus()} onClick={() => void controller.checkCatalogStatus()}>{state.catalogReadPending ? 'Reading tool status…' : 'Check tool status'}</button>
+       {androidCatalogActive(state.catalogStatus) && <button type="button" className="button secondary small" disabled={!controller.canCancelCatalog()} onClick={() => controller.cancelCatalog()}>{state.catalogCancelClaimed ? 'Tool cancellation requested' : 'Cancel tool read'}</button>}
+@@ -111,6 +99,25 @@
+         {sameAndroidToolServiceIdentity(state.serviceCancelClaimed, state.toolService?.operation ?? null)
+           ? 'Service cancellation requested · waiting for cleanup' : 'Cancel this service action'}</button>}
+     </>}
++  </>;
++}
++
++export function AndroidBuild({ state, controller, projectName, operationProjectName, compact = false, onShow, onRefresh, onReadVersion,
++  refreshReason = null, versionReason = null, onHelp, onCredentials, onSettings, onRecovery }: {
++  state: AndroidBuildState; controller: AndroidBuildController; projectName: string | null; operationProjectName: string | null;
++  compact?: boolean; onShow?: () => void; onRefresh?: () => void; onReadVersion?: () => void;
++  onCredentials?: () => void; onSettings?: () => void; onRecovery?: () => void;
++  refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
++}) {
++  const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
++  const owned = androidBuildOwnerReason(state);
++  if (compact && !owned) return null;
++  const prepareReason = controller.prepareReason(), startReason = controller.startReason();
++  const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
++  const controls = <div className="button-row">
++    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading build status…' : 'Check build status'}</button>
++    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this Android build'}</button>}
++    <AndroidToolSetupControls state={state} controller={controller} />
+     {onHelp && <HelpButton content={androidBuildCancelHelp} onHelp={onHelp} />}
+     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Releases</button>}
+   </div>;
+@@ -234,7 +241,7 @@
+   format: 'No service name, administrator command, path or certificate is entered here. Select the separate checkbox only when you want this installed helper registered with macOS. Afterwards choose Check installed service again.',
+   failure: 'A missing shipping signature must be fixed by the publisher, not with local administrator commands or ad-hoc signing. Denied, awaiting approval and unavailable are different states. Cancel does not unregister or undo a completed system action; keep original Status until cleanup is confirmed.',
+ };
+-function AndroidToolService({ state, controller, onHelp }: {
++export function AndroidToolService({ state, controller, onHelp }: {
+   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+ }) {
+   const status = state.toolService, reason = controller.serviceActionReason(), registrationReason = controller.serviceRegistrationReason();
+@@ -284,7 +291,7 @@
+   shutdown: 'The app is closing the original selection before it exits.',
+   'cleanup-unknown': 'Status cannot prove that the original work is closed. Further actions remain blocked; a retry does not resolve this.',
+ };
+-function AndroidToolSources({ state, controller, onHelp }: {
++export function AndroidToolSources({ state, controller, onHelp }: {
+   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+ }) {
+   const sources = state.toolSources, reason = controller.sourceActionReason();
+@@ -339,7 +346,7 @@
+   format: 'The private review binds saved inputs, complete source observations, the exact proposal and original service prerequisites. Displayed source totals cover the three picked roles only, not the separate fixed support group.',
+   failure: 'A changed, expired or incomplete review is refused. Missing supplier, signing, approval or fresh service prerequisites stay unavailable. Cancel is not rollback; retained partial output is not eligible for selection or permission to delete.',
+ };
+-function AndroidToolRegistration({ state, controller, onHelp }: {
++export function AndroidToolRegistration({ state, controller, onHelp }: {
+   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+ }) {
+   const status = state.toolRegistration, consent = state.registrationConsent, review = status?.review;
+@@ -393,7 +400,7 @@
+   </section>;
+ }
+
+-function AndroidToolchainCatalog({ state, controller, onHelp }: {
++export function AndroidToolchainCatalog({ state, controller, onHelp }: {
+   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+ }) {
+   const catalog = state.catalogStatus, reason = controller.catalogActionReason();
+@@ -428,7 +435,7 @@
+           onClick={() => void controller.selectToolchain(entry.instance, entry.selection.recordSha256)}>{selected ? 'This copy is selected' : 'Choose this tool copy'}</button>}
+       </div>;
+     })}
+-    <p className="save-note">Browse above to choose source folders, inspect them, then explicitly approve protected registration when its prerequisites are available. A published copy is never selected automatically. Build still compares the project's original Gradle wrapper URL and SHA-256 and performs fresh runtime/tool admission.</p>
++    <p className="save-note">Use Browse to choose source folders, inspect them, then explicitly approve protected registration when its prerequisites are available. A published copy is never selected automatically. Build still compares the project's original Gradle wrapper URL and SHA-256 and performs fresh runtime/tool admission.</p>
+     {state.catalogCancelPending && <p className="review-caution">The original catalog cancellation invoke is still pending. A terminal event does not release that pending request.</p>}
+     {state.catalogUnconfirmed && <p className="review-caution">The original catalog request is unconfirmed. Use Check tool status or Cancel tool read below; do not repeat the request.</p>}
+     {state.catalogError && <ErrorNotice error={state.catalogError} title="No new tool-catalog outcome was confirmed" />}
+diff --git a/desktop/src/pages/Environment.tsx b/desktop/src/pages/Environment.tsx
+--- a/desktop/src/pages/Environment.tsx
++++ b/desktop/src/pages/Environment.tsx
+@@ -5,6 +5,8 @@
+ import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
+ import { EnvironmentDiagnostics } from '../components/EnvironmentDiagnostics.tsx';
+ import { PrepareBuildEnvironment } from '../components/PrepareBuildEnvironment.tsx';
++import { AndroidToolSetup } from '../components/AndroidToolSetup.tsx';
++import type { AndroidToolSetupProps } from '../components/AndroidToolSetup.tsx';
+ import type { PrepareBuildEnvironmentProps } from '../components/PrepareBuildEnvironment.tsx';
+ import { Badge, ErrorNotice, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+ import { Icon } from '../components/Icon.tsx';
+@@ -34,10 +36,10 @@
+ };
+ const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
+
+-export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, onRetry, onSettings, onHelp, loading }: {
++export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, onRetry, onSettings, onHelp, loading }: {
+   info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
+   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
+-  toolPreparation: PrepareBuildEnvironmentProps;
++  toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps;
+   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
+ }) {
+   const runtime = info?.runtime;
+@@ -47,6 +49,7 @@
+   const resultPreview = state.resultBinding?.mode === 'preview';
+   const guide = result?.help ?? initialHelp;
+   const setContext = (platform: EnvironmentPlatform, operation: EnvironmentOperation) => {
++    toolSetup.controller.setToolSetupVisible(platform === 'android' && operation === 'build');
+     toolPreparation.controller.setVisible(platform === 'android' && operation === 'build');
+     diagnosticsController.setContext(platform, operation);
+     controller.setContext(platform, operation);
+@@ -65,7 +68,10 @@
+       </div>
+     </section>
+     <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
+-    {state.platform === 'android' && state.operation === 'build' && <PrepareBuildEnvironment {...toolPreparation} />}
++    {state.platform === 'android' && state.operation === 'build' && <>
++      <PrepareBuildEnvironment {...toolPreparation} />
++      <AndroidToolSetup {...toolSetup} />
++    </>}
+     <ProgressiveDisclosure title="Required tools & versions"
+       description="See what this project asks for. This list does not check what is installed on your computer."
+       needsAttention={state.pending !== null || state.error !== null || (result !== null && state.stale)}>
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -921,6 +921,7 @@
+   const main = useRef<HTMLElement>(null);
+   const offlineCheckSection = useRef<HTMLDivElement>(null);
+   const androidSigningSection = useRef<HTMLDivElement>(null);
++  const androidToolSetupSection = useRef<HTMLElement>(null);
+   useEffect(() => {
+     if (page !== 'releases' || releaseCheckFocus === null) return;
+     const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current : androidSigningSection.current;
+@@ -1230,7 +1231,7 @@
+     return () => window.removeEventListener('beforeunload', warn);
+   }, []);
+
+-  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
++  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+   const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
+     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
+     // Navigation selects a review only. The existing controller still owns
+@@ -1493,7 +1494,7 @@
+     chooseSource: (role) => { toolAcquisition.toolInputsIntent(); return androidBuild.chooseToolSource(role); },
+     choosePreparedSource: (role) => toolAcquisition.choosePreparedSource(role,(selected,original) => androidBuild.chooseToolSource(selected,original)),
+     refreshCatalog: () => { toolAcquisition.toolInputsIntent(); return androidBuild.refreshCatalog(); },
+-    openRegistration: () => { navigate('releases'); setReleaseCheckFocus('android-signing'); },
++    openRegistration: () => { const section = androidToolSetupSection.current; section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' }); },
+   };
+
+   return <div className="app-shell">
+@@ -1672,7 +1673,7 @@
+             </section>}
+           </ProgressiveDisclosure></>}
+         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
+-          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
++          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
+         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
+           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
+           nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
+diff --git a/desktop/tests/android-build-controller.test.mjs b/desktop/tests/android-build-controller.test.mjs
+--- a/desktop/tests/android-build-controller.test.mjs
++++ b/desktop/tests/android-build-controller.test.mjs
+@@ -187,6 +187,10 @@
+     replyRegistration(call, value) {
+       assert.ok(parseAndroidToolRegistrationStatus(value), 'Synthetic registration must satisfy the closed status contract');
+       registrationRegistry = clone(value); call.resolve(clone(value));
++    },
++    emitRegistration(value) {
++      assert.ok(parseAndroidToolRegistrationStatus(value), 'Synthetic event must satisfy the closed registration contract');
++      registrationRegistry = clone(value); registrationSubscriptions.at(-1)?.callback(clone(value));
+     },
+     setAssets(value) { assets = clone(value); controller.syncAssetSession(); },
+     emitService(value) { serviceRegistry = clone(value); serviceSubscriptions.at(-1)?.callback(clone(value)); },
+@@ -1048,3 +1052,188 @@
+   const cancel=h.calls.at(-1);assert.equal(cancel.kind,'cancel');assert.equal(cancel.input.operationId,op.operationId);
+   h.reply(cancel,status(2,terminal(op)));await flush();
+ });
++
++// The Tools page uses this existing app-owned controller, not a second native owner.
++function toolSetupHarness(t) {
++  return harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialService: serviceIdle(),
++    initialRegistration: { schemaVersion: 1, statusRevision: 0, registrationGeneration: 0,
++      availability: 'available', prerequisite: 'ready', phase: 'idle', reason: 'not-inspected',
++      operation: null, review: null, report: null },
++    sourceSelections: ['jdk', 'sdk', 'gradle'].map(role => ({ role, displayName: 'Example-' + role })) });
++}
++function sourceReview(inspect) {
++  const context = clone(inspect.input.context);
++  return { schemaVersion: 1, statusRevision: 1, registrationGeneration: 1, availability: 'available',
++    prerequisite: 'ready', phase: 'review', reason: 'none',
++    operation: { operationId: OP, registrationGeneration: 1, sourceGeneration: 1, kind: 'inspection', context },
++    review: { reviewId: OTHER, sourceGeneration: 1, context, consentVersion: ANDROID_TOOL_REGISTRATION_CONSENT,
++      licenseAcknowledgmentRequired: true, sources: ['jdk', 'sdk', 'gradle'].map(role => ({ role, version: '17.0.1',
++        logicalBytes: 1, files: 1, entries: 1, aliases: 0, complete: true, compatibility: 'compatible' })) },
++    report: null };
++}
++async function reviewInToolSetup(h) {
++  await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
++  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls.at(-1);
++  assert.equal(inspect?.kind, 'inspect', h.controller.inspectToolSourcesReason());
++  const review = sourceReview(inspect); h.replyRegistration(inspect, review); await inspecting;
++  return review;
++}
++const discardedSourceReview = review => ({ ...review, statusRevision: review.statusRevision + 1,
++  phase: 'cancelled', reason: 'cancelled', review: null });
++
++test('tool setup view is passive and cannot prepare or approve an Android build', async (t) => {
++  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false);
++  assert.match(h.controller.inspectToolSourcesReason(), /Open Set up build tools/);
++  assert.match(h.controller.serviceActionReason(), /Open Set up build tools/);
++  const contextGeneration = h.state.contextGeneration, requestGeneration = h.state.requestGeneration;
++  const sources = h.state.toolSources, selection = h.state.catalogStatus.selected;
++  h.controller.setToolSetupVisible(true);
++  assert.equal(h.state.visible, false);
++  assert.equal(h.state.contextGeneration, contextGeneration); assert.equal(h.state.requestGeneration, requestGeneration);
++  assert.equal(h.state.toolSources, sources); assert.equal(h.state.catalogStatus.selected, selection);
++  assert.equal(h.controller.inspectToolSourcesReason(), null); assert.equal(h.controller.serviceActionReason(), null);
++  assert.match(h.controller.prepareReason(), /Open Releases/);
++  await h.controller.prepare(); h.controller.setAcknowledged(OP, OWNER, true); await h.controller.start(OP, OWNER);
++  assert.equal(h.state.consent, null); assert.equal(h.state.registrationConsent, null); assert.equal(h.state.serviceConsent, null);
++  assert.deepEqual([h.calls.length, h.registrationCalls.length, h.serviceCalls.length, h.catalogCalls.length], [0, 0, 0, 0]);
++});
++
++test('tool setup view uses the original inspection and one-use unchecked protected-copy consent', async (t) => {
++  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
++  assert.equal(h.state.visible, false); assert.equal(h.state.registrationConsent?.acknowledged, false);
++  await h.controller.registerToolSources(OP, 1, OTHER); assert.equal(h.registrationCalls.length, 1);
++  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
++  const registering = h.controller.registerToolSources(OP, 1, OTHER), copy = h.registrationCalls[1];
++  assert.equal(copy?.kind, 'register'); assert.deepEqual(copy.input.context, h.registrationCalls[0].input.context);
++  assert.equal(copy.input.consentVersion, ANDROID_TOOL_REGISTRATION_CONSENT);
++  assert.equal(copy.input.licenseAcknowledged, true); assert.equal(copy.input.reviewId, OTHER);
++  assert.equal(h.state.registrationConsent, null);
++  await h.controller.registerToolSources(OP, 1, OTHER); assert.equal(h.registrationCalls.length, 2);
++  // Settle this fake port with refusal, never fabricated native protected-copy qualification.
++  h.replyRegistration(copy, { ...review, statusRevision: 2, registrationGeneration: 2, phase: 'refused',
++    reason: 'registration-refused', review: null,
++    operation: { ...review.operation, operationId: OWNER, registrationGeneration: 2, kind: 'registration' } });
++  await registering;
++  assert.equal(h.state.toolRegistration.phase, 'refused'); assert.equal(h.state.registrationPending, null);
++  assert.equal(h.state.integrityFailed, false); assert.equal(h.calls.length, 0);
++});
++
++test('tool setup view leaving discards only the original review and returning cannot adopt it from Status', async (t) => {
++  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
++  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
++  h.controller.setToolSetupVisible(false);
++  assert.equal(h.state.registrationConsent, null);
++  const cancel = h.registrationCalls[1];
++  assert.equal(cancel?.kind, 'cancel'); assert.deepEqual(cancel.input, { schemaVersion: 1, operationId: OP, registrationGeneration: 1 });
++  h.controller.setToolSetupVisible(true); await h.controller.checkToolRegistration();
++  assert.equal(h.state.registrationConsent, null); assert.equal(h.state.registrationCancelPending, true);
++  await h.controller.registerToolSources(OP, 1, OTHER); await h.controller.inspectToolSources();
++  assert.equal(h.registrationCalls.length, 2);
++  h.replyRegistration(cancel, discardedSourceReview(review)); await flush();
++  assert.equal(h.state.registrationCancelPending, false); assert.equal(h.state.toolRegistration.phase, 'cancelled');
++  assert.equal(h.state.registrationConsent, null); assert.equal(h.calls.length, 0);
++});
++
++test('tool setup view retains an unresolved inspection and cancels its late original review, not a new request', async (t) => {
++  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
++  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
++  assert.equal(inspect?.kind, 'inspect');
++  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
++  assert.equal(h.state.registrationPending, 'inspect'); assert.equal(h.state.registrationUnconfirmed, true);
++  await h.controller.inspectToolSources(); assert.equal(h.registrationCalls.length, 1);
++  const review = sourceReview(inspect); h.replyRegistration(inspect, review); await inspecting;
++  assert.equal(h.state.registrationConsent, null);
++  const cancel = h.registrationCalls[1];
++  assert.equal(cancel?.kind, 'cancel'); assert.equal(cancel.input.operationId, OP);
++  assert.equal(h.registrationSubscriptions[0].closed, false);
++  h.replyRegistration(cancel, discardedSourceReview(review)); await flush();
++  assert.equal(h.state.registrationPending, null); assert.equal(h.state.registrationCancelPending, false);
++  assert.equal(h.registrationCalls.length, 2);
++});
++
++test('tool setup view keeps active copy Status and Cancel and cannot clear an unknown original', async (t) => {
++  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
++  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
++  const registering = h.controller.registerToolSources(OP, 1, OTHER), copy = h.registrationCalls[1];
++  const copying = { ...review, statusRevision: 2, registrationGeneration: 2, availability: 'busy', phase: 'copying', review: null,
++    operation: { ...review.operation, operationId: OWNER, registrationGeneration: 2, kind: 'registration' } };
++  h.emitRegistration(copying);
++  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
++  assert.equal(h.state.registrationPending, 'register'); assert.equal(h.registrationCalls.length, 2);
++  assert.equal(h.state.toolRegistration.operation.operationId, OWNER); assert.equal(h.controller.canCheckToolRegistration(), true);
++  await h.controller.checkToolRegistration(); assert.equal(h.state.registrationPending, 'register');
++  assert.equal(h.controller.canCancelToolRegistration(), true); h.controller.cancelToolRegistration();
++  const cancel = h.registrationCalls[2];
++  assert.deepEqual(cancel.input, { schemaVersion: 1, operationId: OWNER, registrationGeneration: 2 });
++  const unknown = { ...copying, statusRevision: 3, availability: 'cleanup-unknown', phase: 'unknown', reason: 'cleanup-unknown' };
++  h.replyRegistration(copy, unknown); await registering; h.replyRegistration(cancel, unknown); await flush();
++  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true); await h.controller.checkToolRegistration();
++  assert.equal(h.state.nativeBlocked, true); assert.equal(h.state.toolRegistration.phase, 'unknown');
++  assert.equal(h.state.toolRegistration.operation.operationId, OWNER); assert.equal(h.state.registrationConsent, null);
++  await h.controller.inspectToolSources(); await h.controller.registerToolSources(OP, 1, OTHER);
++  assert.equal(h.registrationCalls.length, 3); assert.equal(h.calls.length, 0);
++  h.controller.dispose(); assert.equal(h.registrationSubscriptions[0].closed, false);
++});
++
++test('tool setup view allows explicit helper check, clears unused helper consent and retains a lost reply', async (t) => {
++  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
++  h.controller.setServiceRegistrationAcknowledged(0, true); assert.ok(h.state.serviceConsent);
++  h.controller.setToolSetupVisible(false); assert.equal(h.state.serviceConsent, null);
++  h.controller.setToolSetupVisible(true);
++  await h.controller.requestAndroidToolServiceRegistration(); assert.equal(h.serviceCalls.length, 0);
++  const checking = h.controller.checkAndroidToolService(), call = h.serviceCalls[0];
++  assert.equal(call?.kind, 'check'); assert.equal(call.input.consentVersion, undefined);
++  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
++  assert.equal(h.state.servicePending, 'check'); assert.equal(h.state.serviceUnconfirmed, true);
++  call.reject({ code: 'reply_lost' }); await checking;
++  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true); await h.controller.checkToolServiceStatus();
++  assert.equal(h.state.serviceUnconfirmed, true); assert.equal(h.state.serviceConsent, null);
++  await h.controller.checkAndroidToolService(); assert.equal(h.serviceCalls.length, 1);
++  const pending = servicePending(call, 1); h.emitService(pending); await flush();
++  const cancel = h.serviceCalls[1]; assert.equal(cancel?.kind, 'cancel');
++  assert.equal(cancel.input.operationId, pending.operation.operationId);
++  h.replyService(cancel, serviceComplete(pending, { state: 'unavailable', phase: 'cancelled', reason: 'cancelled', observation: false }));
++  await flush(); assert.equal(h.state.toolService.phase, 'cancelled'); assert.equal(h.calls.length, 0);
++});
++
++test('tool setup view cannot bypass other-owner gates, native unavailability or reentrant navigation', async (t) => {
++  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
++  h.other('Another original operation is still running.');
++  assert.equal(h.controller.inspectToolSourcesReason(), 'Another original operation is still running.');
++  assert.equal(h.controller.serviceActionReason(), 'Another original operation is still running.');
++  await h.controller.inspectToolSources(); await h.controller.checkAndroidToolService();
++  assert.equal(h.registrationCalls.length, 0); assert.equal(h.serviceCalls.length, 0);
++  h.other(null);
++  const unsubscribe = h.controller.subscribe(() => {
++    if (h.state.registrationPending === 'inspect') h.controller.setToolSetupVisible(false);
++  });
++  await h.controller.inspectToolSources(); unsubscribe();
++  assert.equal(h.registrationCalls.length, 0); assert.equal(h.state.registrationPending, null);
++  assert.equal(h.state.registrationUnconfirmed, false); assert.equal(h.state.registrationConsent, null);
++  h.controller.setToolSetupVisible(true); h.controller.setSelectionPending(true);
++  await h.controller.inspectToolSources(); await h.controller.checkAndroidToolService();
++  assert.equal(h.registrationCalls.length, 0); assert.equal(h.serviceCalls.length, 0);
++  const unavailable = harness(t, { initialService: serviceIdle({ availability: 'runtime-unqualified' }) });
++  await unavailable.ready; unavailable.controller.setVisible(false); unavailable.controller.setToolSetupVisible(true);
++  assert.ok(unavailable.controller.serviceActionReason()); await unavailable.controller.checkAndroidToolService();
++  assert.equal(unavailable.serviceCalls.length, 0);
++});
++
++test('tool setup view never carries Build consent across navigation or resets a started Build', async (t) => {
++  const unstarted = harness(t), review = await reviewed(unstarted);
++  unstarted.controller.setToolSetupVisible(true); unstarted.controller.setVisible(false);
++  assert.equal(unstarted.state.consent, null);
++  const cancel = unstarted.calls.at(-1); assert.equal(cancel.kind, 'cancel');
++  assert.deepEqual(cancel.input, { operationId: review.operationId, ownerGeneration: review.ownerGeneration });
++  await unstarted.controller.start(review.operationId, review.ownerGeneration);
++  assert.equal(unstarted.calls.filter(call => call.kind === 'start').length, 0);
++  unstarted.reply(cancel, status(2, terminal(review))); await flush();
++  const h = harness(t), op = await reviewed(h), sent = start(h, op);
++  h.controller.setVisible(false); h.controller.setToolSetupVisible(true); h.controller.setToolSetupVisible(false);
++  assert.equal(h.calls.filter(call => call.kind === 'cancel').length, 0); assert.equal(h.state.pending, 'start');
++  assert.equal(h.controller.canCancel(), true); assert.equal(h.controller.canCheckStatus(), true);
++  h.controller.cancel(); const stop = h.calls.at(-1);
++  assert.deepEqual(stop.input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
++  h.reply(sent.call, status(2, terminal(op))); await sent.done; h.reply(stop, status(2, terminal(op))); await flush();
++  assert.equal(h.state.pending, null);
++});
