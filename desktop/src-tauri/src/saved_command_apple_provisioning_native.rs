@@ -503,7 +503,8 @@ pub(super) async fn write_phases(
             let mut jobs = owner.apple.native.lock().await;
             call(inner, owner, &mut jobs, index, selected).await?;
             let ack = jobs.slots[index].ack().ok_or_else(apple_wire::invalid)?;
-            apple_wire::journal_ack(&owner.apple.request_binding()?, ack, &update, previous)?
+            let binding = owner.apple.request_binding()?;
+            apple_wire::journal_ack(binding.as_ref(), ack, &update, previous)?
         };
         let current = work_clear(owner);
         let allow_audit = current.is_err()

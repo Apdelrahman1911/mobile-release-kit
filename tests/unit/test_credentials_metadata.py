@@ -43,6 +43,42 @@ from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile as fictional_profile
 
 
+class CredentialFingerprintTextTests(unittest.TestCase):
+    def test_openssl_libressl_and_keytool_fingerprints_share_exact_sha256(self) -> None:
+        pairs = ":".join(["AB"] * 32)
+        for line in (
+            f"sha256 Fingerprint={pairs}",
+            f"SHA256 Fingerprint={pairs}",
+            f"SHA-256 fingerprint={pairs.lower()}",
+            f"\t SHA256: {pairs}  \r",
+            f"SHA256: {'ab' * 32}",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    credential_module._fingerprint_from_text(
+                        f"Certificate details\n{line}\nSignature algorithm: SHA256withRSA\n"
+                    ),
+                    "ab" * 32,
+                )
+
+    def test_malformed_or_partial_fingerprint_never_becomes_approved_digest(self) -> None:
+        pairs = ":".join(["AB"] * 32)
+        for line in (
+            f"SHA1: {pairs}",
+            f"SHA256: {'ab' * 31}",
+            f"SHA256: {'ab' * 33}",
+            f"SHA256: {pairs}:AB",
+            f"SHA256: {pairs}:",
+            f"SHA256: :{pairs}",
+            f"SHA256: {pairs.replace(':', '::', 1)}",
+            f"SHA256: {pairs} trailing-data",
+            f"Unrelated text SHA256: {pairs}",
+            "Signature algorithm name: SHA256withRSA",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(credential_module._fingerprint_from_text(line))
+
+
 class CredentialMetadataTests(unittest.TestCase):
     def test_selected_store_material_requires_exact_validated_live_authority(self) -> None:
         # Real selection, scratch, ADC reader and cancellation ownership. No

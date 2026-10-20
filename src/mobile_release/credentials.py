@@ -1258,7 +1258,15 @@ def _temporary_apple_signing_environment(
 
 
 def _fingerprint_from_text(text: str) -> str | None:
-    match = re.search(r"SHA(?:-)?256(?: fingerprint)?:?\s*=*\s*([0-9A-Fa-f:]{64,95})", text)
+    # OpenSSL/LibreSSL use "sha256 Fingerprint=" or "SHA256 Fingerprint=";
+    # keytool uses "SHA256:". Accept their spelling, not a truncated prefix of
+    # an oversized digest or the unrelated signature-algorithm description.
+    match = re.search(
+        r"^[ \t]*SHA-?256(?:[ \t]+fingerprint)?[ \t]*[:=][ \t]*"
+        r"((?:[0-9a-f]{2}:){31}[0-9a-f]{2}|[0-9a-f]{64})[ \t]*\r?$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
     return match.group(1).replace(":", "").lower() if match else None
 
 
