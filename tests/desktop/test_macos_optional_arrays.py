@@ -17,7 +17,9 @@ class MacOSOptionalArraysTests(unittest.TestCase):
         for name, count in (("history_provider_arguments", 1), ("removal_arguments", 3), ("github_seal_arguments", 1)):
             self.assertEqual(source.count(forms[name]), count)
             self.assertNotIn('"${' + name + '[@]}"', source.replace(forms[name], ""))
-        start = source.index("      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n")
+        # Display labels vary between the ordinary app and native observer.
+        # Select the existing stable step ID, then still test its real argv.
+        start = source.index("        id: app_assemble\n")
         assembly = source[start:source.index("      - name:", start + 1)]
         self.assertIn("          set -euo pipefail\n", assembly)
         prefix = '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
