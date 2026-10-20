@@ -1,0 +1,252 @@
+--- a/src/mobile_release/_desktop_git_local_protocol.py
++++ b/src/mobile_release/_desktop_git_local_protocol.py
+@@ -13,6 +13,7 @@
+ 
+ from . import _desktop_git_read_protocol as source_fields
+ from . import _desktop_git_branches as branch
++from . import _desktop_git_switch as switch
+ from . import git_repository_local as local
+ from . import git_repository_read as read
+ from . import git_service as core
+@@ -50,7 +51,9 @@
+                 {"name": self.identity.name, "email": self.identity.email}}
+ 
+ 
+-def action(value) -> Action | branch.Action:
++def action(value) -> Action | branch.Action | switch.Action:
++    if type(value) is dict and value.get("kind") == "branch-switch":
++        return switch.action(value)
+     if type(value) is dict and value.get("kind") == "branch-create":
+         return branch.action(value)
+     row = source_fields._keys(value, ("kind", "expectedRevision", "paths", "message", "identity"))
+@@ -76,7 +79,7 @@
+ class Request:
+     id: str
+     phase: str
+-    action: Action | branch.Action
++    action: Action | branch.Action | switch.Action
+     review_digest: str | None
+     journal_revision: int | None
+     project_id: str  # Runtime context alias; NOT the durable service project ID.
+@@ -92,12 +95,16 @@
+     work_end_ns: int
+     hard_end_ns: int
+     digest: str
++    switch_sources: switch.Sources | None = None
+ 
+ 
+ def parse_request(raw: bytes) -> Request:
+     try:
+-        row = source_fields._keys(source_fields._decode(raw, REQUEST_LIMIT),
+-            ("protocol", "id", "phase", "action", "reviewDigest", "journalRevision", "context", "native", "clock"))
++        decoded = source_fields._decode(raw, REQUEST_LIMIT)
++        is_switch = (type(decoded) is dict and type(decoded.get("action")) is dict
++                     and decoded["action"].get("kind") == "branch-switch")
++        keys = ("protocol", "id", "phase", "action", "reviewDigest", "journalRevision", "context", "native", "clock")
++        row = source_fields._keys(decoded, (*keys, "switch") if is_switch else keys)
+         require(row["protocol"] == PROTOCOL and row["phase"] in ("prepare", "apply"))
+         if row["phase"] == "prepare":
+             require(row["reviewDigest"] is None and row["journalRevision"] is None)
+@@ -120,10 +127,13 @@
+         clock = source_fields._keys(row["clock"], ("workEndNs", "hardEndNs"))
+         work, hard = (source_fields._integer(clock[name], 1, (1 << 63) - 1) for name in ("workEndNs", "hardEndNs"))
+         require(hard - work == 10_000_000_000)
+-        return Request(source_fields._id(row["id"]), row["phase"], action(row["action"]),
++        selected = action(row["action"])
++        compared = switch.sources(row["switch"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_switch else None
++        require(not is_switch or row["phase"] != "apply" or files["index"] is not None)
++        return Request(source_fields._id(row["id"]), row["phase"], selected,
+             row["reviewDigest"], row["journalRevision"], source_fields._id(context["projectId"]),
+             source_fields._integer(context["generation"], 0, (1 << 32) - 1), source_fields._id(context["revision"]),
+-            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest())
++            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared)
+     except (source_fields.ProtocolError, core.GitError, UnicodeError, ValueError, TypeError, OverflowError):
+         raise ProtocolError(_ERROR) from None
+ 
+@@ -146,6 +156,8 @@
+ 
+ 
+ def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
++    if type(request) is Request and type(request.action) is switch.Action:
++        return switch.matches_review(request, review)
+     if type(request) is Request and type(request.action) is branch.Action:
+         return branch.matches_review(request, review)
+     require(type(request) is Request and type(review) is local.LocalReview and type(review.plan) is core.GitPlan
+@@ -168,6 +180,8 @@
+ 
+ def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
+               intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
++    if type(request) is Request and type(request.action) is switch.Action:
++        return switch.candidate(request, review, intent)
+     if type(request) is Request and type(request.action) is branch.Action:
+         return branch.candidate(request, review, intent)
+     matches_review(request, review)
+@@ -203,11 +217,15 @@
+ def terminal(request: Request, status: str, *, reason: str | None,
+              review: local.LocalReview | branch.BranchReview | None = None,
+              diff: core.Diff | None = None, result: core.MutationResult | None = None,
+-             publication: str = "not-reported", first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
++             publication: str = "not-reported", progress: switch.Progress | None = None,
++             first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
++    is_switch = type(request) is Request and type(request.action) is switch.Action
+     is_branch = type(request) is Request and type(request.action) is branch.Action
+     require(type(request) is Request and status in STATUSES
+-            and (reason is None or (branch.valid_reason(reason) if is_branch else reason in core._REASONS))
+-            and publication in (("not-reported", branch.PUBLICATION) if is_branch else
++            and (reason is None or (switch.valid_reason(reason) if is_switch else
++                                  branch.valid_reason(reason) if is_branch else reason in core._REASONS))
++            and (is_switch or progress is None)
++            and publication in (switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
+                                 ("not-reported", "index-returned", "ref-returned")))
+     try:
+         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
+@@ -217,7 +235,10 @@
+     except source_fields.ProtocolError:
+         raise ProtocolError(_ERROR) from None
+     data = None
+-    if is_branch:
++    if is_switch:
++        data = switch.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
++            publication=publication, progress=progress, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
++    elif is_branch:
+         data = branch.terminal_data(request, status, reason=reason, review=review, diff=diff,
+             result=result, publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
+     elif status == "ok":
+--- a/src/mobile_release/desktop_git_local.py
++++ b/src/mobile_release/desktop_git_local.py
+@@ -17,6 +17,7 @@
+ 
+ from . import _desktop_git_local_protocol as wire
+ from . import _desktop_git_branches as branch
++from . import _desktop_git_switch as switch
+ from . import _desktop_git_read_protocol as source_fields
+ from . import git_repository_local as local
+ from . import git_service as core
+@@ -50,6 +51,10 @@
+         self.entered = self.returned = self.closed = self.unknown = False
+         self.calls = 0
+         self.pending = self.repository = self.review = self.diff = self.result = None
++        self.switch_state = None
++        if type(request.action) is switch.Action:
++            from ._desktop_git_switch_sources import State
++            self.switch_state = State(self)
+         source.bind_operation(self)
+ 
+     def _publication(self):
+@@ -95,6 +100,8 @@
+         GitReadOperation._check(self, successor, True)
+ 
+     def _check(self, original: _Original, hash_file: bool) -> None:
++        if self.switch_state is not None:
++            return self.switch_state.check(original, hash_file)
+         publication = self._publication()
+         if original is not self.index_original or publication is None:
+             GitReadOperation._check(self, original, hash_file)
+@@ -126,6 +133,8 @@
+         self.checkpoint()
+ 
+     def source_post(self, *, hash_files: bool) -> None:
++        if self.switch_state is not None:
++            return self.switch_state.post(hash_files=hash_files)
+         self.checkpoint()
+         publication = self._publication()
+         if publication is not None and self.index_successor is None:
+@@ -161,7 +170,8 @@
+                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
+         sessions = self.repository._active_sessions
+         wire.require(len(sessions) == 1
+-                     and (branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
++                     and (switch.local_session(self, sessions[0]) if type(self.request.action) is switch.Action else
++                          branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
+                           type(sessions[0]) is local._LocalSession)
+                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
+         session = sessions[0]
+@@ -172,7 +182,8 @@
+         selected_index = environ.get("GIT_INDEX_FILE")
+         index = None if selected_index in (None, str(self.request.root / ".git/index")) else Path(selected_index)
+         plan = self.repository._active_plan
+-        identity = plan._identity if args and args[0] == "commit-tree" and plan is not None else None
++        identity = (switch.command_identity(self, session, args) if type(self.request.action) is switch.Action else
++                    plan._identity if args and args[0] == "commit-tree" and plan is not None else None)
+         expected_argv, expected_env = session.command_spec(args, index=index, identity=identity)
+         wire.require(argv == expected_argv and environ == expected_env and cwd == session.frozen.root
+                      and session.root == self.request.root and session.repository.git_executable == wire.TOOL_PATH
+@@ -185,6 +196,8 @@
+             verdict = self.guard.lifetime_ledger.verdict()
+             wire.require(pending.claimed and verdict.cleanup_complete and verdict.contained
+                          and verdict.commands == self.calls)
++            if type(self.request.action) is switch.Action:
++                switch.returned_command(self, session, args, result)
+             self.source_post(hash_files=False)
+             self.pending = None
+             return result
+@@ -219,29 +232,32 @@
+         wire.require(self.source.go_returned and not self.entered)
+         self.entered = True
+         action = self.request.action
+-        repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
+-        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+-            work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
+         try:
+-            # Apply performs a genuine fresh prepare from the retained exact
+-            # input, not reconstruction of a serialized/core plan capability.
+-            if type(action) is branch.Action:
+-                self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
+-                    expected_reference_revision=action.expected_reference_revision)
++            if type(action) is switch.Action:
++                switch.prepare_or_apply(self)
+             else:
+-                self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
+-                    paths=action.paths, message=action.message, identity=action.identity)
+-            wire.matches_review(self.request, self.review)
+-            if self.request.phase == "prepare" and type(action) is not branch.Action:
+-                self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
+-                                                expected_revision=action.expected_revision)
+-            elif self.request.phase == "apply":
++                repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
++                self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
++                    work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
++                # Apply performs a genuine fresh prepare from the retained exact
++                # input, not reconstruction of a serialized/core plan capability.
+                 if type(action) is branch.Action:
+-                    self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
++                    self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
++                        expected_reference_revision=action.expected_reference_revision)
+                 else:
+-                    self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
+-                if self.result.state != "succeeded":
+-                    self.source.failure_observed()
++                    self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
++                        paths=action.paths, message=action.message, identity=action.identity)
++                wire.matches_review(self.request, self.review)
++                if self.request.phase == "prepare" and type(action) is not branch.Action:
++                    self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
++                                                    expected_revision=action.expected_revision)
++                elif self.request.phase == "apply":
++                    if type(action) is branch.Action:
++                        self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
++                    else:
++                        self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
++            if self.result is not None and self.result.state != "succeeded":
++                self.source.failure_observed()
+             wire.require(not self.repository._unknown and not self.repository._active_sessions
+                          and not self.repository._retained_sessions and self.pending is None)
+             self.source_post(hash_files=True)
+@@ -254,6 +270,8 @@
+             raise
+ 
+     def publication(self) -> str:
++        if self.switch_state is not None:
++            return self.switch_state.publication()
+         if type(self.request.action) is branch.Action:
+             return branch.publication(self)
+         if self._publication() is not None:
+@@ -344,6 +362,8 @@
+                 values = {"review": operation.review, "diff": operation.diff}
+             else:
+                 values = {"result": operation.result, "publication": operation.publication()}
++                if operation.switch_state is not None:
++                    values["progress"] = operation.switch_state.progress
+         elif isinstance(self.primary, core.GitError):
+             reason = self.primary.reason
+         elif isinstance(self.primary, ProcessError):
