@@ -40,6 +40,9 @@ pub(crate) use tool_acquisition::SourceGate as ToolAcquisitionSourceGate;
 mod local_history;
 #[path = "saved_command_identity_continuity.rs"]
 mod identity_continuity;
+#[path="saved_command_store_versions.rs"]
+mod store_versions;
+pub(crate) use store_versions::{StoreVersionObservation,document_backing_bytes as store_versions_document_backing_bytes};
 pub(crate) use identity_continuity::document_backing_bytes as identity_continuity_document_backing_bytes;
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(crate) use local_history::{LocalHistoryClaim,LocalHistoryHelperClaim};
@@ -1247,6 +1250,7 @@ struct Registry {
     recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
     android_registration: android_registration::Registration, artifact_inputs: artifact_inputs::Inputs,
     identity_vetoes: identity_continuity::Vetoes,
+    store_versions: store_versions::Slot,
 }
 #[path = "saved_command_agent_local_checks.rs"]
 mod agent_local_checks;
@@ -2240,7 +2244,7 @@ impl SavedCommandOwner {
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
             android_registration: android_registration::Registration::default(), artifact_inputs: artifact_inputs::Inputs::default(),
-            identity_vetoes: identity_continuity::Vetoes::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            store_versions: store_versions::Slot::default(), identity_vetoes: identity_continuity::Vetoes::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: Mutex::new(None),
@@ -2664,7 +2668,7 @@ impl SavedCommandOwner {
     }
     pub(crate) fn document_lost_published(&self, publisher: Option<&android_registration::Publisher>) {
         let at = self.lifecycle_time(publisher);
-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
+        let mut r = self.inner.lock(); r.store_versions.invalidate(); apple_provisioning::invalidate_review(&mut r.apple); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,at);
         r.android_sources.stop(crate::android_tool_sources::Reason::DocumentLost,at);
         r.artifact_inputs.stop(artifact_wire::SelectionReason::DocumentLost,at);
@@ -2682,7 +2686,7 @@ impl SavedCommandOwner {
     }
     pub(crate) fn context_changed_published(&self, publisher: Option<&android_registration::Publisher>) {
         let at = self.lifecycle_time(publisher);
-        let mut r = self.inner.lock(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+        let mut r = self.inner.lock(); r.store_versions.invalidate(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
         if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
             | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,at)
             | r.artifact_inputs.stop(artifact_wire::SelectionReason::ContextChanged,at)
@@ -2707,7 +2711,7 @@ impl SavedCommandOwner {
     }
     pub(crate) fn request_shutdown_published(&self, publisher: Option<&android_registration::Publisher>) {
         let at = self.lifecycle_time(publisher);
-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+        let mut r = self.inner.lock(); r.store_versions.invalidate(); apple_provisioning::invalidate_review(&mut r.apple); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,at);
         r.android_sources.stop(crate::android_tool_sources::Reason::Shutdown,at);
         r.artifact_inputs.stop(artifact_wire::SelectionReason::Shutdown,at);
@@ -2800,6 +2804,8 @@ impl SavedCommandOwner {
                 // Only this exact positive original watchdog retirement may
                 // mint sticky Store continuity. Never parse public Status.
                 r.identity_vetoes.record_original(&active, &owner);
+                let versions_allowed = !r.disabled && !r.exhausted && !r.document_lost && !r.stopping && !self.inner.poisoned.load(Ordering::SeqCst);
+                r.store_versions.record_original(&active, &owner, versions_allowed);
                 if !active.unknown && !active.context_invalidated && !r.document_lost && !r.stopping {
                     if let Some(Terminal::IOSArchive(t)) = &active.projection.result {
                         if t.context.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect)

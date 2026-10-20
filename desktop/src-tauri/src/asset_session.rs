@@ -107,7 +107,7 @@ mod tool_acquisition;
 pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
 #[path = "asset_session_store_material.rs"]
 mod store_material;
-pub(crate) use store_material::{SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
 #[path = "asset_session_github_secret.rs"]
 mod github_secret;
 pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
@@ -1978,6 +1978,7 @@ mod lookup_memory {
             self.add(std::mem::size_of::<DocumentState>())?;
             // Both original Store owners retain continuity across idle/context replacement.
             self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(crate::saved_command_owner::store_versions_document_backing_bytes().ok_or(Problem::Capacity)?)?;
             self.add(crate::saved_command_owner::apple_provisioning_retained_document_backing_bytes().ok_or(Problem::Capacity)?)?;
             // This Document binding can outlive every Apple review/input. It
             // is distinct from the owner's fixed retained comparison buffers.

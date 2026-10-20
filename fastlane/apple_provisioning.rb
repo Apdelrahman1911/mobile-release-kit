@@ -95,11 +95,26 @@ module MobileReleaseKit
                    when "download_profile"
                      AppleProvisioning.require!(@path.match?(%r{\A/v1/profiles/[A-Za-z0-9_-]{1,128}\z}))
                      PROFILE_RELATIONS.merge("fields[profiles]" => PROFILE_FIELDS + ",profileContent")
+                   when "current_app_before", "current_app_after"
+                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}\z}))
+                     { "fields[apps]" => "bundleId" }
+                   when "current_builds"
+                     app = @query["filter[app]"]
+                     AppleProvisioning.require!(@path == "/v1/builds" && app.instance_of?(String) && app.match?(/\A[1-9][0-9]{0,19}\z/))
+                     { "filter[app]" => app, "include" => "app,preReleaseVersion",
+                       "fields[builds]" => "version,app,preReleaseVersion", "fields[apps]" => "bundleId",
+                       "fields[preReleaseVersions]" => "version,platform,app", "limit" => "200" }
+                   when "current_buildUploads"
+                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}/buildUploads\z}))
+                     { "fields[buildUploads]" => "cfBundleVersion,cfBundleShortVersionString,platform,build", "limit" => "200" }
+                   when "current_appStoreVersions"
+                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}/appStoreVersions\z}))
+                     { "fields[appStoreVersions]" => "versionString,platform", "limit" => "200" }
                    else raise Error
                    end
         if @query.key?("cursor")
           cursor = @query["cursor"]
-          AppleProvisioning.require!(@kind != "download_profile" && cursor.bytesize <= 1024 && cursor.match?(/\A[!-~]+\z/))
+          AppleProvisioning.require!(!%w[download_profile current_app_before current_app_after].include?(@kind) && cursor.bytesize <= 1024 && cursor.match?(/\A[!-~]+\z/))
           expected = expected.merge("cursor" => cursor)
         end
         AppleProvisioning.require!(@query == expected)

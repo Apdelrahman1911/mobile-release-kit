@@ -4,7 +4,7 @@
 //! opener, candidate selector, general byte writer, credential or GO authority.
 //! The Supervisor must retain/join the actual state job and rematch the original
 //! Document admission before releasing an ACK. Parsed frames prove none of that.
-use super::{canonical, closed, decode, hash, hex, observation_shape, Authority, Checkpoint,
+use super::{canonical, closed, decode, hash, hex, Authority, Checkpoint,
     Pending, Request as AllocationRequest, Reservation, Revision, StateError, Transition,
     VersionAllocationStatePort, WriteAck};
 use crate::{application_service::ProjectBinding, application_state_store::PrivateStateDirectory,
@@ -78,9 +78,13 @@ pub(crate) struct Request {
 impl Request {
     pub(crate) fn from_port(port: &VersionAllocationStatePort, id: &str, kind: Kind,
         account_id: &str, clock: Clock, observations: &[Value]) -> Result<Self> {
-        require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2
-            && observations.iter().all(observation_shape))?;
+        require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2)?;
         let selected = AllocationRequest(data(port.selected_request())?.clone());
+        // Exact pending reconciliation is read-only and must remain possible
+        // after the original Store observation/key expires. It cannot PUT or
+        // prepare a new edit merely because it recovered the same DATA.
+        require((kind == Kind::Reconcile && observations.is_empty())
+            || selected.observations_valid(observations))?;
         let row = data(port.enrolled())?;
         require((kind == Kind::Reconcile) == row.pending.is_some()
             && row.pending.as_ref().is_none_or(|p| p.reservation.request == selected))?;
@@ -90,7 +94,7 @@ impl Request {
         let local_project_id = port.project.project_id.as_str().to_owned();
         let initial = encoded(&json!({"protocol":PROTOCOL,"id":id,"action":{
             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
-            "candidateId":selected.candidate(),"requestSha256":data(hash(b"mrk:allocation-request:1\0", &selected))?,"clock":clock}}), INITIAL_LIMIT)?;
+            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock}}), INITIAL_LIMIT)?;
         let initial_digest = digest(&initial);
         let public = json!({"observations":observations,"request":selected,
             "requestSha256":initial_digest,"state":{"revision":snapshot.revision.0,"payload":base64(&snapshot.bytes)?}});

@@ -4,6 +4,8 @@ import type { StoreCheck } from '../localStorePreflightTypes.ts';
 import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
 import { AppleProvisioning } from './AppleProvisioning.tsx';
 import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
+import { IOSStoreVersions } from './IOSStoreVersions.tsx';
+import { IOS_VERSIONS_QUERY } from '../iosStoreVersions.ts';
 const hints:Record<StoreCheck,string>={
  'credential-format':'In Credentials, reselect the service-account JSON, keep it and assign it to this exact This Mac context.',
  'query-prerequisites':'Check the saved Android application ID, version/build number and track configuration, then refresh the saved version.',
@@ -27,6 +29,7 @@ export function LocalStorePreflight({state,controller,compact=false,onCredential
  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+ if(op?.context.query===IOS_VERSIONS_QUERY)return <IOSStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(compact&&!retained)return null;
  return <section className="card" aria-label={`Local ${store} access check`}>
   <div className="inline-heading"><h2>{store} access · This Mac</h2>{compact&&<button onClick={onShow}>Show check</button>}</div>
@@ -42,6 +45,7 @@ export function LocalStorePreflight({state,controller,compact=false,onCredential
    <button disabled={!!reason||state.pending} onClick={()=>void controller.prepare()}>Review access check</button>{reason&&<p className="save-note">{reason}</p>}
    {apple&&<AppleProvisioning state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
    {apple&&<AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   {apple&&<IOSStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
   </>}
   {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}

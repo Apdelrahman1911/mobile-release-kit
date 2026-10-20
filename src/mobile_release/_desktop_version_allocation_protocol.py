@@ -102,7 +102,7 @@ class Go:
     token: str
     request: allocation.AllocationRequest
     snapshot: state.NativeStateSnapshot
-    observations: tuple[policy.StoreObservation, ...]
+    observations: allocation.StoreObservations
 
 
 def bound_request(initial: Initial, request: allocation.AllocationRequest) -> None:
@@ -139,7 +139,9 @@ def parse_go(raw: bytes, initial: Initial) -> Go:
         require(selected.pending.reservation.request == request)
     require(type(go["observations"]) is list and len(go["observations"]) <= 2
             and len(policy.canonical(go["observations"])) <= OBSERVATIONS_LIMIT)
-    observations = tuple(policy.StoreObservation.parse(item) for item in go["observations"])
+    observations = allocation.parse_observations(request, go["observations"])
+    require(request.version_policy.schema_version == 1 or len(observations) == 1
+            or (initial.kind == "reconcile" and not observations))
     return Go(token, request, snapshot, observations)
 
 

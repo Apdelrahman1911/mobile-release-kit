@@ -26,7 +26,8 @@ module MobileReleaseKit
 
     def self.supported_input?(input)
       input.instance_of?(Input) ||
-        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input))
+        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input)) ||
+        (defined?(AppleStoreVersions::Input) && input.instance_of?(AppleStoreVersions::Input))
     end
 
     class Input
@@ -117,7 +118,11 @@ module MobileReleaseKit
         AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
         @input, @token, @client, @thread = input, token, client, Thread.current
         @request = AppleProvisioning::Request.new(input.request)
-        AppleBundleRead.require!(@request.kind == (input.instance_of?(Input) ? "list_bundle_ids" : "list_profiles"))
+        kind = if input.instance_of?(Input) then "list_bundle_ids"
+               elsif defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input) then "list_profiles"
+               else "current_app_before"
+               end
+        AppleBundleRead.require!(@request.kind == kind)
         @connection, @builder = client.client, client.client.builder
         @admitted = @sent = @captured = @finished = false
         @raw = @status = nil

@@ -322,11 +322,18 @@ def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str) -> tuple[allo
     journal.admit_request(initial.authority, go.request)
     candidate = journal.selected_candidate(initial.authority)
     if initial.kind == "reserve" and candidate.reservation is None:
-        # No unknown/partial/all-trains assumption may even construct the live
-        # factory for a new reservation. Reconciliation returns DATA only.
+        # No unknown/partial inventory may even construct the live factory for
+        # a new reservation. v2 is explicitly current-visible, never silently
+        # promoted to v1's all-history scope. Reconciliation returns DATA only.
         try:
-            policy.store_constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
-                                     go.request.version_policy, now=math.floor(time.time()))
+            if go.request.version_policy.schema_version == 2:
+                from .ios_store_versions import constraints
+                constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
+                            go.request.store_context_revision, go.request.version_policy,
+                            now=math.floor(time.time()))
+            else:
+                policy.store_constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
+                                         go.request.version_policy, now=math.floor(time.time()))
         except policy.VersionPolicyError as error:
             return allocation.AllocationOutcome("rejected", error.reason, control=_control()), port
     original = _make_allocation_transport(go.token, started=dialogue.started, runtime_dir=runtime_dir,

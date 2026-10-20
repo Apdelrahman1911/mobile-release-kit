@@ -5,6 +5,9 @@ use crate::local_store_preflight_protocol as wire;
 use sha2::{Digest, Sha256};
 #[path="asset_session_apple_provisioning_material.rs"]
 mod apple_provisioning;
+#[path="asset_session_store_versions.rs"]
+mod store_versions;
+pub(crate) use store_versions::StoreVersionMaterial;
 
 pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
 pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
@@ -337,7 +340,7 @@ mod tests {
         }
     }
 
-    fn apple_model()->DocumentState {
+    pub(super) fn apple_model()->DocumentState {
         let mut state=model();
         Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform=Platform::Ios;
         // Minimal canonical PKCS8 envelope with inert private octets, NOT a

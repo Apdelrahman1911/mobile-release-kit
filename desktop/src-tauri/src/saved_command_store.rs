@@ -13,6 +13,7 @@ impl SavedCommandOwner {
     pub(crate) fn prepare_store(&self,input:store_wire::Prepare,registration:u32,project:RegisteredRoot,
         gate:store_wire::Availability,material:Arc<SelectedStoreMaterial>)->Result<store_wire::Status,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalStorePreflight)?;
+        self.inner.lock().store_versions.invalidate();
         self.prepare_bound(Context::LocalStorePreflight(input.context()),registration,project,Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)),None)?.store()
     }
     pub(crate) fn prepared_store_material(&self,operation:&str,generation:&str)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
@@ -27,8 +28,15 @@ impl SavedCommandOwner {
         // Parsed consent is not permission: match the same prepared private loan
         // before the existing owner may publish GO or private material.
         if !material.accepts_access_consent(&input){return Err(self.inner.domain.invalid_owner());}
+        let witness=material.version_inventory_witness()?;
+        let id=input.operation_id.clone(); let generation=input.owner_generation.clone();
         let admitted=self.start_bound(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)))?;
+        if let Some(witness)=witness {
+            let mut r=self.inner.lock();
+            let owner=r.active.as_ref().filter(|a|a.owner.id==id && a.owner.generation==generation).map(|a|a.owner.clone()).ok_or_else(store_wire::invalid)?;
+            if !r.store_versions.arm(&owner,witness) {self.inner.stop_locked(&mut r,&owner,Reason::ContextChanged,Instant::now());return Err(store_wire::invalid());}
+        }
         Ok(crate::local_store_preflight_owner::Admitted::new(admitted.status.store()?,admitted.release))
     }
     pub(crate) fn status_store(&self,gate:store_wire::Availability)->Result<store_wire::Status,BridgeError>{

@@ -29,6 +29,8 @@ pub(crate) mod dialogue;
 pub(crate) mod jobs;
 #[path = "version_enrollment_state_native.rs"]
 pub(crate) mod enrollment;
+#[path="version_allocation_ios_inventory.rs"]
+pub(crate) mod ios_inventory;
 
 const PROTOCOL: &str = "mrk-version-allocation-state/1";
 const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
@@ -116,20 +118,32 @@ struct Request(Value);
 impl Request {
     fn project(&self) -> &str { self.0["projectId"].as_str().unwrap_or("") }
     fn candidate(&self) -> &str { self.0["candidateId"].as_str().unwrap_or("") }
+    fn schema_version(&self) -> u32 { if self.0["policy"]["schemaVersion"] == 2 { 2 } else { 1 } }
+    fn request_hash(&self) -> Result<String> { hash(if self.schema_version() == 2 { ios_inventory::REQUEST_DOMAIN } else { b"mrk:allocation-request:1\0" }, self) }
+    fn reservation_domain(&self) -> &'static [u8] { if self.schema_version() == 2 { ios_inventory::RESERVATION_DOMAIN } else { b"mrk:allocation-reservation:1\0" } }
+    fn observations_valid(&self, values: &[Value]) -> bool {
+        if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
+        else { values.len() <= 2 && values.iter().all(observation_shape) }
+    }
     fn valid(&self) -> bool {
         let v = &self.0;
         let source = &v["source"]; let policy = &v["policy"];
+        let newer = policy["schemaVersion"].as_u64() == Some(2);
         let rules = policy["rules"].as_array();
         let mut refs = BTreeSet::new();
-        closed(v, &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy"])
+        closed(v, if newer { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"] }
+            else { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy"] })
             && shared_id(self.project()) && uuid(self.candidate()) && string(&v["identityRevision"], |s| hex(s, 64))
             && closed(source, &["commit", "tree", "ref", "configurationSha256", "versionSha256"])
             && ["commit", "tree"].into_iter().all(|k| string(&source[k], |s| hex(s, 40)))
             && ["configurationSha256", "versionSha256"].into_iter().all(|k| string(&source[k], |s| hex(s, 64)))
             && string(&source["ref"], full_ref) && version_shape(&v["baseVersion"])
             && [json!(["android"]), json!(["ios"]), json!(["android", "ios"])].contains(&v["platforms"])
-            && closed(policy, &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"])
-            && policy["schemaVersion"].as_u64() == Some(1) && policy["mode"] == "automatic"
+            && closed(policy, if newer { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds", "storeScope"] }
+                else { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"] })
+            && (if newer { v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE
+                && string(&v["storeContextRevision"], |s| hex(s, 64)) } else { policy["schemaVersion"].as_u64() == Some(1) })
+            && policy["mode"] == "automatic"
             && integer(&policy["buildCeiling"], 1, 2_100_000_000) && integer(&policy["storeMaxAgeSeconds"], 1, 3600)
             && rules.is_some_and(|rules| !rules.is_empty() && rules.len() <= 32 && rules.iter().all(|r|
                 closed(r, &["ref", "increment"]) && string(&r["ref"], |s| full_ref(s) && refs.insert(s.to_owned()))
@@ -161,11 +175,11 @@ impl Reservation {
     fn valid(&self) -> Result<()> {
         need((1..=64).contains(&self.sequence) && hex(&self.previous_sha256, 64) && self.request.valid()
             && version_shape(&self.version) && self.store_observations.len() <= 2
-            && self.store_observations.iter().all(observation_shape) && self.allocated_at <= i64::MAX as u64)?;
-        need(self.request_sha256 == hash(b"mrk:allocation-request:1\0", &self.request)?)?;
+            && self.request.observations_valid(&self.store_observations) && self.allocated_at <= i64::MAX as u64)?;
+        need(self.request_sha256 == self.request.request_hash()?)?;
         let mut value = serde_json::to_value(self).map_err(|_| StateError::from(Error::InvalidRequest))?;
         value.as_object_mut().ok_or_else(|| StateError::from(Error::InvalidRequest))?.remove("sha256");
-        need(self.sha256 == hash(b"mrk:allocation-reservation:1\0", &value)?)
+        need(self.sha256 == hash(self.request.reservation_domain(), &value)?)
     }
     fn at_or_before(&self, checkpoint: &Checkpoint) -> bool {
         self.sequence <= checkpoint.sequence && (self.sequence != checkpoint.sequence || self.sha256 == checkpoint.head_sha256)
@@ -179,7 +193,9 @@ struct Pending {
 }
 impl Pending {
     fn valid(&self) -> Result<()> {
-        need(self.schema_version == 1 && self.protocol == ALLOCATION_PROTOCOL && self.authority.valid()
+        need(self.schema_version == self.reservation.request.schema_version()
+            && self.protocol == if self.schema_version == 2 { ios_inventory::PROTOCOL } else { ALLOCATION_PROTOCOL }
+            && self.authority.valid()
             && self.checkpoint.valid() && hex(&self.expected_blob, 40)
             && self.reservation.request.project() == self.authority.project_id
             && self.reservation.sequence == self.checkpoint.sequence + 1
@@ -418,7 +434,9 @@ impl VersionAllocationStatePort {
     /// refresh/retry uses selected_request instead. OS randomness is consumed
     /// once, then the FULL request is retained through the actual durable CAS.
     pub(crate) fn select_new(&mut self, mut template: Value, previous_request: Option<&Value>) -> Result<WriteAck> {
-        need(closed(&template, &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"]))?;
+        need(closed(&template, if template["policy"]["schemaVersion"] == 2 {
+            &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"]
+        } else { &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"] }))?;
         template["candidateId"] = json!("00000000-0000-4000-8000-000000000000");
         let mut request: Request = decode(template)?;
         need(request.valid() && request.project() == self.authority.project_id && self.enrolled()?.pending.is_none())?;
@@ -510,7 +528,7 @@ mod tests {
             "genesisSha256":"a".repeat(64),"protectedBranch":true})
     }
     fn checkpoint() -> Value { json!({"sequence":0,"headSha256":"a".repeat(64),"commit":"c".repeat(40)}) }
-    fn request() -> Value {
+    pub(super) fn request() -> Value {
         json!({"projectId":"11111111-1111-4111-8111-111111111111",
             "candidateId":"22222222-2222-4222-8222-222222222222","identityRevision":"b".repeat(64),
             "source":{"commit":"d".repeat(40),"tree":"e".repeat(40),"ref":"refs/heads/main",
@@ -525,13 +543,13 @@ mod tests {
     fn project(local: &str) -> ProjectBinding {
         ProjectBinding { project_id: Id::parse(local).unwrap(), canonical_root: "/synthetic/project".to_owned(), device: 1, inode: 2 }
     }
-    fn prepared(fixture: &Fixture) -> (Arc<PrivateStateDirectory>, VersionAllocationStatePort) {
+    pub(super) fn prepared(fixture: &Fixture) -> (Arc<PrivateStateDirectory>, VersionAllocationStatePort) {
         let store = Arc::new(PrivateStateDirectory::open(&fixture.app).unwrap());
         let mut port = VersionAllocationStatePort::new(store.clone(), project(&"a".repeat(32)), authority()).unwrap();
         port.load().unwrap(); port.enroll(checkpoint()).unwrap(); port.select_new(template(), None).unwrap();
         (store, port)
     }
-    fn pending(request: &Value) -> Value {
+    pub(super) fn pending(request: &Value) -> Value {
         let mut reservation = json!({"sequence":1,"previousSha256":"a".repeat(64),"request":request,
             "requestSha256":hash(b"mrk:allocation-request:1\0", request).unwrap(),
             "version":{"name":"1.2.3","build":41},"storeObservations":[{
@@ -542,7 +560,7 @@ mod tests {
         json!({"schemaVersion":1,"protocol":ALLOCATION_PROTOCOL,"authority":authority(),
             "checkpoint":checkpoint(),"expectedBlob":"d".repeat(40),"reservation":reservation})
     }
-    fn advanced(pending: &Value) -> Value {
+    pub(super) fn advanced(pending: &Value) -> Value {
         json!({"sequence":1,"headSha256":pending["reservation"]["sha256"],"commit":"e".repeat(40)})
     }
     fn persisted(value: &Value) -> Vec<u8> {

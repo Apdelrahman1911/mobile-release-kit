@@ -9,6 +9,8 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 mod bundle_read;
 #[path = "apple_provisioning_profile_read.rs"]
 mod profile_read;
+#[path = "ios_store_versions.rs"]
+pub(crate) mod store_versions;
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
 pub(crate) const CONSENT: &str = "local-android-store-access-v1";
@@ -105,14 +107,14 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
         && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
             && value.get("platform").and_then(Value::as_str)==Some("ios")
-            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"))) { return Err(invalid()); }
+            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"|"ios-current-versions"))) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT) { return Err(invalid()); } Ok(input)
 }
 impl Start {
     pub(crate) fn matches_context(&self, context:&Context)->bool {
@@ -192,7 +194,8 @@ pub(crate) struct Finding { check: CheckId, status: CoreStatus }
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Limitation { NonPublishing, NoProjectCommands, NoBuildOrSigning, NoReleaseReadiness,
     PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges,
-    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory }
+    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory,
+    CurrentVisibleOnly, NotAtomicStoreSnapshot, HistoricalUniquenessNotEstablished, ExternalUploadersNotCoordinated }
 const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoProjectCommands,
     Limitation::NoBuildOrSigning, Limitation::NoReleaseReadiness, Limitation::PointInTimeAccountAccess,
     Limitation::SavedInputsNotAtomic];
@@ -203,14 +206,17 @@ pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec
     observation: Option<bundle_read::Observation>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "profile_read::optional_summary")]
     profile_reuse: Option<profile_read::Summary>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "store_versions::optional_summary")]
+    current_versions: Option<store_versions::Summary>,
 }
 impl ResultData {
     fn valid(&self, context:&Context) -> bool {
         if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && match query {
             bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
             bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
+            bundle_read::Query::IOSCurrentVersions => store_versions::valid_result(self),
         }; }
-        self.observation.is_none() && self.profile_reuse.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
+        self.observation.is_none() && self.profile_reuse.is_none() && self.current_versions.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
     }
 }

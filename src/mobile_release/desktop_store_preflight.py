@@ -32,6 +32,7 @@ from .reporting import Finding, Status, FAILING_STATUSES
 from .stores import _fastlane_probe_commands, online_preflight_findings
 from . import apple_provisioning_bundle_read as bundle_read
 from . import apple_provisioning_profile_read as profile_read
+from . import ios_store_versions as store_versions
 
 
 class _Refused(Exception):
@@ -257,7 +258,9 @@ class StorePreflightRun:
         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
         query = self._pending == self._lane_index and bundle_read.selected_read(self.request.context)
         maximum = 60 if self._pending < self._lane_index or query else 900
-        return min(timeout, maximum), min(output_limit, bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
+        limit = (store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
+                 else bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
+        return min(timeout, maximum), min(output_limit, limit)
 
     def require_query_timing(self, timeout):
         self.checkpoint()
@@ -293,18 +296,24 @@ class StorePreflightRun:
                             findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
                             if bundle_read.selected_read(self.request.context):
                                 profiles = profile_read.selected_query(self.request.context)
-                                observation = profile_read.unavailable("not-checked") if profiles else "not-checked"
-                                if not bundle_read.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                versions = store_versions.selected_query(self.request.context)
+                                observation = (store_versions.unavailable("not-checked") if versions else
+                                               profile_read.unavailable("not-checked") if profiles else "not-checked")
+                                prerequisites = store_versions.query_prerequisites(config) if versions else bundle_read.query_prerequisites(config)
+                                if not prerequisites or any(row.status in FAILING_STATUSES for row in findings):
                                     findings.append(Finding("store.online.gate", Status.BLOCKED,
-                                        "Configure the saved iOS Bundle ID and selected API key.", category="store-access"))
+                                        "Configure the saved iOS app identity and selected API key.", category="store-access"))
                                 else:
-                                    if profiles:
+                                    if versions:
+                                        extra, observation = store_versions.read_saved_versions(self, config, material)
+                                    elif profiles:
                                         extra, observation = profile_read.read_saved_profiles(self, config, material)
                                     else:
                                         extra, observation = bundle_read.read_saved_bundle_id(self, config, material)
                                     findings.extend(extra)
                                 self._source_post(); self._received_post()
-                                self.report = (profile_read.project_result(findings, observation) if profiles else
+                                self.report = (store_versions.project_result(findings, observation) if versions else
+                                               profile_read.project_result(findings, observation) if profiles else
                                                bundle_read.project_result(findings, observation))
                             else:
                                 blockers = _online_query_blockers(config, (platform,), findings)

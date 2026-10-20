@@ -117,7 +117,7 @@ impl Summary {
 pub(super) fn valid_result(value: &ResultData) -> bool {
     value.schema_version == 1
         && value.scope == SCOPE
-        && value.observation.is_none()
+        && value.observation.is_none() && value.current_versions.is_none()
         && value.profile_reuse.as_ref().is_some_and(Summary::valid)
         && value.limitations.as_slice() == LIMITATIONS
         && value.findings.len() <= 16

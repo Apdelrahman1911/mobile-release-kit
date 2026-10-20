@@ -13,6 +13,8 @@ pub(crate) enum Query {
     BundleIdRegistration,
     #[serde(rename = "app-store-profile-reuse")]
     AppStoreProfileReuse,
+    #[serde(rename = "ios-current-versions")]
+    IOSCurrentVersions,
 }
 
 impl Query {
@@ -20,6 +22,7 @@ impl Query {
         match self {
             Self::BundleIdRegistration => CONSENT,
             Self::AppStoreProfileReuse => super::profile_read::CONSENT,
+            Self::IOSCurrentVersions => super::store_versions::CONSENT,
         }
     }
 }
@@ -64,7 +67,7 @@ pub(super) fn valid_result(value: &super::ResultData) -> bool {
     value.schema_version == 1
         && value.scope == SCOPE
         && value.observation.is_some()
-        && value.profile_reuse.is_none()
+        && value.profile_reuse.is_none() && value.current_versions.is_none()
         && value.limitations.as_slice() == LIMITATIONS
         && value.findings.len() <= 16
         && value
