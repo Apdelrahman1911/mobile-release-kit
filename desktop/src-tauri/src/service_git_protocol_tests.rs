@@ -59,10 +59,24 @@ fn capacity_and_escaped_reply_bounds_apply_before_output_allocation() {
     let value = Selection::new(Action::Stage, "a".repeat(64), paths).unwrap();
     assert_eq!(value.paths.capacity(), 1);
     assert_eq!(value.paths[0].capacity(), 1);
-    let heavy = (0..PATH_LIMIT)
-        .map(|i| format!("p{i:02}/{0}/{0}/{0}/{0}", "\"".repeat(250)))
-        .collect();
-    assert!(Selection::new(Action::Stage, "a".repeat(64), heavy).is_err());
+    let quoted = |count| {
+        (0..PATH_LIMIT)
+            .map(|i| format!("p{i:02}/{0}/{0}/{0}/{0}", "\"".repeat(count)))
+            .collect::<Vec<_>>()
+    };
+    let near = Selection::new(Action::Stage, "a".repeat(64), quoted(250)).unwrap();
+    let near_bytes = serde_json::to_vec(&near).unwrap();
+    assert_eq!(near_bytes.len(), 128_868);
+    assert!(near_bytes.len() <= SCOPE_BYTES - 2048);
+    encoded_bound(&near, near_bytes.len()).unwrap();
+    assert!(encoded_bound(&near, near_bytes.len() - 1).is_err());
+    let mut oversized = near.clone();
+    oversized.paths = quoted(251);
+    assert!(oversized.paths.iter().all(|path| relative(path)));
+    let oversized_bytes = serde_json::to_vec(&oversized).unwrap();
+    assert_eq!(oversized_bytes.len(), 129_380);
+    assert!(oversized_bytes.len() > SCOPE_BYTES - 2048);
+    assert!(Selection::new(Action::Stage, "a".repeat(64), oversized.paths).is_err());
     let scope = Scope {
         service_instance: id('b'),
         project_id: id('a'),
@@ -72,7 +86,7 @@ fn capacity_and_escaped_reply_bounds_apply_before_output_allocation() {
             consumed: false,
             project_id: Some(id('a')),
             grant_id: Some(id('d')),
-            selection: Some(value),
+            selection: Some(near),
         },
     };
     let response = crate::service_protocol::Response {

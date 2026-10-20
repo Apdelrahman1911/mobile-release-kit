@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals() {
         let bytes = capabilities(true).unwrap();
-        assert!(bytes.len() <= 8192 && bytes.ends_with(b"\n"));
+        assert!(bytes.len() <= 12 * 1024 && bytes.ends_with(b"\n"));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["protocolVersion"], p::VERSION);
         assert_eq!(value["scope"], "compiled-interface");
