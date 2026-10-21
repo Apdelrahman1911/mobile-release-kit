@@ -23,6 +23,8 @@ pub(crate) enum Kind {
     RepositoryCreate,
     DraftPrCreate,
     FailedJobsRetry,
+    SetupPublish,
+    SetupReconcile,
 }
 impl Kind {
     pub(crate) fn prefix(self) -> &'static str {
@@ -30,6 +32,7 @@ impl Kind {
             Self::RepositoryCreate => "repository-create-",
             Self::DraftPrCreate => "github-pull-request-",
             Self::FailedJobsRetry => "github-actions-retry-",
+            Self::SetupPublish | Self::SetupReconcile => "github-publication-",
         }
     }
     pub(crate) fn consent(self) -> &'static str {
@@ -37,6 +40,8 @@ impl Kind {
             Self::RepositoryCreate => "agent-repository-create-once-v1",
             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
             Self::FailedJobsRetry => "agent-failed-jobs-retry-once-v1",
+            Self::SetupPublish => "agent-setup-publish-once-v1",
+            Self::SetupReconcile => "agent-setup-reconcile-once-v1",
         }
     }
     pub(crate) fn action(self) -> crate::service_protocol::Action {
@@ -44,7 +49,15 @@ impl Kind {
             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
             Self::FailedJobsRetry => crate::service_protocol::Action::GitHubFailedJobsRetry,
+            Self::SetupPublish => crate::service_protocol::Action::GitHubSetupPublish,
+            Self::SetupReconcile => crate::service_protocol::Action::GitHubSetupReconcile,
         }
+    }
+    pub(crate) fn initial_effect(self) -> Effect {
+        if self == Self::SetupReconcile { Effect::None } else { Effect::NotSent }
+    }
+    pub(crate) fn go_effect(self) -> Effect {
+        if self == Self::SetupReconcile { Effect::None } else { Effect::PotentiallyApplied }
     }
     pub(crate) fn operation(self, s: &str) -> bool {
         s.strip_prefix(self.prefix()).is_some_and(|n| {
@@ -56,26 +69,130 @@ impl Kind {
         })
     }
 }
+// Separate typed payloads: the original three and setup Publish still encode
+// their exact five fields. A GET-only original row has a marker/hash, NEVER a
+// synthetic consentId. Newtype structs enforce duplicate/extra-field rejection;
+// no optional-null placeholders, flatten or generic Value authority is used.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Review {
-    pub(crate) kind: Kind,
+pub(crate) struct PreparedReference {
     pub(crate) session_id: String,
     pub(crate) consent_id: String,
     pub(crate) expected_revision: u32,
     pub(crate) prepared_sha256: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingReference {
+    pub(crate) session_id: String,
+    pub(crate) expected_revision: u32,
+    pub(crate) marker: String,
+    pub(crate) record_sha256: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum Review {
+    RepositoryCreate(PreparedReference),
+    DraftPrCreate(PreparedReference),
+    FailedJobsRetry(PreparedReference),
+    SetupPublish(PreparedReference),
+    SetupReconcile(PendingReference),
+}
+fn original(session: &str, revision: u32) -> bool {
+    !session.is_empty() && session.len() <= 64
+        && session.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+        && (1..u32::MAX).contains(&revision)
+}
 impl Review {
+    pub(crate) fn from_prepared(kind: Kind, value: PreparedReference) -> Option<Self> {
+        Some(match kind {
+            Kind::RepositoryCreate => Self::RepositoryCreate(value),
+            Kind::DraftPrCreate => Self::DraftPrCreate(value),
+            Kind::FailedJobsRetry => Self::FailedJobsRetry(value),
+            Kind::SetupPublish => Self::SetupPublish(value),
+            Kind::SetupReconcile => return None,
+        })
+    }
+    pub(crate) fn kind(&self) -> Kind {
+        match self {
+            Self::RepositoryCreate(_) => Kind::RepositoryCreate,
+            Self::DraftPrCreate(_) => Kind::DraftPrCreate,
+            Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
+            Self::SetupPublish(_) => Kind::SetupPublish,
+            Self::SetupReconcile(_) => Kind::SetupReconcile,
+        }
+    }
+    pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
+        match self {
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::SetupReconcile(_) => None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
+        match self {
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::SetupReconcile(_) => None,
+        }
+    }
     pub(crate) fn valid(&self) -> bool {
-        !self.session_id.is_empty()
-            && self.session_id.len() <= 64
-            && self
-                .session_id
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-            && hex(&self.consent_id, 32)
-            && (1..u32::MAX).contains(&self.expected_revision)
-            && hex(&self.prepared_sha256, 64)
+        match self {
+            Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
+            _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
+        }
+    }
+    pub(crate) fn retained_fits(&self) -> bool {
+        // Same exact three string-allocation bounds as the original profile.
+        match self {
+            Self::SetupReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
+            _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PreparedSelection {
+    pub(crate) session_id: String,
+    pub(crate) consent_id: String,
+    pub(crate) expected_revision: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingSelection {
+    pub(crate) session_id: String,
+    pub(crate) expected_revision: u32,
+    pub(crate) marker: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum Selection {
+    RepositoryCreate(PreparedSelection),
+    DraftPrCreate(PreparedSelection),
+    FailedJobsRetry(PreparedSelection),
+    SetupPublish(PreparedSelection),
+    SetupReconcile(PendingSelection),
+}
+impl Selection {
+    pub(crate) fn kind(&self) -> Kind {
+        match self {
+            Self::RepositoryCreate(_) => Kind::RepositoryCreate,
+            Self::DraftPrCreate(_) => Kind::DraftPrCreate,
+            Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
+            Self::SetupPublish(_) => Kind::SetupPublish,
+            Self::SetupReconcile(_) => Kind::SetupReconcile,
+        }
+    }
+    pub(crate) fn prepared(&self) -> Option<&PreparedSelection> {
+        match self {
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::SetupReconcile(_) => None,
+        }
+    }
+    pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32),
+            _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32)),
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +226,7 @@ pub(crate) enum Reason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Effect {
+    None,
     NotSent,
     PotentiallyApplied,
     AcknowledgedUnconfirmed,
@@ -118,12 +236,18 @@ pub(crate) enum Effect {
     AcceptedUnconfirmed,
     Accepted,
     AdvancedUnattributed,
+    BranchObserved,
+    DraftPrObserved,
 }
 impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
         match self {
-            Self::NotSent | Self::PotentiallyApplied | Self::Unresolved => true,
-            Self::CreatedObserved | Self::FoundUnattributed => k != Kind::FailedJobsRetry,
+            Self::None => k == Kind::SetupReconcile,
+            Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
+            Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
+            Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate),
+            Self::BranchObserved => k == Kind::SetupReconcile,
+            Self::DraftPrObserved => matches!(k, Kind::SetupPublish | Kind::SetupReconcile),
             Self::AcknowledgedUnconfirmed => k == Kind::DraftPrCreate,
             Self::AcceptedUnconfirmed | Self::Accepted | Self::AdvancedUnattributed => {
                 k == Kind::FailedJobsRetry
@@ -169,21 +293,21 @@ impl Status {
         if !self.review.valid()
             || !(1..u32::MAX).contains(&self.revision)
             || !self.do_not_replay
-            || !self.effect.valid_for(self.review.kind)
+            || !self.effect.valid_for(self.review.kind())
             || self
                 .operation_id
                 .as_ref()
-                .is_some_and(|s| !self.review.kind.operation(s))
+                .is_some_and(|s| !self.review.kind().operation(s))
             || terminal != (self.settlement == Settlement::Settled)
             || (self.state == State::Unknown) != (self.settlement == Settlement::Unknown)
             || self.never_admitted
                 && (self.operation_id.is_some()
-                    || self.effect != Effect::NotSent
+                    || self.effect != self.review.kind().initial_effect()
                     || !matches!(
                         self.state,
                         State::Finishing | State::Refused | State::Cancelled
                     ))
-            || self.effect != Effect::NotSent && self.operation_id.is_none()
+            || self.effect != self.review.kind().initial_effect() && self.operation_id.is_none()
             || self.state == State::Complete
                 && (self.reason != Reason::None
                     || self.operation_id.is_none()

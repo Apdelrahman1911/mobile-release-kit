@@ -9,6 +9,9 @@ use crate::{
 use serde_json::Value;
 use std::sync::Arc;
 
+#[path = "github_publication_delegation.rs"]
+mod delegation;
+
 pub(crate) fn refused(reason: p::Reason) -> BridgeError {
     let text = serde_json::to_value(reason)
         .ok()
@@ -44,8 +47,11 @@ struct Active {
     stamp: SavedEditStamp,
     consent_id: String,
     consent_end: Option<Instant>,
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
 }
 struct Consent {
+    identity: Arc<()>,
+    agent: Option<std::sync::Weak<crate::service_github_action_requests::NativeScope>>,
     id: String,
     prepared: p::Review,
     counter_proof: Option<Arc<crate::asset_session::CounterStateProof>>,
@@ -60,6 +66,7 @@ pub(super) struct State {
     view: p::Status,
     active: Option<Active>,
     consent: Option<Consent>,
+    pending_read: Option<delegation::PendingRead>,
     pub(super) exhausted: bool,
 }
 impl State {
@@ -79,6 +86,7 @@ impl State {
             },
             active: None,
             consent: None,
+            pending_read: None,
             exhausted: false,
         }
     }
@@ -100,6 +108,9 @@ impl State {
         }
     }
     pub(super) fn revoke_consent(&mut self) {
+        action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
+        action_delegation::revoke(&self.pending_read.as_ref().and_then(|r| r.agent.clone()));
+        self.pending_read = None;
         self.consent = None;
         self.view.consent = None;
     }
@@ -128,6 +139,7 @@ impl State {
         self.observe_go();
     }
     pub(super) fn unknown(&mut self) {
+        if let Some(a) = &self.active { action_delegation::unknown(&a.agent); }
         self.stop();
         self.view.available = false;
         self.view.reason = p::Reason::CleanupUnknown;
@@ -168,9 +180,13 @@ impl State {
             return None;
         }
         let mut n = self.view.heap()?;
+        if let Some(read) = &self.pending_read {
+            n = n.checked_add(read.heap()?)?.checked_add(delegation::WORKING_BYTES)?;
+        }
         if let Some(v) = &self.consent {
             n = n
                 .checked_add(v.id.capacity())?
+                .checked_add(2 * std::mem::size_of::<usize>())?
                 .checked_add(v.prepared.heap()?)?
                 .checked_add(v.session_id.capacity())?
                 .checked_add(v.project_id.capacity())?
@@ -195,6 +211,10 @@ impl ConnectionState {
             .is_some_and(|v| now >= v.end)
         {
             self.publication.revoke_consent();
+        }
+        if self.publication.pending_read.as_ref().is_some_and(|v| now >= v.end) {
+            action_delegation::revoke(&self.publication.pending_read.as_ref().and_then(|r| r.agent.clone()));
+            self.publication.pending_read = None;
         }
         self.publication.observe_go();
         let reason = if self.unknown || self.exhausted || self.publication.exhausted {
@@ -251,6 +271,7 @@ impl ConnectionState {
                     .as_ref()
                     .map(|v| v.project_id.as_str())
             })
+            .or_else(|| self.publication.pending_read.as_ref().map(|v| v.project_id.as_str()))
     }
     pub(crate) fn publication_counter_inputs(
         &self,
@@ -275,6 +296,8 @@ impl ConnectionState {
             v.generation == generation && &v.root == root && edit.matches(&v.stamp)
         } else if let Some(v) = &self.publication.consent {
             v.generation == generation && &v.root == root && edit.matches(&v.stamp)
+        } else if let Some(v) = &self.publication.pending_read {
+            v.source(generation, root, edit)
         } else {
             true
         }
@@ -395,7 +418,8 @@ impl ConnectionState {
         );
         let end = (now + Duration::from_secs(60))
             .min(private.clock.end)
-            .min(consent_end.unwrap_or(private.clock.end));
+            .min(consent_end.unwrap_or(private.clock.end))
+            .min(gate.agent().map_or(private.clock.end, |e| e.scope().expires));
         if end <= now {
             return Err(refused(p::Reason::ConsentExpired));
         }
@@ -409,15 +433,18 @@ impl ConnectionState {
                     session_id.capacity()
                         + project_id.capacity()
                         + root.path.capacity()
-                        + consent_id.capacity(),
+                        + consent_id.capacity() + 2 * std::mem::size_of::<usize>(),
                 )
             })
             .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + p::GO_LIMIT + 65536))
+            .and_then(|n| n.checked_add(if request.kind == p::Kind::Pending { delegation::WORKING_BYTES } else { 0 }))
             .and_then(|n| n.checked_add(gate.counter_quote()?));
         if !retained.is_some_and(|n| n <= p::RETAINED_LIMIT) {
             return Err(refused(p::Reason::ResourcesUnavailable));
         }
         let before = self.publication.view.clone();
+        let agent = gate.agent().cloned();
+        gate.agent_entering()?;
         let ticket = supervisor
             .start_github_publication(request.clone(), gate, end)
             .map_err(|v| refused(error_reason(&v)))?;
@@ -459,6 +486,7 @@ impl ConnectionState {
             stamp,
             consent_id,
             consent_end,
+            agent,
         });
         self.publication.view.session_id = Some(session_id);
         self.publication.view.available = false;
@@ -593,6 +621,9 @@ impl ConnectionState {
             now,
         )?;
         let target = gate.select_target(target)?;
+        if !action_delegation::origin(&self.publication.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent()) {
+            return Err(refused(p::Reason::ConsentExpired));
+        }
         if !args.confirm
             || !self.publication.consent.as_ref().is_some_and(|v| {
                 v.id == args.consent_id
@@ -664,6 +695,12 @@ impl ConnectionState {
         // cannot mint a new write using the current build's different caller.
         if !p::Selection::from(current).same_scope(&target) {
             return Err(refused(p::Reason::TargetChanged));
+        }
+        if !action_delegation::origin(&self.publication.pending_read.as_ref().and_then(|r| r.agent.clone()), gate.agent()) {
+            return Err(refused(p::Reason::ConsentExpired));
+        }
+        if gate.agent().is_some() {
+            self.publication.pending_read.take().ok_or_else(|| refused(p::Reason::ConsentExpired))?;
         }
         self.publication_start(
             p::Request {
@@ -853,6 +890,8 @@ impl ConnectionState {
             self.unknown_inner();
             return;
         };
+        let agent = active.agent.clone();
+        let agent_id = active.ticket.operation_id().to_owned();
         let mut effect = if active.request.kind == p::Kind::Publish {
             if active.ticket.go_claimed() {
                 p::Effect::PotentiallyApplied
@@ -872,7 +911,7 @@ impl ConnectionState {
                 .and_then(|n| n.checked_add(reply.heap()?))
                 .and_then(|n| n.checked_add(active.ticket.retained_heap()?))
                 .and_then(|n| n.checked_add(active.request.heap()?))
-                .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + 65536))
+                .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + 65536 + delegation::WORKING_BYTES))
                 .is_some_and(|n| n <= p::RETAINED_LIMIT)
         });
         if !fits {
@@ -891,6 +930,7 @@ impl ConnectionState {
             self.retire_inner(Reason::Expired, false);
         }
         if was_unknown || self.unknown || reason == p::Reason::CleanupUnknown {
+            action_delegation::unknown(&agent);
             self.unknown_inner();
             if let Some(op) = &mut self.publication.view.operation {
                 op.phase = p::Phase::CleanupUnknown;
@@ -922,9 +962,19 @@ impl ConnectionState {
                     }
                 }
                 if let Some(pending) = reply.result.pending {
+                    // Only THIS accepted original Pending load transfers its
+                    // private root/edit stamp. Status DATA cannot create one.
+                    let end = self.private.as_ref()
+                        .filter(|v| v.id == active.session_id && v.retirement.is_none())
+                        .map(|v| v.clock.end);
+                    match end.ok_or_else(|| refused(p::Reason::ConsentExpired)).and_then(|end| delegation::PendingRead::returned(
+                        active, &pending, settled_at, end, now,
+                    )) {
+                        Ok(read) => self.publication.pending_read = Some(read),
+                        Err(error) => reason = error_reason(&error),
+                    }
                     self.publication.view.pending = pending;
-                }
-                if let Some(prepared) = reply.result.prepared {
+                } else if let Some(prepared) = reply.result.prepared {
                     let counter_proof = active.ticket.counter_proof();
                     let ready = (|| {
                         match (prepared.counter(), &counter_proof) {
@@ -955,6 +1005,7 @@ impl ConnectionState {
                             prepared: prepared.clone(),
                         });
                         self.publication.consent = Some(Consent {
+                            identity: Arc::new(()), agent: None,
                             id: active.consent_id,
                             prepared,
                             counter_proof,
@@ -1012,6 +1063,13 @@ impl ConnectionState {
         {
             self.complete_retirement();
         }
+        // Only the accepted original after control/source and real receipt
+        // retirement reaches the shared row; not a raw Supervisor phase/event.
+        if let Some(op) = &self.publication.view.operation {
+            if op.id == agent_id && op.phase == p::Phase::Settled {
+                action_delegation::accepted(&agent, &agent_id, self.publication.view.reason, op.effect);
+            } else { action_delegation::unknown(&agent); }
+        } else { action_delegation::unknown(&agent); }
     }
 }
 
@@ -1026,7 +1084,7 @@ mod tests {
     };
     use std::{path::PathBuf, sync::Arc};
 
-    fn request(kind: p::Kind) -> p::Request {
+    pub(super) fn request(kind: p::Kind) -> p::Request {
         let target = p::Target {
             project_binding: "a".repeat(64),
             repository: "owner/app".into(),
@@ -1073,7 +1131,7 @@ mod tests {
     }
     // Actual edit registration/stamp and same in-memory connection/Owner. Root
     // identity is predicate DATA only, never passed to a native file opener.
-    fn fixture(
+    pub(super) fn fixture(
         kind: p::Kind,
         at: Instant,
     ) -> (
@@ -1133,6 +1191,7 @@ mod tests {
             stamp,
             consent_id: "c".repeat(32),
             consent_end: (kind == p::Kind::Publish).then_some(at + Duration::from_secs(30)),
+            agent: None,
         });
         (state, edit, doc, root, control)
     }
@@ -1348,6 +1407,7 @@ mod tests {
                 .stamp()
                 .unwrap();
             state.publication.consent = Some(Consent {
+                identity: Arc::new(()), agent: None,
                 id: "c".repeat(32),
                 prepared: prepared.clone(),
                 counter_proof: None,

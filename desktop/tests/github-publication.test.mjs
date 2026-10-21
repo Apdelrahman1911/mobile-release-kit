@@ -95,8 +95,9 @@ test('cleanup unknown and wrong-repository positive reply never grant another se
 });
 
 test('service handoff retains original observer until settlement, never adopts a late review into new service', async () => {
-  const h = await attached(); h.controller.prepare(); await h.controller.connect(null); assert.equal(h.detached, 0); h.emit(review()); await flush(); assert.equal(h.controller.currentConsent(), null); assert.equal(h.count('discard'), 1);
-  h.respond('discard', operation('prepare', 'settled', 4)); h.respond('prepare', review()); await flush(); assert.equal(h.detached, 1); assert.equal(h.count('publish'), 0);
+  const h = await attached(); h.controller.prepare(); await h.controller.connect(null); assert.equal(h.detached, 0); h.emit(review()); await flush(); assert.equal(h.controller.currentConsent(), null); assert.equal(h.count('discard'), 0);
+  assert.equal(h.state.pending, true); h.respond('prepare', review()); await flush(); assert.equal(h.count('discard'), 1);
+  h.respond('discard', operation('prepare', 'settled', 4)); await flush(); assert.equal(h.detached, 1); assert.equal(h.count('publish'), 0);
 });
 
 
@@ -120,3 +121,6 @@ test('actual main-local capability grants exactly the seven emitted publication 
   // the subsequent desktop-shell build checks those declarations. This test
   // exercises actual bridge requests + ACL DATA, not native command execution.
 });
+
+// Shared only by the focused publication delegation tests; same original fake IPC.
+export { connection, prepared, pending, idle, operation, review, draftResult, deferred, flush, harness, attached, ready, marker, consentId };

@@ -10,9 +10,10 @@ umask 077
 # Replace the completed 77 roster, not the original owner or native observer.
 # 19 VersionEdit + 11 FutureTag + 28 GitHub3 + 28 Metadata + 16 ToolSetup
 # + 5 Apple admission + 1 Config fit + 3 catalogue + 3 older affected checks;
-# the FutureTag alias method is counted once (113 total).
-# Reuse 73 of 76 prior successes; the two catalogue methods, CLI discovery
-# and the prior failed Apple fit remain selected. Publication CLI is not added.
+# the FutureTag alias method is counted once (113 subtotal).
+# Add 9 Publication CLI + 5 original publication protocol + 6 session + 3 reserved-Open admission cases (136 total).
+# Reuse 60 of 76 prior successes; the two catalogue methods, CLI discovery,
+# 11 publication cases, 2 handoff predicates and prior failed Apple fit remain selected.
 # Six tests use private StatePort/Service fixtures; one more uses bounded local
 # Unix IPC. Two Tool tests join inert tasks/threads; all others are memory DATA.
 # Preserve their original closes/joins. No native/provider/product operation.
@@ -137,8 +138,31 @@ selected_tests=(
   asset_session::play_cleanup::tests::actual_document_growth_preserves_separate_cleanup_and_document_limits
   installed_cli::tests::capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals
   installed_cli::tests::requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance
+  github_connection_session::publication::delegation::tests::exact_original_load_and_full_progress_are_required_not_marker_or_status_alone
+  github_connection_session::publication::delegation::tests::replacement_load_identity_is_distinct_even_with_equal_public_rows
+  github_connection_session::publication::delegation::tests::complete_roster_duplicate_foreign_and_nonpending_original_refuse
+  github_connection_session::publication::delegation::tests::original_native_edit_root_and_deadline_cannot_be_replaced_or_renewed
+  service_github_action_protocol::tests::publication_references_are_disjoint_typed_payloads_and_preserve_original_three_bytes
+  service_github_action_requests::tests::publication_read_go_and_return_stay_read_only_until_original_caller_and_history_return
+  service_github_action_requests::tests::publication_impossible_write_effect_and_lost_history_cannot_release_a_read_or_a_write
+  service_github_action_requests::tests::publication_never_admitted_is_not_a_native_return_and_shares_the_same_permission_pool
+  installed_cli::github_action::tests::publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusion
+  github_publication_protocol::tests::publication_commands_never_accept_paths_bytes_tokens_or_mutating_recovery
+  github_publication_protocol::tests::publication_initial_go_exact_review_and_pending_has_no_token
+  github_publication_protocol::tests::publication_ready_and_reply_refuse_duplicate_positional_partial_or_wrong_capture
+  github_publication_protocol::tests::publication_durable_phase_prefix_never_grants_replayed_writes
+  github_publication_protocol::tests::publication_positive_effect_requires_complete_matching_claims_and_pull
+  github_connection_session::publication::tests::settled_publication_request_only_retires_an_explicitly_retiring_connection
+  github_connection_session::publication::tests::final_go_uses_original_edit_root_request_and_one_use_owner_claim
+  github_connection_session::publication::tests::credential_consent_expiry_and_cooldown_cannot_claim_or_reset_original_clock
+  github_connection_session::publication::tests::cancellation_preserves_original_ticket_and_pre_or_post_go_effect
+  github_connection_session::publication::tests::unknown_cleanup_keeps_original_until_receipt_and_late_data_never_upgrades
+  github_connection_session::publication::tests::actual_consent_status_expiry_and_context_change_retire_private_prepared
+  edit_owner::version_reserve::tests::reserved_opened_matches_exact_platform_policy_and_original_source
+  edit_owner::version_reserve::tests::reserved_handoff_data_admits_only_exact_current_inventory_platform_policies
+  edit_owner::version_reserve::tests::paired_handoff_retains_original_envelope_provider_and_byte_bound
 )
-[[ "${#selected_tests[@]}" == 113 ]] || exit 1
+[[ "${#selected_tests[@]}" == 136 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -148,9 +172,9 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '113 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '136 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 113 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 136 passed; 0 failed; 0 ignored;' "$run_log"

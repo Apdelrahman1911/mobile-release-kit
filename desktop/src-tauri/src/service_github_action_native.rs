@@ -64,7 +64,7 @@ impl DocumentBinding {
         let gate = self.github_gate(s);
         let supervisor = &self.inner.bridge.supervisor;
         let now = Instant::now();
-        let available = match a.kind {
+        let available = match a.kind() {
             p::Kind::RepositoryCreate => {
                 s.github
                     .repository_create_status(
@@ -84,6 +84,8 @@ impl DocumentBinding {
                     .actions_retry_status(supervisor.actions_retry_profile_available(), now, gate)
                     .available
             }
+            p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github
+                .publication_status(supervisor.github_publication_profile_available(), now, gate).available,
         };
         if !available {
             return Err(public(Error::Unavailable));
@@ -104,7 +106,7 @@ impl DocumentBinding {
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
-        let review = match a.kind {
+        let review = match a.kind() {
             p::Kind::RepositoryCreate => s
                 .github
                 .repository_create_agent_review(a, generation, &root, &edit, now),
@@ -114,6 +116,7 @@ impl DocumentBinding {
             p::Kind::FailedJobsRetry => s
                 .github
                 .actions_retry_agent_review(a, generation, &root, &edit, now),
+            p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_review(a, generation, &root, &edit, now),
         }?;
         let native = self.service_project_locked(s, &id)?;
         if native.canonical_root != root.path || native.registration_generation != generation {
@@ -154,7 +157,7 @@ impl DocumentBinding {
         window: &str,
         args: Allow,
     ) -> Result<p::Access, BridgeError> {
-        if window != MAIN || args.consent_version != args.selection.kind.consent() {
+        if window != MAIN || !args.selection.valid() || args.consent_version != args.selection.kind().consent() {
             return Err(BridgeError::invalid());
         }
         if self
@@ -239,10 +242,11 @@ impl DocumentBinding {
             .github_action_requests()
             .allow(scope.clone(), grant_id)
             .map_err(public)?;
-        let installed = match review.data.kind {
+        let installed = match review.data.kind() {
             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
             p::Kind::DraftPrCreate => s.github.pull_request_agent_allow(&review, &scope),
             p::Kind::FailedJobsRetry => s.github.actions_retry_agent_allow(&review, &scope),
+            p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_allow(&review, &scope),
         };
         if let Err(e) = installed {
             scope.unused_closed();
@@ -267,10 +271,11 @@ impl DocumentBinding {
         };
         if let Some(scope) = service.github_action_requests().scope().map_err(public)? {
             scope.revoke(p::Reason::PermissionRevoked, Instant::now());
-            match scope.review.kind {
+            match scope.review.kind() {
                 p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(&scope),
                 p::Kind::DraftPrCreate => s.github.pull_request_agent_revoke(&scope),
                 p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(&scope),
+                p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(&scope),
             }
         }
         service
@@ -318,8 +323,9 @@ impl DocumentBinding {
         // These are the same typed adapters used by the GUI. Every adapter rechecks
         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
         let v = &scope.review;
-        match v.kind {
+        match v.kind() {
             p::Kind::RepositoryCreate => {
+                let v = v.prepared().ok_or_else(BridgeError::invalid)?;
                 let a = crate::github_repository_create_protocol::CreateArgs {
                     session_id: v.session_id.clone(),
                     expected_revision: v.expected_revision,
@@ -332,6 +338,7 @@ impl DocumentBinding {
                 )?;
             }
             p::Kind::DraftPrCreate => {
+                let v = v.prepared().ok_or_else(BridgeError::invalid)?;
                 let a = crate::github_pull_request_protocol::CreateArgs {
                     session_id: v.session_id.clone(),
                     expected_revision: v.expected_revision,
@@ -344,6 +351,7 @@ impl DocumentBinding {
                 )?;
             }
             p::Kind::FailedJobsRetry => {
+                let v = v.prepared().ok_or_else(BridgeError::invalid)?;
                 let a = crate::github_actions_retry_protocol::StartArgs {
                     session_id: v.session_id.clone(),
                     expected_revision: v.expected_revision,
@@ -355,6 +363,7 @@ impl DocumentBinding {
                     Some(entry.clone()),
                 )?;
             }
+            p::Kind::SetupPublish | p::Kind::SetupReconcile => self.github_publication_agent_start(entry)?,
         }
         Ok(())
     }
@@ -384,7 +393,7 @@ impl DocumentBinding {
                 service.begin_operation(
                     &e.scope().runtime_id,
                     e.origin().request_id.clone(),
-                    e.scope().review.kind.action(),
+                    e.scope().review.kind().action(),
                     h.fact.state(),
                     h.fact.settlement(),
                 )
@@ -392,7 +401,7 @@ impl DocumentBinding {
                 service.publish_operation(
                     &e.scope().runtime_id,
                     e.origin().request_id.clone(),
-                    e.scope().review.kind.action(),
+                    e.scope().review.kind().action(),
                     h.fact.state(),
                     h.fact.settlement(),
                 )

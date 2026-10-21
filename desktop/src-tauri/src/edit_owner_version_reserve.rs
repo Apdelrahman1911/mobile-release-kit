@@ -104,19 +104,42 @@ pub(crate) struct NativeReservedVersionHandoff {
     sources: Mutex<crate::asset_source::GitReadSources>,
 }
 
+// The original core checkout compares ALL configured enabled platforms with
+// the reservation, not a selected subset. Unsupported DATA is never Android.
+fn handoff_ios_enabled(request: &Value) -> Option<bool> {
+    if request["platforms"] == json!(["android"])
+        && request["policy"]["schemaVersion"] == 3
+    {
+        Some(false)
+    } else if (request["platforms"] == json!(["ios"])
+        && request["policy"]["schemaVersion"] == 2)
+        || (request["platforms"] == json!(["android", "ios"])
+            && request["policy"]["schemaVersion"] == 4)
+    {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 // DATA admission only. The caller must still supply the original consumed
 // reservation gate/control; this predicate cannot construct an edit handoff.
 fn handoff_data_supported(data: &Value) -> bool {
-    let request = &data["reservation"]["request"];
     data["schemaVersion"] == 1
         && data["provider"]["kind"] == "macos-clt-git/1"
-        && ((request["platforms"] == json!(["ios"])
-            && request["policy"]["schemaVersion"] == 2)
-            || (request["platforms"] == json!(["android"])
-                && request["policy"]["schemaVersion"] == 3)
-            || (request["platforms"] == json!(["android", "ios"])
-                && request["policy"]["schemaVersion"] == 4))
+        && handoff_ios_enabled(&data["reservation"]["request"]).is_some()
         && wire::bounded(data, 12 * 1024).is_ok()
+}
+
+fn handoff_opened_matches(data: &Value, checkout: &version_wire::Opened) -> bool {
+    let Ok(baseline) = serde_json::to_value(&checkout.baseline) else {
+        return false;
+    };
+    handoff_ios_enabled(&data["reservation"]["request"]) == Some(checkout.ios_enabled)
+        && data["source"]["savedVersion"]["source"].as_str()
+            == Some(checkout.source.as_str())
+        && baseline["savedConfig"]["sha256"] == data["source"]["savedConfig"]["sha256"]
+        && baseline["savedVersion"]["sha256"] == data["source"]["savedVersion"]["sha256"]
 }
 
 impl NativeReservedVersionHandoff {
@@ -308,14 +331,7 @@ impl NativeReservedVersionHandoff {
             .is_some_and(|s| std::ptr::eq(s.as_ptr(), owner))
     }
     fn opened(&self, checkout: &version_wire::Opened) -> bool {
-        let Ok(baseline) = serde_json::to_value(&checkout.baseline) else {
-            return false;
-        };
-        checkout.ios_enabled
-            && self.data["source"]["savedVersion"]["source"].as_str()
-                == Some(checkout.source.as_str())
-            && baseline["savedConfig"]["sha256"] == self.data["source"]["savedConfig"]["sha256"]
-            && baseline["savedVersion"]["sha256"] == self.data["source"]["savedVersion"]["sha256"]
+        handoff_opened_matches(&self.data, checkout)
     }
     pub(super) fn values(&self, values: &version_wire::Values) -> bool {
         self.data["reservation"]["version"]["name"].as_str() == Some(values.name.as_str())
@@ -738,6 +754,71 @@ mod tests {
     fn handoff_data(platforms: Value, schema: Value) -> Value {
         json!({"schemaVersion":1,"provider":{"kind":"macos-clt-git/1"},
             "reservation":{"request":{"platforms":platforms,"policy":{"schemaVersion":schema}}}})
+    }
+    #[test]
+    fn reserved_opened_matches_exact_platform_policy_and_original_source() {
+        use sha2::{Digest, Sha256};
+        let session = "a".repeat(32);
+        let version = b"VERSION_NAME=1.2\nBUILD_NUMBER=7\n";
+        let config_sha = format!("{:x}", Sha256::digest(b"{}"));
+        let version_sha = format!("{:x}", Sha256::digest(version));
+        let opened = |ios_enabled: bool| {
+            // Real closed decoder, comparison DATA only: no Session, handoff,
+            // gate, borrowed input or native retirement is manufactured.
+            let mut raw = serde_json::to_vec(&json!({"protocol":version_wire::PROTOCOL,
+                "session":session,"seq":0,"kind":"opened","result":{
+                    "revision":"b".repeat(32),"source":"version.properties",
+                    "nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER",
+                    "iosEnabled":ios_enabled,"values":{"name":"1.2","build":"7"},
+                    "baseline":{"savedConfig":{"bytes":2,"sha256":config_sha},
+                        "savedVersion":{"state":"present","bytes":version.len(),"sha256":version_sha}},
+                    "scopeResources":"settled"}})).unwrap();
+            raw.push(b'\n');
+            match version_wire::decode(&raw, &session).unwrap() {
+                ChildFrame::ReleaseVersionOpened(checkout) => checkout,
+                _ => panic!("expected the original Opened DATA shape"),
+            }
+        };
+        for (platforms, schema, ios_enabled) in [
+            (json!(["android"]), 3, false),
+            (json!(["ios"]), 2, true),
+            (json!(["android", "ios"]), 4, true),
+        ] {
+            let mut data = handoff_data(platforms, json!(schema));
+            data["source"] = json!({"savedConfig":{"sha256":config_sha},
+                "savedVersion":{"source":"version.properties","sha256":version_sha}});
+            assert!(handoff_data_supported(&data));
+            let checkout = opened(ios_enabled);
+            assert!(handoff_opened_matches(&data, &checkout));
+            assert!(!handoff_opened_matches(&data, &opened(!ios_enabled)));
+            for (pointer, value) in [
+                ("/source/savedVersion/source", json!("other.properties")),
+                ("/source/savedConfig/sha256", json!("0".repeat(64))),
+                ("/source/savedVersion/sha256", json!("0".repeat(64))),
+                ("/source/savedVersion/sha256", Value::Null),
+            ] {
+                let mut changed = data.clone();
+                *changed.pointer_mut(pointer).unwrap() = value;
+                assert!(!handoff_opened_matches(&changed, &checkout));
+            }
+            for (platforms, schema) in [
+                (json!(["ios", "android"]), json!(4)),
+                (json!(["android", "android"]), json!(3)),
+                (json!(["android"]), json!(2)),
+                (json!(["ios"]), json!(3)),
+                (json!(["android", "ios"]), json!(3)),
+                (json!(["android", "ios"]), json!(4.0)),
+                (json!(["android"]), json!("3")),
+                (Value::Null, json!(4)),
+                (json!(["android"]), Value::Null),
+            ] {
+                let mut unsupported = data.clone();
+                unsupported["reservation"]["request"]["platforms"] = platforms;
+                unsupported["reservation"]["request"]["policy"]["schemaVersion"] = schema;
+                assert!(!handoff_data_supported(&unsupported));
+                assert!(!handoff_opened_matches(&unsupported, &checkout));
+            }
+        }
     }
     #[test]
     fn reserved_handoff_data_admits_only_exact_current_inventory_platform_policies() {

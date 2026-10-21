@@ -1,4 +1,4 @@
-//! IDs-only use of the same three Desktop GitHub owners. No token, URL, draft,
+//! IDs-only use of the existing Desktop GitHub owners. No token, URL, draft,
 //! provider, workflow dispatch, CLI Prepare or alternative native executor.
 use super::*;
 use crate::service_github_action_protocol as github;
@@ -116,6 +116,11 @@ fn output(
             "Original effect: {:?}. This observation grants no other action.\n",
             status.effect
         ));
+        match status.review.kind() {
+            github::Kind::SetupReconcile => text.push_str("This GET-only check observes the exact original setup intent. It sends no new publication request and cannot prove that an uncertain original was never sent.\n"),
+            github::Kind::SetupPublish => text.push_str("This request uses the reviewed five-file setup only. A sent create/PR request can trigger repository CI; STOP does not undo it. Counter setup is not included.\n"),
+            _ => {}
+        }
         text.push_str("A returned request does not mean CI passed or grant another operation. Use the original Desktop recovery surface for uncertainty; never resubmit automatically.\n");
         text.into_bytes()
     };

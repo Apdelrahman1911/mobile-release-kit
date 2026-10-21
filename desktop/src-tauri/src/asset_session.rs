@@ -180,6 +180,9 @@ pub(crate) use actions_retry::GitHubActionsRetryGoGate;
 mod play_cleanup;
 pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_github_publication_native.rs"]
+mod service_github_publication;
+#[cfg(any(target_os="linux",target_os="macos"))]
 #[path="service_github_action_native.rs"]
 pub(crate) mod agent_github_action;
 #[cfg(any(target_os="linux",target_os="macos"))]

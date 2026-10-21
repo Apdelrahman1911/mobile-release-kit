@@ -78,7 +78,7 @@ function permission(h){
 test.afterEach(async()=>{for(const h of retained.splice(0)){for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();h.permission?.controller.dispose();h.controller.dispose();for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();}});
 
 test('closed codec keeps kind-specific effects, exact IDs/nulls and bounded no-replay output',async()=>{
-  for(const kind of GITHUB_ACTION_KINDS){const h=await fixture(kind);assert.ok(parseAgentGithubActionAccess(access(h)));assert.ok(parseGithubActionStatus(requestStatus(h)));
+  for(const kind of ['repository-create','draft-pr-create','failed-jobs-retry']){const h=await fixture(kind);assert.ok(parseAgentGithubActionAccess(access(h)));assert.ok(parseGithubActionStatus(requestStatus(h)));
     for(const change of [s=>delete s.operationId,s=>s.doNotReplay=false,s=>s.origin.token='INERT',s=>s.review.kind='workflow-dispatch',s=>s.operationId='repository-create-0',s=>s.neverAdmitted=true]){const s=requestStatus(h);change(s);assert.equal(parseGithubActionStatus(s),null);}
     const s=requestStatus(h,{effect:kind==='failed-jobs-retry'?'created-observed':'accepted'});assert.equal(parseGithubActionStatus(s),null);
   }
@@ -95,7 +95,7 @@ test('actual composed bridge has four raw metadata-only methods and no preview c
   assert.equal(createNativeApi('preview',()=>assert.fail(),null).agentGithubAction,null);
   assert.equal(calls.length,4);
 });
-for(const kind of GITHUB_ACTION_KINDS){
+for(const kind of ['repository-create','draft-pr-create','failed-jobs-retry']){
   test(`${kind}: genuine returned Prepare is required; event-before-return cannot delegate`,async()=>{
     const h=await fixture(kind,false);h.controller.prepare();h.emit(h.data.review());assert.equal(h.controller.agentSelection(),null);
     assert.equal(h.controller.delegatePrepared({kind,sessionId:'session-a',consentId,expectedRevision:3}),null);

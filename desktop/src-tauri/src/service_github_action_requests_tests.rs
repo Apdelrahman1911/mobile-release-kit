@@ -20,12 +20,16 @@ impl F {
             1,
             2,
             3,
-            p::Review {
-                kind,
+            if kind == p::Kind::SetupReconcile { p::Review::SetupReconcile(p::PendingReference {
+                session_id: "github-connection-1".into(), expected_revision: 4,
+                marker: "a".repeat(32), record_sha256: "b".repeat(64),
+            }) } else {
+            p::Review::from_prepared(kind, p::PreparedReference {
                 session_id: "github-connection-1".into(),
                 consent_id: "a".repeat(32),
                 expected_revision: 4,
                 prepared_sha256: "b".repeat(64),
+            }).unwrap()
             },
             Arc::new(()),
             now + Duration::from_secs(100),
@@ -60,7 +64,7 @@ impl F {
         self.inbox.claim().unwrap().unwrap()
     }
     fn arm(&self, e: &Entry) -> String {
-        let op = format!("{}1", self.scope.review.kind.prefix());
+        let op = format!("{}1", self.scope.review.kind().prefix());
         e.entering().unwrap();
         e.arm(&op).unwrap();
         op
@@ -290,13 +294,13 @@ fn retained_scope(f: &F, kind: p::Kind) -> Arc<NativeScope> {
     let mut root = std::path::PathBuf::with_capacity(8192);
     root.push(format!("/{}", "x".repeat(4095)));
     let mut review = f.scope.review.clone();
-    review.kind = kind;
-    review.session_id = String::with_capacity(128);
-    review.session_id.push_str(&"s".repeat(64));
-    review.consent_id = String::with_capacity(64);
-    review.consent_id.push_str(&"a".repeat(32));
-    review.prepared_sha256 = String::with_capacity(128);
-    review.prepared_sha256.push_str(&"b".repeat(64));
+    review = p::Review::from_prepared(kind, review.prepared().unwrap().clone()).unwrap();
+    review.prepared_mut().unwrap().session_id = String::with_capacity(128);
+    review.prepared_mut().unwrap().session_id.push_str(&"s".repeat(64));
+    review.prepared_mut().unwrap().consent_id = String::with_capacity(64);
+    review.prepared_mut().unwrap().consent_id.push_str(&"a".repeat(32));
+    review.prepared_mut().unwrap().prepared_sha256 = String::with_capacity(128);
+    review.prepared_mut().unwrap().prepared_sha256.push_str(&"b".repeat(64));
     NativeScope::new(
         id('1'),
         runtime,
@@ -331,16 +335,16 @@ fn short_metadata_with_overbound_physical_capacity_is_not_admitted() {
                 s.runtime_id.push('p');
             }
             2 => {
-                s.review.session_id = String::with_capacity(129);
-                s.review.session_id.push('s');
+                s.review.prepared_mut().unwrap().session_id = String::with_capacity(129);
+                s.review.prepared_mut().unwrap().session_id.push('s');
             }
             3 => {
-                s.review.consent_id = String::with_capacity(65);
-                s.review.consent_id.push_str(&"a".repeat(32));
+                s.review.prepared_mut().unwrap().consent_id = String::with_capacity(65);
+                s.review.prepared_mut().unwrap().consent_id.push_str(&"a".repeat(32));
             }
             _ => {
-                s.review.prepared_sha256 = String::with_capacity(129);
-                s.review.prepared_sha256.push_str(&"b".repeat(64));
+                s.review.prepared_mut().unwrap().prepared_sha256 = String::with_capacity(129);
+                s.review.prepared_mut().unwrap().prepared_sha256.push_str(&"b".repeat(64));
             }
         }
         assert!(s.review.valid());
@@ -440,7 +444,54 @@ fn exact_document_query_survives_new_lease_without_adopting_another_doc() {
         Err(Error::AccessDenied)
     );
     assert_eq!(
-        f.inbox.access().unwrap().review.unwrap().kind,
+        f.inbox.access().unwrap().review.unwrap().kind(),
         p::Kind::DraftPrCreate
     );
+}
+
+#[test]
+fn publication_read_go_and_return_stay_read_only_until_original_caller_and_history_return() {
+    let f = F::new(p::Kind::SetupReconcile);
+    let call = f.claim(); let e = call.entry().clone(); let op = f.arm(&e);
+    assert_eq!(e.status().unwrap().effect, p::Effect::None);
+    e.go(&op).unwrap();
+    assert_eq!(e.status().unwrap().effect, p::Effect::None);
+    // This tests the memory transition, not an actual native receipt.
+    e.returned_native(&op, p::Reason::None, p::Effect::None);
+    assert_eq!(e.status().unwrap().effect, p::Effect::None);
+    assert!(e.pending()); assert!(e.claim_history().unwrap().is_none());
+    call.returned(Ok(()));
+    assert!(e.pending());
+    e.claim_history().unwrap().unwrap().returned(Ok(())).unwrap();
+    let s = e.status().unwrap();
+    assert_eq!(s.state, p::State::Complete); assert_eq!(s.effect, p::Effect::None);
+    assert!(!e.pending()); assert!(s.validate().is_ok());
+    assert_eq!(f.inbox.submit(f.input()).unwrap(), s); // same original, not replay
+}
+#[test]
+fn publication_impossible_write_effect_and_lost_history_cannot_release_a_read_or_a_write() {
+    for kind in [p::Kind::SetupPublish, p::Kind::SetupReconcile] {
+        let f = F::new(kind); let call = f.claim(); let e = call.entry().clone(); let op = f.arm(&e);
+        e.go(&op).unwrap();
+        e.returned_native(&op, p::Reason::None, p::Effect::CreatedObserved);
+        call.returned(Ok(()));
+        assert_eq!(e.status().unwrap().state, p::State::Unknown); assert!(e.pending());
+    }
+    let f = F::new(p::Kind::SetupReconcile); let call = f.claim(); let e = call.entry().clone(); let op = f.arm(&e);
+    e.returned_native(&op, p::Reason::None, p::Effect::DraftPrObserved); call.returned(Ok(()));
+    e.claim_history().unwrap().unwrap().returned(Err(Error::StateUnknown)).unwrap_err();
+    assert_eq!(e.status().unwrap().state, p::State::Unknown); assert!(e.pending());
+}
+#[test]
+fn publication_never_admitted_is_not_a_native_return_and_shares_the_same_permission_pool() {
+    for kind in [p::Kind::SetupPublish, p::Kind::SetupReconcile] {
+        let f=F::new(kind); let call=f.claim(); let e=call.entry().clone();
+        assert!(f.inbox.allow(f.scope.clone(), id('5')).is_err());
+        call.returned(Err(p::Reason::NativeRefused));
+        assert_eq!(e.status().unwrap().effect, kind.initial_effect());
+        assert!(e.status().unwrap().never_admitted); assert!(e.pending());
+        e.claim_history().unwrap().unwrap().returned(Ok(())).unwrap();
+        let s=e.status().unwrap(); assert!(s.never_admitted); assert_eq!(s.operation_id,None);
+        assert_eq!(s.effect,kind.initial_effect()); assert!(!e.pending()); assert!(s.validate().is_ok());
+    }
 }

@@ -10,13 +10,12 @@ fn status(kind: Kind) -> Status {
             request_id: id(),
         },
         grant_id: id(),
-        review: Review {
-            kind,
+        review: Review::from_prepared(kind, PreparedReference {
             session_id: "github-connection-1".into(),
             consent_id: "b".repeat(32),
             expected_revision: 1,
             prepared_sha256: "c".repeat(64),
-        },
+        }).unwrap(),
         revision: 1,
         state: State::Queued,
         settlement: Settlement::Pending,
@@ -100,8 +99,8 @@ fn effect_and_never_admitted_are_not_interchangeable_with_native_success() {
 #[test]
 fn all_closed_metadata_fits_status_with_wrapper_and_never_contains_material() {
     let mut s = status(Kind::FailedJobsRetry);
-    s.review.session_id = "x".repeat(64);
-    s.review.expected_revision = u32::MAX - 1;
+    s.review.prepared_mut().unwrap().session_id = "x".repeat(64);
+    s.review.prepared_mut().unwrap().expected_revision = u32::MAX - 1;
     s.revision = u32::MAX - 1;
     s.operation_id = Some("github-actions-retry-18446744073709551615".into());
     s.effect = Effect::AcceptedUnconfirmed;
@@ -122,4 +121,33 @@ fn all_closed_metadata_fits_status_with_wrapper_and_never_contains_material() {
             < STATUS_LIMIT
     );
     assert!(Access::empty().validate().is_ok());
+}
+
+#[test]
+fn publication_references_are_disjoint_typed_payloads_and_preserve_original_three_bytes() {
+    for kind in [Kind::RepositoryCreate, Kind::DraftPrCreate, Kind::FailedJobsRetry] {
+        let s=status(kind);
+        let expected=serde_json::json!({"kind":kind,"sessionId":"github-connection-1","consentId":"b".repeat(32),"expectedRevision":1,"preparedSha256":"c".repeat(64)});
+        assert_eq!(serde_json::to_value(&s.review).unwrap(),expected);
+        assert_eq!(serde_json::from_value::<Review>(expected).unwrap(),s.review);
+    }
+    for kind in [Kind::SetupPublish, Kind::SetupReconcile] {
+        let mut value=serde_json::json!({"kind":kind,"sessionId":"github-connection-1","expectedRevision":1});
+        let (id,hash,foreign)=if kind==Kind::SetupPublish { ("consentId","preparedSha256","marker") } else { ("marker","recordSha256","consentId") };
+        value[id]=serde_json::json!("a".repeat(32));
+        let selected:Selection=serde_json::from_value(value.clone()).unwrap(); assert!(selected.valid());
+        value[hash]=serde_json::json!("b".repeat(64));
+        let review:Review=serde_json::from_value(value.clone()).unwrap(); assert!(review.valid()); assert_eq!(review.kind(),kind);
+        let mut bad=value.clone();bad[foreign]=serde_json::json!("c".repeat(32));assert!(serde_json::from_value::<Review>(bad).is_err());
+        let mut bad=value.clone();bad[id]=serde_json::Value::Null;assert!(serde_json::from_value::<Review>(bad).is_err());
+        let mut bad=value.clone();bad["purpose"]=serde_json::json!("counter");assert!(serde_json::from_value::<Review>(bad).is_err());
+        let mut bad=value.clone();bad["kind"]=serde_json::json!("counter-publish");assert!(serde_json::from_value::<Review>(bad).is_err());
+        let encoded=serde_json::to_vec(&review).unwrap();assert!(encoded.len()<512);
+        assert!(!Effect::CreatedObserved.valid_for(kind)); assert!(!Effect::Accepted.valid_for(kind));
+    }
+    assert!(Effect::None.valid_for(Kind::SetupReconcile));
+    assert!(!Effect::NotSent.valid_for(Kind::SetupReconcile));
+    assert!(!Effect::PotentiallyApplied.valid_for(Kind::SetupReconcile));
+    assert!(Effect::BranchObserved.valid_for(Kind::SetupReconcile));
+    assert!(!Effect::None.valid_for(Kind::SetupPublish));
 }

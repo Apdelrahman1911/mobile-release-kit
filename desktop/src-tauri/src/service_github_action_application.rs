@@ -94,13 +94,12 @@ mod tests {
             point.saved.device,
             point.saved.inode,
             point.saved.revision,
-            wire::Review {
-                kind: wire::Kind::RepositoryCreate,
+            wire::Review::from_prepared(wire::Kind::RepositoryCreate, wire::PreparedReference {
                 session_id: "github-connection-1".into(),
                 consent_id: "a".repeat(32),
                 expected_revision: 1,
                 prepared_sha256: "b".repeat(64),
-            },
+            }).unwrap(),
             Arc::new(()),
             Instant::now() + Duration::from_secs(20),
             point.read,

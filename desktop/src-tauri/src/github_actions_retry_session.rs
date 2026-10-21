@@ -1107,9 +1107,11 @@ impl ConnectionState {
 
 impl ConnectionState {
     pub(crate) fn actions_retry_agent_review(&self, a: &action_delegation::Selection, g:u32, root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<action_delegation::Review,BridgeError> {
+        let kind = a.kind();
+        let a = a.prepared().ok_or_else(|| refused(p::Reason::ConsentExpired))?;
         let c=self.actions_retry.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
-        if a.kind!=crate::service_github_action_protocol::Kind::FailedJobsRetry || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.actions_retry.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.actions_retry.active.is_some() || self.actions_retry.exhausted {return Err(refused(p::Reason::ConsentExpired))}
-        action_delegation::review(a.kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
+        if kind!=crate::service_github_action_protocol::Kind::FailedJobsRetry || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.actions_retry.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.actions_retry.active.is_some() || self.actions_retry.exhausted {return Err(refused(p::Reason::ConsentExpired))}
+        action_delegation::review(kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
     }
     pub(crate) fn actions_retry_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
         let c=self.actions_retry.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;

@@ -29,5 +29,5 @@ export interface PublicationApi {
 export interface PublicationView {
   mode: 'native' | 'preview' | 'unavailable'; status: PublicationStatus | null; base: string; purpose: PublicationPurpose;
   originalTarget: { repository: string; accountId: string; repositoryId: string; base: string } | null;
-  confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean; error: PublicationReason | null;
+  delegating: boolean; confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean; error: PublicationReason | null;
 }

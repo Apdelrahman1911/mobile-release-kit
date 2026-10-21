@@ -3,10 +3,16 @@ use super::*;
 use crate::{github_connection_session::publication as s, github_publication_protocol as p};
 
 pub(crate) struct GitHubPublicationGoGate {
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     inner: Weak<Inner>,
     counter: Option<Arc<version_counter_setup::Facet>>,
 }
 impl GitHubPublicationGoGate {
+    pub(crate) fn agent(&self) -> Option<&Arc<crate::service_github_action_requests::Entry>> { self.agent.as_ref() }
+    pub(crate) fn agent_entering(&self) -> Result<(), BridgeError> {
+        if let Some(e) = &self.agent { e.entering().map_err(application_service::public_error)?; }
+        Ok(())
+    }
     pub(crate) fn select_target(&mut self, target: p::Target) -> Result<p::Selection, BridgeError> {
         match self.counter.as_mut() {
             Some(facet) => Arc::get_mut(facet)
@@ -121,6 +127,7 @@ impl GitHubPublicationGoGate {
         };
         // No lock gap before one-use original GO. The caller supplies no token,
         // source path/identity, raw config, JSON body or alternate edit witness.
+        if let Some(e) = &self.agent { e.current(true).map_err(application_service::public_error)?; }
         state.github.publication_go(
             id,
             digest,
@@ -130,7 +137,13 @@ impl GitHubPublicationGoGate {
             &edit,
             Instant::now(),
             counter_project.as_deref(),
-            claim,
+            || {
+                let granted = claim();
+                if granted { if let Some(e) = &self.agent {
+                    if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; }
+                } }
+                granted
+            },
         )
     }
 }
@@ -227,6 +240,15 @@ impl DocumentBinding {
     ) -> Result<p::Status, BridgeError> {
         let command =
             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_publication_execute(command, app_data, None)
+    }
+    pub(super) fn github_publication_execute(
+        &self, command: p::Command, app_data: Option<std::path::PathBuf>,
+        agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+    ) -> Result<p::Status, BridgeError> {
+        if agent.is_some() && !matches!(command, p::Command::Publish(_) | p::Command::Reconcile(_)) {
+            return Err(s::refused(p::Reason::InvalidInput));
+        }
         if matches!(command, p::Command::Status) {
             return Ok(self.github_publication_status());
         }
@@ -305,6 +327,11 @@ impl DocumentBinding {
                     p::Reason::Busy
                 })
             })?;
+        // The explicit native identity check precedes counter state/native
+        // app-data resolution and home/source acquisition. Counter is excluded.
+        if let Some(e) = &agent {
+            state.github.publication_agent_current(&command, e, generation, &root, &edit, Instant::now())?;
+        }
         let counter = match &command {
             p::Command::Prepare(args) if args.purpose == Some(p::counter::Purpose::Counter) => {
                 Some(version_counter_setup::Facet::new(
@@ -343,7 +370,7 @@ impl DocumentBinding {
             target_pointer_width = "64",
             any(target_arch = "aarch64", target_arch = "x86_64")
         ))]
-        if counter.is_some() {
+        if counter.is_some() || agent.is_some() {
             let bytes = lookup_memory::retained_document_bytes(&self.inner, &state)
                 .map_err(|_| s::refused(p::Reason::ResourcesUnavailable))?
                 .checked_add(
@@ -358,6 +385,7 @@ impl DocumentBinding {
                 .ok_or_else(|| s::refused(p::Reason::ResourcesUnavailable))?;
         }
         let gate = GitHubPublicationGoGate {
+            agent,
             inner: Arc::downgrade(&self.inner),
             counter,
         };

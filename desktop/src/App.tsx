@@ -1,5 +1,6 @@
 import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
 import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
+import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
 import { AgentGithubActionAccessController } from './agentGithubActionAccessController.ts';
 import type { GithubActionSelection } from './agentGithubActionAccess.ts';
 import { AgentGithubActionAccess } from './components/AgentGithubActionAccess.tsx';
@@ -238,7 +239,7 @@ export function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const [cliAccessReveal, setCliAccessReveal] = useState(0);
   const [identityReveal, setIdentityReveal] = useState(0);
-  const [releaseCheckFocus, setReleaseCheckFocus] = useState<'offline' | 'android-signing' | null>(null);
+  const [releaseCheckFocus, setReleaseCheckFocus] = useState<'offline' | 'android-signing' | 'store-access' | null>(null);
   const [help, setHelp] = useState<HelpContent | null>(null);
   const [discardProject, setDiscardProject] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState(initialWorkspace);
@@ -622,12 +623,12 @@ export function App() {
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
-    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();},
-    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:r.kind==='draft-pr-create'?pullRequestRef.current?.delegatePrepared(r)??null:actionsRetryRef.current?.delegatePrepared(r)??null,
+    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
+    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:r.kind==='draft-pr-create'?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
     current:()=>{const service=pathService.current;return {
       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
-      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection()].filter((r):r is GithubActionSelection=>!!r),
+      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
       blockedReason:agentGithubActionAdmission.current(),
     };},
   }));
@@ -944,7 +945,8 @@ export function App() {
     const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
     const pr=!!selected&&selected.kind==='draft-pr-create'&&pullRequestRef.current?.agentSelected(selected)===true;
     const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
-    const blocked=savedCommandBusy(false,false,false,false,false,false,false,false,repository,false,pr,retry,false,true)??
+    const publication=!!selected&&(selected.kind==='setup-publish'||selected.kind==='setup-reconcile')&&githubPublicationControllerRef.current?.agentSelected(selected)===true;
+    const blocked=savedCommandBusy(false,false,false,false,false,false,false,publication,repository,false,pr,retry,false,true)??
       savedOwnersPrerequisiteReason(false,false,undefined,false,true);
     if(blocked)return blocked;
     if(githubPreflight.getSnapshot().status?.prepared||githubRelease.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';
@@ -1470,10 +1472,12 @@ export function App() {
   const main = useRef<HTMLElement>(null);
   const offlineCheckSection = useRef<HTMLDivElement>(null);
   const androidSigningSection = useRef<HTMLDivElement>(null);
+  const storeAccessSection = useRef<HTMLElement>(null);
   const androidToolSetupSection = useRef<HTMLElement>(null);
   useEffect(() => {
     if (page !== 'releases' || releaseCheckFocus === null) return;
-    const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current : androidSigningSection.current;
+    const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current
+      : releaseCheckFocus === 'android-signing' ? androidSigningSection.current : storeAccessSection.current;
     section?.focus({ preventScroll: true });
     section?.scrollIntoView({ block: 'start' });
     setReleaseCheckFocus(null);
@@ -1852,7 +1856,7 @@ export function App() {
   }, []);
 
   const navigate = (next: Page) => { if (next !== page) gitLocal.beforeContextIntent(); externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
-  const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
+  const reviewCredentialChecks = (kind: 'offline' | 'android-signing' | 'store-access') => {
     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
     // Navigation selects a review only. The existing controller still owns
     // availability, original private inputs, consent, Start and cancellation.
@@ -2411,6 +2415,7 @@ export function App() {
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<AgentToolSetup controller={agentToolSetup}/>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
+          onStoreAccess={() => reviewCredentialChecks('store-access')}
           nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
           delegation={<AgentUploadKeyAccess controller={agentUploadKey} />} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
@@ -2466,7 +2471,9 @@ export function App() {
               needsAttention: githubPublicationOwnerReason(githubPublicationState) !== null || githubPublicationState.observing || githubPublicationState.error !== null ||
                 !!githubPublicationState.status?.pending.length || !!githubPublicationState.status?.operation && (githubPublicationState.status.operation.reason !== 'none' ||
                   ['potentially-applied', 'unresolved', 'branch-observed'].includes(githubPublicationState.status.operation.effect)),
-              content: <GitHubPublication state={githubPublicationState} controller={githubPublication} /> },
+              content: <><GitHubPublication state={githubPublicationState} controller={githubPublication} />
+                <GitHubPublicationAccess state={githubPublicationState} controller={githubPublication}
+                  blockedReason={agentGithubAction.ownerReason()} onChoose={kind=>{agentGithubAction.choose(kind);}} /></> },
             { id: 'settings', title: 'Configure repository settings and required inputs',
               description: 'Review Actions settings, environment protections, or one assigned secret or variable. Every change needs its own approval.',
               needsAttention: githubRemoteSetupOwnerReason(githubRemoteSetupState) !== null || githubRemoteSetupState.observing || githubRemoteSetupState.error !== null ||
@@ -2499,7 +2506,7 @@ export function App() {
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
           storeOperations={<>
             <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
-            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+            <section id="release-store-access" ref={storeAccessSection} tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
             <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>

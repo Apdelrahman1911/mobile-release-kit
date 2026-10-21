@@ -37,13 +37,12 @@ pub(super) fn review<T: Serialize>(
 ) -> Result<Review, BridgeError> {
     let mut hash = Hash { sha: Sha256::new() };
     serde_json::to_writer(&mut hash, prepared).map_err(|_| BridgeError::protocol())?;
-    let data = p::Review {
-        kind,
+    let data = p::Review::from_prepared(kind, p::PreparedReference {
         session_id: session.into(),
         consent_id: id.into(),
         expected_revision: revision,
         prepared_sha256: format!("{:x}", hash.sha.finalize()),
-    };
+    }).ok_or_else(BridgeError::protocol)?;
     if !data.valid() {
         return Err(BridgeError::protocol());
     }
@@ -108,14 +107,7 @@ pub(super) fn accepted<R: Serialize, E: Serialize>(
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Selection {
-    pub(crate) kind: p::Kind,
-    pub(crate) session_id: String,
-    pub(crate) consent_id: String,
-    pub(crate) expected_revision: u32,
-}
+pub(crate) use p::Selection;
 
 #[cfg(test)]
 #[path = "github_action_delegation_tests.rs"]

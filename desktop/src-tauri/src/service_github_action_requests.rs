@@ -117,9 +117,7 @@ impl NativeScope {
             && self.project_id.retained_bytes() <= 64
             && self.runtime_id.capacity() <= 128
             && self.root.capacity() <= 8192
-            && self.review.session_id.capacity() <= 128
-            && self.review.consent_id.capacity() <= 64
-            && self.review.prepared_sha256.capacity() <= 128
+            && self.review.retained_fits()
             && !self.runtime_id.is_empty()
             && self.runtime_id.len() <= 64
             && self
@@ -283,7 +281,7 @@ impl Entry {
     pub(crate) fn arm(&self, id: &str) -> Result<(), Error> {
         self.current(false)?;
         let mut r = self.lock()?;
-        if !r.entered || !self.scope.review.kind.operation(id) {
+        if !r.entered || !self.scope.review.kind().operation(id) {
             return Err(Error::Conflict);
         }
         r.operation = Some(id.into());
@@ -291,7 +289,7 @@ impl Entry {
             &mut r,
             Admission::Running,
             p::Reason::None,
-            p::Effect::NotSent,
+            self.scope.review.kind().initial_effect(),
         )
     }
     fn set_fact(
@@ -320,7 +318,7 @@ impl Entry {
             &mut r,
             Admission::Running,
             p::Reason::None,
-            p::Effect::PotentiallyApplied,
+            self.scope.review.kind().go_effect(),
         )
     }
     // ONLY the original typed Connection accept_* tail invokes this. Its actual
@@ -334,7 +332,7 @@ impl Entry {
             || r.fact
                 .as_ref()
                 .is_none_or(|f| f.admission != Admission::Running)
-            || !effect.valid_for(self.scope.review.kind)
+            || !effect.valid_for(self.scope.review.kind())
             || matches!(
                 reason,
                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
@@ -344,8 +342,8 @@ impl Entry {
             self.unknown(p::Reason::CleanupUnknown);
             return;
         }
-        if r.go && effect == p::Effect::NotSent {
-            effect = p::Effect::PotentiallyApplied
+        if r.go && effect == self.scope.review.kind().initial_effect() {
+            effect = self.scope.review.kind().go_effect()
         }
         if self
             .set_fact(&mut r, Admission::Returned, reason, effect)
@@ -371,7 +369,7 @@ impl Entry {
         {
             return Err(Error::StateUnknown);
         }
-        self.set_fact(&mut r, Admission::NeverAdmitted, why, p::Effect::NotSent)?;
+        self.set_fact(&mut r, Admission::NeverAdmitted, why, self.scope.review.kind().initial_effect())?;
         self.scope.retired.store(true, Ordering::Release);
         Ok(())
     }
@@ -479,7 +477,7 @@ impl Entry {
             settlement,
             operation_id: r.operation.clone(),
             reason,
-            effect: f.map_or(p::Effect::NotSent, |f| f.effect),
+            effect: f.map_or(self.scope.review.kind().initial_effect(), |f| f.effect),
             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
                 && state != p::State::Unknown,
             do_not_replay: true,

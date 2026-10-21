@@ -49,13 +49,12 @@ fn returned_status_and_lost_reply_keep_exact_original_ids_and_no_replay() {
     let status = github::Status {
         origin: q.clone(),
         grant_id: id("d"),
-        review: github::Review {
-            kind: github::Kind::FailedJobsRetry,
+        review: github::Review::FailedJobsRetry(github::PreparedReference {
             session_id: "github-connection-1".into(),
             consent_id: "a".repeat(32),
             expected_revision: 2,
             prepared_sha256: "b".repeat(64),
-        },
+        }),
         revision: 4,
         state: github::State::Complete,
         settlement: p::Settlement::Settled,
@@ -91,8 +90,11 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
     assert_eq!(
         v["kinds"],
-        serde_json::json!(["repository-create", "draft-pr-create", "failed-jobs-retry"])
+        serde_json::json!(["repository-create", "draft-pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile"])
     );
+    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile"]));
+    assert_eq!(v["counterSetup"], false);
+    assert_eq!(v["cliPendingLoad"], false);
     for key in ["oneUse", "mutating", "requiresExactDesktopConsent"] {
         assert_eq!(v[key], true);
     }
@@ -107,5 +109,33 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
         "nativeAvailabilityChecked",
     ] {
         assert_eq!(v[key], false);
+    }
+}
+
+#[test]
+fn publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusion() {
+    let q = github::Query { project_id:id("a"), service_instance:id("b"), request_id:id("c") };
+    for kind in [github::Kind::SetupPublish, github::Kind::SetupReconcile] {
+        let review=if kind==github::Kind::SetupPublish { github::Review::SetupPublish(github::PreparedReference {
+            session_id:"github-connection-1".into(), consent_id:"a".repeat(32), expected_revision:2, prepared_sha256:"b".repeat(64),
+        }) } else { github::Review::SetupReconcile(github::PendingReference {
+            session_id:"github-connection-1".into(), expected_revision:2, marker:"a".repeat(32), record_sha256:"b".repeat(64),
+        }) };
+        let response=p::Response { version:1, request_id:id("e"),service_instance:id("b"),client_id:id("f"),session_id:id("a"),
+            response:p::ResponseBody::GitHubActionRequest(github::Status {
+                origin:q.clone(),grant_id:id("d"),review,revision:4,state:github::State::Complete,settlement:p::Settlement::Settled,
+                operation_id:Some("github-publication-7".into()),reason:github::Reason::None,
+                effect:if kind==github::Kind::SetupReconcile {github::Effect::None}else{github::Effect::DraftPrObserved},
+                never_admitted:false,do_not_replay:true,
+            }),
+        };
+        let (code,bytes)=output(&response,&q,Some(&id("d")),false).unwrap();assert_eq!(code,0);
+        let text=String::from_utf8(bytes).unwrap();
+        assert!(text.contains(if kind==github::Kind::SetupReconcile {"GET-only"}else{"Counter setup is not included"}));
+        assert!(text.contains(q.request_id.as_str()));assert!(text.contains("never resubmit automatically"));
+        let (_,json)=output(&response,&q,None,true).unwrap();
+        let parsed: serde_json::Value=serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed,serde_json::to_value(&response).unwrap());
+        let mut wrong=q.clone();wrong.request_id=id("e");assert!(output(&response,&wrong,None,true).is_err());
     }
 }

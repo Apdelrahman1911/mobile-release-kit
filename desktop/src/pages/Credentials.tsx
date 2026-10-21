@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Catalog, CredentialGuide, HelpContent } from '../types.ts';
-import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { Badge, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 import { CredentialSession } from '../components/CredentialSession.tsx';
 import type { AssetDisplayState } from '../assetSessionTypes.ts';
@@ -34,7 +34,7 @@ function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { g
   </section>;
 }
 
-export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, delegation, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; delegation?: ReactNode; nativeBusyReason?: string | null }) {
+export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, onStoreAccess, delegation, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; onStoreAccess: () => void; delegation?: ReactNode; nativeBusyReason?: string | null }) {
   const [filter, setFilter] = useState('');
   const [selectedGuide, setSelectedGuide] = useState('');
   const [preparation, setPreparation] = useState<ReleaseInputPreparationTarget | null>(null);
@@ -106,7 +106,9 @@ export function Credentials({ catalog, state, controller, project, inputState, i
       {!project && <p className="save-note">Select a project first. The review will show the current runtime, tools, saved-input and assignment prerequisites.</p>}
       <p className="save-note">Use the original build's status, Cancel and Recovery controls in Releases. Cancel is not rollback; an unknown cleanup state cannot be reset by reopening this page.</p>
       <h3>Store account access · separate online check</h3>
-      <DisabledAction label="Check Store account access" icon="shield" reason="This screen has no admitted bundled Ruby/Bundler Store-check provider. No account request is made. Offline checks and local Android or Apple signing do not verify Play or App Store account access." />
+      <p>Review the saved settings, assigned credentials and runtime prerequisites in Releases. Opening the review makes no Store request; give separate consent there to start a check.</p>
+      <p>The Android check can create a temporary, uncommitted Google Play edit and attempts to delete it. It does not publish a release. Offline checks and signing do not verify Store account access.</p>
+      <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onStoreAccess}>Review Store account access</button>
     </section>
   </>;
 }

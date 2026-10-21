@@ -28,13 +28,12 @@ fn scope(doc: &Arc<()>, data: p::Review, identity: Arc<()>) -> Arc<r::NativeScop
     )
 }
 fn data(kind: p::Kind) -> p::Review {
-    p::Review {
-        kind,
+    p::Review::from_prepared(kind, p::PreparedReference {
         session_id: "github-connection-1".into(),
         consent_id: "a".repeat(32),
         expected_revision: 7,
         prepared_sha256: "b".repeat(64),
-    }
+    }).unwrap()
 }
 fn input() -> p::Submit {
     p::Submit {
@@ -103,7 +102,7 @@ fn streamed_review_binds_private_input_and_actual_original_edit_stamp() {
         assert!(original.matches(&a.stamp));
         assert!(!other.matches(&a.stamp));
         assert_eq!(
-            a.data.prepared_sha256,
+            a.data.prepared().unwrap().prepared_sha256,
             format!(
                 "{:x}",
                 Sha256::digest(serde_json::to_vec(&private).unwrap())
@@ -122,7 +121,7 @@ fn streamed_review_binds_private_input_and_actual_original_edit_stamp() {
             at,
         )
         .unwrap();
-        assert_ne!(a.data.prepared_sha256, c.data.prepared_sha256);
+        assert_ne!(a.data.prepared().unwrap().prepared_sha256, c.data.prepared().unwrap().prepared_sha256);
         let public = serde_json::to_string(&a.data).unwrap();
         assert!(!public.contains("privateDraft") && !public.contains("must-not-be"));
     }

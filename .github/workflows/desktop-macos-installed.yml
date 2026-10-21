@@ -1282,7 +1282,7 @@ jobs:
           cd desktop
           npm ci --ignore-scripts --no-audit --no-fund --cache "$MRK_MACOS_WORK/npm-cache"
           npm run build
-      - name: Check 113 pending versions, GitHub, metadata, tools, Apple and affected capacity contracts before the observer build
+      - name: Check 136 pending versions, GitHub/publication, metadata, tools, Apple and affected capacity contracts before the observer build
         id: git_selected_contracts
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && matrix.target == 'aarch64-apple-darwin' && steps.app_frontend.outcome == 'success' && steps.app_vault.outcome == 'success'
         timeout-minutes: 32

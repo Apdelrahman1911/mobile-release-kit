@@ -13,8 +13,8 @@ fn fixed_main_decoder_accepts_only_the_original_closed_three_selections() {
             "expectedRevision":7}, "consentVersion":kind.consent()});
         let bytes = serde_json::to_vec(&value).unwrap();
         let decoded: Allow = decode(&bytes).unwrap();
-        assert_eq!(decoded.selection.kind, kind);
-        assert_eq!(decoded.selection.expected_revision, 7);
+        assert_eq!(decoded.selection.kind(), kind);
+        assert_eq!(decoded.selection.prepared().unwrap().expected_revision, 7);
         assert_eq!(decoded.consent_version, kind.consent());
         for suffix in [" {}", " null"] {
             let mut trailing = bytes.clone();

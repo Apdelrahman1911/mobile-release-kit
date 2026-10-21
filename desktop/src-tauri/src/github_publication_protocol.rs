@@ -824,7 +824,7 @@ impl Summary {
     }
 }
 impl Pending {
-    fn heap(&self) -> Option<usize> {
+    pub(crate) fn heap(&self) -> Option<usize> {
         let mut n = self.summary.heap()?.checked_add(
             self.claimed
                 .capacity()
