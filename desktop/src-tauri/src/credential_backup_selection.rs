@@ -270,6 +270,7 @@ fn picker_gate(document: &DocumentBinding, state: &DocumentState, owner: &Arc<Or
     let slot = state.slot.as_ref().filter(|slot| slot.operation == purpose.operation()
         && slot.reason == Reason::None).ok_or(Reason::SourceChanged)?;
     let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
+    super::backup_desktop::require_android_context(context).map_err(|error| error.reason)?;
     if !document.context_matches(state, context).map_err(|error| error.reason)?
         || owner.backup_selection.get().is_none_or(|selectors| selectors.purpose != purpose) {
         return Err(Reason::ContextStale);
@@ -412,12 +413,15 @@ impl DocumentBinding {
             super::super::agent_upload_key::consume(self, &state, link, crate::service_upload_key_protocol::Kind::BackupEncrypted)?;
         }
         let context = self.current_context(&mut state, context_revision)?;
+        super::backup_desktop::require_android_context(&context)?;
         let key = own_record(reference)?;
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?);
         let kind = row.authenticated.descriptor.kind;
-        if agent.is_some() && kind != Kind::AndroidKeystore { return Err(AssetError::new(Reason::SourceRefused)); }
+        // Ordinary Desktop and delegated export both read this authenticated
+        // current row before either original chooser can be installed.
+        super::backup_desktop::require_android_kind(kind).map_err(AssetError::new)?;
         session_kind_gate(&context, kind)?;
         let mut slot = self.backup_picker_slot(&mut state, context, Purpose::Export, Some(key))?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference);
@@ -439,6 +443,7 @@ impl DocumentBinding {
             super::super::agent_upload_key::consume(self, &state, link, crate::service_upload_key_protocol::Kind::RestoreEncrypted)?;
         }
         let context = self.current_context(&mut state, context_revision)?;
+        super::backup_desktop::require_android_context(&context)?;
         if state.vault.as_ref().is_none_or(|session| session.rows.len() >= store::DESCRIPTOR_COUNT) {
             return Err(AssetError::new(Reason::Capacity));
         }

@@ -363,8 +363,8 @@ fn import_new(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custody: &
     let exclusions = exclusion_roots(owner, book, &request.roster)?;
     sources.capture(&exclusions, request.budget.transfer(), owner)?;
     sources.authenticate(request.budget.transfer(), &mut || owner.interrupted())?;
-    // Only an actually unlinked ordinary import is kind-generic. The fixed
-    // delegated Android action cannot smuggle another kind into NEW storage.
+    // Only an unlinked, non-picker backend import remains kind-generic. Both
+    // Desktop picker and delegated Android imports restrict the kind before NEW.
     super::backup_delegation::require_import_kind(owner, sources.kind()?)?;
     let retained = sources.retained_bytes().ok_or(Reason::Capacity)?;
     if retained > request.budget.resident { return Err(Reason::Capacity); }

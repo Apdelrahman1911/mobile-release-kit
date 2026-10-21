@@ -166,6 +166,8 @@ fn import_kind(link: Option<agent::Kind>, authenticated: Kind) -> Result<(), Rea
 
 /// Called after THIS original BackupSources authenticated its payload and
 /// BEFORE seal_new/NEW. A wrong attached kind is never an ordinary import.
+/// The actual two-picker original is Android-only even when not delegated;
+/// genuinely unlinked non-picker backend imports retain their existing policy.
 pub(super) fn require_import_kind(owner: &OriginalWork, authenticated: Kind) -> Result<(), Reason> {
     import_kind(
         owner
@@ -173,7 +175,11 @@ pub(super) fn require_import_kind(owner: &OriginalWork, authenticated: Kind) -> 
             .get()
             .map(|link| link.entry().scope().kind),
         authenticated,
-    )
+    )?;
+    if owner.has_credential_backup_picker() {
+        backup_desktop::require_android_kind(authenticated)?;
+    }
+    Ok(())
 }
 
 /// Comparison stamp captured only while the SAME parent accepts the already
@@ -387,7 +393,7 @@ mod tests {
 
     #[test]
     fn authenticated_kind_policy_has_no_wrong_link_fallback_before_new() {
-        assert!(import_kind(None, Kind::AscP8).is_ok()); // Unchanged ordinary import.
+        assert!(import_kind(None, Kind::AscP8).is_ok()); // Unchanged non-picker backend policy.
         assert!(import_kind(Some(agent::Kind::RestoreEncrypted), Kind::AndroidKeystore).is_ok());
         for selected in [
             agent::Kind::GenerateNew,
@@ -410,6 +416,33 @@ mod tests {
                 Err(Reason::SourceRefused)
             );
         }
+    }
+
+    #[test]
+    fn original_picker_import_is_android_only_without_narrowing_the_backend() {
+        // Actual original route/control cells, but neither picker nor native
+        // storage entered. No selected paths, GUI facts or joins are invented.
+        let picker = OriginalWork::new_credential_backup(
+            1, Weak::new(), super::super::backup_selection::Purpose::Import,
+        ).unwrap();
+        let backend = OriginalWork::new(2, false, Weak::new());
+        let original_end = picker.endpoint();
+        assert!(require_import_kind(&picker, Kind::AndroidKeystore).is_ok());
+        assert!(require_import_kind(&backend, Kind::AndroidKeystore).is_ok());
+        for kind in [
+            Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile, Kind::AscP8,
+            Kind::AppleDistributionKey, Kind::IosFirebase, Kind::GoogleWif,
+            Kind::ProjectReadToken, Kind::AppleReviewContact, Kind::AppleReviewDemo,
+            Kind::OperationCommitment, Kind::GoogleServiceAccount,
+        ] {
+            assert_eq!(require_import_kind(&picker, kind), Err(Reason::SourceRefused));
+            assert!(require_import_kind(&backend, kind).is_ok());
+        }
+        assert_eq!(picker.endpoint(), original_end);
+        assert!(!picker.stopped());
+        assert!(picker.coordinator.lock().unwrap().receipt == JoinReceipt::New);
+        assert!(picker.child.try_lock().unwrap().receipt == JoinReceipt::New);
+        assert!(!picker.gui.facts().unwrap().dispatched);
     }
 
     #[cfg(debug_assertions)]

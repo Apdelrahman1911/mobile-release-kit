@@ -2,10 +2,11 @@
 //! A publication marker is display DATA, not material access or a new receipt.
 use super::*;
 
-// The new two-picker/two-file route has not had focused native Mac verification.
-// Existing installed vault qualification, codecs and Linux predicate tests do
-// not admit it. There is no renderer setting or generic observer bypass.
-const NATIVE_BACKUP_QUALIFIED: bool = false;
+// The Android upload-key two-picker/two-file route has not had focused native
+// Mac verification. This bit never qualifies other credential kinds. Existing
+// vault qualification, codecs and backend roundtrips do not admit the pickers;
+// there is no renderer setting or generic observer bypass.
+const NATIVE_ANDROID_UPLOAD_KEY_BACKUP_QUALIFIED: bool = false;
 
 pub(super) fn qualification(document: &DocumentBinding) -> Result<(), AssetError> {
     if !cfg!(all(
@@ -16,9 +17,25 @@ pub(super) fn qualification(document: &DocumentBinding) -> Result<(), AssetError
     )) {
         return Err(AssetError::new(Reason::UnsupportedPlatform));
     }
-    if !NATIVE_BACKUP_QUALIFIED || !document.native_qualified() || !qualified(document) {
+    if !NATIVE_ANDROID_UPLOAD_KEY_BACKUP_QUALIFIED || !document.native_qualified() || !qualified(document) {
         return Err(AssetError::new(Reason::Unqualified));
     }
+    Ok(())
+}
+
+// Closed scope comparisons only. Callers still require the SAME current
+// context/full reference, native qualification and original owner gates.
+pub(super) fn require_android_context(context: &NativeContext) -> Result<(), AssetError> {
+    if context.platform != Platform::Android
+        || context.execution_mode != commands::ExecutionMode::Local
+    {
+        return Err(AssetError::new(Reason::ContextStale));
+    }
+    Ok(())
+}
+
+pub(super) fn require_android_kind(authenticated: Kind) -> Result<(), Reason> {
+    if authenticated != Kind::AndroidKeystore { return Err(Reason::SourceRefused); }
     Ok(())
 }
 
@@ -34,6 +51,9 @@ pub(in crate::asset_session) fn project(
         status.modes.encrypted.reason
     } else {
         qualification(document)
+            .and_then(|()| {
+                require_android_context(state.context.as_deref().ok_or_else(AssetError::invalid)?)
+            })
             .err()
             .map_or(Reason::None, |error| error.reason)
     };
@@ -203,7 +223,7 @@ mod tests {
 
     #[test]
     fn idle_known_is_not_a_backup_publication_or_native_qualification() {
-        assert!(!NATIVE_BACKUP_QUALIFIED);
+        assert!(!NATIVE_ANDROID_UPLOAD_KEY_BACKUP_QUALIFIED);
         let mut state = model();
         assert!(delivered_current(&state));
         state.slot.as_mut().unwrap().vault.backup_export_published = false;
@@ -211,6 +231,20 @@ mod tests {
         let status = DocumentBinding::status_data_modes(&state, true, true);
         let value = serde_json::to_value(status).unwrap();
         assert!(value["operation"].get("backupDelivered").is_none());
+    }
+
+    #[test]
+    fn android_upload_key_scope_does_not_qualify_other_desktop_contexts() {
+        // Scope DATA only: no picker, native qualification or source authority.
+        let mut context = context(1);
+        assert!(require_android_context(&context).is_err()); // GitHub mode.
+        Arc::get_mut(&mut context).unwrap().execution_mode = commands::ExecutionMode::Local;
+        assert!(require_android_context(&context).is_ok());
+        for platform in [Platform::Ios, Platform::Both] {
+            Arc::get_mut(&mut context).unwrap().platform = platform;
+            assert!(require_android_context(&context).is_err());
+        }
+        assert!(!NATIVE_ANDROID_UPLOAD_KEY_BACKUP_QUALIFIED);
     }
 
     #[test]
