@@ -578,6 +578,13 @@ impl State {
                 && route.received == route.completed
         })
     }
+    /// A certificate key reply must have actually entered and returned on the
+    /// original writer. This alone is not worker/native/private retirement.
+    pub(super) fn certificate_key_returned(&self) -> bool {
+        self.route.try_lock().is_ok_and(|route| !route.failed && route.pending.is_none()
+            && !route.ack_writing && route.received == route.completed && route.completed >= 1
+            && route.ack_entered.first() == Some(&true))
+    }
     /// After F only an already-armed attempt may publish its bounded audit.
     /// This never admits another Pending event or authorizes provider work.
     pub(super) fn accepts_audit(&self, event: &apple_wire::EventDataFrame) -> bool {

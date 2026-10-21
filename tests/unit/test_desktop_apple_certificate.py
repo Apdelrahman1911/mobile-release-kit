@@ -97,9 +97,21 @@ def selected(root, runtime, mode="certificate-review", *, key_history=True, prio
 
 
 class CertificateWorkerTests(unittest.TestCase):
-    def execute(self, mode="certificate-review", *, existing=False, fault=None, prior_receipt=None):
+    def execute(self, mode="certificate-review", *, existing=False, fault=None, prior_receipt=None, restored=False):
         with old.BundleWorkerTests.files(self) as (base, root, runtime):
             value = selected(root, runtime, mode, key_history=fault != "no-key-history", prior_receipt=prior_receipt)
+            if restored:
+                # NEW-only restore changes all ref identities, never the old
+                # row. The real private verifier below remains explicitly fake.
+                current = {"vaultId": "a" * 32, "generationId": "b" * 32, "recordId": "e" * 32,
+                           "revisionId": "d" * 32, "revisionCounter": 1}
+                scope = value["native"]["certificate"]
+                scope["sourceKey"], scope["keyPreparation"] = current, None
+                scope["sourceP8"].update(vaultId=current["vaultId"], generationId=current["generationId"])
+                value["context"].update(keyRecordId=current["recordId"], keyRecordRevision=1)
+            if fault in {"prior-csr", "prior-spki"}:
+                field = "csrSha256" if fault == "prior-csr" else "publicKeySha256"
+                value["native"]["certificate"]["prior"][field] = "e" * 64
             initial_prior = copy.deepcopy(value["native"]["certificate"]["prior"])
             material = old.MATERIAL + (base64.b64encode(PRIVATE), CSR, base64.b64encode(SPKI))
             body = old.PREFIX + old.encode({"schemaVersion": 1, "files": [{"role": role, "bytes": len(raw)}
@@ -141,7 +153,13 @@ class CertificateWorkerTests(unittest.TestCase):
                 digest = api.digest(api.canonical(payload))
                 if kind == "certificate-key":
                     ack = {"keySha256": digest, "csrSha256": api.digest(CSR), "publicKeySha256": api.digest(SPKI),
-                           "keySavedAckSha256": None if fault == "no-key-history" else "8" * 64}
+                           "keySavedAckSha256": None if restored or fault == "no-key-history" else "8" * 64}
+                    if fault == "restored-key-stop":
+                        engine.input.stop("cancelled")
+                    if fault == "restored-key-source-changed":
+                        (root / "release/version.properties").write_bytes(b"VERSION_NAME=1.2.3\nBUILD_NUMBER=43\n")
+                    if fault == "restored-key-wrong-ack":
+                        ack["keySha256"] = "0" * 64
                 elif kind == "certificate-identities":
                     rows = payload["certificates"]
                     ack = {"identitySha256": digest, "batch": payload["batch"], "seen": len(rows), "ambiguous": False,
@@ -425,6 +443,56 @@ class CertificateWorkerTests(unittest.TestCase):
                 self.assertNotIn("create_certificate", calls)
                 self.assertTrue(engine.service.closed() and engine.input.material_closed())
 
+    def test_restored_new_reference_reconciles_same_key_without_restoring_old_history_or_post(self):
+        receipt = issuance.CertificateCreationReceipt("certificate-one", None, None, None)
+        engine, code, frames, calls = self.execute("certificate-reconcile", existing=True, prior_receipt=receipt, restored=True)
+        self.assertEqual(code, 0, repr(engine.primary))
+        native = engine.request.native["certificate"]
+        self.assertNotEqual(native["sourceKey"], native["prior"]["sourceKey"])
+        self.assertEqual(native["prior"]["sourceKey"], KEY)
+        self.assertIsNone(native["keyPreparation"])
+        result = frames[-1]["payload"]["result"]
+        self.assertEqual((result["decision"], result["comparison"], result["attempt"]["status"]),
+                         ("comparison-only", "same-response", "unknown"))
+        self.assertFalse(result["attempt"]["retryAllowed"] or result["credentialReady"])
+        self.assertEqual(calls[:7], ["probe"] * 6 + ["verifier"])
+        self.assertNotIn("create_certificate", calls)
+        self.assertIsNone(engine.service.attempt)
+        self.assertFalse(any(row["kind"] in {"certificate-pending", "certificate-attempt"} for row in frames))
+        self.assertTrue(engine.service.closed() and engine.input.material_closed())
+
+    def test_restored_key_both_prior_hashes_stop_before_first_provider_get(self):
+        for fault in ("prior-csr", "prior-spki"):
+            with self.subTest(fault=fault):
+                engine, code, frames, calls = self.execute("certificate-reconcile", restored=True, fault=fault)
+                self.assertEqual(code, 0)  # A returned refusal is still a valid terminal transport.
+                self.assertNotEqual(frames[-1]["payload"]["outcome"], "complete")
+                self.assertIsNone(frames[-1]["payload"]["result"])
+                self.assertEqual(calls, ["probe"] * 6 + ["verifier"])
+                self.assertIsNone(engine.service.attempt)
+                self.assertTrue(engine.service.closed() and engine.input.material_closed())
+
+    def test_restored_key_stop_current_source_or_wrong_ack_cannot_start_inventory(self):
+        for fault in ("restored-key-stop", "restored-key-source-changed", "restored-key-wrong-ack"):
+            with self.subTest(fault=fault):
+                engine, code, frames, calls = self.execute("certificate-reconcile", restored=True, fault=fault)
+                self.assertEqual(code, 0)
+                self.assertNotEqual(frames[-1]["payload"]["outcome"], "complete")
+                self.assertEqual(calls, ["probe"] * 6 + ["verifier"])
+                self.assertIsNone(frames[-1]["payload"]["result"])
+                self.assertIsNone(engine.service.attempt)
+
+    def test_restored_key_fresh_reuse_needs_no_old_key_saved_but_cannot_offer_issuance(self):
+        for existing, decision, reason in ((True, "reuse", "existing-certificate"),
+                                           (False, "blocked", "key-history-unavailable")):
+            with self.subTest(existing=existing):
+                engine, code, frames, calls = self.execute(existing=existing, restored=True)
+                self.assertEqual(code, 0, repr(engine.primary))
+                result = frames[-1]["payload"]["result"]
+                self.assertEqual((result["decision"], result["reason"]), (decision, reason))
+                self.assertIsNone(engine.request.native["certificate"]["keyPreparation"])
+                self.assertNotIn("create_certificate", calls)
+
     def test_partial_or_denied_restart_read_cannot_become_absence_or_recovered_disposition(self):
         receipt = issuance.CertificateCreationReceipt("certificate-one", None, None, None)
         for fault in ("partial", "denied"):
@@ -440,16 +508,19 @@ class CertificateWorkerTests(unittest.TestCase):
 
 
 class CertificateProtocolTests(unittest.TestCase):
-    def test_restart_prior_requires_exact_selected_key_account_target_and_receipt(self):
+    def test_restart_prior_preserves_valid_old_ref_and_exact_account_target_receipt(self):
         with old.BundleWorkerTests.files(self) as (_, root, runtime):
             receipt = issuance.CertificateCreationReceipt("certificate-one", None, None, None)
             value = selected(root, runtime, "certificate-reconcile", prior_receipt=receipt)
             wire.parse_request(old.encode(value))
+            restored = copy.deepcopy(value)
+            restored["native"]["certificate"]["prior"]["sourceKey"] = {**KEY, "revisionId": "f" * 32}
+            wire.parse_request(old.encode(restored))  # DATA selection only; not key proof or a returned ACK.
             for field in ("key", "account", "name", "entitlements", "receipt"):
                 invalid = copy.deepcopy(value)
                 prior = invalid["native"]["certificate"]["prior"]
                 if field == "key":
-                    prior["sourceKey"] = {**prior["sourceKey"], "revisionId": "f" * 32}
+                    prior["sourceKey"] = {**prior["sourceKey"], "revisionId": "0" * 32}
                 elif field == "account":
                     prior["record"]["context"]["accountRef"] = "f" * 64
                 elif field == "name":
@@ -460,6 +531,16 @@ class CertificateProtocolTests(unittest.TestCase):
                     prior["receipt"]["resourceId"] = "another-certificate"
                 with self.subTest(field=field), self.assertRaises(wire.ProtocolError):
                     wire.parse_request(old.encode(invalid))
+
+    def test_restored_reference_never_aliases_key_preparation_or_makes_create_review(self):
+        with old.BundleWorkerTests.files(self) as (_, root, runtime):
+            value = selected(root, runtime, "certificate-create")
+            value["native"]["certificate"]["sourceKey"] = {**KEY, "revisionId": "e" * 32}
+            with self.assertRaises(wire.ProtocolError):
+                wire.parse_request(old.encode(value))
+            value["native"]["certificate"]["keyPreparation"] = None
+            with self.assertRaises(wire.ProtocolError):
+                wire.parse_request(old.encode(value))
 
     def test_modes_roles_and_original_limits_are_disjoint(self):
         with old.BundleWorkerTests.files(self) as (_, root, runtime):

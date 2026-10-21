@@ -542,7 +542,7 @@ pub(super) fn request(
     if input.context().mode.certificate() {
         let key_preparation=apple_wire::certificate_key_preparation(account,&scope)?;
         let prior=if input.context().mode == apple_wire::Mode::CertificateReconcile {
-            Some(apple_wire::certificate_prior(account,&scope,input.context().reference.as_ref().ok_or_else(apple_wire::invalid)?)?)
+            Some(apple_wire::certificate_prior(account,&scope,input.context())?)
         } else { None };
         let certificate=scope.certificate.as_mut().ok_or_else(apple_wire::invalid)?;
         certificate.key_preparation=key_preparation; certificate.prior=prior;
@@ -1051,5 +1051,5 @@ pub(super) fn certificate_history(owner: &Session) -> Option<apple_wire::Certifi
     let jobs=owner.apple.native.try_lock().ok()?;
     if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) { return None; }
     let Some(Ok(Value::Account(account)))=jobs.slots[INITIAL].returned.as_ref() else { return None; };
-    apple_wire::certificate_recovery_history(account,&binding.scope).ok()
+    super::super::apple_key::certificate::recovery_history(owner,account,&binding)
 }

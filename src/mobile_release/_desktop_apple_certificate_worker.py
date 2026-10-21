@@ -99,6 +99,10 @@ class CertificateSteps:
         wire.need(self.public_csr.key_ref == wire.key_ref(op.request.native["certificate"]["sourceKey"])
                   and csr == self.public_csr.csr_pem and api.digest(spki) == self.public_csr.public_key_sha256
                   and self.key_payload == wire.key_payload(op.request, csr, spki))
+        if op.request.context["mode"] == "certificate-reconcile":
+            prior = op.request.native["certificate"]["prior"]
+            wire.need(prior is not None and prior["csrSha256"] == api.digest(csr)
+                      and prior["publicKeySha256"] == api.digest(spki))
         if require_history:
             history = op.request.native["certificate"]["keyPreparation"]
             wire.need(history is not None and wire.common.sha(self.key_saved_ack)

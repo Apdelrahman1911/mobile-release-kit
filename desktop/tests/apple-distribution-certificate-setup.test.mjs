@@ -313,6 +313,35 @@ test('fresh restart history selects exact earlier reference/name for read-only r
   assert.equal(h.state.certificateResult.attempt.operationId, id('9').operationId); assert.equal(h.state.certificateResult.attempt.status, 'unknown');
 });
 
+test('restored encrypted record keeps its NEW selection while old request history offers only explicit read-only continuation', async t => {
+  const h = harness(t), restoredId = 'e'.repeat(32), recorded = history();
+  await h.ready;
+  const current = h.assets; current.status.records[1].recordId = restoredId;
+  h.replaceAssets(current); h.controller.selectCertificateKey(restoredId, 1);
+  const review = await prepared(h);
+  assert.equal(review.context.keyRecordId, restoredId);
+  // Native supplied comparison DATA, not a mocked private key/binding. Its
+  // original proof and cross-ref history filter are tested in their own seams.
+  await started(h, review, { ...complete(review, result('certificate-review', 'blocked', 'account-pending')),
+    certificateRecovery: recorded }, 3);
+  const count = h.calls.length;
+  const pending = h.controller.continuePreviousCertificate(id('9').operationId, id('9').ownerGeneration);
+  const call = h.calls.at(-1);
+  assert.equal(h.calls.length, count + 1); assert.equal(call.kind, 'prepare');
+  assert.equal(call.request.mode, 'certificate-reconcile'); assert.equal(call.request.keyRecordId, restoredId);
+  assert.deepEqual(call.request.reference, id('9'));
+  const op = operation(call.request, '2'); h.reply(call, status(4, op)); await pending;
+  assert.equal(h.state.consent.acknowledged, false); assert.equal(h.state.certificateReviewReference, null);
+  const comparison = result('certificate-reconcile', 'comparison-only', 'comparison-only', {
+    certificateId: '_observed-1', comparison: 'same-response', attempt: attempt('9', 'unknown', 'provider_outcome_unknown') });
+  await started(h, op, complete(op, comparison), 5);
+  assert.equal(h.state.certificateResult.attempt.status, 'unknown');
+  assert.equal(h.state.certificateResult.attempt.retryAllowed, false);
+  assert.equal(h.state.certificateResult.credentialReady, false);
+  assert.ok(h.state.certificateCreateReason);
+  assert.ok(h.calls.every(row => !['certificate-create', 'key-prepare', 'p12-save'].includes(row.request.mode)));
+});
+
 test('historical selection is refused after synchronous name/source drift or withdrawal, without overwriting the newer input', async t => {
   for (const change of ['reentrant-name', 'key-drift', 'withdrawal']) await t.test(change, async t => {
     const h = harness(t), recorded = history(); const op = await reviewed(h, result('certificate-review', 'blocked', 'account-pending'), { certificateRecovery: recorded });

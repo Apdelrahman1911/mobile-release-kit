@@ -114,11 +114,24 @@ impl CertificateScopeData {
                 || review.selection.csr_sha256 != key.csr_sha256 || review.selection.public_key_sha256 != key.public_key_sha256 { return false; }
         } else if self.review.is_some() || scope.reviewed_at.is_some() { return false; }
         match (&self.prior, context.mode) {
-            (Some(prior), Mode::CertificateReconcile) => prior.source_key == self.source_key && prior.target == target
+            // The prior keeps its original full reference after a NEW-only
+            // backup restore. This is read-only selection DATA, not a current
+            // loan: key_ack must compare both old hashes before any GET.
+            (Some(prior), Mode::CertificateReconcile) => prior.source_key.validate().is_ok() && prior.target == target
                 && context.reference.as_ref() == Some(&prior.reference) && sha(&prior.csr_sha256) && sha(&prior.public_key_sha256)
                 && prior.record.context.account_ref == scope.provisioning.account_ref
                 && prior.record.context.operation_id == prior.reference.operation_id
                 && receipt_matches(&prior.receipt, &prior.record),
+            (None, mode) => mode != Mode::CertificateReconcile,
+            _ => false,
+        }
+    }
+    /// Comparison only, called after the actual current loan/public-key check.
+    /// No other mode may carry a prior, and no changed-ref history grants POST.
+    pub(crate) fn prior_key_matches(&self, mode: Mode, csr: &str, spki: &str) -> bool {
+        match (&self.prior, mode) {
+            (Some(prior), Mode::CertificateReconcile) => sha(csr) && sha(spki)
+                && prior.csr_sha256 == csr && prior.public_key_sha256 == spki,
             (None, mode) => mode != Mode::CertificateReconcile,
             _ => false,
         }

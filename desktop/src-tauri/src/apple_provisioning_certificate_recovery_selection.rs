@@ -20,7 +20,7 @@ pub(crate) struct CertificateRecoveryHistory {
     pub(crate) hidden_unresolved: u32,
 }
 
-pub(crate) fn certificate_recovery_scope_matches(row: &CertificateIssuanceRow, scope: &ScopeData) -> bool {
+fn certificate_project_scope_matches(row: &CertificateIssuanceRow, scope: &ScopeData) -> bool {
     let Some(certificate) = &scope.certificate else { return false; };
     let Ok(mut target) = certificate.target(&scope.target) else { return false; };
     // List an old name only as DATA. Explicit selection must repeat the FULL
@@ -29,11 +29,19 @@ pub(crate) fn certificate_recovery_scope_matches(row: &CertificateIssuanceRow, s
     row.intent.context.account_ref == scope.provisioning.account_ref
         && row.intent.provenance.project_binding == scope.provenance.project_binding
         && row.intent.provenance.registered_root == scope.provenance.registered_root
-        && row.intent.source_key == certificate.source_key && row.intent.target == target
+        && row.intent.target == target
 }
-pub(crate) fn certificate_recovery_history(account: &AccountSnapshot, scope: &ScopeData)
+pub(crate) fn certificate_recovery_scope_matches(row: &CertificateIssuanceRow, scope: &ScopeData) -> bool {
+    certificate_project_scope_matches(row, scope)
+        && scope.certificate.as_ref().is_some_and(|certificate| row.intent.source_key == certificate.source_key)
+}
+/// Optional hashes are comparison DATA from the caller's actually returned
+/// key check. The native publisher separately requires its original ACK and
+/// full retirement; this projection cannot grant a key loan or reconciliation.
+pub(crate) fn certificate_recovery_history(account: &AccountSnapshot, scope: &ScopeData,
+    checked_key: Option<(&str, &str)>)
     -> Result<CertificateRecoveryHistory, BridgeError> {
-    need(scope.certificate.is_some())?;
+    need(scope.certificate.is_some() && checked_key.is_none_or(|(csr, spki)| sha(csr) && sha(spki)))?;
     let old = recovery_history(account, scope)?; // SAME combined32 cap, duplicate/account checks.
     let visible_unresolved = old.attempts.iter().filter(|row|
         row.native_settlement != NativeSettlement::Known || !matches!(row.status,
@@ -45,7 +53,9 @@ pub(crate) fn certificate_recovery_history(account: &AccountSnapshot, scope: &Sc
             owner_generation: row.intent.provenance.owner_generation.as_str().into() };
         need(reference.valid() && reference.operation_id == row.intent.context.operation_id
             && display_name(&row.intent.target.display_name) && timestamp_shape(&row.intent.observed_at))?;
-        if !certificate_recovery_scope_matches(row, scope) { continue; }
+        let same_key = checked_key.is_some_and(|(csr, spki)| row.intent.csr_sha256 == csr
+            && row.intent.public_key_sha256 == spki && certificate_project_scope_matches(row, scope));
+        if !certificate_recovery_scope_matches(row, scope) && !same_key { continue; }
         if row.unresolved() { hidden = hidden.checked_sub(1).ok_or_else(invalid)?; }
         attempts.push(CertificateRecoveryAttempt { reference,
             display_name: row.intent.target.display_name.clone(), observed_at: row.intent.observed_at.clone(),
@@ -59,8 +69,11 @@ pub(crate) fn certificate_recovery_history(account: &AccountSnapshot, scope: &Sc
     Ok(result)
 }
 
-pub(crate) fn certificate_prior(account: &AccountSnapshot, scope: &ScopeData, reference: &Reference)
+pub(crate) fn certificate_prior(account: &AccountSnapshot, scope: &ScopeData, context: &Context)
     -> Result<CertificatePriorData, BridgeError> {
+    need(context.mode == Mode::CertificateReconcile)?;
+    let reference = context.reference.as_ref().ok_or_else(invalid)?;
+    need(reference.valid())?;
     let certificate = scope.certificate.as_ref().ok_or_else(invalid)?;
     let target = certificate.target(&scope.target)?;
     // Validate the full original roster even when selecting just one row.
@@ -68,7 +81,11 @@ pub(crate) fn certificate_prior(account: &AccountSnapshot, scope: &ScopeData, re
     let row = account.certificate_rows.iter().find(|row|
         row.intent.provenance.operation_id.as_str() == reference.operation_id
             && row.intent.provenance.owner_generation.as_str() == reference.owner_generation).ok_or_else(invalid)?;
-    need(certificate_recovery_scope_matches(row, scope) && row.intent.target == target)?;
+    // Select immutable historical DATA only. A different current full ref is
+    // not an alias for this row: the SAME new operation must independently
+    // compare its real key/CSR with both old hashes before the first GET.
+    need(certificate_project_scope_matches(row, scope) && row.intent.target == target
+        && row.intent.source_key.validate().is_ok())?;
     Ok(CertificatePriorData { reference: reference.clone(), source_key: row.intent.source_key.clone(),
         target: row.intent.target.clone(), csr_sha256: row.intent.csr_sha256.clone(),
         public_key_sha256: row.intent.public_key_sha256.clone(), record: row.update.record.clone(),
@@ -115,12 +132,115 @@ mod tests {
         AccountSnapshot { revision:crate::application_state_store::Revision(7),account:scope.provisioning.account_ref.clone(),
             rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![],p12_rows:vec![] }
     }
+    fn reconcile_context(binding: &RequestBinding, reference: Reference) -> Context {
+        let mut context = binding.context.clone();
+        context.mode = Mode::CertificateReconcile;
+        context.reference = Some(reference);
+        context
+    }
+    fn restored_selection(binding: &mut std::sync::Arc<RequestBinding>) {
+        let binding = std::sync::Arc::get_mut(binding).unwrap();
+        let certificate = binding.scope.certificate.as_mut().unwrap();
+        certificate.source_key = crate::credential_setup::KeyReference { vault_id:"a".repeat(32), generation_id:"b".repeat(32),
+            record_id:"e".repeat(32), revision_id:"d".repeat(32), revision_counter:1 };
+        certificate.source_p8.vault_id = certificate.source_key.vault_id.clone();
+        certificate.source_p8.generation_id = certificate.source_key.generation_id.clone();
+        certificate.key_preparation = None;
+        binding.context.key_record_id = Some(certificate.source_key.record_id.clone());
+        binding.context.key_record_revision = Some(1);
+    }
+    #[test]
+    fn restored_key_history_compares_both_hashes_without_rewriting_old_rows_or_key_saved() {
+        let mut binding = binding(Mode::CertificateReview);
+        let mut account = account(&binding.scope);
+        let mut old = row(&binding);
+        old.native_settlement = NativeSettlement::Unknown;
+        account.certificate_rows.push(old.clone());
+        account.key_rows.push(saved_key(&binding));
+        restored_selection(&mut binding);
+        assert!(certificate_key_preparation(&account,&binding.scope).unwrap().is_none());
+        let hashes = Some((old.intent.csr_sha256.as_str(),old.intent.public_key_sha256.as_str()));
+        let hidden = certificate_recovery_history(&account,&binding.scope,None).unwrap();
+        assert!(hidden.attempts.is_empty() && hidden.hidden_unresolved == 1);
+        let shown = certificate_recovery_history(&account,&binding.scope,hashes).unwrap();
+        assert!(shown.attempts.len() == 1 && shown.hidden_unresolved == 0);
+        for (csr,spki) in [("e".repeat(64),old.intent.public_key_sha256.clone()),
+            (old.intent.csr_sha256.clone(),"e".repeat(64))] {
+            let shown = certificate_recovery_history(&account,&binding.scope,Some((&csr,&spki))).unwrap();
+            assert!(shown.attempts.is_empty() && shown.hidden_unresolved == 1);
+        }
+        let context = reconcile_context(&binding,shown.attempts[0].reference.clone());
+        let prior = certificate_prior(&account,&binding.scope,&context).unwrap();
+        assert!(prior.source_key == old.intent.source_key);
+        assert!(prior.source_key != binding.scope.certificate.as_ref().unwrap().source_key);
+        assert!(prior.record == old.update.record && prior.receipt == old.update.receipt);
+        assert!(account.certificate_rows[0] == old && account.certificate_rows[0].unresolved());
+        assert!(account.key_rows[0].intent.destination == old.intent.source_key);
+        assert!(certificate_prior(&account,&binding.scope,&binding.context).is_err());
+    }
+    #[test]
+    fn restored_key_hashes_cannot_disclose_foreign_project_root_or_target() {
+        for field in 0..7 {
+            let mut binding = binding(Mode::CertificateReview);
+            let mut account = account(&binding.scope);
+            let mut old = row(&binding);
+            let (csr,spki) = (old.intent.csr_sha256.clone(),old.intent.public_key_sha256.clone());
+            match field {
+                0 => old.intent.provenance.project_binding.project_id = Id::parse(&"f".repeat(32)).unwrap(),
+                1 => old.intent.provenance.registered_root.inode += 1,
+                2 => old.intent.target.team_id = "OTHERTEAM1".into(),
+                3 => old.intent.target.app_id_prefix = "OTHERTEAM1".into(),
+                4 => old.intent.target.bundle_id = "com.other.fixture".into(),
+                5 => old.intent.target.entitlements_sha256 = "f".repeat(64),
+                _ => old.intent.context.account_ref = crate::apple_provisioning_journal::AccountRef::from_selected_issuer([2;16]),
+            }
+            let reference = Reference { operation_id:old.intent.context.operation_id.clone(),
+                owner_generation:old.intent.provenance.owner_generation.as_str().into() };
+            account.certificate_rows.push(old);
+            restored_selection(&mut binding);
+            let history = certificate_recovery_history(&account,&binding.scope,Some((&csr,&spki)));
+            if field == 6 { assert!(history.is_err()); }
+            else { let history = history.unwrap(); assert!(history.attempts.is_empty() && history.hidden_unresolved == 1); }
+            assert!(certificate_prior(&account,&binding.scope,&reconcile_context(&binding,reference)).is_err());
+        }
+    }
+    #[test]
+    fn restored_prior_stays_reconcile_only_and_both_key_hashes_are_rechecked() {
+        let mut binding = binding(Mode::CertificateReview);
+        let mut account = account(&binding.scope);
+        let old = row(&binding);
+        let reference = Reference { operation_id:old.intent.context.operation_id.clone(),
+            owner_generation:old.intent.provenance.owner_generation.as_str().into() };
+        account.certificate_rows.push(old.clone());
+        restored_selection(&mut binding);
+        let context = reconcile_context(&binding,reference);
+        let prior = certificate_prior(&account,&binding.scope,&context).unwrap();
+        let binding = std::sync::Arc::get_mut(&mut binding).unwrap();
+        binding.context = context;
+        binding.scope.certificate.as_mut().unwrap().prior = Some(prior);
+        let certificate = binding.scope.certificate.as_ref().unwrap();
+        assert!(certificate.valid(&binding.context,&binding.scope));
+        // This is the exact DATA comparison used AFTER native Loan matching
+        // in key_ack; it cannot construct that loan or a returned ACK.
+        assert!(certificate.prior_key_matches(Mode::CertificateReconcile,&old.intent.csr_sha256,&old.intent.public_key_sha256));
+        assert!(!certificate.prior_key_matches(Mode::CertificateReconcile,&"f".repeat(64),&old.intent.public_key_sha256));
+        assert!(!certificate.prior_key_matches(Mode::CertificateReconcile,&old.intent.csr_sha256,&"f".repeat(64)));
+        for mode in [Mode::CertificateReview,Mode::CertificateCreate,Mode::KeyPrepare,Mode::P12Review,Mode::P12Save] {
+            let mut context = binding.context.clone(); context.mode = mode;
+            assert!(!certificate.valid(&context,&binding.scope));
+            assert!(!certificate.prior_key_matches(mode,&old.intent.csr_sha256,&old.intent.public_key_sha256));
+        }
+        binding.scope.certificate.as_mut().unwrap().prior.as_mut().unwrap().source_key.revision_id = "0".repeat(32);
+        assert!(!binding.scope.certificate.as_ref().unwrap().valid(&binding.context,&binding.scope));
+        account.certificate_rows[0].intent.source_key.revision_id = "0".repeat(32);
+        assert!(certificate_prior(&account,&binding.scope,&binding.context).is_err());
+    }
     #[test]
     fn certificate_history_is_redacted_current_fullref_data_and_preserves_pending() {
         let binding=binding(Mode::CertificateReview);let mut account=account(&binding.scope);
         let mut old=row(&binding);old.intent.target.display_name="Explicit previous name".into();
         account.certificate_rows.push(old.clone());
-        let history=certificate_recovery_history(&account,&binding.scope).unwrap();
+        let history=certificate_recovery_history(&account,&binding.scope,None).unwrap();
         assert_eq!(history.attempts.len(),1);assert_eq!(history.hidden_unresolved,0);
         let data=serde_json::to_value(&history).unwrap();
         assert_eq!(data["attempts"][0]["displayName"],"Explicit previous name");
@@ -130,7 +250,7 @@ mod tests {
             assert!(!encoded.contains(private));
         }
         let reference=history.attempts[0].reference.clone();
-        assert!(certificate_prior(&account,&binding.scope,&reference).is_err()); // Name is an explicit local choice, not silently rewritten.
+        assert!(certificate_prior(&account,&binding.scope,&reconcile_context(&binding,reference)).is_err()); // Name is an explicit local choice, not silently rewritten.
         assert!(account.certificate_rows[0]==old && account.certificate_rows[0].unresolved());
     }
     #[test]
@@ -148,8 +268,8 @@ mod tests {
                 _=>old.intent.context.account_ref=crate::apple_provisioning_journal::AccountRef::from_selected_issuer([2;16]),
             }
             account.certificate_rows.push(old);
-            if field==6 { assert!(certificate_recovery_history(&account,&binding.scope).is_err()); }
-            else { let history=certificate_recovery_history(&account,&binding.scope).unwrap();
+            if field==6 { assert!(certificate_recovery_history(&account,&binding.scope,None).is_err()); }
+            else { let history=certificate_recovery_history(&account,&binding.scope,None).unwrap();
                 assert!(history.attempts.is_empty() && history.hidden_unresolved==1); }
         }
     }
@@ -160,11 +280,12 @@ mod tests {
         account.certificate_rows.push(old.clone());
         let reference=Reference { operation_id:old.intent.context.operation_id.clone(),
             owner_generation:old.intent.provenance.owner_generation.as_str().into() };
-        let prior=certificate_prior(&account,&binding.scope,&reference).unwrap();
+        let context=reconcile_context(&binding,reference);
+        let prior=certificate_prior(&account,&binding.scope,&context).unwrap();
         assert!(prior.record==old.update.record && prior.receipt.is_none());
         assert!(account.certificate_rows[0].native_settlement==NativeSettlement::Unknown);
         account.certificate_rows.push(old);
-        assert!(certificate_prior(&account,&binding.scope,&reference).is_err());
+        assert!(certificate_prior(&account,&binding.scope,&context).is_err());
         account.certificate_rows.truncate(1);
         for n in 1..=32 {
             let mut row=account.certificate_rows[0].clone();
@@ -172,7 +293,7 @@ mod tests {
             row.intent.provenance.operation_id=Id::parse(&row.intent.context.operation_id).unwrap();
             account.certificate_rows.push(row);
         }
-        assert!(certificate_recovery_history(&account,&binding.scope).is_err());
+        assert!(certificate_recovery_history(&account,&binding.scope,None).is_err());
     }
 
     fn saved_key(binding:&RequestBinding)->KeyPrepareRow {

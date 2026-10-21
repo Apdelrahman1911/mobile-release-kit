@@ -106,7 +106,14 @@ def validate_native(selected, native):
         need(value["review"] is None and native["reviewedAt"] is None)
     if selected["mode"] == "certificate-reconcile":
         prior = _keys(value["prior"], {"reference", "sourceKey", "target", "csrSha256", "publicKeySha256", "record", "receipt"})
-        need(prior["reference"] == selected["reference"] and prior["sourceKey"] == value["sourceKey"]
+        # Historical sourceKey stays immutable after NEW-only restore. Only
+        # this read-only mode accepts a different valid ref; its fresh native
+        # key ACK and current_key compare both old hashes before inventory.
+        try:
+            key_ref(prior["sourceKey"])
+        except api.ProvisioningError:
+            need(False)
+        need(prior["reference"] == selected["reference"]
              and prior["target"] == {**native["target"], "entitlementsSha256": api.digest(api.canonical(value["entitlements"]))}
              and common.sha(prior["csrSha256"]) and common.sha(prior["publicKeySha256"]))
         previous = record(prior["record"])

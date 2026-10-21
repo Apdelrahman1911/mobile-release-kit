@@ -70,7 +70,7 @@ export function AppleDistributionCertificateSetup({ controller, state, onKeyCred
     </div>}
     {state.previousCertificateAttempts && <section aria-label="Earlier certificate requests">
       <h4>Continue an earlier certificate request</h4>
-      <p>Choose a recorded request to check it with Apple without issuing another certificate. Only its earlier display name is reused; all current inputs are checked again.</p>
+      <p>Choose a recorded request to check it with Apple without issuing another certificate. A restored key must match the original key and certificate request. Only its earlier display name is reused; all current inputs are checked again.</p>
       <ul>{state.previousCertificateAttempts.attempts.map(row => <li key={`${row.reference.operationId}:${row.reference.ownerGeneration}`}>
         <strong>{row.displayName}</strong> — recorded {row.observedAt}
         <p>{appleCertificateRecoveryCopy(row)}</p>
@@ -88,7 +88,7 @@ export function AppleDistributionCertificateSetup({ controller, state, onKeyCred
     </div>}
     <details><summary>Certificate, key and signing: what is separate?</summary>
       <p>The private key stays in encrypted storage. This view never displays a certificate request, private bytes or API token. The native operation checks the actual saved key; a listed record is not permission to use it.</p>
-      <p>A certificate alone is not a P12, provisioning profile, signing assignment or release approval. P12 association and full-reference-changing restore recovery are not provided by these buttons. Existing P12/profile setup remains available above; unsupported account or certificate layouts need manual Apple setup.</p>
+      <p>A certificate alone is not a P12, provisioning profile, signing assignment or release approval. After restoring an encrypted key backup, select the restored record and check existing certificates to find matching earlier requests. Checking one does not resolve its earlier uncertainty or permit another request. Existing P12/profile setup remains separate; unresolved account setup still blocks it.</p>
       <p>The check does not establish live revocation status. A missing or incomplete Apple response never authorizes another request.</p>
       {selected && <p>Selected saved record: <code>{selected.recordId}</code> · revision {selected.recordRevision}. This is a selection comparison, not a current native key loan.</p>}
       {state.certificateResult?.certificateId && <p>Recorded certificate: <code>{state.certificateResult.certificateId}</code>. This identifier is not a saved P12 or signing approval.</p>}

@@ -161,6 +161,12 @@ pub(in crate::saved_command_owner) fn key_ack(owner: &Arc<Session>, sequence: u3
         return Err(invalid());
     }
     let scope = binding.scope.certificate.as_ref().ok_or_else(invalid)?;
+    // A restored NEW reference never relabels the old row. Before acknowledging
+    // the key phase (and therefore before provider inventory), prove BOTH the
+    // original CSR bytes and full-SPKI hash using this SAME fresh loan check.
+    if !scope.prior_key_matches(parent.mode, &input.csr_sha256, &input.public_key_sha256) {
+        return Err(invalid());
+    }
     let history = scope.key_preparation.as_ref().filter(|history|
         history.csr_sha256 == input.csr_sha256 && history.public_key_sha256 == input.public_key_sha256)
         .map(|history| history.update_sha256.clone());
@@ -174,6 +180,23 @@ pub(in crate::saved_command_owner) fn key_ack(owner: &Arc<Session>, sequence: u3
     facts.key = Some(PublicKey { csr: input.csr, spki: input.spki, csr_sha256: input.csr_sha256,
         spki_sha256: input.public_key_sha256, history_sha256: history });
     Ok(bytes)
+}
+
+/// Detached history only after the original writer, worker, native jobs and
+/// private source retirement. Retained public Facts alone are not a receipt.
+pub(in crate::saved_command_owner) fn recovery_history(owner: &Session,
+    account: &crate::apple_provisioning_journal::AccountSnapshot,
+    binding: &Arc<wire::RequestBinding>) -> Option<wire::CertificateRecoveryHistory> {
+    let parent = original(owner).ok()?;
+    if parent.mode != wire::Mode::CertificateReview || !parent.same_binding(binding)
+        || !parent.owner.upgrade().is_some_and(|same| std::ptr::eq(same.as_ref(), owner))
+        || !parent.source_returned.load(Ordering::SeqCst) || !parent.worker_joined.load(Ordering::SeqCst)
+        || !parent.all_jobs_joined.load(Ordering::SeqCst) || !parent.private_drained.load(Ordering::SeqCst)
+        || !parent.clock.completed() || owner.resource_unknown.load(Ordering::SeqCst)
+        || !owner.apple.certificate_key_returned() { return None; }
+    let facts = state(parent).ok()?.facts.try_lock().ok()?;
+    let key = facts.key.as_ref()?;
+    wire::certificate_recovery_history(account, &binding.scope, Some((&key.csr_sha256, &key.spki_sha256))).ok()
 }
 
 pub(in crate::saved_command_owner) fn identities_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificateIdentityInput) -> Result<Vec<u8>, BridgeError> {
@@ -291,7 +314,9 @@ fn positive_joined(owner:&Arc<Session>,id:Option<&str>,hashes:Option<(&str,&str)
     let (_,asset,loan,binding)=originals(owner)?;
     let mut facts=state(parent)?.facts.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
     let key=facts.key.as_ref().ok_or_else(invalid)?;
-    if facts.policy.is_none() || !loan.matches_public_material(&asset,key.csr.as_bytes(),&key.spki) {return Err(invalid());}
+    if facts.policy.is_none() || !loan.matches_public_material(&asset,key.csr.as_bytes(),&key.spki)
+        || binding.scope.certificate.as_ref().is_none_or(|scope|
+            !scope.prior_key_matches(parent.mode,&key.csr_sha256,&key.spki_sha256)) {return Err(invalid());}
     let spki_sha256=key.spki_sha256.clone();
     let selected=facts.batch.as_mut().and_then(|batch|batch.selected.take()).ok_or_else(invalid)?;
     if id!=selected.id || current_time()? >= selected.after

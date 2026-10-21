@@ -12,6 +12,32 @@ fn context() -> apple_wire::Context {
         "mode":"review","reference":null,"newApplication":false,"displayName":"Explicit name"})).unwrap().context
 }
 
+#[test]
+fn certificate_history_requires_original_entered_returned_key_ack_not_completed_data() {
+    let state = State::new(None);
+    assert!(!state.certificate_key_returned());
+    {
+        let mut route = state.route.lock().unwrap();
+        route.received = 1;
+        route.ack_entered[0] = true;
+    }
+    assert!(!state.certificate_key_returned()); // Entered/partial is not returned.
+    state.route.lock().unwrap().completed = 1;
+    assert!(state.certificate_key_returned()); // Only this original route factor, NOT all-jobs finality.
+    for field in 0..4 {
+        let mut route = state.route.lock().unwrap();
+        match field { 0 => route.ack_writing = true, 1 => route.failed = true,
+            2 => route.received = 2, _ => route.ack_entered[0] = false }
+        drop(route);
+        assert!(!state.certificate_key_returned());
+        let mut route = state.route.lock().unwrap();
+        route.ack_writing = false; route.failed = false; route.received = 1; route.ack_entered[0] = true;
+    }
+    let held = state.route.lock().unwrap();
+    assert!(!state.certificate_key_returned()); // Never wait/reborrow the route under a publication guard.
+    drop(held);
+}
+
 fn projection() -> RunProjection {
     let context = context();
     let terminal: apple_wire::Terminal = serde_json::from_value(json!({
