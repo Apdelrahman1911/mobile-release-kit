@@ -1,4 +1,4 @@
-//! Main-document delegation of ONE existing prepared, nonpublishing Store
+//! Main-document delegation of ONE existing prepared, exactly consented Store
 //! step. The old relay/owner/GO/STOP/history paths do the work; IPC is DATA.
 use super::*;
 use crate::{
@@ -10,6 +10,8 @@ use crate::{
     service_store_protocol as p, service_store_requests as requests,
 };
 use serde::Deserialize;
+#[path = "asset_session_agent_store_release.rs"]
+mod release;
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
     if bytes.is_empty() || bytes.len() > p::RAW_LIMIT {
         return Err(BridgeError::invalid());
@@ -39,6 +41,8 @@ impl DocumentBinding {
     fn store_delegate_owner(&self, kind: p::Kind) -> &SavedCommandOwner {
         match kind {
             p::Kind::AccessCheck => self.inner.bridge.local_store.agent_store_original(),
+            p::Kind::Execute => self.inner.bridge.local_store_execute.agent_store_original(),
+            p::Kind::Reconcile => self.inner.bridge.local_store_reconcile.agent_store_original(),
             p::Kind::CandidatePrepare => {
                 self.inner.bridge.local_store_prepare.agent_store_original()
             }
@@ -51,6 +55,8 @@ impl DocumentBinding {
     ) -> crate::local_store_preflight_protocol::Availability {
         match kind {
             p::Kind::AccessCheck => self.local_store_gate(s),
+            p::Kind::Execute => self.local_store_execute_gate(s),
+            p::Kind::Reconcile => self.local_store_reconcile_gate(s),
             p::Kind::CandidatePrepare => self.local_store_prepare_gate(s),
         }
     }
@@ -70,6 +76,7 @@ impl DocumentBinding {
     ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
         let r = a.review();
         match r.kind {
+            p::Kind::Execute | p::Kind::Reconcile => self.agent_store_release_material(s, a, registration, root),
             p::Kind::AccessCheck => {
                 let m = self
                     .inner
@@ -154,7 +161,7 @@ impl DocumentBinding {
                 &args.owner_generation,
                 args.expected_status_revision,
             )?;
-            if args.consent_version != args.kind.consent(approval.review().platform) {
+            if Some(args.consent_version.as_str()) != approval.review().consent() {
                 return Err(BridgeError::invalid());
             }
             let selected = self
@@ -368,9 +375,12 @@ impl DocumentBinding {
             return Err(public(Error::Conflict));
         }
         let material = self.agent_store_material(&state, &grant.approval, registration, &root)?;
-        let admitted = self
-            .store_delegate_owner(grant.scope.review.kind)
-            .start_agent_store(entry, Some((registration, root)), gate, material)?;
+        let admitted = if matches!(grant.scope.review.kind, p::Kind::Execute | p::Kind::Reconcile) {
+            self.start_agent_store_release(&state, entry, Some((registration, root)), gate, material)?
+        } else {
+            self.store_delegate_owner(grant.scope.review.kind)
+                .start_agent_store(entry, Some((registration, root)), gate, material)?
+        };
         drop(edit);
         drop(state);
         admitted.release();

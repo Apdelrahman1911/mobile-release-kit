@@ -12,7 +12,7 @@ const uncertain='The original Store permission or request is unconfirmed. Keep i
 const nativeReason=(c:AgentStoreContext)=>c.preview?'CLI Store delegation is unavailable in preview.':!c.port||!c.nativeSession?'Connect the installed Desktop first.':null;
 const same=(a:AgentStoreContext,b:AgentStoreContext)=>a.port===b.port&&a.nativeSession===b.nativeSession&&a.projectId===b.projectId&&a.epoch===b.epoch&&a.preview===b.preview;
 const sameGrant=(a:AgentStoreAccess,b:AgentStoreAccess)=>a.projectId===b.projectId&&a.serviceInstance===b.serviceInstance&&a.grantId===b.grantId&&a.reviewId===b.reviewId&&sameStoreReview(a.review,b.review);
-/** ONE retained permission child shared by basic access and candidate Prepare.
+/** ONE retained permission child shared by all exact Store reviews.
  * No Submit, no automatic status/read/renewal, no native-result -> JS join. */
 export class AgentStoreAccessController {
   private context=absent(); private original:AgentStoreContext|null=null; private generation:object={};
@@ -28,7 +28,7 @@ export class AgentStoreAccessController {
   whenSettled=():Promise<void>=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
   private read():AgentStoreContext {
     try {const c=this.source.current();if(typeof c.preview!=='boolean'||!c.epoch||typeof c.epoch!=='object'||
-      c.nativeSession!==null&&typeof c.nativeSession!=='object'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>2)return absent();
+      c.nativeSession!==null&&typeof c.nativeSession!=='object'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>4)return absent();
       const p=c.port,port=p&&['status','allow','revoke'].every(k=>typeof p[k as keyof AgentStoreAccessPort]==='function')?p:null;
       const reviews=c.reviews.map(parseStoreReview).filter((r):r is StoreReview=>r!==null);
       if(new Set(reviews.map(r=>r.kind)).size!==reviews.length)return absent();
@@ -48,15 +48,23 @@ export class AgentStoreAccessController {
   }
   ownerReason=():string|null=>this.state.unknown?uncertain:this.normal||this.revokeWork?'The original Store permission call is still returning. Check or revoke that original.':
     this.state.access?.pending?'The original delegated Store request is not yet retired by all owners.':this.state.access?.enabled?'A local CLI has one-use permission for this Store review. Revoke it before different work.':null;
+  // DATA pin for App's peer check. Only the selected exact original may be
+  // excluded; each local controller independently rematches its private Attempt.
+  // During delegation the Work keeps this pin after GUI consent disappears.
+  peerReview():StoreReview|null {
+    if(this.disposed||this.state.unknown||this.revokeWork)return null;
+    if(this.normal)return this.normal.kind==='allow'&&this.normal.generation===this.generation?this.normal.review:null;
+    return this.ownerReason()?null:this.state.review;
+  }
   private controls():AgentStoreContext{return this.ownerReason()&&this.original?this.original:this.read();}
   choose(kind:StoreKind):boolean {
-    if(!['access-check','candidate-prepare'].includes(kind)||this.disposed||this.ownerReason())return false;
+    if(!['access-check','candidate-prepare','execute','reconcile'].includes(kind)||this.disposed||this.ownerReason())return false;
     this.consent=null;this.patch({selected:kind,acknowledged:false});this.syncContext();return true;
   }
   consentReason():string|null {
     const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected);
     return this.disposed?'This permission controller is retired.':this.ownerReason()??nativeReason(c)??c.blockedReason??
-      (!c.projectId||!r?'Review the basic access check or candidate-only Store preparation in Desktop first.':sameStoreReview(r,this.attempted)?'This review was already used for an Allow attempt. Check or revoke it; never replay.':null);
+      (!c.projectId||!r?'Use the original Store panel to review this exact mode in Desktop first.':sameStoreReview(r,this.attempted)?'This review was already used for an Allow attempt. Check or revoke it; never replay.':null);
   }
   allowReason():string|null {const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected)??null;
     return this.consentReason()??(!this.consent||!same(c,this.consent.context)||!sameStoreReview(r,this.consent.review)?'Confirm permission for this one exact Store review.':null);}

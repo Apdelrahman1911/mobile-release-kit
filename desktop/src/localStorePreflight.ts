@@ -59,6 +59,10 @@ export class LocalStorePreflightController {
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{if(pending)this.invalidate();else this.syncProject();};
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
+ agentPreparedMatches(id:LocalStoreIdentity,revision:number):boolean{
+  const a=this.attempt,api=this.api;
+  return !!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(this.hasPendingGuiSubmission()||false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&a.request.query===undefined&&(a.request.platform===undefined||a.request.platform==='android'||a.request.platform==='ios')&&(a.delegated===true||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
+ }
  delegatePrepared(id:LocalStoreIdentity,revision:number):(()=>boolean)|null{
   this.syncProject();const a=this.attempt,api=this.api;
   const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(this.hasPendingGuiSubmission()||false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&a.request.query===undefined&&(a.request.platform===undefined||a.request.platform==='android'||a.request.platform==='ios');

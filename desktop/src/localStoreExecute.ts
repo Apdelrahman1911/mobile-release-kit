@@ -53,7 +53,7 @@ export function localStoreExecuteRequest(project:ExecuteProject|null,assets:Asse
 export class LocalStoreExecuteController {
  private state:LocalStoreExecuteState={mode:'unavailable',platform:'android',applicationId:null,prepared:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
- private attempt:{request:PrepareLocalStoreExecute;prepared:PreparedReview;epoch:number;after:number;previous:LocalStoreExecuteIdentity|null;id:LocalStoreExecuteIdentity|null;retired:boolean;started:boolean}|null=null;
+ private attempt:{delegated:boolean;prepareReturned:boolean;request:PrepareLocalStoreExecute;prepared:PreparedReview;epoch:number;after:number;previous:LocalStoreExecuteIdentity|null;id:LocalStoreExecuteIdentity|null;retired:boolean;started:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
  private readonly source:Source;
  private selectionPending=false;private historyHead:number|null=null;
@@ -71,7 +71,21 @@ export class LocalStoreExecuteController {
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
+ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
+ agentPreparedMatches(id:LocalStoreExecuteIdentity,revision:number):boolean{
+  const a=this.attempt,op=this.state.status?.operation;
+  return !!a&&a.prepareReturned&&this.api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&
+   !this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!this.state.historical&&sameId(a.id,id)&&sameId(a.id,op)&&
+   this.state.status?.statusRevision===revision&&op?.phase==='awaiting-consent'&&op.intentUsable&&sameOfflineData(op.context,requestContext(a.request))&&
+   (a.delegated||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
+ }
+ delegatePrepared(id:LocalStoreExecuteIdentity,revision:number):(()=>boolean)|null{
+  this.syncProject();const a=this.attempt,api=this.api;
+  if(!a||a.delegated||!this.agentPreparedMatches(id,revision))return null;
+  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
+  // Monotone even if Allow is lost/refused. No fake started flag or native grant.
+  return ()=>this.attempt===a&&this.api===api&&a.delegated&&this.agentPreparedMatches(id,revision);
+ }
  beginConnection=()=>{this.invalidate();if(localStoreExecuteOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
   try{const unlisten=await api.subscribeLocalStoreExecute(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
@@ -92,14 +106,15 @@ export class LocalStoreExecuteController {
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStoreExecuteStatus());}catch{this.fail();}finally{this.reading=false;}}
  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot upload to a Store.';if(localStoreExecuteOwnerReason(this.state))return localStoreExecuteOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store execution.';if(!this.state.request&&this.source.assets()?.scope.stage!=='candidate')return'Review the current stage-prepared intent in Release history, read the matching saved version and assign the same stage-specific Store credentials and iOS review inputs. This reuses the original uploaded binary; Java, Xcode and another build are not required. A changed, pending or failed stage cannot be resent.';if(!this.state.request)return'Review the matching prepared intent in Release history, read the saved version, and assign the same credential in Credentials → This Mac → the candidate platform → Candidate → Store (or Full). Android also requires the protected Android tool copy; iOS requires local Xcode (check Environment doctor).';return this.source.otherOperationReason();}
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.prepared||!this.state.status)return;const api=this.api,request=this.state.request;
-  this.attempt={request,prepared:this.state.prepared,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+  this.attempt={delegated:false,prepareReturned:false,request,prepared:this.state.prepared,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});
   try{this.receive(await api.prepareLocalStoreExecute(request));const op=this.state.status?.operation;
    if(this.attempt!==a||a.retired||a.epoch!==this.epoch||!sameId(a.id,op)||op?.phase!=='awaiting-consent'||!op.intentUsable){if(a.id)void this.cancelOriginal(false);return;}
    const deadline=this.now()+60000;this.update({consentUntil:deadline,acknowledged:false});this.timer=setTimeout(()=>{if(this.attempt===a)this.invalidate();},60000);
-  }catch{this.fail();}finally{this.update({pending:false});}}
+  }catch{this.fail();}finally{a.prepareReturned=true;this.update({pending:false});}}
  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
+  if(a?.delegated)return; // Only the linked native CLI approval can consume this review.
   if(a?.started)return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});

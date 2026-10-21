@@ -39,7 +39,7 @@ impl DocumentBinding {
     pub(crate) fn cancel_local_store_reconcile(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
         let state=self.lock();self.inner.bridge.local_store_reconcile.cancel(&args.operation_id,&args.owner_generation,self.local_store_reconcile_gate(&state))
     }
-    fn store_reconcile_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
+    pub(super) fn store_reconcile_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {
             let future=crate::saved_command_owner::store_reconcile_document_backing_bytes().ok_or_else(crate::local_store_reconcile_owner::unavailable)?;

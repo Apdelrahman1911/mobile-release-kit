@@ -45,6 +45,10 @@ export class LocalStorePrepareController {
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
+ agentPreparedMatches(id:LocalStorePrepareIdentity,revision:number):boolean{
+  const a=this.attempt,api=this.api;
+  return !!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request)&&(a.delegated===true||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
+ }
  delegatePrepared(id:LocalStorePrepareIdentity,revision:number):(()=>boolean)|null{
   this.syncProject();const a=this.attempt,api=this.api;
   const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request);

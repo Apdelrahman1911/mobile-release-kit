@@ -50,7 +50,7 @@ impl DocumentBinding {
     pub(crate) fn cancel_local_store_execute(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
         let state=self.lock();self.inner.bridge.local_store_execute.cancel(&args.operation_id,&args.owner_generation,self.local_store_execute_gate(&state))
     }
-    fn store_execute_budget<'a>(&self,state:&'a DocumentState,loan:&'a Arc<SelectedStoreMaterial>)->Result<ExecuteMemoryAdmission<'a>,BridgeError>{
+    pub(super) fn store_execute_budget<'a>(&self,state:&'a DocumentState,loan:&'a Arc<SelectedStoreMaterial>)->Result<ExecuteMemoryAdmission<'a>,BridgeError>{
         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {
             let future=crate::saved_command_owner::store_execute_document_backing_bytes().ok_or_else(crate::local_store_execute_owner::unavailable)?;

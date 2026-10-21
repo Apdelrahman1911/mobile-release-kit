@@ -23,6 +23,7 @@ fn review() -> store::Review {
             build: 42,
         },
         candidate: None,
+        release: None,
     }
 }
 #[test]
@@ -113,14 +114,15 @@ fn store_cli_lost_ack_has_only_original_status_cancel_and_no_replay() {
     assert_eq!(c["commands"].as_array().unwrap().len(), 3);
     for key in [
         "defaultEnabled",
-        "execute",
-        "reconcile",
-        "upload",
-        "promotion",
         "queryVariants",
         "nativeAvailabilityChecked",
     ] {
         assert_eq!(c[key], false);
     }
     assert_eq!(c["readGrantAuthorizesExecution"], false);
+    for key in ["execute", "reconcile", "upload", "promotion", "requiresSeparateExactModeConsent"] { assert_eq!(c[key], true); }
+    for key in ["oldAccessPrepareGrantsAuthorizeRelease", "automaticRetry", "publicRelease"] { assert_eq!(c[key], false); }
 }
+
+#[path = "installed_cli_store_release_tests.rs"]
+mod release_tests;

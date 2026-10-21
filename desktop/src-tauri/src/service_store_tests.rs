@@ -22,6 +22,7 @@ fn review() -> p::Review {
             build: 42,
         },
         candidate: None,
+        release: None,
     }
 }
 struct Fixture {
@@ -402,3 +403,6 @@ fn store_full_census_includes_retained_rows_ipc_and_projection_without_credit() 
     assert!(usize::MAX.checked_add(p::DOCUMENT_BACKING).is_none());
     assert!(rows > 0 && ipc > 0);
 }
+
+#[path = "service_store_release_inbox_tests.rs"]
+mod release_tests;

@@ -12,6 +12,7 @@ import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
 import { AgentStoreAccess } from './components/AgentStoreAccess.tsx';
 import { AgentStoreAccessController } from './agentStoreAccessController.ts';
 import { storeReviewFromState } from './agentStoreAccess.ts';
+import { storeSelectedPeerReason } from './agentStoreRelease.ts';
 import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
 import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
 import { ReleaseRehearsal } from './components/ReleaseRehearsal.tsx';
@@ -1043,16 +1044,25 @@ export function App() {
   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
   // One permission, not one per platform/panel. Attach only the existing
   // installed port; neither mounting nor context reconciliation sends work.
-  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='access-check'?localStore:localStorePrepare).delegatePrepared(r,r.statusRevision),current:()=>{
+  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='execute'?localStoreExecuteControllerRef.current:r.kind==='reconcile'?localStoreReconcileControllerRef.current:r.kind==='access-check'?localStore:localStorePrepare)?.delegatePrepared(r,r.statusRevision)??null,current:()=>{
     const service=cliService.current,current=workspaceRef.current;
     const project=current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
     const id=project?.project.id??null;
     const access=storeReviewFromState(localStore.getSnapshot(),'access-check',id);
     const prepare=storeReviewFromState(localStorePrepare.getSnapshot(),'candidate-prepare',id);
+    // These refs are declared before this constructor's syncContext; later
+    // controller consts must not be read during the first source call.
+    const execute=localStoreExecuteControllerRef.current,reconcile=localStoreReconcileControllerRef.current;
+    const executeReview=execute?storeReviewFromState(execute.getSnapshot(),'execute',id):null;
+    const reconcileReview=reconcile?storeReviewFromState(reconcile.getSnapshot(),'reconcile',id):null;
+    const selected=agentStoreControllerRef.current?.peerReview()??null;
+    const peers=storeSelectedPeerReason(selected,'access-check',localStore,localStoreOwnerReason(localStore.getSnapshot()))??
+      storeSelectedPeerReason(selected,'candidate-prepare',localStorePrepare,localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
+      storeSelectedPeerReason(selected,'execute',execute,storeExecuteBusy())??storeSelectedPeerReason(selected,'reconcile',reconcile,storeReconcileBusy());
     return {port:service.api?.mode==='native'?service.api.agentStoreAccess??null:null,
       nativeSession:service.api?.mode==='native'?service:null,projectId:id,epoch:project??service,
-      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[])],
-      blockedReason:appleProvisioningBusy()??storeReconcileBusy()??storeExecuteBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[]),...(executeReview?[executeReview]:[]),...(reconcileReview?[reconcileReview]:[])],
+      blockedReason:appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
   }}));
   agentStoreControllerRef.current=agentStoreAccess;
   useSyncExternalStore(agentStoreAccess.subscribe,agentStoreAccess.getSnapshot,agentStoreAccess.getSnapshot);
@@ -2185,8 +2195,8 @@ export function App() {
           <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact onShow={()=>navigate('releases')}/>
           <LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
-          <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
-          <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+          <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+          <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
         </>}
         {page !== 'releases' && <OfflinePreflight state={offlinePreflightState} controller={offlinePreflight} compact
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
@@ -2407,8 +2417,8 @@ export function App() {
             <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
             <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
             <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
-            <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
-            <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+            <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+            <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           </>}
           protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<div id="release-local-checks" ref={offlineCheckSection} tabIndex={-1} aria-label="Saved offline checks review"><OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}

@@ -1,11 +1,11 @@
 import { localStoreStageLabel } from '../localStoreStageProtocol.ts';
 import { localStoreExecuteOwnerReason, type LocalStoreExecuteController, type LocalStoreExecuteState } from '../localStoreExecute.ts';
 
-export function LocalStoreExecute({ state, controller, compact = false, onCredentials, onShow }: {
+export function LocalStoreExecute({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
   state: LocalStoreExecuteState; controller: LocalStoreExecuteController; compact?: boolean;
-  onCredentials: () => void; onShow: () => void;
+  onCredentials: () => void; onShow: () => void; agentReason?: string | null;
 }) {
-  const op=state.status?.operation, retained=localStoreExecuteOwnerReason(state), reason=controller.prepareReason();
+  const op=state.status?.operation, retained=localStoreExecuteOwnerReason(state), reason=agentReason??controller.prepareReason();
   const receipt=op?.result?.executionReceipt;
   const ios=(retained&&op?op.context.platform:state.platform)==='ios';
   const displayedRequest=retained&&op?op.context:state.request;

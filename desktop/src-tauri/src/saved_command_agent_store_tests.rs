@@ -380,3 +380,6 @@ fn store_raw_main_request_is_bounded_before_closed_decode() {
     assert!(decode::<Allow>(&bytes).is_err());
     assert!(decode::<Allow>(br#"{"kind":"access-check","kind":"candidate-prepare"}"#).is_err());
 }
+
+#[path = "saved_command_agent_store_release_tests.rs"]
+mod release_tests;

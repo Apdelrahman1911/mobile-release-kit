@@ -1,10 +1,10 @@
 import { localStoreReconcileOwnerReason, type LocalStoreReconcileController, type LocalStoreReconcileState } from '../localStoreReconcile.ts';
 
-export function LocalStoreReconcile({ state, controller, compact = false, onCredentials, onShow }: {
+export function LocalStoreReconcile({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
   state: LocalStoreReconcileState; controller: LocalStoreReconcileController; compact?: boolean;
-  onCredentials: () => void; onShow: () => void;
+  onCredentials: () => void; onShow: () => void; agentReason?: string | null;
 }) {
-  const op=state.status?.operation, retained=localStoreReconcileOwnerReason(state), reason=controller.prepareReason();
+  const op=state.status?.operation, retained=localStoreReconcileOwnerReason(state), reason=agentReason??controller.prepareReason();
   const receipt=op?.result?.readinessReceipt??op?.result?.reconciliationReceipt;
   const originalReadiness=op?.context.action==='external-readiness';
   const readiness=retained&&op?originalReadiness:state.externalReadiness;

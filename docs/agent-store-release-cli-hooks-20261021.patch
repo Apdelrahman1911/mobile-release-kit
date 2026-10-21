@@ -1,0 +1,804 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -8,10 +8,11 @@
+     "node": ">=22.12.0"
+   },
+   "scripts": {
++    "test:agent-store-release": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-release.test.mjs",
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src-tauri/src/asset_session_agent_store.rs b/desktop/src-tauri/src/asset_session_agent_store.rs
+--- a/desktop/src-tauri/src/asset_session_agent_store.rs
++++ b/desktop/src-tauri/src/asset_session_agent_store.rs
+@@ -1,4 +1,4 @@
+-//! Main-document delegation of ONE existing prepared, nonpublishing Store
++//! Main-document delegation of ONE existing prepared, exactly consented Store
+ //! step. The old relay/owner/GO/STOP/history paths do the work; IPC is DATA.
+ use super::*;
+ use crate::{
+@@ -10,6 +10,8 @@
+     service_store_protocol as p, service_store_requests as requests,
+ };
+ use serde::Deserialize;
++#[path = "asset_session_agent_store_release.rs"]
++mod release;
+ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
+     if bytes.is_empty() || bytes.len() > p::RAW_LIMIT {
+         return Err(BridgeError::invalid());
+@@ -39,6 +41,8 @@
+     fn store_delegate_owner(&self, kind: p::Kind) -> &SavedCommandOwner {
+         match kind {
+             p::Kind::AccessCheck => self.inner.bridge.local_store.agent_store_original(),
++            p::Kind::Execute => self.inner.bridge.local_store_execute.agent_store_original(),
++            p::Kind::Reconcile => self.inner.bridge.local_store_reconcile.agent_store_original(),
+             p::Kind::CandidatePrepare => {
+                 self.inner.bridge.local_store_prepare.agent_store_original()
+             }
+@@ -51,6 +55,8 @@
+     ) -> crate::local_store_preflight_protocol::Availability {
+         match kind {
+             p::Kind::AccessCheck => self.local_store_gate(s),
++            p::Kind::Execute => self.local_store_execute_gate(s),
++            p::Kind::Reconcile => self.local_store_reconcile_gate(s),
+             p::Kind::CandidatePrepare => self.local_store_prepare_gate(s),
+         }
+     }
+@@ -70,6 +76,7 @@
+     ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+         let r = a.review();
+         match r.kind {
++            p::Kind::Execute | p::Kind::Reconcile => self.agent_store_release_material(s, a, registration, root),
+             p::Kind::AccessCheck => {
+                 let m = self
+                     .inner
+@@ -154,7 +161,7 @@
+                 &args.owner_generation,
+                 args.expected_status_revision,
+             )?;
+-            if args.consent_version != args.kind.consent(approval.review().platform) {
++            if Some(args.consent_version.as_str()) != approval.review().consent() {
+                 return Err(BridgeError::invalid());
+             }
+             let selected = self
+@@ -368,9 +375,12 @@
+             return Err(public(Error::Conflict));
+         }
+         let material = self.agent_store_material(&state, &grant.approval, registration, &root)?;
+-        let admitted = self
+-            .store_delegate_owner(grant.scope.review.kind)
+-            .start_agent_store(entry, Some((registration, root)), gate, material)?;
++        let admitted = if matches!(grant.scope.review.kind, p::Kind::Execute | p::Kind::Reconcile) {
++            self.start_agent_store_release(&state, entry, Some((registration, root)), gate, material)?
++        } else {
++            self.store_delegate_owner(grant.scope.review.kind)
++                .start_agent_store(entry, Some((registration, root)), gate, material)?
++        };
+         drop(edit);
+         drop(state);
+         admitted.release();
+diff --git a/desktop/src-tauri/src/asset_session_store_execute.rs b/desktop/src-tauri/src/asset_session_store_execute.rs
+--- a/desktop/src-tauri/src/asset_session_store_execute.rs
++++ b/desktop/src-tauri/src/asset_session_store_execute.rs
+@@ -50,7 +50,7 @@
+     pub(crate) fn cancel_local_store_execute(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
+         let state=self.lock();self.inner.bridge.local_store_execute.cancel(&args.operation_id,&args.owner_generation,self.local_store_execute_gate(&state))
+     }
+-    fn store_execute_budget<'a>(&self,state:&'a DocumentState,loan:&'a Arc<SelectedStoreMaterial>)->Result<ExecuteMemoryAdmission<'a>,BridgeError>{
++    pub(super) fn store_execute_budget<'a>(&self,state:&'a DocumentState,loan:&'a Arc<SelectedStoreMaterial>)->Result<ExecuteMemoryAdmission<'a>,BridgeError>{
+         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {
+             let future=crate::saved_command_owner::store_execute_document_backing_bytes().ok_or_else(crate::local_store_execute_owner::unavailable)?;
+diff --git a/desktop/src-tauri/src/asset_session_store_reconcile.rs b/desktop/src-tauri/src/asset_session_store_reconcile.rs
+--- a/desktop/src-tauri/src/asset_session_store_reconcile.rs
++++ b/desktop/src-tauri/src/asset_session_store_reconcile.rs
+@@ -39,7 +39,7 @@
+     pub(crate) fn cancel_local_store_reconcile(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
+         let state=self.lock();self.inner.bridge.local_store_reconcile.cancel(&args.operation_id,&args.owner_generation,self.local_store_reconcile_gate(&state))
+     }
+-    fn store_reconcile_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
++    pub(super) fn store_reconcile_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
+         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {
+             let future=crate::saved_command_owner::store_reconcile_document_backing_bytes().ok_or_else(crate::local_store_reconcile_owner::unavailable)?;
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -277,11 +277,12 @@
+                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
+                 "privateArguments":false,"backup":false,"rememberAssignment":false,"recoveryAcknowledgment":false,
+                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
+-            "store": {"scope":"one-existing-desktop-prepared-nonpublishing-store-step","commands":store::COMMANDS,
+-                "kinds":["access-check","candidate-prepare"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
++            "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
++                "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
+-                "execute":false,"reconcile":false,"upload":false,"promotion":false,"queryVariants":false,"nativeAvailabilityChecked":false},
++                "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
++                "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":false,"nativeAvailabilityChecked":false},
+             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+@@ -330,7 +331,7 @@
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
+-        text.push_str("\nStore steps: separate Desktop one-use approval of an existing prepared basic access check or candidate preparation. Android access uses a temporary uncommitted edit; candidate preparation writes the local journal. No Execute/upload/promotion/Reconcile.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
++        text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+diff --git a/desktop/src-tauri/src/installed_cli_store.rs b/desktop/src-tauri/src/installed_cli_store.rs
+--- a/desktop/src-tauri/src/installed_cli_store.rs
++++ b/desktop/src-tauri/src/installed_cli_store.rs
+@@ -118,7 +118,18 @@
+             status.settlement,
+             receipt(q)
+         );
+-        text.push_str("Only the reviewed basic access check or local candidate preparation is delegated. No Execute, upload, promotion or Reconcile permission.\n");
++        text.push_str("Only the exact separately approved Store review is delegated. Access/Prepare grants never authorize Execute or Reconcile. Receipts, recovery/readiness checkpoints and target matches do not authorize retry or prove public availability.\n");
++        if let Some(release) = &status.review.release {
++            text.push_str(&format!("Reviewed {:?} / {:?} ({:?}).\n", status.review.kind, release.mode, status.review.platform));
++        }
++        if let Some(result) = &status.result {
++            match result {
++                store::Report::Execute { release } | store::Report::Reconcile { release } => {
++                    text.push_str(&format!("Semantic target: {:?}; {:?}; state {:?}. Receipt {}.\n", release.target, release.result, release.state, release.receipt_sha256));
++                }
++                _ => {}
++            }
++        }
+         text.into_bytes()
+     };
+     Ok((code, bytes))
+diff --git a/desktop/src-tauri/src/installed_cli_store_tests.rs b/desktop/src-tauri/src/installed_cli_store_tests.rs
+--- a/desktop/src-tauri/src/installed_cli_store_tests.rs
++++ b/desktop/src-tauri/src/installed_cli_store_tests.rs
+@@ -23,6 +23,7 @@
+             build: 42,
+         },
+         candidate: None,
++        release: None,
+     }
+ }
+ #[test]
+@@ -113,14 +114,15 @@
+     assert_eq!(c["commands"].as_array().unwrap().len(), 3);
+     for key in [
+         "defaultEnabled",
+-        "execute",
+-        "reconcile",
+-        "upload",
+-        "promotion",
+         "queryVariants",
+         "nativeAvailabilityChecked",
+     ] {
+         assert_eq!(c[key], false);
+     }
+     assert_eq!(c["readGrantAuthorizesExecution"], false);
++    for key in ["execute", "reconcile", "upload", "promotion", "requiresSeparateExactModeConsent"] { assert_eq!(c[key], true); }
++    for key in ["oldAccessPrepareGrantsAuthorizeRelease", "automaticRetry", "publicRelease"] { assert_eq!(c[key], false); }
+ }
++
++#[path = "installed_cli_store_release_tests.rs"]
++mod release_tests;
+diff --git a/desktop/src-tauri/src/local_store_execute_owner.rs b/desktop/src-tauri/src/local_store_execute_owner.rs
+--- a/desktop/src-tauri/src/local_store_execute_owner.rs
++++ b/desktop/src-tauri/src/local_store_execute_owner.rs
+@@ -21,6 +21,7 @@
+     pub(crate) fn claim_matches(&self,c:&crate::saved_command_owner::LocalHistoryClaim)->bool{c.matches_owner(&self.saved)}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+     pub(crate) fn helper_matches(&self,c:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{c.matches_owner(&self.saved)}
++    pub(crate) fn agent_store_original(&self) -> &SavedCommandOwner { &self.saved }
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }
+diff --git a/desktop/src-tauri/src/local_store_reconcile_owner.rs b/desktop/src-tauri/src/local_store_reconcile_owner.rs
+--- a/desktop/src-tauri/src/local_store_reconcile_owner.rs
++++ b/desktop/src-tauri/src/local_store_reconcile_owner.rs
+@@ -21,6 +21,7 @@
+     pub(crate) fn claim_matches(&self,c:&crate::saved_command_owner::LocalHistoryClaim)->bool{c.matches_owner(&self.saved)}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+     pub(crate) fn helper_matches(&self,c:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{c.matches_owner(&self.saved)}
++    pub(crate) fn agent_store_original(&self) -> &SavedCommandOwner { &self.saved }
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }
+diff --git a/desktop/src-tauri/src/saved_command_agent_store.rs b/desktop/src-tauri/src/saved_command_agent_store.rs
+--- a/desktop/src-tauri/src/saved_command_agent_store.rs
++++ b/desktop/src-tauri/src/saved_command_agent_store.rs
+@@ -5,6 +5,8 @@
+     service_protocol as s, service_store_protocol as p, service_store_requests as requests,
+ };
+ use std::sync::{OnceLock, Weak};
++#[path = "saved_command_agent_store_release.rs"]
++mod release;
+ 
+ fn refused() -> BridgeError {
+     BridgeError::new("agent_store_unavailable","This original Store review cannot be delegated. Check or stop the original request; do not replay it.")
+@@ -23,6 +25,9 @@
+     generation: &str,
+     revision: u32,
+ ) -> Result<p::Review, BridgeError> {
++    if matches!(c, Context::LocalStoreExecute(_) | Context::LocalStoreReconcile(_)) {
++        return release::review(c, id, generation, revision);
++    }
+     let (kind, platform, config, saved_version, candidate) = match c {
+         Context::LocalStorePreflight(c) if c.query.is_none() && c.ios_record.is_none() => {
+             let platform = match c.platform {
+@@ -66,6 +71,7 @@
+         saved_config: config,
+         saved_version,
+         candidate,
++        release: None,
+         operation_id: s::Id::parse(id).map_err(|_| refused())?,
+         owner_generation: s::Id::parse(generation).map_err(|_| refused())?,
+         status_revision: revision,
+@@ -85,6 +91,7 @@
+             Some(Arc::new(()))
+         }
+         Context::LocalStorePrepare(c) if c.later.is_none() => Some(Arc::new(())),
++        Context::LocalStoreExecute(_) | Context::LocalStoreReconcile(_) if release::supported(context) => Some(Arc::new(())),
+         _ => None,
+     }
+ }
+@@ -275,6 +282,9 @@
+     }
+ }
+ fn report(t: &Terminal, review: &p::Review) -> Result<p::Report, BridgeError> {
++    if matches!(review.kind, p::Kind::Execute | p::Kind::Reconcile) {
++        return release::report(t, review);
++    }
+     // The original decoder already validated full context, fixed scope and
+     // lifetime. Project only bounded nonsecret fields after native retirement.
+     let (value, kind) = match t {
+@@ -299,6 +309,7 @@
+     }
+     let v: serde_json::Value = serde_json::from_slice(&value).map_err(|_| refused())?;
+     let projected = match kind {
++        p::Kind::Execute | p::Kind::Reconcile => return Err(refused()),
+         p::Kind::AccessCheck => {
+             serde_json::json!({"kind":"access-check","findings":v["findings"],"limitations":v["limitations"]})
+         }
+diff --git a/desktop/src-tauri/src/saved_command_agent_store_tests.rs b/desktop/src-tauri/src/saved_command_agent_store_tests.rs
+--- a/desktop/src-tauri/src/saved_command_agent_store_tests.rs
++++ b/desktop/src-tauri/src/saved_command_agent_store_tests.rs
+@@ -380,3 +380,6 @@
+     assert!(decode::<Allow>(&bytes).is_err());
+     assert!(decode::<Allow>(br#"{"kind":"access-check","kind":"candidate-prepare"}"#).is_err());
+ }
++
++#[path = "saved_command_agent_store_release_tests.rs"]
++mod release_tests;
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1277,7 +1277,7 @@
+ pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
+ #[path="saved_command_agent_store.rs"]
+ mod agent_store;
+-pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding};
++pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
+ 
+ struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+diff --git a/desktop/src-tauri/src/service_store_protocol.rs b/desktop/src-tauri/src/service_store_protocol.rs
+--- a/desktop/src-tauri/src/service_store_protocol.rs
++++ b/desktop/src-tauri/src/service_store_protocol.rs
+@@ -1,4 +1,4 @@
+-//! Closed nonpublishing Store delegation DATA. No decoded value owns a
++//! Closed original-bound Store delegation DATA. No decoded value owns a
+ //! Prepared, credential, source, native operation or release authorization.
+ use crate::service_protocol::{Error, Id, Settlement};
+ use serde::{Deserialize, Deserializer, Serialize};
+@@ -8,6 +8,8 @@
+ pub(crate) const STATUS_LIMIT: usize = 8192;
+ pub(crate) const INTENT_MS: u64 = 300_000;
+ pub(crate) const DOCUMENT_BACKING: usize = 2 * 1024 * 1024;
++#[path = "service_store_release_protocol.rs"]
++pub(crate) mod release;
+ 
+ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+     Option::<T>::deserialize(d)
+@@ -34,6 +36,8 @@
+ pub(crate) enum Kind {
+     AccessCheck,
+     CandidatePrepare,
++    Execute,
++    Reconcile,
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+@@ -42,20 +46,19 @@
+     Ios,
+ }
+ impl Kind {
+-    pub(crate) fn consent(self, platform: Platform) -> &'static str {
++    fn basic_consent(self, platform: Platform) -> Option<&'static str> {
+         match (self, platform) {
+-            (Self::AccessCheck, Platform::Android) => "agent-android-store-access-once-v1",
+-            (Self::AccessCheck, Platform::Ios) => "agent-ios-store-access-once-v1",
+-            (Self::CandidatePrepare, Platform::Android) => {
+-                "agent-android-store-candidate-prepare-once-v1"
+-            }
+-            (Self::CandidatePrepare, Platform::Ios) => "agent-ios-store-candidate-prepare-once-v1",
++            (Self::AccessCheck, Platform::Android) => Some("agent-android-store-access-once-v1"),
++            (Self::AccessCheck, Platform::Ios) => Some("agent-ios-store-access-once-v1"),
++            (Self::CandidatePrepare, Platform::Android) => Some("agent-android-store-candidate-prepare-once-v1"),
++            (Self::CandidatePrepare, Platform::Ios) => Some("agent-ios-store-candidate-prepare-once-v1"),
++            _ => None,
+         }
+     }
+     pub(crate) fn action(self) -> crate::service_protocol::Action {
+         match self {
+             Self::AccessCheck => crate::service_protocol::Action::ObserveProject,
+-            Self::CandidatePrepare => crate::service_protocol::Action::Release,
++            Self::CandidatePrepare | Self::Execute | Self::Reconcile => crate::service_protocol::Action::Release,
+         }
+     }
+ }
+@@ -96,7 +99,7 @@
+     pub(crate) operation_id: String,
+     pub(crate) sha256: String,
+ }
+-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct Review {
+     pub(crate) kind: Kind,
+@@ -108,15 +111,22 @@
+     pub(crate) saved_version: Version,
+     #[serde(deserialize_with = "nullable")]
+     pub(crate) candidate: Option<Candidate>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub(crate) release: Option<release::Review>,
+ }
+ impl Review {
++    pub(crate) fn consent(&self) -> Option<&'static str> {
++        if !self.valid() { return None; }
++        self.release.as_ref().map_or_else(|| self.kind.basic_consent(self.platform), |r| r.mode.consent(self.kind, self.platform))
++    }
+     pub(crate) fn valid(&self) -> bool {
+         (1..u32::MAX).contains(&self.status_revision)
+             && self.saved_config.valid()
+             && self.saved_version.valid()
+-            && match (&self.kind, &self.candidate) {
+-                (Kind::AccessCheck, None) => true,
+-                (Kind::CandidatePrepare, Some(c)) => uuid(&c.operation_id) && sha(&c.sha256),
++            && match (self.kind, &self.candidate, &self.release) {
++                (Kind::AccessCheck, None, None) => true,
++                (Kind::CandidatePrepare, Some(c), None) => uuid(&c.operation_id) && sha(&c.sha256),
++                (Kind::Execute | Kind::Reconcile, Some(c), Some(r)) => r.valid_for(self.kind, self.platform, c),
+                 _ => false,
+             }
+     }
+@@ -244,6 +254,8 @@
+     deny_unknown_fields
+ )]
+ pub(crate) enum Report {
++    Execute { release: release::Receipt },
++    Reconcile { release: release::Receipt },
+     AccessCheck {
+         findings: Vec<Finding>,
+         limitations: Vec<Limitation>,
+@@ -260,6 +272,7 @@
+ impl Report {
+     pub(crate) fn valid_for(&self, r: &Review) -> bool {
+         match (self, r.kind) {
++            (Self::Execute { release }, Kind::Execute) | (Self::Reconcile { release }, Kind::Reconcile) => release.valid_for(r),
+             (
+                 Self::AccessCheck {
+                     findings,
+diff --git a/desktop/src-tauri/src/service_store_tests.rs b/desktop/src-tauri/src/service_store_tests.rs
+--- a/desktop/src-tauri/src/service_store_tests.rs
++++ b/desktop/src-tauri/src/service_store_tests.rs
+@@ -22,6 +22,7 @@
+             build: 42,
+         },
+         candidate: None,
++        release: None,
+     }
+ }
+ struct Fixture {
+@@ -402,3 +403,6 @@
+     assert!(usize::MAX.checked_add(p::DOCUMENT_BACKING).is_none());
+     assert!(rows > 0 && ipc > 0);
+ }
++
++#[path = "service_store_release_inbox_tests.rs"]
++mod release_tests;
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -12,6 +12,7 @@
+ import { AgentStoreAccess } from './components/AgentStoreAccess.tsx';
+ import { AgentStoreAccessController } from './agentStoreAccessController.ts';
+ import { storeReviewFromState } from './agentStoreAccess.ts';
++import { storeSelectedPeerReason } from './agentStoreRelease.ts';
+ import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
+ import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
+ import { ReleaseRehearsal } from './components/ReleaseRehearsal.tsx';
+@@ -1043,16 +1044,25 @@
+   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
+   // One permission, not one per platform/panel. Attach only the existing
+   // installed port; neither mounting nor context reconciliation sends work.
+-  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='access-check'?localStore:localStorePrepare).delegatePrepared(r,r.statusRevision),current:()=>{
++  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='execute'?localStoreExecuteControllerRef.current:r.kind==='reconcile'?localStoreReconcileControllerRef.current:r.kind==='access-check'?localStore:localStorePrepare)?.delegatePrepared(r,r.statusRevision)??null,current:()=>{
+     const service=cliService.current,current=workspaceRef.current;
+     const project=current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
+     const id=project?.project.id??null;
+     const access=storeReviewFromState(localStore.getSnapshot(),'access-check',id);
+     const prepare=storeReviewFromState(localStorePrepare.getSnapshot(),'candidate-prepare',id);
++    // These refs are declared before this constructor's syncContext; later
++    // controller consts must not be read during the first source call.
++    const execute=localStoreExecuteControllerRef.current,reconcile=localStoreReconcileControllerRef.current;
++    const executeReview=execute?storeReviewFromState(execute.getSnapshot(),'execute',id):null;
++    const reconcileReview=reconcile?storeReviewFromState(reconcile.getSnapshot(),'reconcile',id):null;
++    const selected=agentStoreControllerRef.current?.peerReview()??null;
++    const peers=storeSelectedPeerReason(selected,'access-check',localStore,localStoreOwnerReason(localStore.getSnapshot()))??
++      storeSelectedPeerReason(selected,'candidate-prepare',localStorePrepare,localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
++      storeSelectedPeerReason(selected,'execute',execute,storeExecuteBusy())??storeSelectedPeerReason(selected,'reconcile',reconcile,storeReconcileBusy());
+     return {port:service.api?.mode==='native'?service.api.agentStoreAccess??null:null,
+       nativeSession:service.api?.mode==='native'?service:null,projectId:id,epoch:project??service,
+-      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[])],
+-      blockedReason:appleProvisioningBusy()??storeReconcileBusy()??storeExecuteBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
++      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[]),...(executeReview?[executeReview]:[]),...(reconcileReview?[reconcileReview]:[])],
++      blockedReason:appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+   }}));
+   agentStoreControllerRef.current=agentStoreAccess;
+   useSyncExternalStore(agentStoreAccess.subscribe,agentStoreAccess.getSnapshot,agentStoreAccess.getSnapshot);
+@@ -2185,8 +2195,8 @@
+           <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact onShow={()=>navigate('releases')}/>
+           <LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+           <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+-          <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+-          <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++          <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++          <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+         </>}
+         {page !== 'releases' && <OfflinePreflight state={offlinePreflightState} controller={offlinePreflight} compact
+           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
+@@ -2407,8 +2417,8 @@
+             <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
+             <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+             <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+-            <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+-            <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++            <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++            <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+           </>}
+           protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<div id="release-local-checks" ref={offlineCheckSection} tabIndex={-1} aria-label="Saved offline checks review"><OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
+           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
+diff --git a/desktop/src/agentStoreAccess.ts b/desktop/src/agentStoreAccess.ts
+--- a/desktop/src/agentStoreAccess.ts
++++ b/desktop/src/agentStoreAccess.ts
+@@ -1,11 +1,14 @@
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+-export type StoreKind = 'access-check' | 'candidate-prepare';
++import { validStoreReleaseReview, validStoreReleaseResult, storeReleaseFromContext } from './agentStoreRelease.ts';
++import type { StoreReleaseReview } from './agentStoreRelease.ts';
++export type StoreKind = 'access-check' | 'candidate-prepare' | 'execute' | 'reconcile';
+ export type StorePlatform = 'android' | 'ios';
+ export interface StoreReview {
+   readonly kind: StoreKind; readonly platform: StorePlatform; readonly operationId: string; readonly ownerGeneration: string; readonly statusRevision: number;
+   readonly savedConfig: { readonly bytes: number; readonly sha256: string };
+   readonly savedVersion: { readonly bytes: number; readonly sha256: string; readonly name: string; readonly build: number };
+   readonly candidate: { readonly operationId: string; readonly sha256: string } | null;
++  readonly release?: StoreReleaseReview;
+ }
+ export interface StoreRequestStatus {
+   readonly origin: { readonly projectId: string; readonly serviceInstance: string; readonly requestId: string };
+@@ -29,22 +32,27 @@
+ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+ const keys = (v: unknown, names: readonly string[]): v is Record<string, unknown> => record(v) && Object.keys(v).length === names.length && names.every(k => Object.hasOwn(v, k));
+ const oneOf = (v: unknown, a: readonly string[]) => typeof v === 'string' && a.includes(v);
+-export const storeConsent = (r: StoreReview): string => `agent-${r.platform}-store-${r.kind === 'access-check' ? 'access' : 'candidate-prepare'}-once-v1`;
++export const storeConsent = (r: StoreReview): string => r.kind==='execute'||r.kind==='reconcile' ?
++  validStoreReleaseReview(r.release,r.kind,r.platform,r.candidate)?`agent-${r.platform}-store-${r.kind}-${r.release.mode}-once-v1`:'' :
++  `agent-${r.platform}-store-${r.kind === 'access-check' ? 'access' : 'candidate-prepare'}-once-v1`;
+ function review(v: unknown): v is StoreReview {
+-  return keys(v, ['kind','platform','operationId','ownerGeneration','statusRevision','savedConfig','savedVersion','candidate']) &&
+-    oneOf(v.kind, ['access-check','candidate-prepare']) && oneOf(v.platform, ['android','ios']) && id(v.operationId) && id(v.ownerGeneration) && number(v.statusRevision,1,0xffff_fffe) &&
++  const release=record(v)&&(v.kind==='execute'||v.kind==='reconcile');
++  return keys(v, ['kind','platform','operationId','ownerGeneration','statusRevision','savedConfig','savedVersion','candidate',...(release?['release']:[])]) &&
++    oneOf(v.kind, ['access-check','candidate-prepare','execute','reconcile']) && oneOf(v.platform, ['android','ios']) && id(v.operationId) && id(v.ownerGeneration) && number(v.statusRevision,1,0xffff_fffe) &&
+     keys(v.savedConfig,['bytes','sha256']) && number(v.savedConfig.bytes,1,524288) && sha(v.savedConfig.sha256) &&
+     keys(v.savedVersion,['bytes','sha256','name','build']) && number(v.savedVersion.bytes,1,65536) && sha(v.savedVersion.sha256) && number(v.savedVersion.build,1,2100000000) &&
+     typeof v.savedVersion.name === 'string' && /^[A-Za-z0-9.+-]{1,64}$/.test(v.savedVersion.name) &&
+-    (v.kind === 'access-check' ? v.candidate === null : keys(v.candidate,['operationId','sha256']) && uuid(v.candidate.operationId) && sha(v.candidate.sha256));
++    (v.kind === 'access-check' ? v.candidate === null : keys(v.candidate,['operationId','sha256']) && uuid(v.candidate.operationId) && sha(v.candidate.sha256)) &&
++    (!release || validStoreReleaseReview(v.release,v.kind as StoreKind,v.platform as StorePlatform,v.candidate as StoreReview['candidate']));
+ }
+ // Only after the bounded copy has removed accessors/prototypes/cycles.
+ function freeze<T>(v:T):T {if(v&&typeof v==='object'){for(const item of Object.values(v))freeze(item);Object.freeze(v);}return v;}
+-export function parseStoreReview(raw: unknown): StoreReview | null { try { const v=copyBoundedComparisonData(raw,2048,36); return review(v) ? freeze(v) : null; } catch { return null; } }
++export function parseStoreReview(raw: unknown): StoreReview | null { try { const v=copyBoundedComparisonData(raw,2048,52); return review(v) ? freeze(v) : null; } catch { return null; } }
+ export const sameStoreReview = (a: StoreReview | null, b: StoreReview | null) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
+ const accessLimits=['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic'];
+ function result(v: unknown, r: StoreReview): boolean {
+   if (!record(v) || v.kind !== r.kind) return false;
++  if(r.kind==='execute'||r.kind==='reconcile')return validStoreReleaseResult(v,r);
+   if (r.kind === 'access-check') return keys(v,['kind','findings','limitations']) && Array.isArray(v.findings) && v.findings.length<=16 &&
+     v.findings.every(f=>keys(f,['check','status']) && oneOf(f.check,['credential-format','query-prerequisites','runtime-unavailable','bundle-unavailable','store-access']) &&
+       oneOf(f.status,['PASS','FAIL','MISSING','BLOCKED','INVALID','SKIP','MANUAL','CONFIGURED','NOT_APPLICABLE'])) && JSON.stringify(v.limitations)===JSON.stringify(accessLimits);
+@@ -98,7 +106,15 @@
+     const s=copyBoundedComparisonData(raw,65536,2048);
+     if(!record(s)||s.mode!=='native'||s.pending||s.callersPending||s.historical||s.blocked||s.unconfirmed||s.consentUntil===null||!record(s.status))return null;
+     const op=s.status.operation;if(!record(op)||op.phase!=='awaiting-consent'||op.intentUsable!==true||!record(op.context)||op.context.projectId!==projectId)return null;
+-    const c=op.context;if(!oneOf(c.platform,['android','ios'])||c.query!==undefined||c.iosRecord!==undefined||c.stage!==undefined||c.later!==undefined)return null;
++    const c=op.context;if(!oneOf(c.platform,['android','ios'])||c.query!==undefined||c.iosRecord!==undefined||c.later!==undefined)return null;
++    if(kind==='execute'||kind==='reconcile'){
++      const release=storeReleaseFromContext(c,kind),v=c.savedVersion;
++      if(!release||c.executionMode!=='local'||!record(v))return null;
++      return parseStoreReview({kind,platform:c.platform,operationId:op.operationId,ownerGeneration:op.ownerGeneration,statusRevision:s.status.statusRevision,
++        savedConfig:c.savedConfig,savedVersion:{bytes:v.bytes,sha256:v.sha256,name:v.name,build:v.build},
++        candidate:{operationId:c.candidateOperationId,sha256:c.candidateSha256},release});
++    }
++    if(c.stage!==undefined)return null;
+     if(c.operation!==(kind==='access-check'?'local-store-preflight':'local-store-prepare')||c.executionMode!=='local')return null;
+     const v=c.savedVersion;if(!record(v))return null;
+     return parseStoreReview({kind,platform:c.platform,operationId:op.operationId,ownerGeneration:op.ownerGeneration,statusRevision:s.status.statusRevision,
+diff --git a/desktop/src/agentStoreAccessController.ts b/desktop/src/agentStoreAccessController.ts
+--- a/desktop/src/agentStoreAccessController.ts
++++ b/desktop/src/agentStoreAccessController.ts
+@@ -12,7 +12,7 @@
+ const nativeReason=(c:AgentStoreContext)=>c.preview?'CLI Store delegation is unavailable in preview.':!c.port||!c.nativeSession?'Connect the installed Desktop first.':null;
+ const same=(a:AgentStoreContext,b:AgentStoreContext)=>a.port===b.port&&a.nativeSession===b.nativeSession&&a.projectId===b.projectId&&a.epoch===b.epoch&&a.preview===b.preview;
+ const sameGrant=(a:AgentStoreAccess,b:AgentStoreAccess)=>a.projectId===b.projectId&&a.serviceInstance===b.serviceInstance&&a.grantId===b.grantId&&a.reviewId===b.reviewId&&sameStoreReview(a.review,b.review);
+-/** ONE retained permission child shared by basic access and candidate Prepare.
++/** ONE retained permission child shared by all exact Store reviews.
+  * No Submit, no automatic status/read/renewal, no native-result -> JS join. */
+ export class AgentStoreAccessController {
+   private context=absent(); private original:AgentStoreContext|null=null; private generation:object={};
+@@ -28,7 +28,7 @@
+   whenSettled=():Promise<void>=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
+   private read():AgentStoreContext {
+     try {const c=this.source.current();if(typeof c.preview!=='boolean'||!c.epoch||typeof c.epoch!=='object'||
+-      c.nativeSession!==null&&typeof c.nativeSession!=='object'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>2)return absent();
++      c.nativeSession!==null&&typeof c.nativeSession!=='object'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>4)return absent();
+       const p=c.port,port=p&&['status','allow','revoke'].every(k=>typeof p[k as keyof AgentStoreAccessPort]==='function')?p:null;
+       const reviews=c.reviews.map(parseStoreReview).filter((r):r is StoreReview=>r!==null);
+       if(new Set(reviews.map(r=>r.kind)).size!==reviews.length)return absent();
+@@ -48,15 +48,23 @@
+   }
+   ownerReason=():string|null=>this.state.unknown?uncertain:this.normal||this.revokeWork?'The original Store permission call is still returning. Check or revoke that original.':
+     this.state.access?.pending?'The original delegated Store request is not yet retired by all owners.':this.state.access?.enabled?'A local CLI has one-use permission for this Store review. Revoke it before different work.':null;
++  // DATA pin for App's peer check. Only the selected exact original may be
++  // excluded; each local controller independently rematches its private Attempt.
++  // During delegation the Work keeps this pin after GUI consent disappears.
++  peerReview():StoreReview|null {
++    if(this.disposed||this.state.unknown||this.revokeWork)return null;
++    if(this.normal)return this.normal.kind==='allow'&&this.normal.generation===this.generation?this.normal.review:null;
++    return this.ownerReason()?null:this.state.review;
++  }
+   private controls():AgentStoreContext{return this.ownerReason()&&this.original?this.original:this.read();}
+   choose(kind:StoreKind):boolean {
+-    if(!['access-check','candidate-prepare'].includes(kind)||this.disposed||this.ownerReason())return false;
++    if(!['access-check','candidate-prepare','execute','reconcile'].includes(kind)||this.disposed||this.ownerReason())return false;
+     this.consent=null;this.patch({selected:kind,acknowledged:false});this.syncContext();return true;
+   }
+   consentReason():string|null {
+     const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected);
+     return this.disposed?'This permission controller is retired.':this.ownerReason()??nativeReason(c)??c.blockedReason??
+-      (!c.projectId||!r?'Review the basic access check or candidate-only Store preparation in Desktop first.':sameStoreReview(r,this.attempted)?'This review was already used for an Allow attempt. Check or revoke it; never replay.':null);
++      (!c.projectId||!r?'Use the original Store panel to review this exact mode in Desktop first.':sameStoreReview(r,this.attempted)?'This review was already used for an Allow attempt. Check or revoke it; never replay.':null);
+   }
+   allowReason():string|null {const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected)??null;
+     return this.consentReason()??(!this.consent||!same(c,this.consent.context)||!sameStoreReview(r,this.consent.review)?'Confirm permission for this one exact Store review.':null);}
+diff --git a/desktop/src/components/AgentStoreAccess.tsx b/desktop/src/components/AgentStoreAccess.tsx
+--- a/desktop/src/components/AgentStoreAccess.tsx
++++ b/desktop/src/components/AgentStoreAccess.tsx
+@@ -1,18 +1,22 @@
+ import { useSyncExternalStore } from 'react';
+ import type { AgentStoreAccessController } from '../agentStoreAccessController.ts';
+ import { storeCommands } from '../agentStoreAccess.ts';
++import type { StoreKind } from '../agentStoreAccess.ts';
++import { storeEffectText, storeStepLabel } from '../agentStoreRelease.ts';
+ export function AgentStoreAccess({controller}:{controller:AgentStoreAccessController}) {
+   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
+   const r=state.review,access=state.access,commands=storeCommands(access),seconds=controller.remainingSeconds();
+   return <section className="card" aria-label="Local CLI Store permission">
+     <h2>Let a local CLI run one reviewed Store step</h2>
+-    <p>Uses the same native Store review, credentials and cleanup. It cannot Execute, upload, promote or Reconcile. Android access can create a temporary uncommitted Play edit; candidate preparation also writes a local snapshot and intent. iOS access only reads App Store Connect.</p>
+-    <label>Step <select value={state.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value==='candidate-prepare'?'candidate-prepare':'access-check')}>
+-      <option value="access-check">Basic access check</option><option value="candidate-prepare">Prepare candidate intent</option>
++    <p>Uses the same native Store review, credentials, original cleanup and history. Each exact mode needs its own one-use approval. An access/prepare grant cannot authorize an upload, promotion, submission or recovery check.</p>
++    <label>Step <select value={state.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as StoreKind)}>
++      {(['access-check','candidate-prepare','execute','reconcile'] as const).map(kind=><option key={kind} value={kind}>{storeStepLabel(kind)}</option>)}
+     </select></label>
+     {r&&<p>{r.platform==='ios'?'iOS':'Android'} · Version {r.savedVersion.name} · Build {r.savedVersion.build}. Native review <code>{r.operationId}</code>{r.candidate&&<> · Candidate <code>{r.candidate.operationId}</code></>}.</p>}
+-    <p>First use the original Store panel’s Review button. Allow then authorizes one submission before that same review expires; it does not start it or authorize publishing. Keep Desktop open.</p>
+-    <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact nonpublishing review.</label>
++    {r&&<div className="notice"><strong>{r.release?.mode??storeStepLabel(r.kind)}</strong><p>{storeEffectText(r)}</p>
++      {r.release&&<p>Intent <code>{r.release.intentSha256}</code>{r.release.stageOperationId&&<> · Stage <code>{r.release.stageOperationId}</code></>}{r.release.basis&&<> · Basis receipt <code>{r.release.basis.receiptSha256}</code></>}.</p>}</div>}
++    <p>First use the original Store panel’s Review button. Allow authorizes one submission of exactly that review before its native expiry; it does not start it. Execute may perform the reviewed Store mutation; Reconcile performs only its separately reviewed mode. Keep Desktop open. No automatic retry, and no target/receipt is proof of public release.</p>
++    <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact Store mode and its displayed effects.</label>
+     <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this Store step once</button>
+     {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
+     <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original CLI permission/status</button>
+@@ -22,6 +26,8 @@
+     {state.issue&&<p role="alert">{state.issue}</p>}
+     {access&&<p>{state.stale?'Earlier or unconfirmed context · ':''}{access.status?`${access.status.state} · ${access.status.settlement}`:access.enabled?'One-use permission observed':'No unused permission observed'}{seconds!==null?` · up to ${seconds}s remaining`:''}.</p>}
+     {commands.length>0&&<><p>Run manually in your terminal. Keep the request ID printed before submission; after a lost response, use Status/Cancel for that ID, not Submit again.</p><pre>{commands.join('\n')}</pre></>}
+-    {access?.status?.state==='complete'&&<p>The same caller, native owner and service-history writer returned. Access findings may still fail; a prepared local intent is not an upload or release approval.</p>}
++    {access?.review?.release&&<p>Retained request mode: {access.review.release.mode}. {storeEffectText(access.review)}</p>}
++    {access?.status?.result&&(access.review?.kind==='execute'||access.review?.kind==='reconcile')&&<pre>{JSON.stringify(access.status.result,null,2)}</pre>}
++    {access?.status?.state==='complete'&&<p>The same caller, native owner and service-history writer returned. Access findings may still fail; preparation is not upload approval. Execute receipts retain their actual tester/review/draft state, not public availability. Reconcile/readiness/recovery records do not establish the earlier execution’s finality or authorize retry.</p>}
+   </section>;
+ }
+diff --git a/desktop/src/components/LocalStoreExecute.tsx b/desktop/src/components/LocalStoreExecute.tsx
+--- a/desktop/src/components/LocalStoreExecute.tsx
++++ b/desktop/src/components/LocalStoreExecute.tsx
+@@ -1,11 +1,11 @@
+ import { localStoreStageLabel } from '../localStoreStageProtocol.ts';
+ import { localStoreExecuteOwnerReason, type LocalStoreExecuteController, type LocalStoreExecuteState } from '../localStoreExecute.ts';
+ 
+-export function LocalStoreExecute({ state, controller, compact = false, onCredentials, onShow }: {
++export function LocalStoreExecute({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
+   state: LocalStoreExecuteState; controller: LocalStoreExecuteController; compact?: boolean;
+-  onCredentials: () => void; onShow: () => void;
++  onCredentials: () => void; onShow: () => void; agentReason?: string | null;
+ }) {
+-  const op=state.status?.operation, retained=localStoreExecuteOwnerReason(state), reason=controller.prepareReason();
++  const op=state.status?.operation, retained=localStoreExecuteOwnerReason(state), reason=agentReason??controller.prepareReason();
+   const receipt=op?.result?.executionReceipt;
+   const ios=(retained&&op?op.context.platform:state.platform)==='ios';
+   const displayedRequest=retained&&op?op.context:state.request;
+diff --git a/desktop/src/components/LocalStoreReconcile.tsx b/desktop/src/components/LocalStoreReconcile.tsx
+--- a/desktop/src/components/LocalStoreReconcile.tsx
++++ b/desktop/src/components/LocalStoreReconcile.tsx
+@@ -1,10 +1,10 @@
+ import { localStoreReconcileOwnerReason, type LocalStoreReconcileController, type LocalStoreReconcileState } from '../localStoreReconcile.ts';
+ 
+-export function LocalStoreReconcile({ state, controller, compact = false, onCredentials, onShow }: {
++export function LocalStoreReconcile({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
+   state: LocalStoreReconcileState; controller: LocalStoreReconcileController; compact?: boolean;
+-  onCredentials: () => void; onShow: () => void;
++  onCredentials: () => void; onShow: () => void; agentReason?: string | null;
+ }) {
+-  const op=state.status?.operation, retained=localStoreReconcileOwnerReason(state), reason=controller.prepareReason();
++  const op=state.status?.operation, retained=localStoreReconcileOwnerReason(state), reason=agentReason??controller.prepareReason();
+   const receipt=op?.result?.readinessReceipt??op?.result?.reconciliationReceipt;
+   const originalReadiness=op?.context.action==='external-readiness';
+   const readiness=retained&&op?originalReadiness:state.externalReadiness;
+diff --git a/desktop/src/localStoreExecute.ts b/desktop/src/localStoreExecute.ts
+--- a/desktop/src/localStoreExecute.ts
++++ b/desktop/src/localStoreExecute.ts
+@@ -53,7 +53,7 @@
+ export class LocalStoreExecuteController {
+  private state:LocalStoreExecuteState={mode:'unavailable',platform:'android',applicationId:null,prepared:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
+- private attempt:{request:PrepareLocalStoreExecute;prepared:PreparedReview;epoch:number;after:number;previous:LocalStoreExecuteIdentity|null;id:LocalStoreExecuteIdentity|null;retired:boolean;started:boolean}|null=null;
++ private attempt:{delegated:boolean;prepareReturned:boolean;request:PrepareLocalStoreExecute;prepared:PreparedReview;epoch:number;after:number;previous:LocalStoreExecuteIdentity|null;id:LocalStoreExecuteIdentity|null;retired:boolean;started:boolean}|null=null;
+  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
+  private readonly source:Source;
+  private selectionPending=false;private historyHead:number|null=null;
+@@ -71,7 +71,21 @@
+  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
+- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
++ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ agentPreparedMatches(id:LocalStoreExecuteIdentity,revision:number):boolean{
++  const a=this.attempt,op=this.state.status?.operation;
++  return !!a&&a.prepareReturned&&this.api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&
++   !this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!this.state.historical&&sameId(a.id,id)&&sameId(a.id,op)&&
++   this.state.status?.statusRevision===revision&&op?.phase==='awaiting-consent'&&op.intentUsable&&sameOfflineData(op.context,requestContext(a.request))&&
++   (a.delegated||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
++ }
++ delegatePrepared(id:LocalStoreExecuteIdentity,revision:number):(()=>boolean)|null{
++  this.syncProject();const a=this.attempt,api=this.api;
++  if(!a||a.delegated||!this.agentPreparedMatches(id,revision))return null;
++  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
++  // Monotone even if Allow is lost/refused. No fake started flag or native grant.
++  return ()=>this.attempt===a&&this.api===api&&a.delegated&&this.agentPreparedMatches(id,revision);
++ }
+  beginConnection=()=>{this.invalidate();if(localStoreExecuteOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
+  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
+   try{const unlisten=await api.subscribeLocalStoreExecute(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
+@@ -92,14 +106,15 @@
+  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStoreExecuteStatus());}catch{this.fail();}finally{this.reading=false;}}
+  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot upload to a Store.';if(localStoreExecuteOwnerReason(this.state))return localStoreExecuteOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store execution.';if(!this.state.request&&this.source.assets()?.scope.stage!=='candidate')return'Review the current stage-prepared intent in Release history, read the matching saved version and assign the same stage-specific Store credentials and iOS review inputs. This reuses the original uploaded binary; Java, Xcode and another build are not required. A changed, pending or failed stage cannot be resent.';if(!this.state.request)return'Review the matching prepared intent in Release history, read the saved version, and assign the same credential in Credentials → This Mac → the candidate platform → Candidate → Store (or Full). Android also requires the protected Android tool copy; iOS requires local Xcode (check Environment doctor).';return this.source.otherOperationReason();}
+  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.prepared||!this.state.status)return;const api=this.api,request=this.state.request;
+-  this.attempt={request,prepared:this.state.prepared,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
++  this.attempt={delegated:false,prepareReturned:false,request,prepared:this.state.prepared,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+   this.update({pending:true,unconfirmed:true,error:null,historical:false});
+   try{this.receive(await api.prepareLocalStoreExecute(request));const op=this.state.status?.operation;
+    if(this.attempt!==a||a.retired||a.epoch!==this.epoch||!sameId(a.id,op)||op?.phase!=='awaiting-consent'||!op.intentUsable){if(a.id)void this.cancelOriginal(false);return;}
+    const deadline=this.now()+60000;this.update({consentUntil:deadline,acknowledged:false});this.timer=setTimeout(()=>{if(this.attempt===a)this.invalidate();},60000);
+-  }catch{this.fail();}finally{this.update({pending:false});}}
++  }catch{this.fail();}finally{a.prepareReturned=true;this.update({pending:false});}}
+  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
+  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
++  if(a?.delegated)return; // Only the linked native CLI approval can consume this review.
+   if(a?.started)return; // A queued second click cannot cancel the running original.
+   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
+   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
+diff --git a/desktop/src/localStorePreflight.ts b/desktop/src/localStorePreflight.ts
+--- a/desktop/src/localStorePreflight.ts
++++ b/desktop/src/localStorePreflight.ts
+@@ -59,6 +59,10 @@
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{if(pending)this.invalidate();else this.syncProject();};
+  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ agentPreparedMatches(id:LocalStoreIdentity,revision:number):boolean{
++  const a=this.attempt,api=this.api;
++  return !!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(this.hasPendingGuiSubmission()||false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&a.request.query===undefined&&(a.request.platform===undefined||a.request.platform==='android'||a.request.platform==='ios')&&(a.delegated===true||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
++ }
+  delegatePrepared(id:LocalStoreIdentity,revision:number):(()=>boolean)|null{
+   this.syncProject();const a=this.attempt,api=this.api;
+   const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(this.hasPendingGuiSubmission()||false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&a.request.query===undefined&&(a.request.platform===undefined||a.request.platform==='android'||a.request.platform==='ios');
+diff --git a/desktop/src/localStorePrepare.ts b/desktop/src/localStorePrepare.ts
+--- a/desktop/src/localStorePrepare.ts
++++ b/desktop/src/localStorePrepare.ts
+@@ -45,6 +45,10 @@
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
+  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ agentPreparedMatches(id:LocalStorePrepareIdentity,revision:number):boolean{
++  const a=this.attempt,api=this.api;
++  return !!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request)&&(a.delegated===true||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
++ }
+  delegatePrepared(id:LocalStorePrepareIdentity,revision:number):(()=>boolean)|null{
+   this.syncProject();const a=this.attempt,api=this.api;
+   const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request);
+diff --git a/desktop/src/localStoreReconcile.ts b/desktop/src/localStoreReconcile.ts
+--- a/desktop/src/localStoreReconcile.ts
++++ b/desktop/src/localStoreReconcile.ts
+@@ -57,7 +57,7 @@
+ export class LocalStoreReconcileController {
+  private state:LocalStoreReconcileState={platform:'android',settlement:false,externalReadiness:false,mode:'unavailable',applicationId:null,prepared:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
+- private attempt:{request:PrepareLocalStoreReconcile;prepared:PreparedReview;head:number;epoch:number;after:number;previous:LocalStoreReconcileIdentity|null;id:LocalStoreReconcileIdentity|null;retired:boolean;started:boolean}|null=null;
++ private attempt:{delegated:boolean;prepareReturned:boolean;request:PrepareLocalStoreReconcile;prepared:PreparedReview;head:number;epoch:number;after:number;previous:LocalStoreReconcileIdentity|null;id:LocalStoreReconcileIdentity|null;retired:boolean;started:boolean}|null=null;
+  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
+  private readonly source:Source;
+  private selectionPending=false;private historyHead:number|null=null;
+@@ -80,7 +80,21 @@
+  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
+- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
++ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ agentPreparedMatches(id:LocalStoreReconcileIdentity,revision:number):boolean{
++  const a=this.attempt,op=this.state.status?.operation;
++  return !!a&&a.prepareReturned&&this.api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&
++   !this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!this.state.historical&&sameId(a.id,id)&&sameId(a.id,op)&&
++   this.state.status?.statusRevision===revision&&op?.phase==='awaiting-consent'&&op.intentUsable&&sameOfflineData(op.context,reconcileRequestContext(a.request))&&
++   (a.delegated||this.state.consentUntil!==null&&this.now()<this.state.consentUntil);
++ }
++ delegatePrepared(id:LocalStoreReconcileIdentity,revision:number):(()=>boolean)|null{
++  this.syncProject();const a=this.attempt,api=this.api;
++  if(!a||a.delegated||!this.agentPreparedMatches(id,revision))return null;
++  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
++  // Monotone even if Allow is lost/refused. No fake started flag or native grant.
++  return ()=>this.attempt===a&&this.api===api&&a.delegated&&this.agentPreparedMatches(id,revision);
++ }
+  beginConnection=()=>{this.invalidate();if(localStoreReconcileOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
+  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
+   try{const unlisten=await api.subscribeLocalStoreReconcile(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
+@@ -104,14 +118,15 @@
+  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStoreReconcileStatus());}catch{this.fail();}finally{this.reading=false;}}
+  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreReconcileOwnerReason(this.state))return localStoreReconcileOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store readback.';if(!this.state.request&&this.state.externalReadiness)return'In Release history, choose iOS and review the latest successful external stage receipt. Keep its saved version and assign the original App Store Connect key, review contact and operation commitment under Credentials → This Mac → iOS → External testing → Store (or Full). The original operation must be complete, not interrupted.';if(!this.state.request&&this.state.settlement)return'Review the latest interrupted or failed execution for a Store check. Already successful executions and a full recovery journal cannot record another checkpoint. Keep the matching saved version and assigned Google account.';if(!this.state.request&&this.state.platform==='ios')return'In Release history, choose iOS and review the latest execution for a Store check. Read the matching saved version and assign the same App Store Connect P8, Key ID and Issuer ID in Credentials → This Mac → iOS → Candidate → Store (or Full).';if(!this.state.request)return'In Release history, review the latest execution for a Store check, read the matching saved version, and assign the same Google service account in Credentials → This Mac → Android → Candidate → Store (or Full).';return this.source.otherOperationReason();}
+  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.prepared||!this.state.status||this.historyHead===null)return;const api=this.api,request=this.state.request;
+-  this.attempt={request,prepared:this.state.prepared,head:this.historyHead,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
++  this.attempt={delegated:false,prepareReturned:false,request,prepared:this.state.prepared,head:this.historyHead,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+   this.update({pending:true,unconfirmed:true,error:null,historical:false});
+   try{this.receive(await api.prepareLocalStoreReconcile(request));const op=this.state.status?.operation;
+    if(this.attempt!==a||a.retired||a.epoch!==this.epoch||!sameId(a.id,op)||op?.phase!=='awaiting-consent'||!op.intentUsable){if(a.id)void this.cancelOriginal(false);return;}
+    const deadline=this.now()+60000;this.update({consentUntil:deadline,acknowledged:false});this.timer=setTimeout(()=>{if(this.attempt===a)this.invalidate();},60000);
+-  }catch{this.fail();}finally{this.update({pending:false});}}
++  }catch{this.fail();}finally{a.prepareReturned=true;this.update({pending:false});}}
+  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
+  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
++  if(a?.delegated)return; // Only the linked native CLI approval can consume this review.
+   if(a?.started)return; // A queued second click cannot cancel the running original.
+   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
+   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});

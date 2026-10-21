@@ -118,7 +118,18 @@ fn output(
             status.settlement,
             receipt(q)
         );
-        text.push_str("Only the reviewed basic access check or local candidate preparation is delegated. No Execute, upload, promotion or Reconcile permission.\n");
+        text.push_str("Only the exact separately approved Store review is delegated. Access/Prepare grants never authorize Execute or Reconcile. Receipts, recovery/readiness checkpoints and target matches do not authorize retry or prove public availability.\n");
+        if let Some(release) = &status.review.release {
+            text.push_str(&format!("Reviewed {:?} / {:?} ({:?}).\n", status.review.kind, release.mode, status.review.platform));
+        }
+        if let Some(result) = &status.result {
+            match result {
+                store::Report::Execute { release } | store::Report::Reconcile { release } => {
+                    text.push_str(&format!("Semantic target: {:?}; {:?}; state {:?}. Receipt {}.\n", release.target, release.result, release.state, release.receipt_sha256));
+                }
+                _ => {}
+            }
+        }
         text.into_bytes()
     };
     Ok((code, bytes))

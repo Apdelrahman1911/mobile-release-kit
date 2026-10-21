@@ -5,6 +5,8 @@ use crate::{
     service_protocol as s, service_store_protocol as p, service_store_requests as requests,
 };
 use std::sync::{OnceLock, Weak};
+#[path = "saved_command_agent_store_release.rs"]
+mod release;
 
 fn refused() -> BridgeError {
     BridgeError::new("agent_store_unavailable","This original Store review cannot be delegated. Check or stop the original request; do not replay it.")
@@ -23,6 +25,9 @@ fn review(
     generation: &str,
     revision: u32,
 ) -> Result<p::Review, BridgeError> {
+    if matches!(c, Context::LocalStoreExecute(_) | Context::LocalStoreReconcile(_)) {
+        return release::review(c, id, generation, revision);
+    }
     let (kind, platform, config, saved_version, candidate) = match c {
         Context::LocalStorePreflight(c) if c.query.is_none() && c.ios_record.is_none() => {
             let platform = match c.platform {
@@ -66,6 +71,7 @@ fn review(
         saved_config: config,
         saved_version,
         candidate,
+        release: None,
         operation_id: s::Id::parse(id).map_err(|_| refused())?,
         owner_generation: s::Id::parse(generation).map_err(|_| refused())?,
         status_revision: revision,
@@ -85,6 +91,7 @@ pub(super) fn witness(context: &Context) -> Option<Arc<()>> {
             Some(Arc::new(()))
         }
         Context::LocalStorePrepare(c) if c.later.is_none() => Some(Arc::new(())),
+        Context::LocalStoreExecute(_) | Context::LocalStoreReconcile(_) if release::supported(context) => Some(Arc::new(())),
         _ => None,
     }
 }
@@ -275,6 +282,9 @@ fn reason(r: Reason, control: &requests::Control) -> p::Reason {
     }
 }
 fn report(t: &Terminal, review: &p::Review) -> Result<p::Report, BridgeError> {
+    if matches!(review.kind, p::Kind::Execute | p::Kind::Reconcile) {
+        return release::report(t, review);
+    }
     // The original decoder already validated full context, fixed scope and
     // lifetime. Project only bounded nonsecret fields after native retirement.
     let (value, kind) = match t {
@@ -299,6 +309,7 @@ fn report(t: &Terminal, review: &p::Review) -> Result<p::Report, BridgeError> {
     }
     let v: serde_json::Value = serde_json::from_slice(&value).map_err(|_| refused())?;
     let projected = match kind {
+        p::Kind::Execute | p::Kind::Reconcile => return Err(refused()),
         p::Kind::AccessCheck => {
             serde_json::json!({"kind":"access-check","findings":v["findings"],"limitations":v["limitations"]})
         }

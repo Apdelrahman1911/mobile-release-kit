@@ -1,4 +1,4 @@
-//! Closed nonpublishing Store delegation DATA. No decoded value owns a
+//! Closed original-bound Store delegation DATA. No decoded value owns a
 //! Prepared, credential, source, native operation or release authorization.
 use crate::service_protocol::{Error, Id, Settlement};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -8,6 +8,8 @@ pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 8192;
 pub(crate) const INTENT_MS: u64 = 300_000;
 pub(crate) const DOCUMENT_BACKING: usize = 2 * 1024 * 1024;
+#[path = "service_store_release_protocol.rs"]
+pub(crate) mod release;
 
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
@@ -34,6 +36,8 @@ pub(crate) fn uuid(v: &str) -> bool {
 pub(crate) enum Kind {
     AccessCheck,
     CandidatePrepare,
+    Execute,
+    Reconcile,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -42,20 +46,19 @@ pub(crate) enum Platform {
     Ios,
 }
 impl Kind {
-    pub(crate) fn consent(self, platform: Platform) -> &'static str {
+    fn basic_consent(self, platform: Platform) -> Option<&'static str> {
         match (self, platform) {
-            (Self::AccessCheck, Platform::Android) => "agent-android-store-access-once-v1",
-            (Self::AccessCheck, Platform::Ios) => "agent-ios-store-access-once-v1",
-            (Self::CandidatePrepare, Platform::Android) => {
-                "agent-android-store-candidate-prepare-once-v1"
-            }
-            (Self::CandidatePrepare, Platform::Ios) => "agent-ios-store-candidate-prepare-once-v1",
+            (Self::AccessCheck, Platform::Android) => Some("agent-android-store-access-once-v1"),
+            (Self::AccessCheck, Platform::Ios) => Some("agent-ios-store-access-once-v1"),
+            (Self::CandidatePrepare, Platform::Android) => Some("agent-android-store-candidate-prepare-once-v1"),
+            (Self::CandidatePrepare, Platform::Ios) => Some("agent-ios-store-candidate-prepare-once-v1"),
+            _ => None,
         }
     }
     pub(crate) fn action(self) -> crate::service_protocol::Action {
         match self {
             Self::AccessCheck => crate::service_protocol::Action::ObserveProject,
-            Self::CandidatePrepare => crate::service_protocol::Action::Release,
+            Self::CandidatePrepare | Self::Execute | Self::Reconcile => crate::service_protocol::Action::Release,
         }
     }
 }
@@ -96,7 +99,7 @@ pub(crate) struct Candidate {
     pub(crate) operation_id: String,
     pub(crate) sha256: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Review {
     pub(crate) kind: Kind,
@@ -108,15 +111,22 @@ pub(crate) struct Review {
     pub(crate) saved_version: Version,
     #[serde(deserialize_with = "nullable")]
     pub(crate) candidate: Option<Candidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) release: Option<release::Review>,
 }
 impl Review {
+    pub(crate) fn consent(&self) -> Option<&'static str> {
+        if !self.valid() { return None; }
+        self.release.as_ref().map_or_else(|| self.kind.basic_consent(self.platform), |r| r.mode.consent(self.kind, self.platform))
+    }
     pub(crate) fn valid(&self) -> bool {
         (1..u32::MAX).contains(&self.status_revision)
             && self.saved_config.valid()
             && self.saved_version.valid()
-            && match (&self.kind, &self.candidate) {
-                (Kind::AccessCheck, None) => true,
-                (Kind::CandidatePrepare, Some(c)) => uuid(&c.operation_id) && sha(&c.sha256),
+            && match (self.kind, &self.candidate, &self.release) {
+                (Kind::AccessCheck, None, None) => true,
+                (Kind::CandidatePrepare, Some(c), None) => uuid(&c.operation_id) && sha(&c.sha256),
+                (Kind::Execute | Kind::Reconcile, Some(c), Some(r)) => r.valid_for(self.kind, self.platform, c),
                 _ => false,
             }
     }
@@ -244,6 +254,8 @@ pub(crate) fn prepare_limitations(platform: Platform) -> [Limitation; 5] {
     deny_unknown_fields
 )]
 pub(crate) enum Report {
+    Execute { release: release::Receipt },
+    Reconcile { release: release::Receipt },
     AccessCheck {
         findings: Vec<Finding>,
         limitations: Vec<Limitation>,
@@ -260,6 +272,7 @@ pub(crate) enum Report {
 impl Report {
     pub(crate) fn valid_for(&self, r: &Review) -> bool {
         match (self, r.kind) {
+            (Self::Execute { release }, Kind::Execute) | (Self::Reconcile { release }, Kind::Reconcile) => release.valid_for(r),
             (
                 Self::AccessCheck {
                     findings,

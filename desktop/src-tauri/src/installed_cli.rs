@@ -279,11 +279,12 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "backupRestoreScope":"android-keystore-only","restoreNewUnassigned":true,"implicitAssignment":false,
                 "rememberAssignment":false,"recoveryAcknowledgment":false,
                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
-            "store": {"scope":"one-existing-desktop-prepared-nonpublishing-store-step","commands":store::COMMANDS,
-                "kinds":["access-check","candidate-prepare"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+            "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
+                "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
-                "execute":false,"reconcile":false,"upload":false,"promotion":false,"queryVariants":false,"nativeAvailabilityChecked":false},
+                "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
+                "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":false,"nativeAvailabilityChecked":false},
             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
@@ -332,7 +333,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
-        text.push_str("\nStore steps: separate Desktop one-use approval of an existing prepared basic access check or candidate preparation. Android access uses a temporary uncommitted edit; candidate preparation writes the local journal. No Execute/upload/promotion/Reconcile.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");

@@ -1277,7 +1277,7 @@ pub(crate) use agent_ios_archive::Approval as AgentIOSArchiveApproval;
 pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
 #[path="saved_command_agent_store.rs"]
 mod agent_store;
-pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding};
+pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
 
 struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
