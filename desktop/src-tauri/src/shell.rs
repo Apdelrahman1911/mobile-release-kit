@@ -2865,17 +2865,17 @@ async fn github_setup_publication_status(webview: Webview, request: tauri::ipc::
 }
 
 #[tauri::command]
-async fn github_setup_publication_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+async fn github_setup_publication_prepare(app: AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
-    state.document.github_publication_command("github_setup_publication_prepare", request_body(&request)?)
+    state.document.github_publication_command_at("github_setup_publication_prepare", request_body(&request)?, app.path().app_local_data_dir().ok())
 }
 
 #[tauri::command]
-async fn github_setup_publication_publish(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
+async fn github_setup_publication_publish(app: AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_publication_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_connection_session::publication::refused(crate::github_publication_protocol::Reason::InvalidInput)); }
-    state.document.github_publication_command("github_setup_publication_publish", request_body(&request)?)
+    state.document.github_publication_command_at("github_setup_publication_publish", request_body(&request)?, app.path().app_local_data_dir().ok())
 }
 
 #[tauri::command]

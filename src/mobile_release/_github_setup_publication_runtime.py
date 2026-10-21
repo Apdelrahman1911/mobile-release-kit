@@ -9,9 +9,10 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import github_setup_publication as policy
+from . import version_counter_setup as counter
 from ._desktop_github_engine import _ID, _check_control, _write_response, ProtocolError
 from ._github_connection_transport import _Budget, _ExchangeProfile, _control, ReadFailure
 from ._github_setup_publication_journal import Journal, summary, MAX_RECORDS
@@ -25,14 +26,14 @@ MAX_INITIAL_BYTES = 8192
 MAX_GO_BYTES = policy.MAX_REVIEW_BYTES + 8192
 MAX_RESULT_BYTES = 512 * 1024
 KINDS = {"prepare", "publish", "pending", "reconcile"}
-REASONS = policy.REASONS | {"none", "configuration-changed", "resources-unavailable", "runtime-unavailable"}
+REASONS = policy.REASONS | counter.REASONS | {"none", "configuration-changed", "resources-unavailable", "runtime-unavailable"}
 
 
 @dataclass(frozen=True, slots=True, repr=False)
 class Initial:
     id: str
     kind: str
-    target: policy.Target
+    target: policy.Target | counter.Target
     source: dict | None
     home: str | None
     prepared_sha256: str | None
@@ -49,15 +50,17 @@ def parse_initial(raw: bytes) -> Initial:
     policy._require((source is not None) == (kind in {"prepare", "publish"}))
     if source is not None:
         publication_source(source)
+    target = counter.target(action["target"], unresolved=kind == "prepare")
+    policy._require(kind != "pending" or type(target) is policy.Target)
     home = action["home"]
-    policy._require((home is not None) == (kind != "prepare"))
+    policy._require((home is not None) == (kind != "prepare" or type(target) is counter.Target))
     if home is not None:
         Journal(home, end=0)  # Closed home grammar only, never opens here.
     digest = action["preparedSha256"]
     policy._require((digest is not None) == (kind == "publish"))
     if digest is not None:
         policy._match(digest, policy._DIGEST)
-    return Initial(policy._match(row["id"], _ID), kind, policy.Target.parse(action["target"]),
+    return Initial(policy._match(row["id"], _ID), kind, target,
                    source, home, digest, hashlib.sha256(raw).hexdigest())
 
 
@@ -66,11 +69,12 @@ def ready_frame(request: Initial) -> bytes:
         "ready": {"requestSha256": request.digest}}) + b"\n"
 
 
-def parse_go(raw: bytes, request: Initial) -> tuple[str | None, policy.Prepared | None]:
+def parse_go(raw: bytes, request: Initial) -> tuple[str | None, policy.Prepared | counter.NativeGo | None]:
     maximum = MAX_GO_BYTES if request.kind == "publish" else 8192
     row = policy._object(_frame(raw, maximum, nodes=1024, depth=12), {"protocol", "id", "go"})
     policy._require(row["protocol"] == policy.PROTOCOL and row["id"] == request.id)
-    go = policy._object(row["go"], {"requestSha256", "token", "prepared"})
+    is_counter = type(request.target) is counter.Target
+    go = policy._object(row["go"], {"requestSha256", "token", "prepared"} | ({"projectId"} if is_counter else set()))
     policy._require(go["requestSha256"] == request.digest)
     token = go["token"]
     if request.kind == "pending":
@@ -82,9 +86,9 @@ def parse_go(raw: bytes, request: Initial) -> tuple[str | None, policy.Prepared 
     policy._require((prepared is not None) == (request.kind == "publish"))
     if prepared is not None:
         policy._require(hashlib.sha256(policy._canonical(prepared)).hexdigest() == request.prepared_sha256)
-        prepared = policy.Prepared.parse(prepared)
+        prepared = counter.prepared(prepared)
         policy._require(prepared.target == request.target)
-    return token, prepared
+    return token, counter.resolve_go(request.target, go["projectId"], prepared) if is_counter else prepared
 
 
 def _scope(target: policy.Target) -> dict:
@@ -94,6 +98,10 @@ def _scope(target: policy.Target) -> dict:
 def execute(request: Initial, token: str | None, retained: policy.Prepared | None, *,
             started: float, runtime_dir: str) -> dict:
     """Only invoked after original native GO. No journal result before close."""
+    if type(request.target) is counter.Target:
+        policy._require(type(retained) is counter.NativeGo and counter.resolved_matches(request.target, retained.target))
+        request = replace(request, target=retained.target)
+        retained = retained.review
     budget = _Budget(started, _profile=_ExchangeProfile.PUBLICATION)
     budget.remaining()
     result = {"schemaVersion": 1, "kind": request.kind, "reason": "none", "prepared": None,
@@ -117,27 +125,46 @@ def execute(request: Initial, token: str | None, retained: policy.Prepared | Non
             original = matches[0]
             exchange = make_exchange(request.target, token, started=started, runtime_dir=runtime_dir,
                                      budget=budget, checkpoint=journal._post)
-            result["publication"] = policy.reconcile(summary(original["summary"]), original["confirmed"],
+            facet = counter if type(request.target) is counter.Target else policy
+            result["publication"] = facet.reconcile(summary(original["summary"]), original["confirmed"],
                                                      tuple(original["claimed"]), exchange)
             result["reason"] = result["publication"]["reason"]
         else:
-            with observe_publication_configuration(request.source, budget=budget) as captured:
-                source = policy.Source.from_saved(captured.saved_bytes(), request.target)
-                result["configuration"] = captured.value()
+            is_counter = type(request.target) is counter.Target
+            with observe_publication_configuration(request.source, budget=budget, counter=is_counter) as captured:
                 def checkpoint():
-                    captured.checkpoint()
+                    try:
+                        captured.checkpoint()
+                    except SecretConfigurationError:
+                        raise
+                    except Exception as error:
+                        if not is_counter:
+                            raise
+                        # The retained reader may raise its private _ReadProblem.
+                        # Normalize only this checkpoint, not arbitrary policy or
+                        # HTTP failures; the enclosing owner still performs POST
+                        # and all consuming closes before any usable frame.
+                        raise SecretConfigurationError("configuration-changed") from error
                     if journal is not None:
                         journal._post()
-                exchange = make_exchange(request.target, token, started=started, runtime_dir=runtime_dir,
-                                         budget=budget, checkpoint=checkpoint)
                 try:
+                    if is_counter:
+                        counter.source_matches(captured.saved_bytes(), captured.version_bytes(), request.target)
+                        source = None
+                    else:
+                        source = policy.Source.from_saved(captured.saved_bytes(), request.target)
+                    result["configuration"] = captured.value()
+                    exchange = make_exchange(request.target, token, started=started, runtime_dir=runtime_dir,
+                                             budget=budget, checkpoint=checkpoint)
                     if request.kind == "prepare":
                         policy._require(retained is None)
-                        result["prepared"] = policy.prepare(request.target, source, exchange).view()
+                        result["prepared"] = (counter.prepare(request.target, exchange, journal) if is_counter
+                            else policy.prepare(request.target, source, exchange)).view()
                     else:
                         policy._require(request.kind == "publish" and retained is not None and journal is not None
                                         and retained.target == request.target)
-                        result["publication"] = policy.publish(retained, source, exchange, journal)
+                        result["publication"] = (counter.publish(retained, exchange, journal) if is_counter
+                            else policy.publish(retained, source, exchange, journal))
                         result["reason"] = result["publication"]["reason"]
                 except SecretConfigurationError:
                     raise
@@ -158,7 +185,7 @@ def execute(request: Initial, token: str | None, retained: policy.Prepared | Non
             result["publication"]["reason"] = error.reason
             if result["publication"].get("claimed"):
                 result["publication"]["effect"] = "potentially-applied"
-                result["publication"]["pull"] = None
+                result["publication"]["counter" if type(request.target) is counter.Target else "pull"] = None
     except (policy.Refused, ReadFailure) as error:
         result["reason"] = error.reason
     finally:
@@ -180,7 +207,7 @@ def encode_result(request: Initial, result: dict) -> bytes:
     _check_control(result["control"])
     if result["prepared"] is not None:
         policy._require(request.kind == "prepare" and result["reason"] == "none"
-                        and policy.Prepared.parse(result["prepared"]).target == request.target)
+                        and counter.resolved_matches(request.target, counter.prepared(result["prepared"]).target))
     if result["pending"] is not None:
         policy._require(request.kind == "pending" and len(result["pending"]) <= MAX_RECORDS)
         for row in result["pending"]:

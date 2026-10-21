@@ -720,3 +720,6 @@ mod tests {
         assert!(!Request({ let mut r = request(); r["policy"]["mode"] = json!("manual"); r }).valid());
     }
 }
+
+#[path="version_counter_setup_state_native.rs"]
+pub(crate) mod counter_setup;

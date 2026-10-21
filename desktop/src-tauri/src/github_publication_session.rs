@@ -7,6 +7,7 @@ use crate::{
     supervisor::{GitHubPublicationReceipt, GitHubPublicationTicket},
 };
 use serde_json::Value;
+use std::sync::Arc;
 
 pub(crate) fn refused(reason: p::Reason) -> BridgeError {
     let text = serde_json::to_value(reason)
@@ -46,7 +47,8 @@ struct Active {
 }
 struct Consent {
     id: String,
-    prepared: p::Prepared,
+    prepared: p::Review,
+    counter_proof: Option<Arc<crate::asset_session::CounterStateProof>>,
     end: Instant,
     session_id: String,
     project_id: String,
@@ -73,6 +75,7 @@ impl State {
                 consent: None,
                 pending: Vec::new(),
                 pull: None,
+                counter: None,
             },
             active: None,
             consent: None,
@@ -154,6 +157,7 @@ impl State {
         self.revoke_consent();
         self.view.pending.clear();
         self.view.pull = None;
+        self.view.counter = None;
         self.view.operation = None;
         self.view.session_id = None;
         self.finish(before);
@@ -170,7 +174,8 @@ impl State {
                 .checked_add(v.prepared.heap()?)?
                 .checked_add(v.session_id.capacity())?
                 .checked_add(v.project_id.capacity())?
-                .checked_add(v.root.path.capacity())?;
+                .checked_add(v.root.path.capacity())?
+                .checked_add(v.counter_proof.as_ref().map_or(Some(0), |p| p.heap())?)?;
         }
         Some(n)
     }
@@ -246,6 +251,19 @@ impl ConnectionState {
                     .as_ref()
                     .map(|v| v.project_id.as_str())
             })
+    }
+    pub(crate) fn publication_counter_inputs(
+        &self,
+        id: &str,
+    ) -> Option<(
+        p::counter::CounterTarget,
+        Arc<crate::asset_session::CounterStateProof>,
+    )> {
+        let consent = self.publication.consent.as_ref().filter(|v| v.id == id)?;
+        Some((
+            consent.prepared.counter()?.target.counter()?.clone(),
+            consent.counter_proof.clone()?,
+        ))
     }
     fn publication_binding(
         &self,
@@ -394,7 +412,8 @@ impl ConnectionState {
                         + consent_id.capacity(),
                 )
             })
-            .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + p::GO_LIMIT + 65536));
+            .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + p::GO_LIMIT + 65536))
+            .and_then(|n| n.checked_add(gate.counter_quote()?));
         if !retained.is_some_and(|n| n <= p::RETAINED_LIMIT) {
             return Err(refused(p::Reason::ResourcesUnavailable));
         }
@@ -412,13 +431,16 @@ impl ConnectionState {
         self.setup.revoke_consent();
         self.setup.finish(old);
         self.pull_request.context_changed();
-        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+        self.actions_retry.context_changed();
+        self.play_cleanup.context_changed();
         self.publication.revoke_consent();
         self.publication.view.pending.clear();
         self.publication.view.pull = None;
+        self.publication.view.counter = None;
         self.publication.view.operation = Some(p::Operation {
             id: ticket.operation_id().into(),
             kind: request.kind,
+            purpose: request.target.purpose(),
             phase: p::Phase::Running,
             reason: p::Reason::None,
             effect: if request.kind == p::Kind::Publish {
@@ -456,7 +478,8 @@ impl ConnectionState {
         stamp: SavedEditStamp,
         nonce: String,
         source: p::Source,
-        gate: crate::asset_session::GitHubPublicationGoGate,
+        home: Option<String>,
+        mut gate: crate::asset_session::GitHubPublicationGoGate,
         supervisor: &Supervisor,
         now: Instant,
     ) -> Result<p::Status, BridgeError> {
@@ -472,12 +495,16 @@ impl ConnectionState {
             nonce.clone(),
             now,
         )?;
+        let target = gate.select_target(target)?;
+        if target.purpose() != args.purpose || target.counter().is_some() != home.is_some() {
+            return Err(refused(p::Reason::InvalidInput));
+        }
         self.publication_start(
             p::Request {
                 kind: p::Kind::Prepare,
                 target,
                 source: Some(source),
-                home: None,
+                home,
                 prepared: None,
             },
             root,
@@ -524,7 +551,7 @@ impl ConnectionState {
         self.publication_start(
             p::Request {
                 kind: p::Kind::Pending,
-                target,
+                target: target.into(),
                 source: None,
                 home: Some(home),
                 prepared: None,
@@ -547,7 +574,7 @@ impl ConnectionState {
         edit: &SavedEditGuard<'_>,
         source: p::Source,
         home: String,
-        gate: crate::asset_session::GitHubPublicationGoGate,
+        mut gate: crate::asset_session::GitHubPublicationGoGate,
         supervisor: &Supervisor,
         now: Instant,
     ) -> Result<p::Status, BridgeError> {
@@ -561,10 +588,11 @@ impl ConnectionState {
             args.expected_revision,
             generation,
             binding,
-            old.prepared.target.base.clone(),
-            old.prepared.target.marker.clone(),
+            old.prepared.target().base().clone(),
+            old.prepared.target().marker().clone(),
             now,
         )?;
+        let target = gate.select_target(target)?;
         if !args.confirm
             || !self.publication.consent.as_ref().is_some_and(|v| {
                 v.id == args.consent_id
@@ -573,7 +601,7 @@ impl ConnectionState {
                     && v.root == root
                     && edit.matches(&v.stamp)
                     && now < v.end
-                    && v.prepared.target == target
+                    && v.prepared.target() == target
             })
         {
             return Err(refused(p::Reason::ConsentExpired));
@@ -620,21 +648,21 @@ impl ConnectionState {
             .view
             .pending
             .iter()
-            .find(|v| v.summary.target.marker == args.marker)
-            .map(|v| v.summary.target.clone())
+            .find(|v| v.summary.target().marker() == &args.marker)
+            .map(|v| v.summary.target())
             .ok_or_else(|| refused(p::Reason::TargetChanged))?;
         let current = self.publication_context(
             &args.session_id,
             args.expected_revision,
             generation,
             binding,
-            target.base.clone(),
-            target.marker.clone(),
+            target.base().clone(),
+            target.marker().clone(),
             now,
         )?;
         // Historical tooling pin is retained for read-only reconciliation. It
         // cannot mint a new write using the current build's different caller.
-        if !current.same_scope(&target) {
+        if !p::Selection::from(current).same_scope(&target) {
             return Err(refused(p::Reason::TargetChanged));
         }
         self.publication_start(
@@ -665,7 +693,8 @@ impl ConnectionState {
         }
         self.publication.context_changed();
         self.pull_request.context_changed();
-        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+        self.actions_retry.context_changed();
+        self.play_cleanup.context_changed();
         Ok(self.publication.view.clone())
     }
     pub(crate) fn publication_discard(
@@ -698,6 +727,7 @@ impl ConnectionState {
         root: &RegisteredRoot,
         edit: &SavedEditGuard<'_>,
         now: Instant,
+        counter_project: Option<&str>,
         claim: impl FnOnce() -> bool,
     ) -> Result<Vec<u8>, BridgeError> {
         let active = self
@@ -718,7 +748,12 @@ impl ConnectionState {
         if self.preflight.native_work_pending()
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
-            || (self.history.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+            || (self.history.native_work_pending()
+                || (self.pull_request.native_work_pending()
+                    || (self.actions_retry.native_work_pending()
+                        || self.play_cleanup.native_work_pending()))
+                || self.activity.native_work_pending()
+                || self.repository_create.native_work_pending())
             || self.version_reserve_pending()
         {
             return Err(refused(p::Reason::Busy));
@@ -744,11 +779,11 @@ impl ConnectionState {
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) {
             return Err(refused(p::Reason::RateLimited));
         }
-        if private.account_pin.as_ref() != Some(&request.target.account_id)
-            || private.repository_pin.as_ref() != Some(&request.target.repository_id)
+        if private.account_pin.as_ref() != Some(request.target.account_id())
+            || private.repository_pin.as_ref() != Some(request.target.repository_id())
             || !private
                 .repository
-                .eq_ignore_ascii_case(&request.target.repository)
+                .eq_ignore_ascii_case(request.target.repository())
         {
             return Err(refused(p::Reason::TargetChanged));
         }
@@ -757,7 +792,7 @@ impl ConnectionState {
         } else {
             private.token.as_deref()
         };
-        let mut bytes = p::encode_go(id, digest, token, request)?;
+        let mut bytes = p::encode_go(id, digest, token, request, counter_project)?;
         if !claim() {
             use zeroize::Zeroize;
             bytes.zeroize();
@@ -880,14 +915,25 @@ impl ConnectionState {
         } else if let Ok(reply) = result {
             if reason == reply.result.reason {
                 if let Some(value) = reply.result.publication {
-                    effect = value.effect;
-                    self.publication.view.pull = value.pull;
+                    effect = value.effect();
+                    match value {
+                        p::Outcome::Setup(value) => self.publication.view.pull = value.pull,
+                        p::Outcome::Counter(value) => self.publication.view.counter = value.counter,
+                    }
                 }
                 if let Some(pending) = reply.result.pending {
                     self.publication.view.pending = pending;
                 }
                 if let Some(prepared) = reply.result.prepared {
+                    let counter_proof = active.ticket.counter_proof();
                     let ready = (|| {
+                        match (prepared.counter(), &counter_proof) {
+                            (Some(review), Some(proof))
+                                if review.target.counter()?.project_id.as_deref()
+                                    == Some(proof.project_id()) => {}
+                            (None, None) => {}
+                            _ => return None,
+                        }
                         let private = self
                             .private
                             .as_ref()
@@ -911,6 +957,7 @@ impl ConnectionState {
                         self.publication.consent = Some(Consent {
                             id: active.consent_id,
                             prepared,
+                            counter_proof,
                             end,
                             session_id: active.session_id,
                             project_id: active.project_id,
@@ -924,9 +971,15 @@ impl ConnectionState {
                 }
             }
         }
-        if reason != p::Reason::None && effect == p::Effect::DraftPrObserved {
+        if reason != p::Reason::None
+            && matches!(
+                effect,
+                p::Effect::DraftPrObserved | p::Effect::CounterObserved
+            )
+        {
             effect = p::Effect::PotentiallyApplied;
             self.publication.view.pull = None;
+            self.publication.view.counter = None;
         }
         if let Some(op) = &mut self.publication.view.operation {
             op.phase = p::Phase::Settled;
@@ -952,7 +1005,11 @@ impl ConnectionState {
         // Finishing a publication request does not itself disconnect the
         // account. Only complete an already-requested original retirement.
         // CleanupUnknown retains its separate fail-closed path above.
-        if self.private.as_ref().is_some_and(|v| v.retirement.is_some()) {
+        if self
+            .private
+            .as_ref()
+            .is_some_and(|v| v.retirement.is_some())
+        {
             self.complete_retirement();
         }
     }
@@ -999,7 +1056,7 @@ mod tests {
         };
         p::Request {
             kind,
-            target,
+            target: target.into(),
             source: matches!(kind, p::Kind::Prepare | p::Kind::Publish).then(|| p::Source {
                 root: "/inert/project".into(),
                 root_identity: crate::github_setup_protocol::SecretRootIdentity {
@@ -1011,7 +1068,7 @@ mod tests {
                 },
             }),
             home: (kind != p::Kind::Prepare).then(|| "/inert/home".into()),
-            prepared: (kind == p::Kind::Publish).then_some(prepared),
+            prepared: (kind == p::Kind::Publish).then_some(prepared.into()),
         }
     }
     // Actual edit registration/stamp and same in-memory connection/Owner. Root
@@ -1057,6 +1114,7 @@ mod tests {
         state.publication.view.operation = Some(p::Operation {
             id: ticket.operation_id().into(),
             kind,
+            purpose: None,
             phase: p::Phase::Running,
             reason: p::Reason::None,
             effect: if kind == p::Kind::Publish {
@@ -1098,6 +1156,7 @@ mod tests {
             root,
             &guard,
             now,
+            None,
             || control.claim(),
         )
     }
@@ -1291,6 +1350,7 @@ mod tests {
             state.publication.consent = Some(Consent {
                 id: "c".repeat(32),
                 prepared: prepared.clone(),
+                counter_proof: None,
                 end: at + Duration::from_secs(1),
                 session_id: "github-session-1".into(),
                 project_id: "project-1".into(),

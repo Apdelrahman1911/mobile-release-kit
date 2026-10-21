@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+from . import version_counter_setup as counter
+
 from ._desktop_github_engine import _decode_json
 from ._github_preflight_journal import Journal as _Custodian, JournalError, canonical
 from .github_setup_publication import (CONFIG_PATH, MAX_CONFIG_BYTES, MAX_CALLER_BYTES, PATHS, PHASES,
@@ -20,6 +22,8 @@ MAX_PHASE_BYTES = 512
 
 
 def summary(value: object) -> dict:
+    if type(value) is dict and value.get("protocol") == counter.PROTOCOL:
+        return counter.summary(value)
     row = _object(value, {"protocol", "target", "baseCommit", "baseTree", "desiredTree", "files"})
     _require(row["protocol"] == PROTOCOL)
     target = Target.parse(row["target"])
@@ -42,6 +46,10 @@ def summary(value: object) -> dict:
     # Detached strict parsed DATA. No caller retains a mutable authority alias.
     return {**row, "target": target.value(), "files": [dict(file,
         before=None if file["before"] is None else dict(file["before"]), after=dict(file["after"])) for file in files]}
+
+
+def phases(original: dict) -> tuple[str, ...]:
+    return counter.PHASES if original["protocol"] == counter.PROTOCOL else PHASES
 
 
 class Journal(_Custodian):
@@ -80,7 +88,7 @@ class Journal(_Custodian):
             digest = hashlib.sha256(raw).hexdigest()
             record = {"summary": original, "digest": digest, "claimed": [], "confirmed": {}}
             seen = {intent_name}
-            for phase in PHASES:
+            for phase in phases(original):
                 claim, result = marker + "." + phase + ".claim.json", marker + "." + phase + ".result.json"
                 if claim not in names:
                     break
@@ -104,7 +112,7 @@ class Journal(_Custodian):
 
     @staticmethod
     def _identity(phase: str, identity: object, original: dict, confirmed: dict) -> str:
-        _require(phase in PHASES)
+        _require(phase in phases(original))
         value = _id(identity) if phase == "pull" else _match(identity, _SHA)
         if phase == "tree":
             _require(value == original["desiredTree"])
@@ -115,6 +123,8 @@ class Journal(_Custodian):
     def create_intent(self, value: dict) -> None:
         original = summary(value)
         marker = original["target"]["marker"]
+        if original["protocol"] == counter.PROTOCOL:
+            counter.first_use(self.publications, counter.Target.parse(original["target"]))
         _require(self.selected is None and marker not in self.publications and len(self.publications) < MAX_RECORDS)
         raw = canonical(original) + b"\n"
         self._create(marker + ".intent.json", raw)
@@ -126,7 +136,8 @@ class Journal(_Custodian):
         _require(self.selected is not None)
         record = self.publications[self.selected]
         count = len(record["claimed"])
-        _require(count < len(PHASES) and phase == PHASES[count]
+        sequence = phases(record["summary"])
+        _require(count < len(sequence) and phase == sequence[count]
                  and len(record["confirmed"]) == count)
         self._create(self.selected + "." + phase + ".claim.json",
                      canonical(self._claim_value(record["digest"], phase)) + b"\n")
@@ -135,7 +146,7 @@ class Journal(_Custodian):
     def record(self, phase: str, identity: str) -> None:
         _require(self.selected is not None)
         record = self.publications[self.selected]
-        _require(phase in PHASES and record["claimed"] and phase == record["claimed"][-1]
+        _require(phase in phases(record["summary"]) and record["claimed"] and phase == record["claimed"][-1]
                  and phase not in record["confirmed"])
         identity = self._identity(phase, identity, record["summary"], record["confirmed"])
         self._create(self.selected + "." + phase + ".result.json", canonical({

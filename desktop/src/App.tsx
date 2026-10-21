@@ -1,3 +1,5 @@
+import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
+import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
 import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
 import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
 import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
@@ -631,7 +633,7 @@ export function App() {
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null) ??
       (!session ? 'Select the original project first.' : null);
-  }));
+  }, () => { const current = workspaceRef.current; return captureCounterSaved(current.selectedId ? current.projects[current.selectedId] ?? null : null, releaseVersion.getSnapshot()); }));
   githubPublicationControllerRef.current = githubPublication;
   const githubPublicationState = useSyncExternalStore(githubPublication.subscribe, githubPublication.getSnapshot, githubPublication.getSnapshot);
   const [githubRemoteSetup] = useState(() => new GitHubRemoteSetupController(githubConnection.getSnapshot, () => {
@@ -1632,6 +1634,7 @@ export function App() {
   useEffect(() => githubConnection.subscribe(githubActionsRetry.syncContext), [githubConnection, githubActionsRetry]);
   useEffect(() => githubConnection.subscribe(githubPlayCleanup.syncContext), [githubConnection, githubPlayCleanup]);
   useEffect(() => githubConnection.subscribe(githubPublication.syncContext), [githubConnection, githubPublication]);
+  useEffect(() => releaseVersion.subscribe(githubPublication.syncCounterSource), [releaseVersion, githubPublication]);
   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
   useEffect(() => githubConnection.subscribe(githubHistory.syncContext), [githubConnection, githubHistory]);
@@ -2112,7 +2115,7 @@ export function App() {
     chooseSource: (role) => { toolAcquisition.toolInputsIntent(); return androidBuild.chooseToolSource(role); },
     choosePreparedSource: (role) => toolAcquisition.choosePreparedSource(role,(selected,original) => androidBuild.chooseToolSource(selected,original)),
     refreshCatalog: () => { toolAcquisition.toolInputsIntent(); return androidBuild.refreshCatalog(); },
-    readSavedInputs: () => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); return releaseVersion.read(); },
+    readSavedInputs: () => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); return releaseVersion.read(); },
     readSavedInputsReason: releaseVersion.startReason(),
     openRegistration: () => { const section = androidToolSetupSection.current; section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' }); },
   };
@@ -2167,7 +2170,7 @@ export function App() {
             <div className="button-row">
               {externalObservation.notice.next === 'review-settings' && <button type="button" className="button small secondary" onClick={() => navigate('settings')}>Review project settings</button>}
               {externalObservation.notice.next === 'read-saved-version' && <button type="button" className="button small secondary" disabled={releaseVersion.startReason() !== null}
-                onClick={() => { navigate('dashboard'); externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}>Read updated version</button>}
+                onClick={() => { navigate('dashboard'); externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }}>Read updated version</button>}
               {externalObservation.notice.next === 'refresh-project' && <button type="button" className="button small secondary" disabled={loading || refreshReason !== null}
                 onClick={() => { if (session) void loadSnapshot(session.project.id); }}>Check saved files again</button>}
               <button type="button" className="button small secondary" onClick={() => externalObserver.dismissNotice()}>Dismiss</button>
@@ -2278,7 +2281,7 @@ export function App() {
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} onGit={() => navigate('github')} /></>}
-          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}
+          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }}
           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="Set up your project" description="Change your app settings one group at a time. Review the proposed file changes before saving." />{editor()}
           <ProgressiveDisclosure title="App ID · keep this app or set up a separate new app" needsAttention={identityAttention} reveal={identityReveal}>
@@ -2403,11 +2406,13 @@ export function App() {
                 !!githubHistoryState.status?.operation && githubHistoryState.status.operation.reason !== 'none' ||
                 !!githubHistoryState.status?.result && githubHistoryState.status.result.verification !== 'verified',
               content: <GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} /> },
-            { id: 'counter', title: 'Advanced: connect a shared version counter',
-              description: 'Optional. Manual versions remain the default; connecting a counter does not reserve or change a version.',
-              needsAttention: versionEnrollmentBusy() !== null || versionEnrollmentState.issue !== null ||
+            { id: 'counter', title: 'Advanced: create or connect a shared version counter',
+              description: 'Optional. Create a first counter or connect an existing protected one. Manual versions remain the default; neither step allocates or edits a version.',
+              needsAttention: githubPublicationState.purpose === COUNTER_PURPOSE || !!githubPublicationState.status?.counter || githubPublicationState.status?.pending.some((p) => p.summary.protocol === 'mrk-version-counter-setup/1') || versionEnrollmentBusy() !== null || versionEnrollmentState.issue !== null ||
                 versionEnrollmentState.status?.phase === 'reviewed' || versionEnrollmentState.status?.phase === 'refused',
-              content: <VersionEnrollmentPanel controller={versionEnrollment} /> },
+              content: <><VersionCounterSetup state={githubPublicationState} controller={githubPublication} readReason={releaseVersion.startReason()}
+                onReadSaved={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} />
+                <VersionEnrollmentPanel controller={versionEnrollment} /></> },
           ]} />}
         {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}
           rehearsal={<ReleaseRehearsal context={rehearsalContext()} onAction={rehearsalAction} />}
@@ -2426,13 +2431,13 @@ export function App() {
           androidBuild={<div id="release-android-build" ref={androidSigningSection} tabIndex={-1} aria-label="Android build and signing review"><AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
             <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
           iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="Original iOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></section>} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />

@@ -67,6 +67,11 @@ def _need(condition: bool, reason: str = "configuration-changed") -> None:
         raise SecretConfigurationError(reason)
 
 
+def _counter_open_attempts(depth: int) -> int:
+    _need(type(depth) is int and 1 <= depth <= _MAX_COMPONENTS)
+    return _MAX_OPENS + 65 * (2 + depth)
+
+
 def _keys(value, expected: set[str]) -> None:
     _need(type(value) is dict and set(value) == expected)
 
@@ -190,6 +195,7 @@ class _SecretConfigurationBudget:
         self.root_fd: int | None = None
         self.handles: set[int] = set()
         self.chain: list[tuple[int | None, str, int, tuple[int, ...]]] = []
+        self.max_opens = _MAX_OPENS
         self.opens = self.live = self.entries_seen = self.reads = self.checks = 0
         self.failed: str | None = None
         self.closed = False
@@ -218,7 +224,7 @@ class _SecretConfigurationBudget:
 
     def _acquire(self) -> None:
         self.check()
-        if self.opens >= _MAX_OPENS or self.live >= _MAX_LIVE:
+        if self.opens >= self.max_opens or self.live >= _MAX_LIVE:
             self.fail("resources-unavailable")
         self.opens += 1
         self.live += 1
@@ -300,9 +306,13 @@ class _SecretConfigurationBudget:
 
     def file_admission(self, path: Path, limit: int) -> int:
         self.check()
-        if path != self.root / CONFIGURATION_PATH or limit != MAX_CONFIG_BYTES:
-            self.fail()
-        return MAX_CONFIG_BYTES
+        if path == self.root / CONFIGURATION_PATH and limit == MAX_CONFIG_BYTES:
+            return MAX_CONFIG_BYTES
+        # Installed only from this SAME held, validated configuration below.
+        selected = getattr(self, "counter_version", None)
+        if selected is not None and (path, limit) == selected:
+            return limit
+        self.fail()
 
     def open_root(self, expected: tuple[int, ...]) -> None:
         parent = None
@@ -394,14 +404,21 @@ class _PublicationObserved(_Observed):
         self.checkpoint()
         return self._raw
 
+    def version_bytes(self) -> bytes:
+        self.checkpoint()
+        value = getattr(self, "_version", None)
+        _need(type(value) is bytes)
+        return value
 
-def observe_publication_configuration(source: dict, *, budget: transport._Budget):
+
+def observe_publication_configuration(source: dict, *, budget: transport._Budget, counter: bool = False):
     """Same held config original, retained only for the fixed five-file review.
 
     No credential requirement is invented. Only the publication profile can
     request this loan; secret/variable callers retain their original 10s rules.
     """
-    return _observe_configuration(source, None, budget=budget, kind="publication")
+    _need(type(counter) is bool)
+    return _observe_configuration(source, None, budget=budget, kind="version-counter" if counter else "publication")
 
 
 def observe_play_cleanup_configuration(source: dict, *, budget: transport._Budget):
@@ -412,7 +429,7 @@ def observe_play_cleanup_configuration(source: dict, *, budget: transport._Budge
 @contextmanager
 def _observe_configuration(source: dict, selection: dict | None, *, budget: transport._Budget, kind: str):
     try:
-        publication = kind in ("publication", "play-cleanup")
+        publication = kind in ("publication", "play-cleanup", "version-counter")
         expected_profile = (transport._ExchangeProfile.PLAY_CLEANUP if kind == "play-cleanup" else
                             transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP)
         _need(type(budget) is transport._Budget and budget.profile is expected_profile)
@@ -443,6 +460,24 @@ def _observe_configuration(source: dict, selection: dict | None, *, budget: tran
                 from .github_setup_publication import MAX_CONFIG_BYTES as review_limit
                 _need(len(raw) <= review_limit, "resources-unavailable")
                 observed = _PublicationObserved(custody, reader, value, raw)
+                if kind == "version-counter":
+                    from . import version_text
+                    from .version_counter_setup import MAX_VERSION_BYTES
+                    selected = version_text.public_version_selection(raw.decode("utf-8"))
+                    # Counter-only explicit cumulative-attempt reservation, derived
+                    # from this held configuration, never a caller quota. Each
+                    # of 64 original checkpoints plus the final reader check
+                    # still performs EVERY alias census: two config components
+                    # plus d version components. Initial admission fits the old
+                    # 128; live FDs/entries/read/clock limits are unchanged.
+                    depth = len(selected.source.split("/"))
+                    custody.max_opens = _counter_open_attempts(depth)
+                    custody.counter_version = (Path(root) / selected.source, MAX_VERSION_BYTES)
+                    version = reader.read(selected.source, limit=MAX_VERSION_BYTES, binary=True)
+                    _need(type(version) is bytes and 0 < len(version) <= MAX_VERSION_BYTES)
+                    observed._version = version
+                    value["savedVersion"] = _digest(version)
+                    del selected, version
             else:
                 config = ReleaseConfig(path=Path(root) / CONFIGURATION_PATH, root=Path(root), data=data)
                 selected = requirements(config, selection["stage"], purpose=source["purpose"],

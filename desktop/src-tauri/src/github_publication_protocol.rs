@@ -11,6 +11,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+#[path = "version_counter_setup_protocol.rs"]
+pub(crate) mod counter;
+pub(crate) use counter::{Outcome, Record, Review, Selection};
+
 pub(crate) const PROTOCOL: &str = "mrk-github-setup-publication/1";
 pub(crate) const EVENT: &str = "github-setup-publication-status";
 pub(crate) const INITIAL_LIMIT: usize = 8192;
@@ -90,6 +94,13 @@ pub(crate) enum Reason {
     InvalidInput,
     CleanupUnknown,
     ConsentExpired,
+    CounterExists,
+    CounterIntentExists,
+    CounterStateUnavailable,
+    CounterStateChanged,
+    CounterKnownAuthority,
+    CounterVersionUnsupported,
+    SavedInputsRequired,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -100,6 +111,7 @@ pub(crate) enum Effect {
     DraftPrObserved,
     Unresolved,
     BranchObserved,
+    CounterObserved,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -265,7 +277,7 @@ impl Summary {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Pending {
-    pub(crate) summary: Summary,
+    pub(crate) summary: Record,
     pub(crate) claimed: Vec<Step>,
     pub(crate) confirmed: BTreeMap<Step, String>,
 }
@@ -293,10 +305,11 @@ impl Pending {
     pub(crate) fn valid(&self) -> bool {
         self.summary.valid()
             && progress(&self.claimed, &self.confirmed)
+            && (!self.summary.counter() || self.claimed.len() <= 3)
             && self
                 .confirmed
                 .get(&Step::Tree)
-                .is_none_or(|v| v == &self.summary.desired_tree)
+                .is_none_or(|v| v == self.summary.desired_tree())
     }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -324,17 +337,23 @@ impl Source {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Request {
     pub(crate) kind: Kind,
-    pub(crate) target: Target,
+    pub(crate) target: Selection,
     pub(crate) source: Option<Source>,
     pub(crate) home: Option<String>,
-    pub(crate) prepared: Option<Prepared>,
+    pub(crate) prepared: Option<Review>,
 }
 impl Request {
     pub(crate) fn valid(&self) -> bool {
         self.target.valid()
+            && !(self.kind == Kind::Pending && self.target.counter().is_some())
             && matches!(self.kind, Kind::Prepare | Kind::Publish) == self.source.is_some()
             && self.source.as_ref().is_none_or(Source::valid)
-            && (self.kind == Kind::Prepare) == self.home.is_none()
+            && (self.kind == Kind::Prepare && self.target.counter().is_none())
+                == self.home.is_none()
+            && self
+                .target
+                .counter()
+                .is_none_or(|v| v.project_id.is_some() || self.kind == Kind::Prepare)
             && self.home.as_ref().is_none_or(|v| {
                 v.starts_with('/') && v.len() <= 4016 && !v.chars().any(char::is_control)
             })
@@ -342,7 +361,7 @@ impl Request {
             && self
                 .prepared
                 .as_ref()
-                .is_none_or(|v| v.valid() && v.target == self.target)
+                .is_none_or(|v| v.valid() && v.target() == self.target)
     }
 }
 fn frame(raw: &[u8], maximum: usize, nodes: usize) -> Result<Value, BridgeError> {
@@ -380,11 +399,7 @@ pub(crate) fn encode_initial(id: &str, request: &Request) -> Result<Vec<u8>, Bri
     if !valid_id(id) || !request.valid() {
         return Err(BridgeError::invalid());
     }
-    let prepared_sha256 = request
-        .prepared
-        .as_ref()
-        .map(Prepared::sha256)
-        .transpose()?;
+    let prepared_sha256 = request.prepared.as_ref().map(Review::sha256).transpose()?;
     let value = serde_json::json!({"protocol":PROTOCOL,"id":id,"action":{"kind":request.kind,"target":request.target,
         "source":request.source,"home":request.home,"preparedSha256":prepared_sha256}});
     let mut raw = serde_json::to_vec(&value).map_err(|_| BridgeError::invalid())?;
@@ -419,6 +434,7 @@ pub(crate) fn encode_go(
     expected: &str,
     token: Option<&str>,
     request: &Request,
+    counter_project: Option<&str>,
 ) -> Result<Vec<u8>, BridgeError> {
     if !valid_id(id)
         || !hex(expected, 64)
@@ -427,6 +443,16 @@ pub(crate) fn encode_go(
         || token.is_some_and(|v| {
             v.is_empty() || v.len() > 4096 || !v.bytes().all(|b| (0x21..=0x7e).contains(&b))
         })
+    {
+        return Err(BridgeError::invalid());
+    }
+    if request.target.counter().is_some() != counter_project.is_some()
+        || counter_project.is_some_and(|v| crate::service_protocol::Id::parse(v).is_err())
+        || request
+            .target
+            .counter()
+            .and_then(|v| v.project_id.as_deref())
+            .is_some_and(|v| Some(v) != counter_project)
     {
         return Err(BridgeError::invalid());
     }
@@ -439,6 +465,10 @@ pub(crate) fn encode_go(
     serde_json::to_writer(&mut raw, &request.prepared).map_err(|_| BridgeError::invalid())?;
     raw.extend_from_slice(b",\"token\":");
     serde_json::to_writer(&mut raw, &token).map_err(|_| BridgeError::invalid())?;
+    if let Some(v) = counter_project {
+        raw.extend_from_slice(b",\"projectId\":");
+        serde_json::to_writer(&mut raw, v).map_err(|_| BridgeError::invalid())?;
+    }
     raw.extend_from_slice(b"}}\n");
     if raw.len() > GO_LIMIT {
         return Err(BridgeError::invalid());
@@ -479,6 +509,8 @@ pub(crate) struct Publication {
 pub(crate) struct Configuration {
     pub(crate) saved_config: Fingerprint,
     pub(crate) canonical_config: Fingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) saved_version: Option<Fingerprint>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -487,9 +519,9 @@ pub(crate) struct ResultData {
     pub(crate) kind: Kind,
     pub(crate) reason: Reason,
     #[serde(deserialize_with = "nullable")]
-    pub(crate) prepared: Option<Prepared>,
+    pub(crate) prepared: Option<Review>,
     #[serde(deserialize_with = "nullable")]
-    pub(crate) publication: Option<Publication>,
+    pub(crate) publication: Option<Outcome>,
     #[serde(deserialize_with = "nullable")]
     pub(crate) pending: Option<Vec<Pending>>,
     #[serde(deserialize_with = "nullable")]
@@ -505,6 +537,16 @@ pub(crate) struct Reply {
 }
 impl ResultData {
     fn valid(&self, request: &Request) -> bool {
+        if request.target.counter().is_some() {
+            return counter::result_valid(self, request);
+        }
+        if self
+            .publication
+            .as_ref()
+            .is_some_and(|v| v.setup().is_none())
+        {
+            return false;
+        }
         if self.schema_version != 1
             || self.kind != request.kind
             || !self.control.valid()
@@ -512,6 +554,7 @@ impl ResultData {
                 !matches!(self.kind, Kind::Prepare | Kind::Publish)
                     || !v.saved_config.valid(65536)
                     || !v.canonical_config.valid(512 * 1024)
+                    || v.saved_version.is_some()
             })
         {
             return false;
@@ -523,9 +566,11 @@ impl ResultData {
                     && (self.reason == Reason::None) == self.prepared.is_some()
                     && self.prepared.as_ref().is_none_or(|v| {
                         v.valid()
-                            && v.target == request.target
+                            && v.target() == request.target
                             && self.configuration.as_ref().is_some_and(|c| {
-                                c.saved_config == Fingerprint::from(v.files[0].after.as_bytes())
+                                v.setup().is_some_and(|v| {
+                                    c.saved_config == Fingerprint::from(v.files[0].after.as_bytes())
+                                })
                             })
                     })
             }
@@ -536,25 +581,28 @@ impl ResultData {
                     && self.reason == Reason::None
                     && self.pending.as_ref().is_some_and(|v| {
                         v.len() <= 64
-                            && v.iter()
-                                .all(|p| p.valid() && p.summary.target.same_scope(&request.target))
+                            && v.iter().all(|p| {
+                                p.valid() && p.summary.target().same_scope(&request.target)
+                            })
                             && {
                                 let mut ids = std::collections::BTreeSet::new();
-                                v.iter().all(|p| ids.insert(&p.summary.target.marker))
+                                v.iter()
+                                    .all(|p| ids.insert(p.summary.target().marker().clone()))
                             }
                     })
             }
             Kind::Publish | Kind::Reconcile => {
                 self.prepared.is_none()
                     && self.pending.is_none()
-                    && self
-                        .publication
-                        .as_ref()
-                        .map_or(self.reason != Reason::None, |v| {
+                    && self.publication.as_ref().and_then(Outcome::setup).map_or(
+                        self.reason != Reason::None,
+                        |v| {
                             if v.reason != self.reason
                                 || v.control != self.control
                                 || !v.control.valid()
-                                || v.pull.as_ref().is_some_and(|p| !p.valid(&request.target))
+                                || v.pull.as_ref().is_some_and(|p| {
+                                    request.target.setup().is_none_or(|t| !p.valid(t))
+                                })
                             {
                                 return false;
                             }
@@ -568,7 +616,7 @@ impl ResultData {
                                         request
                                             .prepared
                                             .as_ref()
-                                            .is_none_or(|p| &p.desired_tree != tree)
+                                            .is_none_or(|p| p.desired_tree() != tree)
                                     })
                                 {
                                     return false;
@@ -609,7 +657,8 @@ impl ResultData {
                                         _ => false,
                                     }
                             }
-                        })
+                        },
+                    )
             }
         }
     }
@@ -629,6 +678,14 @@ pub(crate) fn decode_reply(id: &str, raw: &[u8], request: &Request) -> Result<Re
         {
             return Err(BridgeError::protocol());
         }
+    }
+    if value
+        .get("result")
+        .and_then(|v| v.get("configuration"))
+        .and_then(|v| v.get("savedVersion"))
+        .is_some_and(Value::is_null)
+    {
+        return Err(BridgeError::protocol());
     }
     let reply: Reply = serde_json::from_value(value).map_err(|_| BridgeError::protocol())?;
     if reply.protocol != PROTOCOL
@@ -657,13 +714,15 @@ pub(crate) struct Operation {
     pub(crate) phase: Phase,
     pub(crate) reason: Reason,
     pub(crate) effect: Effect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) purpose: Option<counter::Purpose>,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentView {
     pub(crate) id: String,
     pub(crate) expires_at: String,
-    pub(crate) prepared: Prepared,
+    pub(crate) prepared: Review,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -677,6 +736,8 @@ pub(crate) struct Status {
     pub(crate) consent: Option<ConsentView>,
     pub(crate) pending: Vec<Pending>,
     pub(crate) pull: Option<Pull>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) counter: Option<counter::Observed>,
 }
 impl Status {
     pub(crate) fn fits(&self) -> bool {
@@ -788,7 +849,7 @@ impl Request {
             .heap()?
             .checked_add(self.source.as_ref().map_or(Some(0), Source::heap)?)?
             .checked_add(self.home.as_ref().map_or(0, String::capacity))?
-            .checked_add(self.prepared.as_ref().map_or(Some(0), Prepared::heap)?)
+            .checked_add(self.prepared.as_ref().map_or(Some(0), Review::heap)?)
     }
 }
 impl Status {
@@ -803,7 +864,12 @@ impl Status {
                     .capacity()
                     .checked_mul(std::mem::size_of::<Pending>())?,
             )?
-            .checked_add(self.pull.as_ref().map_or(Some(0), Pull::heap)?)?;
+            .checked_add(self.pull.as_ref().map_or(Some(0), Pull::heap)?)?
+            .checked_add(
+                self.counter
+                    .as_ref()
+                    .map_or(Some(0), counter::Observed::heap)?,
+            )?;
         if let Some(v) = &self.consent {
             n = n
                 .checked_add(strings(&[&v.id, &v.expires_at])?)?
@@ -821,7 +887,7 @@ impl Reply {
             self.result
                 .prepared
                 .as_ref()
-                .map_or(Some(0), Prepared::heap)?,
+                .map_or(Some(0), Review::heap)?,
         )?;
         if let Some(rows) = &self.result.pending {
             n = n.checked_add(
@@ -833,29 +899,17 @@ impl Reply {
             }
         }
         if let Some(v) = &self.result.configuration {
-            n = n.checked_add(strings(&[
-                &v.saved_config.sha256,
-                &v.canonical_config.sha256,
-            ])?)?;
+            n = n
+                .checked_add(strings(&[
+                    &v.saved_config.sha256,
+                    &v.canonical_config.sha256,
+                ])?)?
+                .checked_add(v.saved_version.as_ref().map_or(0, |v| v.sha256.capacity()))?;
         }
         if let Some(v) = &self.result.publication {
-            n = n.checked_add(v.pull.as_ref().map_or(Some(0), Pull::heap)?)?;
-            if let Some(rows) = &v.claimed {
-                n = n.checked_add(rows.capacity().checked_mul(std::mem::size_of::<Step>())?)?;
-            }
-            if let Some(rows) = &v.confirmed {
-                n = n.checked_add(rows.len().checked_mul(512)?)?;
-                for v in rows.values() {
-                    n = n.checked_add(v.capacity())?;
-                }
-            }
-            n = n.checked_add(
-                v.control
-                    .credential_expires_at
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )?;
+            n = n.checked_add(v.heap()?)?;
         }
+
         n.checked_add(
             self.result
                 .control
@@ -873,6 +927,8 @@ pub(crate) struct PrepareArgs {
     pub(crate) expected_revision: u32,
     pub(crate) expected_connection_revision: u32,
     pub(crate) base: String,
+    #[serde(default)]
+    pub(crate) purpose: Option<counter::Purpose>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -918,6 +974,9 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
             Command::Status
         }
         "github_setup_publication_prepare" => {
+            if value.get("purpose").is_some_and(Value::is_null) {
+                return Err(BridgeError::invalid());
+            }
             let v: PrepareArgs = read(value)?;
             if !valid_id(&v.session_id)
                 || !revision(v.expected_revision)
@@ -1025,10 +1084,10 @@ mod tests {
     fn request(kind: Kind) -> Request {
         Request {
             kind,
-            target: target(),
+            target: target().into(),
             source: matches!(kind, Kind::Prepare | Kind::Publish).then(source),
             home: (kind != Kind::Prepare).then(|| "/inert/home".into()),
-            prepared: (kind == Kind::Publish).then(prepared),
+            prepared: (kind == Kind::Publish).then(|| prepared().into()),
         }
     }
     fn control() -> Value {
@@ -1069,7 +1128,7 @@ mod tests {
             let value: Value = serde_json::from_slice(&initial).unwrap();
             assert_eq!(value["action"]["source"].get("draft"), None);
             let token = (kind != Kind::Pending).then_some("INERT_TOKEN");
-            let go = encode_go("fixture", &expected, token, &request).unwrap();
+            let go = encode_go("fixture", &expected, token, &request, None).unwrap();
             let parsed: Value = serde_json::from_slice(&go).unwrap();
             assert_eq!(parsed["go"]["requestSha256"], expected);
             assert_eq!(
@@ -1088,7 +1147,8 @@ mod tests {
                 } else {
                     Some("INERT_TOKEN")
                 },
-                &request
+                &request,
+                None,
             )
             .is_err());
         }
@@ -1129,7 +1189,7 @@ mod tests {
     fn publication_durable_phase_prefix_never_grants_replayed_writes() {
         let prepared = prepared();
         let mut record = Pending {
-            summary: prepared.summary(),
+            summary: prepared.summary().into(),
             claimed: vec![Step::Tree],
             confirmed: BTreeMap::new(),
         };
@@ -1146,7 +1206,8 @@ mod tests {
         assert!(!record.valid());
         record.confirmed.insert(Step::Branch, "7".repeat(40));
         assert!(record.valid());
-        record.summary.files[0].after.bytes = 0;
+        let Record::Setup(summary) = &mut record.summary else { panic!("original setup record") };
+        summary.files[0].after.bytes = 0;
         assert!(!record.valid());
     }
     #[test]
@@ -1155,7 +1216,7 @@ mod tests {
         let prepared = request.prepared.as_ref().unwrap();
         let mut value = serde_json::json!({"protocol":PROTOCOL,"id":"fixture","result":{"schemaVersion":1,"kind":"publish","reason":"none",
             "prepared":null,"pending":null,"configuration":null,"control":control(),"publication":{"effect":"draft-pr-observed","reason":"none",
-            "claimed":["tree","commit","branch","pull"],"confirmed":{"tree":prepared.desired_tree,"commit":"7".repeat(40),"branch":"7".repeat(40),"pull":"8"},
+            "claimed":["tree","commit","branch","pull"],"confirmed":{"tree":prepared.desired_tree(),"commit":"7".repeat(40),"branch":"7".repeat(40),"pull":"8"},
             "pull":{"number":"8","commit":"7".repeat(40),"url":"https://github.com/owner/repo/pull/8"},"control":control()}}});
         assert!(decode_reply("fixture", &wire(&value), &request).is_ok());
         value["result"]["publication"]["confirmed"]["branch"] = Value::String("9".repeat(40));

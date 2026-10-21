@@ -90,7 +90,7 @@ mod publication;
 #[path = "supervisor_version_enrollment.rs"]
 mod enrollment;
 pub(crate) use enrollment::{VersionEnrollmentAdmission, VersionEnrollmentControl, VersionEnrollmentJoined, VersionEnrollmentTicket};
-pub(crate) use publication::{GitHubPublicationReceipt, GitHubPublicationTicket};
+pub(crate) use publication::{GitHubPublicationReceipt, GitHubPublicationTicket, PublicationControl};
 #[cfg(test)]
 pub(crate) use publication::PublicationControlFixture;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -1072,6 +1072,7 @@ impl Owner {
         if expired { None } else { Some(play_cleanup::check_deadline(self,now,endpoint)) }
     }
     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+        if matches!(self.profile,Profile::GitHubPublication)&&self.publication_gate.as_ref().is_none_or(|g|!g.counter_settled()) {self.unknown(inner);return false;}
         // The same original management observer must join final journal CAS,
         // NativeUse retirement and Publisher resolution before releasing debit.
         if matches!(self.profile, Profile::GitLocal) && !self.resources.try_lock()
@@ -1877,6 +1878,9 @@ async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
             if matches!(owner.profile, Profile::GitLocal) && !git_local::finalize(&inner,&owner).await {
                 owner_unknown!(owner,&inner,None,Management); pending::<()>().await;
             }
+            if matches!(owner.profile,Profile::GitHubPublication) && !publication::finalize_counter(&inner,&owner).await {
+                owner_unknown!(owner,&inner,None,Management);pending::<()>().await;
+            }
             if owner.retire(&inner) {return;}
         }
         if !driver_pending && !watchdog_pending {
@@ -2161,8 +2165,12 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
         Profile::GitHubPublication => match (&owner.publication_gate,&owner.publication_request) {
             (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
                 && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
-                && owner.setup_request.is_none() => gate.claim(&owner.id,&digest,request,
-                    ||claim_preflight_go(&inner,&owner,Profile::GitHubPublication)),
+                && owner.setup_request.is_none() => {
+                    match publication::prepare_counter(&inner,&owner).await {
+                        Ok(())=>gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubPublication)),
+                        Err(error)=>Err(error),
+                    }
+                },
             _=>Err(BridgeError::cleanup_unknown()),
         },
         _ => Err(BridgeError::cleanup_unknown()),

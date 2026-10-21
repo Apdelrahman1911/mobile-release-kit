@@ -16,7 +16,7 @@ export function VersionEnrollmentPanel({ controller, compact = false }: { contro
     status?.phase === 'reviewed' ? 'Counter reviewed — not connected by this review' : status?.phase === 'refused' ? 'Counter connection not confirmed' :
     status?.phase === 'stopping' ? 'Stopping the original operation…' : 'No current counter review';
   return <section className={compact ? 'notice notice-warning' : 'card'} aria-labelledby={`${id}-title`} aria-busy={owner !== null}>
-    <div id={`${id}-title`}><SectionHeading title={compact ? 'Shared counter operation' : 'Connect a shared version counter'}
+    <div id={`${id}-title`}><SectionHeading title={compact ? 'Shared counter operation' : 'Connect an existing protected counter'}
       description={compact ? 'Keep the original operation until it finishes.' : 'Optional · for a repository that already has a supported shared counter.'} /></div>
     {!compact && <p>Use the GitHub account and repository selected above. <strong>Manual versions remain the default.</strong> This only connects the counter on this computer; it does not create a counter, reserve a number, change project files or check either Store.</p>}
     <div role="status" aria-live="polite"><Badge tone={state.unknown || state.issue ? 'warning' : 'info'}>{phase}</Badge></div>

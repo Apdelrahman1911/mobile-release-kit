@@ -156,6 +156,9 @@ pub(crate) use gh_auth::{GitHubDeviceGoGate, GitHubAuthGoGate, GitHubAuthRequest
 #[path = "asset_session_github_publication.rs"]
 mod github_publication;
 pub(crate) use github_publication::GitHubPublicationGoGate;
+#[path="asset_session_version_counter_setup.rs"]
+mod version_counter_setup;
+pub(crate) use version_counter_setup::CounterStateProof;
 #[path = "asset_session_repository_create.rs"]
 mod repository_create;
 pub(crate) use repository_create::RepositoryCreateGoGate;

@@ -97,6 +97,11 @@ impl SavedComparisonData {
 }
 pub(super) struct SavedInputBinding { pub(super) lane: Arc<SavedObservationLane>, comparison: SavedComparisonData }
 impl SavedInputBinding {
+    pub(super) fn counter_initial_version(&self)->Result<crate::github_publication_protocol::counter::InitialVersion,BridgeError>{
+        let name=std::str::from_utf8(&self.comparison.name[..usize::from(self.comparison.name_len)]).map_err(|_|stale())?.to_owned();
+        let result=crate::github_publication_protocol::counter::InitialVersion{name,build:self.comparison.build};
+        if !self.lane.returned()||!result.valid(){return Err(stale());}Ok(result)
+    }
     pub(super) fn matches_version_source(&self, document: &Inner, original: &Arc<SavedObservationLane>,
         input: &crate::supervisor::VersionAllocationSourceInput, edit: &crate::edit_owner::SavedEditGuard<'_>) -> bool {
         Arc::ptr_eq(&self.lane, original) && self.lane.current_version_source(document, input)

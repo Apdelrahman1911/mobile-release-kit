@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from . import version_counter_setup as counter
 from ._desktop_github_engine import _check_control, _decode_json
 from ._github_connection_transport import _Budget, _ExchangeProfile, _ResponseRole, _make_live_exchange, _control
 from .github_setup_publication import (CONFIG_PATH, CONFIRMATION, MAX_CALLER_BYTES, MAX_CONFIG_BYTES,
@@ -80,7 +81,7 @@ def request_role(target: Target, request) -> _ResponseRole:
 
 def make_exchange(target: Target, token: str, *, started: float, runtime_dir: str, budget: _Budget,
                   checkpoint):
-    Target.parse(target.value())
+    counter.target(target.value())
     _require(type(budget) is _Budget and budget.profile is _ExchangeProfile.PUBLICATION
              and budget.started == started and budget.end == started + 60.0)
     exchange = _make_live_exchange(token, started=started, runtime_dir=runtime_dir, api_version="2026-03-10",
@@ -91,7 +92,7 @@ def make_exchange(target: Target, token: str, *, started: float, runtime_dir: st
         nonlocal count
         checkpoint(); budget.remaining()
         _require(count < MAX_REQUESTS)
-        role = request_role(target, request)
+        role = counter.request_role(target, request) if type(target) is counter.Target else request_role(target, request)
         count += 1  # Never refund an attempted logical request.
         result = exchange(request.method, request.path, request.body, _role=role)
         send.control = dict(_check_control(result.control))
