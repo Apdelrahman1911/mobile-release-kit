@@ -3551,7 +3551,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.play_cleanup_agent_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
-            upload_key.tick(&document).await;
+            upload_key.tick(&document, &app).await;
             #[cfg(any(target_os="linux",target_os="macos"))]
             match app.path().app_local_data_dir() {
                 Ok(location)=>reserve.tick(&document,&location).await,

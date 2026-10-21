@@ -400,31 +400,50 @@ pub(super) async fn run_selected(document: &DocumentBinding, owner: &Arc<Origina
 impl DocumentBinding {
     pub(crate) fn choose_credential_backup_export(&self, app: tauri::AppHandle, context_revision: u32,
         reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
+        self.choose_credential_backup_export_delegated(app, context_revision, reference, None)
+    }
+    pub(in crate::asset_session) fn choose_credential_backup_export_delegated(&self, app: tauri::AppHandle,
+        context_revision: u32, reference: commands::RecordRef<'_>,
+        agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus, AssetError> {
         super::backup_desktop::qualification(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
+        if let Some(link) = &agent {
+            super::super::agent_upload_key::consume(self, &state, link, crate::service_upload_key_protocol::Kind::BackupEncrypted)?;
+        }
         let context = self.current_context(&mut state, context_revision)?;
         let key = own_record(reference)?;
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?);
         let kind = row.authenticated.descriptor.kind;
+        if agent.is_some() && kind != Kind::AndroidKeystore { return Err(AssetError::new(Reason::SourceRefused)); }
         session_kind_gate(&context, kind)?;
         let mut slot = self.backup_picker_slot(&mut state, context, Purpose::Export, Some(key))?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference);
+        if let Some(link) = &agent { super::super::agent_upload_key::attach(&state, &slot.owner, link)?; }
         let start = self.install(&mut state, slot, super::super::Job::Vault(Job::BackupPick { app, purpose: Purpose::Export }))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(crate) fn choose_credential_backup_import(&self, app: tauri::AppHandle, context_revision: u32)
         -> Result<AssetStatus, AssetError> {
+        self.choose_credential_backup_import_delegated(app, context_revision, None)
+    }
+    pub(in crate::asset_session) fn choose_credential_backup_import_delegated(&self, app: tauri::AppHandle,
+        context_revision: u32, agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>)
+        -> Result<AssetStatus, AssetError> {
         super::backup_desktop::qualification(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
+        if let Some(link) = &agent {
+            super::super::agent_upload_key::consume(self, &state, link, crate::service_upload_key_protocol::Kind::RestoreEncrypted)?;
+        }
         let context = self.current_context(&mut state, context_revision)?;
         if state.vault.as_ref().is_none_or(|session| session.rows.len() >= store::DESCRIPTOR_COUNT) {
             return Err(AssetError::new(Reason::Capacity));
         }
         let slot = self.backup_picker_slot(&mut state, context, Purpose::Import, None)?;
+        if let Some(link) = &agent { super::super::agent_upload_key::attach(&state, &slot.owner, link)?; }
         let start = self.install(&mut state, slot, super::super::Job::Vault(Job::BackupPick { app, purpose: Purpose::Import }))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }

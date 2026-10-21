@@ -493,7 +493,7 @@ impl Entry {
             return;
         };
         if let Some((stop, _)) = r.stop {
-            if matches!(state, p::State::SavedUnassigned | p::State::Assigned) {
+            if state.success() {
                 state = p::State::Cancelled;
                 reason = stop;
                 key = None;

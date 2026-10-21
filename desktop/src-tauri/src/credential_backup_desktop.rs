@@ -44,7 +44,7 @@ pub(in crate::asset_session) fn project(
     }
 }
 
-fn delivered_current(state: &DocumentState) -> bool {
+pub(super) fn delivered_current(state: &DocumentState) -> bool {
     if state.session
         || state.stopping
         || state.unknown

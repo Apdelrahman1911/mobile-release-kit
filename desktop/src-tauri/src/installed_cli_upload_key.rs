@@ -120,11 +120,19 @@ fn output(
             key::State::Assigned => {
                 "The explicitly reviewed existing key is assigned in this Desktop session.\n"
             }
+            key::State::BackupDelivered => {
+                "The original encrypted backup and recovery-code file were delivered through Desktop's two native dialogs. Keep both safe and separate; no private output is returned here.\n"
+            }
+            key::State::RestoredUnassigned => {
+                "Encrypted Android key restored as a NEW, unassigned record. Withdraw the original permission, then separately select/assess the record and review Assign in Desktop.\n"
+            }
             _ => "No saved or assigned success is implied by this observation.\n",
         });
-        out.push_str(
-            "No backup, remember-assignment, recovery acknowledgment or retry was authorized.\n",
-        );
+        out.push_str(if matches!(row.kind, key::Kind::BackupEncrypted | key::Kind::RestoreEncrypted) {
+            "No assignment, replacement, remember-assignment, recovery acknowledgment or retry was authorized. A stopped or unknown result may have left files or a NEW record; do not repeat it.\n"
+        } else {
+            "No backup, restore, remember-assignment, recovery acknowledgment or retry was authorized.\n"
+        });
         out.into_bytes()
     };
     Ok((code, bytes))
@@ -163,7 +171,7 @@ fn scope_output(response: &p::Response, project: &Id, json: bool) -> Result<(u8,
         } else {
             out.push_str("No upload-key consent is retained. Prepare or review the existing key in Desktop, then explicitly allow one action.\n");
         }
-        out.push_str("Never generate a replacement for an existing/reserved/unknown key. Backup and recovery remain separate Desktop actions.\n");
+        out.push_str("Never generate a replacement for an existing/reserved/unknown key. Encrypted backup/restore require separate exact Desktop consent and both genuine native dialogs; no CLI path, key, password or recovery code is accepted. Restore is NEW and unassigned, not a Bind or recovery acknowledgment. Native qualification is still required.\n");
         Ok((0, out.into_bytes()))
     }
 }

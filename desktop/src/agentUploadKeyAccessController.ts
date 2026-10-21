@@ -1,6 +1,8 @@
 import { AGENT_UPLOAD_KEY_MAX_MS, agentUploadKeySelection, parseAgentUploadKeyAccess } from './agentUploadKeyAccess.ts';
 import type { AgentUploadKeyAccess, AgentUploadKeyAccessPort, AgentUploadKeyKind, AgentUploadKeySelection } from './agentUploadKeyAccess.ts';
-import type { AssetDisplayState } from './assetSessionTypes.ts';
+import type { AssetDisplayState, AssetRecordRef } from './assetSessionTypes.ts';
+import { agentUploadKeyBackupOptions, agentUploadKeyBackupReason } from './agentUploadKeyBackup.ts';
+import type { AgentUploadKeyBackupOption } from './agentUploadKeyBackup.ts';
 import { reserveId, reserveProject } from './versionReserve.ts';
 
 export interface AgentUploadKeyContext {
@@ -10,6 +12,7 @@ export interface AgentUploadKeyContext {
 export interface AgentUploadKeyAccessView {
   readonly kind: AgentUploadKeyKind; readonly access: AgentUploadKeyAccess | null;
   readonly acknowledged: boolean; readonly newApplication: boolean;
+  readonly backupRecord: Readonly<AssetRecordRef> | null;
   readonly stale: boolean; readonly unknown: boolean; readonly issue: string | null;
   readonly pending: 'status' | 'allow' | null; readonly revoking: boolean;
 }
@@ -21,7 +24,7 @@ interface Work { kind: 'status' | 'allow' | 'revoke'; context: AgentUploadKeyCon
   original: Promise<unknown> | null; completion: Promise<void>; finish(): void }
 const absent = (): AgentUploadKeyContext => ({ port: null, nativeSession: null, projectId: null, project: null,
   assets: null, generateReady: false, blockedReason: 'Open the native app and select your Android project.' });
-const uncertain = 'CLI permission is unconfirmed. Keep the original request; check it or withdraw this exact permission. Do not repeat key generation or assignment.';
+const uncertain = 'CLI permission is unconfirmed. Keep the original request; check it or withdraw this exact permission. Do not repeat generation, assignment, backup or restore.';
 const hostReason = (c: AgentUploadKeyContext): string | null => !c.port || !c.nativeSession ? 'CLI signing-key permission requires the running native Desktop app.' : null;
 const sameHost = (a: AgentUploadKeyContext, b: AgentUploadKeyContext) => a.port === b.port && a.nativeSession === b.nativeSession;
 const sameContext = (a: AgentUploadKeyContext, b: AgentUploadKeyContext) => sameHost(a, b) && a.project === b.project && a.projectId === b.projectId &&
@@ -48,7 +51,7 @@ export class AgentUploadKeyAccessController {
   private disposed = false;
   private listeners = new Set<() => void>();
   private state: AgentUploadKeyAccessView = Object.freeze({ kind: 'bind-reviewed', access: null, acknowledged: false,
-    newApplication: false, stale: true, unknown: false, issue: null, pending: null, revoking: false });
+    newApplication: false, backupRecord: null, stale: true, unknown: false, issue: null, pending: null, revoking: false });
   constructor(source: { current(): AgentUploadKeyContext; now?(): number; nonce?(): string }) { this.source = source; this.syncContext(); }
   getSnapshot = (): AgentUploadKeyAccessView => this.state;
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
@@ -82,16 +85,17 @@ export class AgentUploadKeyAccessController {
     this.context = c;
     if (changed || display) {
       this.version = {}; this.consent = null;
-      this.patch({ acknowledged: false, newApplication: false, ...(changed ? { stale: true } : {}) });
+      this.patch({ acknowledged: false, newApplication: false, ...(changed ? { stale: true, backupRecord: null } : {}) });
     }
   }
   private witness(c: AgentUploadKeyContext): Witness | null {
     const now = this.now(), a = c.assets;
     if (!a || !c.projectId || !c.project || hostReason(c) || c.blockedReason || now === null || a.status?.context?.projectId !== c.projectId) return null;
-    const selection = agentUploadKeySelection(a, this.state.kind, c.generateReady, now), status = a.status;
+    const selection = agentUploadKeySelection(a, this.state.kind, c.generateReady, now, this.state.backupRecord), status = a.status;
     if (!selection || !status?.context) return null;
     const key = selection.kind === 'bind-reviewed' ? `bind:${c.projectId}:${status.context.revision}:${selection.previewOperationId}:${selection.previewToken}` :
-      `generate:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}`;
+      selection.kind === 'backup-encrypted' ? `backup:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}:${selection.recordId}:${selection.expectedRevision}` :
+      `${selection.kind === 'generate-new' ? 'generate' : 'restore'}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}`;
     return { context: c, revision: status.statusRevision, contextRevision: status.context.revision, entry: a.entryGeneration, selection,
       end: selection.kind === 'bind-reviewed' ? Math.min(now + AGENT_UPLOAD_KEY_MAX_MS, a.previewDeadline!) : now + AGENT_UPLOAD_KEY_MAX_MS,
       version: this.version, key };
@@ -104,6 +108,7 @@ export class AgentUploadKeyAccessController {
     const c = this.read(), w = this.witness(c);
     return this.disposed ? 'This permission controller is retired.' : this.ownerReason() ?? hostReason(c) ?? c.blockedReason ??
       (!w ? this.state.kind === 'generate-new' ? 'Finish the ordinary new-app signing setup and tool checks in Desktop first. Any existing or uncertain key prevents generation.' :
+        this.state.kind === 'backup-encrypted' || this.state.kind === 'restore-encrypted' ? agentUploadKeyBackupReason(c.assets) ?? 'Explicitly select the encrypted Android key to back up.' :
         'Select and assess an existing encrypted Android key in Desktop first, leaving its current Assign review open.' :
         this.attempted.has(w.key) ? 'This exact review was already delegated. Check its original request; it is not renewed by a refresh.' :
           this.nonces.size >= 32 ? 'This session has reached its finite permission limit. Preserve any original request before closing Desktop.' : null);
@@ -113,8 +118,19 @@ export class AgentUploadKeyAccessController {
       this.state.kind === 'generate-new' && !this.state.newApplication ? 'Confirm the separate permission for this exact action.' : null);
   }
   setKind(value: AgentUploadKeyKind): boolean {
-    if (this.disposed || !['generate-new', 'bind-reviewed'].includes(value) || this.ownerReason()) return false;
-    if (value !== this.state.kind) { this.version = {}; this.consent = null; this.patch({ kind: value, acknowledged: false, newApplication: false, stale: true }); }
+    if (this.disposed || !['generate-new', 'bind-reviewed', 'backup-encrypted', 'restore-encrypted'].includes(value) || this.ownerReason()) return false;
+    if (value !== this.state.kind) { this.version = {}; this.consent = null; this.patch({ kind: value, acknowledged: false, newApplication: false, backupRecord: null, stale: true }); }
+    return true;
+  }
+  backupOptions(): readonly AgentUploadKeyBackupOption[] { return agentUploadKeyBackupOptions(this.read().assets); }
+  setBackupRecord(value: Readonly<AssetRecordRef> | null): boolean {
+    this.syncContext();
+    if (this.disposed || this.ownerReason() || this.state.kind !== 'backup-encrypted') return false;
+    const exact = value === null ? null : this.backupOptions().find((r) => r.recordId === value.recordId && r.expectedRevision === value.expectedRevision);
+    if (value !== null && !exact) return false;
+    this.version = {}; this.consent = null;
+    this.patch({ backupRecord: exact ? Object.freeze({ recordId: exact.recordId, expectedRevision: exact.expectedRevision }) : null,
+      acknowledged: false, newApplication: false, stale: true });
     return true;
   }
   setNewApplication(value: boolean): boolean {

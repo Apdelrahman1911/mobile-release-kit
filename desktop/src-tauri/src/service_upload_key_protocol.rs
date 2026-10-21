@@ -1,4 +1,4 @@
-//! Fixed Android upload-key delegation DATA. No file, material, picker,
+//! Fixed Android upload-key delegation DATA. No file, material, picker result,
 //! assessment, tool or credential authority crosses the installed IPC.
 use crate::service_protocol::{Error, Id, Settlement};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,6 +9,7 @@ pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const VIEW_LIMIT: usize = 4096;
 pub(crate) const ALLOW_SECONDS: u64 = 300;
 pub(crate) const DECLARATION: &str = "new-application-no-existing-upload-key";
+pub(crate) const RESTORE_DECLARATION: &str = "restore-as-new-unassigned";
 
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
@@ -19,12 +20,16 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Opti
 pub enum Kind {
     GenerateNew,
     BindReviewed,
+    BackupEncrypted,
+    RestoreEncrypted,
 }
 impl Kind {
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::GenerateNew => "agent-android-upload-key-generate-once-v1",
             Self::BindReviewed => "agent-android-upload-key-bind-once-v1",
+            Self::BackupEncrypted => "agent-android-upload-key-backup-once-v1",
+            Self::RestoreEncrypted => "agent-android-upload-key-restore-once-v1",
         }
     }
 }
@@ -45,12 +50,21 @@ pub(crate) enum Selection {
         preview_operation_id: u32,
         preview_token: String,
     },
+    BackupEncrypted {
+        record_id: Id,
+        expected_revision: u32,
+    },
+    RestoreEncrypted {
+        declaration: String,
+    },
 }
 impl Selection {
     pub(crate) fn kind(&self) -> Kind {
         match self {
             Self::GenerateNew { .. } => Kind::GenerateNew,
             Self::BindReviewed { .. } => Kind::BindReviewed,
+            Self::BackupEncrypted { .. } => Kind::BackupEncrypted,
+            Self::RestoreEncrypted { .. } => Kind::RestoreEncrypted,
         }
     }
     pub(crate) fn valid(&self) -> bool {
@@ -60,6 +74,10 @@ impl Selection {
                 preview_operation_id,
                 preview_token,
             } => (1..u32::MAX).contains(preview_operation_id) && Id::parse(preview_token).is_ok(),
+            Self::BackupEncrypted { expected_revision, .. } => {
+                (1..u32::MAX).contains(expected_revision)
+            }
+            Self::RestoreEncrypted { declaration } => declaration == RESTORE_DECLARATION,
         }
     }
 }
@@ -167,11 +185,18 @@ pub enum State {
     StopRequested,
     SavedUnassigned,
     Assigned,
+    BackupDelivered,
+    RestoredUnassigned,
     Refused,
     Cancelled,
     Failed,
     RecoveryRequired,
     Unknown,
+}
+impl State {
+    pub(crate) fn success(self) -> bool {
+        matches!(self, Self::SavedUnassigned | Self::Assigned | Self::BackupDelivered | Self::RestoredUnassigned)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -207,7 +232,7 @@ impl Status {
         use State::*;
         let settled = matches!(
             self.state,
-            SavedUnassigned | Assigned | Refused | Cancelled | Failed
+            SavedUnassigned | Assigned | BackupDelivered | RestoredUnassigned | Refused | Cancelled | Failed
         );
         if self.schema_version != 1
             || !self.do_not_replay
@@ -224,8 +249,11 @@ impl Status {
                 && !matches!(self.settlement, Settlement::Settled | Settlement::Unknown)
             || self.state == SavedUnassigned && self.kind != Kind::GenerateNew
             || self.state == Assigned && self.kind != Kind::BindReviewed
-            || matches!(self.state, SavedUnassigned | Assigned) != self.key.is_some()
-            || matches!(self.state, SavedUnassigned | Assigned)
+            || self.state == BackupDelivered && self.kind != Kind::BackupEncrypted
+            || self.state == RestoredUnassigned && self.kind != Kind::RestoreEncrypted
+            || self.state == RestoredUnassigned && self.key.as_ref().is_some_and(|k| k.revision_counter != 1)
+            || matches!(self.state, SavedUnassigned | Assigned | RestoredUnassigned) != self.key.is_some()
+            || self.state.success()
                 && (self.asset_operation_id.is_none() || self.reason != Reason::None)
             || matches!(self.state, Queued | Running) && self.reason != Reason::None
             || matches!(

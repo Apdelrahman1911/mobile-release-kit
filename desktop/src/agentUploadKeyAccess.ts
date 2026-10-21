@@ -1,13 +1,16 @@
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { reserveId, reserveProject } from './versionReserve.ts';
-import type { AssetDisplayState } from './assetSessionTypes.ts';
+import type { AssetDisplayState, AssetRecordRef } from './assetSessionTypes.ts';
+import { AGENT_UPLOAD_KEY_RESTORE_DECLARATION, agentUploadKeyBackupSelection } from './agentUploadKeyBackup.ts';
+import type { AgentUploadKeyBackupKind, AgentUploadKeyBackupSelection } from './agentUploadKeyBackup.ts';
 
 // Permission and comparison DATA only. No private input or native credential
 // capability is transported by this panel or by the installed CLI.
-export type AgentUploadKeyKind = 'generate-new' | 'bind-reviewed';
+export type AgentUploadKeyKind = 'generate-new' | 'bind-reviewed' | AgentUploadKeyBackupKind;
 export type AgentUploadKeySelection =
   | { readonly kind: 'generate-new'; readonly declaration: 'new-application-no-existing-upload-key' }
-  | { readonly kind: 'bind-reviewed'; readonly previewOperationId: number; readonly previewToken: string };
+  | { readonly kind: 'bind-reviewed'; readonly previewOperationId: number; readonly previewToken: string }
+  | AgentUploadKeyBackupSelection;
 export interface AgentUploadKeyAccess {
   readonly schemaVersion: 1;
   readonly serviceInstance: string | null;
@@ -33,12 +36,18 @@ export interface AgentUploadKeyAccessPort {
 }
 export const AGENT_UPLOAD_KEY_MAX_MS = 300_000;
 export const AGENT_UPLOAD_KEY_DECLARATION = 'new-application-no-existing-upload-key' as const;
-export const agentUploadKeyConsent = (kind: AgentUploadKeyKind): string => kind === 'generate-new'
-  ? 'agent-android-upload-key-generate-once-v1' : 'agent-android-upload-key-bind-once-v1';
+export function agentUploadKeyConsent(kind: AgentUploadKeyKind): string {
+  switch (kind) {
+    case 'generate-new': return 'agent-android-upload-key-generate-once-v1';
+    case 'bind-reviewed': return 'agent-android-upload-key-bind-once-v1';
+    case 'backup-encrypted': return 'agent-android-upload-key-backup-once-v1';
+    case 'restore-encrypted': return 'agent-android-upload-key-restore-once-v1';
+  }
+}
 const fields = ['schemaVersion', 'serviceInstance', 'projectId', 'grantId', 'kind', 'requestId', 'enabled', 'remainingMs', 'consumed'];
 const integer = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0) && v >= 0 && v <= max;
 export const uploadKeyRevision = (v: unknown): v is number => integer(v, 0xffff_fffe) && v > 0;
-const kind = (v: unknown): v is AgentUploadKeyKind => v === 'generate-new' || v === 'bind-reviewed';
+const kind = (v: unknown): v is AgentUploadKeyKind => v === 'generate-new' || v === 'bind-reviewed' || v === 'backup-encrypted' || v === 'restore-encrypted';
 
 export function parseAgentUploadKeyAccess(raw: unknown): AgentUploadKeyAccess | null {
   try {
@@ -67,6 +76,10 @@ export function parseAgentUploadKeySelection(raw: unknown): AgentUploadKeySelect
       return Object.freeze({ kind: 'generate-new', declaration: AGENT_UPLOAD_KEY_DECLARATION });
     if (keys.length === 3 && d.kind === 'bind-reviewed' && uploadKeyRevision(d.previewOperationId) && reserveId(d.previewToken))
       return Object.freeze({ kind: 'bind-reviewed', previewOperationId: d.previewOperationId, previewToken: d.previewToken });
+    if (keys.length === 3 && d.kind === 'backup-encrypted' && reserveId(d.recordId) && uploadKeyRevision(d.expectedRevision))
+      return Object.freeze({ kind: 'backup-encrypted', recordId: d.recordId, expectedRevision: d.expectedRevision });
+    if (keys.length === 2 && d.kind === 'restore-encrypted' && d.declaration === AGENT_UPLOAD_KEY_RESTORE_DECLARATION)
+      return Object.freeze({ kind: 'restore-encrypted', declaration: AGENT_UPLOAD_KEY_RESTORE_DECLARATION });
     return null;
   } catch { return null; }
 }
@@ -93,7 +106,8 @@ export function createAgentUploadKeyAccessPort(invoke: (command: string, body: U
 // This helper is a UI admission hint over the SAME Asset controller's actual
 // joined preview. Native Allow/consume still capture/recheck the private full
 // StoredRef, OriginalWork, source and assessment; this is not a Bind factory.
-export function agentUploadKeySelection(assets: AssetDisplayState, selected: AgentUploadKeyKind, generateReady: boolean, now: number): AgentUploadKeySelection | null {
+export function agentUploadKeySelection(assets: AssetDisplayState, selected: AgentUploadKeyKind, generateReady: boolean, now: number,
+  backupRecord: Readonly<AssetRecordRef> | null = null): AgentUploadKeySelection | null {
   const s = assets.status, c = s?.context;
   if (!Number.isFinite(now) || now < 0 || assets.mode !== 'native' || assets.blocked || assets.observationFailed || !assets.contextCurrent ||
       assets.busy || assets.updatingContext || assets.originPending || !s || s.mode !== 'encrypted' ||
@@ -102,6 +116,8 @@ export function agentUploadKeySelection(assets: AssetDisplayState, selected: Age
   const o = s.operation;
   if (selected === 'generate-new') return generateReady && (!o || o.phase === 'idle' && o.settlement === 'known') &&
     !s.records.some((r) => r.kind === 'android-keystore') ? Object.freeze({ kind: selected, declaration: AGENT_UPLOAD_KEY_DECLARATION }) : null;
+  if (selected === 'backup-encrypted' || selected === 'restore-encrypted') return agentUploadKeyBackupSelection(assets, selected, backupRecord);
+  if (selected !== 'bind-reviewed') return null;
   const p = o?.preview, subject = p?.subject, i = assets.intent;
   if (!o || o.phase !== 'preview' || o.reason !== 'none' || o.settlement !== 'known' || !assets.reviewReady ||
       assets.previewDeadline === null || now >= assets.previewDeadline || p?.action !== 'bind' ||

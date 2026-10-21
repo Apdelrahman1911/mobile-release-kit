@@ -8,23 +8,36 @@ import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKeyAccessController }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot), id = useId();
   const access = state.access, remaining = controller.remainingSeconds();
+  const backupOptions = state.kind === 'backup-encrypted' ? controller.backupOptions() : [];
   const commands = access && (access.consumed || !state.stale && !state.unknown) ? agentUploadKeyCommands(access) : [];
   const status = state.unknown ? 'Permission is unconfirmed — do not repeat this action' : state.revoking ? 'Withdrawing the original permission…' :
     state.pending === 'allow' ? 'Allowing this one action…' : state.pending === 'status' ? 'Checking the original permission…' :
-      access?.consumed ? 'Permission used — this is not proof that the key was saved or assigned' : state.stale ? 'Check permission before continuing' :
+      access?.consumed ? 'Permission used — this is not proof that the action completed' : state.stale ? 'Check permission before continuing' :
         access?.enabled ? 'One CLI action was allowed at the last check' : 'Permission is off at the last check';
   return <ProgressiveDisclosure title="Let a CLI or AI tool use one signing-key review · optional"
     description="Keep using Desktop unless a trusted local tool needs this one action. No private key or password is sent to the CLI."
     needsAttention={controller.ownerReason() !== null || state.issue !== null}>
     <section className="credential-guidance" aria-labelledby={`${id}-title`}>
       <h4 id={`${id}-title`}>Android upload key · one-use local permission</h4>
-      <p>First use the ordinary controls above. Prefer the key your app already uses. This panel delegates only a completed new-app setup or the exact existing-key Assign review; it cannot select files, choose a tool or bypass an uncertain earlier key.</p>
-      <label htmlFor={`${id}-kind`}>Action already reviewed in Desktop</label>
+      <p>Prefer the key your app already uses. Delegate one completed new-app setup, the exact existing-key Assign review, or an encrypted backup/restore with Desktop’s ordinary file dialogs. This panel cannot choose files or tools, replace a key, or bypass an uncertain earlier action.</p>
+      <label htmlFor={`${id}-kind`}>One action to allow in Desktop</label>
       <select id={`${id}-kind`} value={state.kind} disabled={controller.ownerReason() !== null}
         onChange={(e) => controller.setKind(e.target.value as AgentUploadKeyKind)}>
         <option value="bind-reviewed">Assign the reviewed existing Android key</option>
         <option value="generate-new">Generate and save one key for a new app</option>
+        <option value="backup-encrypted">Back up a selected encrypted Android key</option>
+        <option value="restore-encrypted">Restore an encrypted Android key as a new record</option>
       </select>
+      {state.kind === 'backup-encrypted' && <>
+        <label htmlFor={`${id}-record`}>Existing encrypted Android key</label>
+        <select id={`${id}-record`} value={state.backupRecord?.recordId ?? ''} disabled={controller.ownerReason() !== null}
+          onChange={(e) => { const row = backupOptions.find((r) => r.recordId === e.target.value); controller.setBackupRecord(row ?? null); }}>
+          <option value="">Select the key to back up</option>
+          {backupOptions.map((r) => <option key={r.recordId} value={r.recordId}>{r.label} · {r.recordId} · revision {r.expectedRevision}</option>)}
+        </select>
+        <p>After the CLI submits this permission, Desktop asks for two separate new file locations: an encrypted backup and its recovery-code file. Keep both safe and apart. No file or code is returned to the CLI.</p>
+      </>}
+      {state.kind === 'restore-encrypted' && <p>After Submit, select the encrypted backup and its recovery-code file in Desktop’s two native dialogs. Restore adds a new, unassigned Android-key record; it never replaces or assigns an existing key. After completion, withdraw this permission, then use the ordinary Select/Assess and Assign review separately.</p>}
       {state.kind === 'generate-new' && <label><input type="checkbox" checked={state.newApplication}
         disabled={controller.selectionReason() !== null} onChange={(e) => controller.setNewApplication(e.target.checked)} />
         This is a new app, and I have never used an upload key for it. Do not replace an existing key.</label>}
@@ -41,8 +54,8 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
         <button type="button" className="button secondary" disabled={controller.revokeReason() !== null} onClick={() => void controller.revoke()}>Withdraw / request Stop</button>
       </div>
       <p className="toolbar-reason">{controller.allowReason() ?? 'Only this exact reviewed action can be submitted. Desktop checks its original source again.'}</p>
-      <p>Generation saves an encrypted, unassigned key. Assigning an existing key applies only to the current Desktop context. Neither operation remembers the assignment for a later launch, makes a backup, signs a build or verifies Play access.</p>
-      <p className="save-note">Withdrawal asks the same original request to stop; it does not undo a saved key or prove cleanup. Lost or unknown results must not be replayed. Use the original request’s Status/Cancel commands, and Desktop’s existing recovery controls when required.</p>
+      <p>Generation and restore save an encrypted, unassigned key. Assigning an existing key applies only to the current Desktop context. Backup requires its own separate permission and both native dialogs. No action remembers an assignment for a later launch, signs a build or verifies Play access.</p>
+      <p className="save-note">Withdrawal asks the same original request to stop; it does not undo a saved key or backup file, or prove cleanup. Files or a new record may already exist after a stopped or unknown result. Do not replay it. Keep the original request’s Status/Cancel commands and use Desktop’s existing recovery controls when required.</p>
       <details><summary>Commands and original request details</summary>
         <p>These commands are instructions, not buttons that execute. The installed CLI prints its original request ID before sending Submit; keep that ID if a reply is lost.</p>
         {commands.map((command) => <pre key={command}><code>{command}</code></pre>)}
@@ -50,7 +63,7 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
         {access?.grantId && <dl><dt>Service project</dt><dd><code>{access.projectId}</code></dd><dt>Running service</dt><dd><code>{access.serviceInstance}</code></dd>
           <dt>Permission</dt><dd><code>{access.grantId}</code></dd><dt>Allowed action</dt><dd>{access.kind}</dd>
           {access.requestId && <><dt>Original request</dt><dd><code>{access.requestId}</code></dd></>}</dl>}
-        <p>No CLI backup/import, private path, password, recovery acknowledgment or automatic second action is supported by this permission.</p>
+        <p>No private path, key, password, recovery code or recovery acknowledgment is accepted by these CLI commands. Native backup availability is still required. There is no automatic second action or assignment after restore.</p>
       </details>
     </section>
   </ProgressiveDisclosure>;

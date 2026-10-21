@@ -606,7 +606,7 @@ impl DocumentBinding {
         }
         Ok(claim)
     }
-    pub(super) fn run_agent_upload_key(&self, claim: requests::Claim) {
+    pub(super) fn run_agent_upload_key(&self, claim: requests::Claim, #[cfg(feature = "desktop-shell")] app: tauri::AppHandle) {
         let link = claim.link().clone();
         let result = (|| {
             let grant = self
@@ -630,7 +630,7 @@ impl DocumentBinding {
                 )
             ))]
             {
-                grant.proof.run(self, link).map_err(|_| Error::Conflict)
+                grant.proof.run(self, link, #[cfg(feature = "desktop-shell")] app).map_err(|_| Error::Conflict)
             }
             #[cfg(not(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -730,6 +730,14 @@ mod tests {
             (
                 serde_json::json!({"kind":"bind-reviewed","previewOperationId":7,"previewToken":"a".repeat(32)}),
                 p::Kind::BindReviewed.consent(),
+            ),
+            (
+                serde_json::json!({"kind":"backup-encrypted","recordId":"c".repeat(32),"expectedRevision":1}),
+                p::Kind::BackupEncrypted.consent(),
+            ),
+            (
+                serde_json::json!({"kind":"restore-encrypted","declaration":p::RESTORE_DECLARATION}),
+                p::Kind::RestoreEncrypted.consent(),
             ),
         ] {
             let mut value = serde_json::json!({"projectId":"project-1","consentId":"b".repeat(32),"contextRevision":1,"expectedStatusRevision":2,"selection":selection,"consentVersion":consent});

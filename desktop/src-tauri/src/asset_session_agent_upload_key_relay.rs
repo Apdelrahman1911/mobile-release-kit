@@ -19,6 +19,10 @@ struct Call {
     original: DocumentBinding,
     claim: Option<requests::Claim>,
     go: oneshot::Receiver<()>,
+    // SAME start_relay handle, never a fabricated window/picker. Its fixed
+    // layout is included in TASK_STAGE below; shared runtime is not copied.
+    #[cfg(feature = "desktop-shell")]
+    app: tauri::AppHandle,
 }
 impl Future for Call {
     type Output = ();
@@ -30,7 +34,7 @@ impl Future for Call {
         };
         if let Some(claim) = call.claim.take() {
             if result.is_ok() {
-                call.original.run_agent_upload_key(claim);
+                call.original.run_agent_upload_key(claim, #[cfg(feature = "desktop-shell")] call.app.clone());
             } else {
                 claim.returned(Err(Error::Conflict));
             }
@@ -109,7 +113,7 @@ impl UploadKeyRelay {
         }
         document.inner.changes.send_modify(|_| {});
     }
-    pub(crate) async fn tick(self: &Arc<Self>, document: &DocumentBinding) {
+    pub(crate) async fn tick(self: &Arc<Self>, document: &DocumentBinding, #[cfg(feature = "desktop-shell")] app: &tauri::AppHandle) {
         document.agent_upload_key_tick();
         self.join_finished(document).await;
         if self.closed.load(Ordering::SeqCst) {
@@ -147,6 +151,8 @@ impl UploadKeyRelay {
             original,
             claim: Some(claim),
             go,
+            #[cfg(feature = "desktop-shell")]
+            app: app.clone(),
         }));
         if self.closed.load(Ordering::SeqCst) || entry.first_stop().map_or(true, |s| s.is_some()) {
             entry.cancel(p::Reason::PermissionRevoked, Instant::now());

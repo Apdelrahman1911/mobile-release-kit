@@ -1,7 +1,8 @@
-//! Private comparison proof for the two fixed MAIN-reviewed actions. This
+//! Private comparison proof for fixed MAIN-reviewed Android key actions. This
 //! child can observe the original Setup/Preview; IPC and status cannot mint it.
 use super::*;
 use crate::{service_upload_key_protocol as agent, service_upload_key_requests as requests};
+use crate::asset_session::vault::backup_delegation;
 
 pub(in crate::asset_session) struct Proof {
     context: Weak<NativeContext>,
@@ -17,21 +18,23 @@ enum Selected {
         reference: StoredRef,
         end: Instant,
     },
+    Backup(backup_delegation::Selection),
 }
 impl Proof {
     pub(in crate::asset_session) fn retained_bytes(&self) -> usize {
         // Weak pointers keep their original allocation header/body alive even
         // after destruction of contents. No decrypted payload is copied here.
         std::mem::size_of::<Self>()
-            + 4 * 2 * std::mem::size_of::<usize>()
+            + 3 * 2 * std::mem::size_of::<usize>()
             + std::mem::size_of::<NativeContext>()
             + std::mem::size_of::<Mutex<store::StoreBook>>()
             + std::mem::size_of::<crypto::VaultKey>()
             + match &self.action {
-                Selected::Generate(_) => std::mem::size_of::<PreparedSetup>(),
+                Selected::Generate(_) => 2 * std::mem::size_of::<usize>() + std::mem::size_of::<PreparedSetup>(),
                 Selected::Bind { token, .. } => {
-                    std::mem::size_of::<OriginalWork>() + token.capacity()
+                    2 * std::mem::size_of::<usize>() + std::mem::size_of::<OriginalWork>() + token.capacity()
                 }
+                Selected::Backup(_) => 0, // Entire fixed comparison already in Self; no extra Weak/heap.
             }
     }
     pub(in crate::asset_session) fn end(&self, now: Instant) -> Instant {
@@ -39,12 +42,14 @@ impl Proof {
         match &self.action {
             Selected::Generate(_) => cap,
             Selected::Bind { end, .. } => cap.min(*end),
+            Selected::Backup(_) => cap,
         }
     }
     pub(in crate::asset_session) fn kind(&self) -> agent::Kind {
         match self.action {
             Selected::Generate(_) => agent::Kind::GenerateNew,
             Selected::Bind { .. } => agent::Kind::BindReviewed,
+            Selected::Backup(ref selected) => selected.kind(),
         }
     }
     pub(in crate::asset_session) fn current(
@@ -130,6 +135,7 @@ impl Proof {
                     return Err(AssetError::new(Reason::SourceRefused));
                 }
             }
+            Selected::Backup(selected) => selected.current(document, state)?,
         }
         Ok(())
     }
@@ -144,6 +150,7 @@ impl Proof {
         &self,
         document: &DocumentBinding,
         link: Arc<requests::NativeLink>,
+        app: tauri::AppHandle,
     ) -> Result<(), AssetError> {
         match &self.action {
             Selected::Generate(_) => {
@@ -172,6 +179,7 @@ impl Proof {
             Selected::Bind { token, .. } => {
                 document.bind_vault_delegated(token, Some(link)).map(|_| ())
             }
+            Selected::Backup(selected) => selected.run(document, app, link),
         }
     }
     #[cfg(not(all(
@@ -185,6 +193,7 @@ impl Proof {
         &self,
         _document: &DocumentBinding,
         _link: Arc<requests::NativeLink>,
+        #[cfg(feature = "desktop-shell")] _app: tauri::AppHandle,
     ) -> Result<(), AssetError> {
         Err(AssetError::new(Reason::Unqualified))
     }
@@ -233,6 +242,9 @@ pub(in crate::asset_session) fn capture(
                 end: slot.review_end.ok_or_else(AssetError::invalid)?,
             }
         }
+        agent::Selection::BackupEncrypted { .. } | agent::Selection::RestoreEncrypted { .. } => {
+            Selected::Backup(backup_delegation::Selection::capture(document, state, selected)?)
+        }
     };
     let proof = Proof {
         context: Arc::downgrade(context),
@@ -257,7 +269,7 @@ pub(in crate::asset_session) fn completion(
 ) -> Option<(agent::State, agent::Reason, Option<agent::KeyReference>)> {
     if !matches!(
         slot.operation,
-        Operation::GenerateUploadKey | Operation::Bind
+        Operation::GenerateUploadKey | Operation::Bind | Operation::PrepareBackupExport | Operation::ImportBackup
     ) || !slot.owner.resources_settled()
     {
         return None;
@@ -275,6 +287,11 @@ pub(in crate::asset_session) fn completion(
     }
     if slot.phase != Phase::Idle || slot.settlement != Settlement::Known {
         return None;
+    }
+    if matches!(slot.operation, Operation::PrepareBackupExport | Operation::ImportBackup) {
+        let (outcome, reason, key) = backup_delegation::completion(document, state, slot)?;
+        let key = match key { Some(value) => Some(reference(value)?), None => None };
+        return Some((outcome, reason, key));
     }
     if slot.operation == Operation::GenerateUploadKey {
         if let Some(key) = stored_marker(document, state, slot).and_then(reference) {

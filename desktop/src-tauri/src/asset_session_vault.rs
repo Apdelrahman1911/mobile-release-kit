@@ -31,6 +31,8 @@ pub(in crate::asset_session) use backup_native::installed as installed_backup_ob
 mod backup_selection;
 #[path = "credential_backup_desktop.rs"]
 pub(super) mod backup_desktop;
+#[path = "credential_backup_delegation.rs"]
+pub(in crate::asset_session) mod backup_delegation;
 pub(super) use backup_selection::Selectors as BackupSelectors;
 pub(crate) use backup_selection::Choice as CredentialBackupChoice;
 
@@ -242,6 +244,9 @@ pub(super) struct SlotData {
     // Set only by the original explicit Discard/Lock path or the accepted
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
+    // Exact delegated NEW/readback publication, captured before private drain.
+    // Comparison DATA only; no imported reference/assignment authority.
+    backup_import_context: Option<(u32, StoredRef)>,
     upload_key_new_published: bool,
     apple_profile_new_published: bool,
     upload_key_context: Option<(u32, StoredRef)>,
@@ -523,7 +528,15 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             slot.settlement = Settlement::Known;
         },
         Staged::Mutated { record, row, generation } => {
-            if slot.operation == Operation::ImportBackup { slot.vault.backup_new_published = true; }
+            if slot.operation == Operation::ImportBackup {
+                match backup_delegation::import_publication(slot, row.as_ref(), session.identity) {
+                    Ok(stamp) => { slot.vault.backup_import_context = stamp; slot.vault.backup_new_published = true; },
+                    Err(reason) => {
+                        slot.staged = Some(super::Staged::Vault(Staged::Mutated { record, row, generation }));
+                        slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, Instant::now()); return;
+                    },
+                }
+            }
             if slot.operation == Operation::GenerateUploadKey {
                 let observed = (|| {
                     let work = slot.owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?;

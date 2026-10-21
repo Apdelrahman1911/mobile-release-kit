@@ -46,6 +46,50 @@ fn reference() -> key::KeyReference {
 }
 
 #[test]
+fn backup_and_restore_output_keep_delivery_new_reference_and_assignment_distinct() {
+    for (kind, state, saved, expected) in [
+        (key::Kind::BackupEncrypted, key::State::BackupDelivered, None, "two native dialogs"),
+        (key::Kind::RestoreEncrypted, key::State::RestoredUnassigned, Some(reference()), "NEW, unassigned"),
+    ] {
+        let mut value = row();
+        value.kind = kind; value.state = state; value.key = saved; value.settlement = p::Settlement::Settled;
+        value.asset_operation_id = Some(7);
+        let result = response(p::ResponseBody::UploadKeyRequest(value.clone()));
+        let (code, bytes) = output(&result, &origin(), Some(&id('d')), false).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(expected));
+        assert!(text.contains("No assignment, replacement"));
+        assert!(!text.contains("No backup, restore"));
+        let (_, json) = output(&result, &origin(), Some(&id('d')), true).unwrap();
+        let encoded = String::from_utf8(json).unwrap();
+        for forbidden in ["backupPath", "recoveryCode", "password", "privateKey", "destinationPath"] {
+            assert!(!encoded.contains(forbidden));
+        }
+        let mut wrong = value;
+        wrong.kind = key::Kind::BindReviewed;
+        assert!(output(&response(p::ResponseBody::UploadKeyRequest(wrong)), &origin(), None, false).is_err());
+    }
+}
+
+#[test]
+fn backup_cli_still_accepts_only_ids_not_a_file_pair_or_restore_override() {
+    for option in ["--backup-path", "--password", "--recovery-code", "--restore", "--auto-bind", "--replace"] {
+        let args: Vec<OsString> = [COMMANDS[1], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "dddddddddddddddddddddddddddddddd", "--reviewed", option].into_iter().map(OsString::from).collect();
+        assert!(parse(&args).is_err());
+    }
+    let mut value = row();
+    value.kind = key::Kind::RestoreEncrypted; value.state = key::State::RecoveryRequired;
+    value.settlement = p::Settlement::Unknown; value.reason = key::Reason::RecoveryRequired;
+    let (code, bytes) = output(&response(p::ResponseBody::UploadKeyRequest(value)), &origin(), None, false).unwrap();
+    assert_eq!(code, 6);
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("may have left files or a NEW record"));
+    assert!(!text.contains("key restored as a NEW"));
+}
+
+#[test]
 fn actual_collector_admits_only_four_ids_only_commands_and_explicit_submit_review() {
     let q = origin();
     let g = id('d');

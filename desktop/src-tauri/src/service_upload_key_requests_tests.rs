@@ -1,6 +1,8 @@
 //! Actual finite Inbox/Entry/Claim with inert callback DATA. No native source,
 //! private material, joins receipt, saved key or Bind proof is manufactured.
 use super::*;
+#[path = "service_upload_key_backup_tests.rs"]
+mod backup;
 fn id(n: u32) -> Id {
     Id::parse(&format!("{n:032x}")).unwrap()
 }
