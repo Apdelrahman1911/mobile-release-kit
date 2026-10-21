@@ -68,8 +68,10 @@ impl Fixture {
         if data.identity[2] & 0o7777 != 0o600 {
             return Err(());
         }
-        let v = crate::git_read_protocol::strict_json(&bytes).map_err(|_| ())?;
-        if !crate::git_read_protocol::keys(&v, &["schemaVersion", "case", "base", "target", "pack"])
+        let v = crate::protocol::strict_json(&bytes).map_err(|_| ())?;
+        let names = ["schemaVersion", "case", "base", "target", "pack"];
+        if !v.as_object().is_some_and(|object|
+            object.len() == names.len() && names.iter().all(|name| object.contains_key(*name)))
             || v["schemaVersion"] != 1
             || v["case"] != case.name()
         {
