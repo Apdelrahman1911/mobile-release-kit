@@ -188,6 +188,10 @@ impl ConnectionState {
         self.push_pin_current(&pins, now, work_end)?;
         Ok(pins)
     }
+    /// Delegation liveness only; cannot replace original Apply/GO checks.
+    pub(crate) fn git_push_delegation_current(&self,pins:&Pins,action:&push::Action,now:Instant)->bool {
+        !self.native_work_pending() && action==&pins.action && self.push_pin_current(pins,now,now).is_ok()
+    }
     pub(crate) fn git_push_review_current(
         &self,
         pins: &Pins,
@@ -580,4 +584,21 @@ mod tests {
         s.private.as_mut().unwrap().clock.end = original + Duration::from_secs(1);
         assert!(s.push_pin_current(&pins, at, end).is_err());
     }
+    #[test]
+    fn remote_delegation_current_uses_original_pins_and_never_renews_expiry() {
+        let at=Instant::now();let mut s=connected(at);let a=data::action();
+        let p=s.select_git_push("project-1",2,&a,at,at+Duration::from_secs(45)).unwrap();
+        assert!(s.git_push_delegation_current(&p,&a,at));
+        let end=s.private.as_ref().unwrap().clock.end;
+        s.status.revision+=1;assert!(s.git_push_delegation_current(&p,&a,at));
+        assert_eq!(s.private.as_ref().unwrap().clock.end,end);
+        s.status.account.state=FactState::Stale;assert!(!s.git_push_delegation_current(&p,&a,at));
+        s.status.account.state=FactState::Observed;
+        s.unknown=true;assert!(!s.git_remote_finish_known());assert!(!s.git_push_delegation_current(&p,&a,at));
+        s.unknown=false;s.private.as_mut().unwrap().clock.end=at;
+        assert!(!s.git_push_delegation_current(&p,&a,at));
+        // finish-known alone is NOT credential liveness or actual return.
+        assert!(s.git_remote_finish_known());
+    }
+
 }

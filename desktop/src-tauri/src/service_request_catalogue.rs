@@ -164,13 +164,14 @@ pub enum AdditionalFamily {
     GitIndex,
     GitCommit,
     GitRepository,
+    GitRemote,
     Identity,
     VersionReservation,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
         match self {
-            Self::GitIndex | Self::GitCommit | Self::GitRepository => 0,
+            Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
             Self::Identity => 1,
             Self::VersionReservation => 2,
         }
@@ -180,6 +181,7 @@ impl AdditionalFamily {
             Self::GitIndex => "git-index-status",
             Self::GitCommit => "git-commit-status",
             Self::GitRepository => "git-repository-status",
+            Self::GitRemote => "git-remote-status",
             Self::Identity => "identity-request-status",
             Self::VersionReservation => "version-reserve-status",
         }

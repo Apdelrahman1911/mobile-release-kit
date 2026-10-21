@@ -25,6 +25,7 @@ fn names(family: Family) -> &'static [&'static str; 5] {
         Family::Index => &["git-index-scope", "git-index-prepare", "git-index-start", "git-index-status", "git-index-cancel"],
         Family::Commit => &["git-commit-scope", "git-commit-prepare", "git-commit-start", "git-commit-status", "git-commit-cancel"],
         Family::Repository => &["git-repository-scope", "git-repository-prepare", "git-repository-start", "git-repository-status", "git-repository-cancel"],
+        Family::Remote => &super::git_remote::NAMES,
     }
 }
 pub(super) fn recognizes(args: &[OsString]) -> bool { recognizes_for(args, Family::Index) }
@@ -108,6 +109,7 @@ fn output(
 }
 fn output_for(response: &p::Response, project: &Id, origin: Option<&git::Query>, json: bool, family: Family) -> Result<(u8, Vec<u8>), Error> {
     if family == Family::Repository { return super::git_repository::output(response, project, origin, json); }
+    if family == Family::Remote { return super::git_remote::output(response, project, origin, json); }
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
     }
@@ -231,7 +233,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
             Command::Scope(p) => (
                 p.clone(),
                 None,
-                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }), Family::Repository => p::RequestBody::GitRepositoryScope(p::ProjectQuery { project_id: p }) },
+                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }), Family::Repository => p::RequestBody::GitRepositoryScope(p::ProjectQuery { project_id: p }), Family::Remote => p::RequestBody::GitRemoteScope(p::ProjectQuery { project_id: p }) },
             ),
             Command::Prepare {
                 project,
@@ -250,24 +252,24 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                     Some(q.clone()),
                     match family {
                         Family::Index => p::RequestBody::GitIndexPrepare(git::Prepare { origin: q, grant_id: grant }),
-                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Repository => p::RequestBody::GitRepositoryPrepare(git::Prepare { origin: q, grant_id: grant }),
+                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Repository => p::RequestBody::GitRepositoryPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Remote => p::RequestBody::GitRemotePrepare(git::Prepare { origin: q, grant_id: grant }),
                     },
                 )
             }
             Command::Start(s) => (
                 s.origin.project_id.clone(),
                 Some(s.origin.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s), Family::Repository => p::RequestBody::GitRepositoryStart(s) },
+                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s), Family::Repository => p::RequestBody::GitRepositoryStart(s), Family::Remote => p::RequestBody::GitRemoteStart(s) },
             ),
             Command::Status(q) => (
                 q.project_id.clone(),
                 Some(q.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q), Family::Repository => p::RequestBody::GitRepositoryStatus(q) },
+                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q), Family::Repository => p::RequestBody::GitRepositoryStatus(q), Family::Remote => p::RequestBody::GitRemoteStatus(q) },
             ),
             Command::Cancel(q) => (
                 q.project_id.clone(),
                 Some(q.clone()),
-                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q), Family::Repository => p::RequestBody::GitRepositoryCancel(q) },
+                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q), Family::Repository => p::RequestBody::GitRepositoryCancel(q), Family::Remote => p::RequestBody::GitRemoteCancel(q) },
             ),
         };
         let result = (|| {
@@ -303,3 +305,6 @@ mod tests;
 #[cfg(test)]
 #[path = "installed_cli_git_repository_tests.rs"]
 mod repository_tests;
+#[cfg(test)]
+#[path = "installed_cli_git_remote_tests.rs"]
+mod remote_tests;

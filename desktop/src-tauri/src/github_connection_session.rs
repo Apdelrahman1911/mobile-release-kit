@@ -632,6 +632,11 @@ impl ConnectionState {
     pub(crate) fn registration(&self) -> Option<(&str, u32)> {
         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
     }
+    // Comparison only, called under SAME Doc immediately AFTER the actual
+    // matching Git hold finish returned. This cannot stand in for that call.
+    pub(crate) fn git_remote_finish_known(&self) -> bool {
+        !self.unknown && !self.exhausted && self.fetch.is_none() && self.push.is_none()
+    }
     pub(crate) fn material_settled(&self) -> bool {
         self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending()
     }

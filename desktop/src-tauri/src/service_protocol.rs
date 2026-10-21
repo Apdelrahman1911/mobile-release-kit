@@ -97,7 +97,7 @@ impl CredentialReference {
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
-    GitCommit, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+    GitCommit, GitFetch, GitPush, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
 }
 
 /// Future operation-specific adapters may compare this DATA with a genuine
@@ -224,6 +224,11 @@ pub enum RequestBody {
     #[serde(rename="git-repository.start")] GitRepositoryStart(crate::service_git_repository_protocol::Start),
     #[serde(rename="git-repository.status")] GitRepositoryStatus(crate::service_git_repository_protocol::Query),
     #[serde(rename="git-repository.cancel")] GitRepositoryCancel(crate::service_git_repository_protocol::Query),
+    #[serde(rename="git-remote.scope")] GitRemoteScope(ProjectQuery),
+    #[serde(rename="git-remote.prepare")] GitRemotePrepare(crate::service_git_remote_protocol::Prepare),
+    #[serde(rename="git-remote.start")] GitRemoteStart(crate::service_git_remote_protocol::Start),
+    #[serde(rename="git-remote.status")] GitRemoteStatus(crate::service_git_remote_protocol::Query),
+    #[serde(rename="git-remote.cancel")] GitRemoteCancel(crate::service_git_remote_protocol::Query),
     #[serde(rename = "service.info")] Info(Empty),
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
@@ -274,6 +279,8 @@ pub enum ResponseBody {
     GitCommitRequest(crate::service_git_commit_protocol::Status),
     GitRepositoryScope(crate::service_git_repository_protocol::Scope),
     GitRepositoryRequest(crate::service_git_repository_protocol::Status),
+    GitRemoteScope(crate::service_git_remote_protocol::Scope),
+    GitRemoteRequest(crate::service_git_remote_protocol::Status),
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     AndroidTools(crate::service_android_tools::View),
@@ -320,7 +327,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
-    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) = &request.request { input.validate()?; }
+    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -414,6 +421,14 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         },
         ResponseBody::GitRepositoryRequest(row) => {
             row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, false)?;
+        },
+        ResponseBody::GitRemoteScope(row) => {
+            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::encoded_bound(response, crate::service_git_remote_protocol::ACCESS_LIMIT)?;
+        },
+        ResponseBody::GitRemoteRequest(row) => {
+            row.validate()?; if row.progress.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
             crate::service_git_protocol::response_bound(response, false)?;
         },
         ResponseBody::Observation(row) => project(row)?,

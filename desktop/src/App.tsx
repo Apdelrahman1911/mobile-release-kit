@@ -56,6 +56,8 @@ import { GitCommitPermission } from './service_git_commit_permission.ts';
 import { GitRepositoryPermission } from './service_git_repository_permission.ts';
 import { gitRepositoryPermissionContext } from './gitRepositoryPermissionSelection.ts';
 import { ServiceGitRepositoryAccess } from './components/ServiceGitRepositoryAccess.tsx';
+import { GitRemotePermission, gitRemotePermissionContext } from './service_git_remote_permission.ts';
+import { ServiceGitRemoteAccess } from './components/ServiceGitRemoteAccess.tsx';
 import { ServiceGitCommitAccess } from './components/ServiceGitCommitAccess.tsx';
 import { gitReadPathOrder } from './gitReadProtocol.ts';
 import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
@@ -1195,6 +1197,18 @@ export function App() {
   }));
   // Display/currentness only; the retained Permission owns every actual call.
   useEffect(() => { agentGitRepository.syncContext(); });
+  const [agentGitRemote] = useState(() => new GitRemotePermission((kind) => {
+    const service = pathService.current, projectId = workspaceRef.current.selectedId;
+    return gitRemotePermissionContext(kind, {
+      api: service.api?.mode === 'native' ? service.api.agentGitRemote ?? null : null,
+      session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
+      projectId, epoch: gitReadEpoch.current, repository: gitRepositories.current.find(v => v.service === service && v.projectId === projectId)?.controller ?? null,
+      reader: gitReadRef.current, local: gitLocalRef.current, connection: githubConnection.getSnapshot(),
+      blocked: connectionPicking.current ? 'Finish selecting the original native project first.' :
+        gitLocalAdmission.current(kind === 'fetch' ? 'git-fetch' : 'git-push') ?? gitLocalRef.current?.ownerReason() ?? null,
+    });
+  }));
+  useEffect(() => { agentGitRemote.syncContext(); });
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const [cliReadAccess] = useState(() => new CliReadAccessController({
@@ -2222,6 +2236,8 @@ export function App() {
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+            <ServiceGitRemoteAccess controller={agentGitRemote} repository={gitRepository} reader={gitRead} local={gitLocal}
+              connection={githubConnection} projectName={session?.project.name ?? 'No project selected'} />
             <ServiceGitRepositoryAccess controller={agentGitRepository} repository={gitRepository} reader={gitRead} local={gitLocal}
               projectName={session?.project.name ?? 'No project selected'} />
             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}

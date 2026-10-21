@@ -133,6 +133,7 @@ pub(super) fn basis_current(
     match &scope.selection {
         shared::Selected::Files(_) => successful_observe(value),
         shared::Selected::Repository(s) => selected(value, &s.action),
+        shared::Selected::Remote(s) => super::remote::selected(value,&s.action),
     }
 }
 
@@ -304,6 +305,7 @@ impl DocumentBinding {
         book.grant = Some(Arc::new(Grant {
             scope,
             observation: original,
+            remote: None,
         }));
         Ok(access)
     }
@@ -341,6 +343,7 @@ pub(super) fn action(scope: &requests::NativeScope) -> Result<local::Action, Bri
     match &scope.selection {
         shared::Selected::Files(_) => commit::action(scope),
         shared::Selected::Repository(selected) => native::action(&selected.action),
+        shared::Selected::Remote(_) => super::remote::action(scope),
     }
 }
 

@@ -1,0 +1,994 @@
+--- a/desktop/src-tauri/src/service_git_commit_protocol.rs
++++ b/desktop/src-tauri/src/service_git_commit_protocol.rs
+@@ -11,13 +11,14 @@
+     Index,
+     Commit,
+     Repository,
++    Remote,
+ }
+ impl Family {
+     pub(crate) fn matches(self, action: p::Action) -> bool {
+         match self {
+             Self::Index => matches!(action, p::Action::Stage | p::Action::Unstage),
+             Self::Commit => action == p::Action::Commit,
+-            Self::Repository => false,
++            Self::Repository | Self::Remote => false,
+         }
+     }
+ }
+--- a/desktop/src-tauri/src/service_git_repository_shared.rs
++++ b/desktop/src-tauri/src/service_git_repository_shared.rs
+@@ -9,6 +9,7 @@
+ pub(crate) enum Selected {
+     Files(p::Selection),
+     Repository(Selection),
++    Remote(crate::service_git_remote_protocol::Selection),
+ }
+ impl From<p::Selection> for Selected {
+     fn from(value: p::Selection) -> Self {
+@@ -20,18 +21,21 @@
+         Self::Repository(value)
+     }
+ }
++impl From<crate::service_git_remote_protocol::Selection> for Selected { fn from(v: crate::service_git_remote_protocol::Selection) -> Self { Self::Remote(v) } }
+ impl Selected {
+     pub(crate) fn family(&self) -> Family {
+         match self {
+             Self::Files(v) if v.summary.action == p::Action::Commit => Family::Commit,
+             Self::Files(_) => Family::Index,
+             Self::Repository(_) => Family::Repository,
++            Self::Remote(_) => Family::Remote,
+         }
+     }
+     pub(crate) fn validate(&self) -> Result<(), Error> {
+         match self {
+             Self::Files(v) => v.validate_shared(),
+             Self::Repository(v) => v.validate(),
++            Self::Remote(v) => v.validate(),
+         }
+     }
+     pub(crate) fn files(&self) -> Result<&p::Selection, Error> {
+@@ -50,6 +54,7 @@
+         match self {
+             Self::Files(v) => Summary::Files(v.summary.clone()),
+             Self::Repository(v) => Summary::Repository(v.clone()),
++            Self::Remote(v) => Summary::Remote(v.clone()),
+         }
+     }
+ }
+@@ -59,12 +64,14 @@
+ pub(crate) enum Summary {
+     Files(p::Summary),
+     Repository(Selection),
++    Remote(crate::service_git_remote_protocol::Selection),
+ }
+ impl Summary {
+     fn validate(&self) -> Result<(), Error> {
+         match self {
+             Self::Files(v) => v.validate(),
+             Self::Repository(v) => v.validate(),
++            Self::Remote(v) => v.validate(),
+         }
+     }
+     pub(crate) fn history_action(&self) -> crate::service_protocol::Action {
+@@ -76,6 +83,7 @@
+                 p::Action::Commit => A::GitCommit,
+             },
+             Self::Repository(v) => v.action.history_action(),
++            Self::Remote(v) => v.action.history_action(),
+         }
+     }
+ }
+@@ -84,6 +92,7 @@
+ pub(crate) enum Reviewed {
+     Files(p::Review),
+     Repository(Review),
++    Remote(crate::service_git_remote_protocol::Review),
+ }
+ impl From<p::Review> for Reviewed {
+     fn from(value: p::Review) -> Self {
+@@ -95,17 +104,21 @@
+         Self::Repository(value)
+     }
+ }
++impl From<crate::service_git_remote_protocol::Review> for Reviewed { fn from(v: crate::service_git_remote_protocol::Review) -> Self { Self::Remote(v) } }
+ impl Reviewed {
++    pub(crate) fn can_apply(&self) -> bool { match self { Self::Remote(r) => r.can_apply(), _ => true } }
+     pub(crate) fn id(&self) -> &str {
+         match self {
+             Self::Files(v) => &v.review_id,
+             Self::Repository(v) => &v.review_id,
++            Self::Remote(v) => &v.review_id,
+         }
+     }
+     pub(crate) fn matches(&self, selection: &Summary) -> bool {
+         match (self, selection) {
+             (Self::Files(r), Summary::Files(_)) => r.validate().is_ok(),
+             (Self::Repository(r), Summary::Repository(s)) => r.matches(s),
++            (Self::Remote(r), Summary::Remote(s)) => r.matches(s),
+             _ => false,
+         }
+     }
+@@ -136,6 +149,10 @@
+         out.validate_shared()?;
+         Ok(out)
+     }
++    pub(crate) fn remote(self) -> Result<crate::service_git_remote_protocol::Access, Error> {
++        let selection=self.selection.as_ref().map(|s| match s {Selected::Remote(v)=>Ok(v.clone()),_=>Err(Error::InvalidRequest)}).transpose()?;
++        let out=crate::service_git_remote_protocol::Access::from_parts(self.with_selection(selection));out.validate()?;Ok(out)
++    }
+     pub(crate) fn repository(self) -> Result<super::Access, Error> {
+         let selection = self
+             .selection
+@@ -178,6 +195,11 @@
+         out.validate_shared()?;
+         Ok(out)
+     }
++    pub(crate) fn remote(self, result:Option<crate::service_git_remote_protocol::Outcome>) -> Result<crate::service_git_remote_protocol::Status, Error> {
++        let Summary::Remote(selection)=&self.selection else {return Err(Error::InvalidRequest);};let selection=selection.clone();
++        let review=self.review.as_ref().map(|r| match r {Reviewed::Remote(v)=>Ok(v.clone()),_=>Err(Error::InvalidRequest)}).transpose()?;
++        let out=crate::service_git_remote_protocol::Status {progress:self.with_data(selection,review),result};out.validate()?;Ok(out)
++    }
+     pub(crate) fn repository(self) -> Result<super::Status, Error> {
+         let Summary::Repository(selection) = &self.selection else {
+             return Err(Error::InvalidRequest);
+--- a/desktop/src-tauri/src/service_git_requests.rs
++++ b/desktop/src-tauri/src/service_git_requests.rs
+@@ -15,18 +15,16 @@
+     time::Instant,
+ };
+ 
+-// Thirty-two metadata rows, ONE selected pathset (plus one old handoff stack),
+-// and the SAME eight IPC workers' typed/encoded responses. The existing native
+-// Git owner separately charges its action/review/runtime/source/job originals.
+-// No diff, file bytes or raw native result is retained here. Repository rows
+-// add <=2KiB selection + TWO <=2.5KiB review summaries; charge 8KiB per row
+-// instead of the old 4KiB, inside the unchanged global Document limit. The
+-// existing scope/8-worker reserves already exceed the bounded repository DTOs.
+-// One private Commit draft is retained only with the active scope/handoff,
+-// never in the 32 metadata tombstones or public IPC responses.
++// SAME thirty-two rows/one scope, not a second Remote inbox. ROW_HEAP names
++// simultaneous Remote selection (<=2.5KiB), private/public/pending review
++// summaries (<=3KiB each), final effect (<=1KiB) and transition copies. Local
++// rows stay within that quote. The SAME eight IPC workers below reserve their
++// typed+encoded scope/status copies (SCOPE_BACKING exceeds Remote metadata).
++// Full native action/review/Connection runtime remains on its existing owners.
++// Private Commit draft remains only in the original active scope/handoff.
+ const SCOPE_BACKING: usize = p::PATH_LIMIT * (1024 + std::mem::size_of::<String>()) + 8192;
+ pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT
+-    * (8192 + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
++    * (crate::service_git_remote_protocol::ROW_HEAP + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
+     + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING)
+     + 8 * (p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096);
+ 
+@@ -51,7 +49,7 @@
+             && match (&self.commit, &self.selection) {
+                 (Some(draft), shared::Selected::Files(v)) if v.summary.action == p::Action::Commit => draft.valid(),
+                 (None, shared::Selected::Files(v)) => matches!(v.summary.action,p::Action::Stage|p::Action::Unstage),
+-                (None, shared::Selected::Repository(_)) => true,
++                (None, shared::Selected::Repository(_) | shared::Selected::Remote(_)) => true,
+                 _ => false,
+             }
+             && match &self.selection {
+@@ -104,6 +102,7 @@
+     claimed: Option<Phase>,
+     prepare_joined: bool,
+     apply_joined: bool,
++    remote: Option<remote_requests::Retirement>,
+     // Only actual native reconcile supplies this. It is removed by the SAME
+     // original ReadyReview's retirement, never a status/EOF/socket assumption.
+     review: Option<(shared::Reviewed, Instant)>,
+@@ -294,7 +293,7 @@
+                     || row
+                         .review
+                         .as_ref()
+-                        .is_none_or(|(r, end)| r.id() != input.review_id || now >= *end)
++                        .is_none_or(|(r, end)| r.id() != input.review_id || now >= *end || !r.can_apply())
+                 {
+                     return Err(Error::Conflict);
+                 }
+@@ -413,6 +412,7 @@
+                 row.status.review = None;
+             }
+         }
++        remote_requests::armed(&mut row,self.phase)?;
+         self.armed.store(true, Ordering::Release);
+         change(&mut row)
+     }
+@@ -443,6 +443,7 @@
+         Arc::ptr_eq(&self.entry, &other.entry) && Arc::ptr_eq(&self.lease, &other.lease)
+     }
+     pub(crate) fn ready(&self, review: impl Into<shared::Reviewed>, expires: Instant) -> Result<bool, Error> {
++        if self.is_remote() { return Err(Error::StateUnknown); } // Remote needs actual Connection finish first.
+         let review = review.into();
+         let mut row = self.entry.lock()?;
+         if !review.matches(&row.status.selection) { return Err(Error::InvalidRequest); }
+@@ -474,6 +475,7 @@
+     /// Called only when the original Prepare receipt has really joined but
+     /// native reconcile cannot retain a current usable review.
+     pub(crate) fn no_review(&self) {
++        if remote_requests::review_removed(self) {return;}
+         if let Ok(mut row) = self.entry.lock() {
+             if self.phase != Phase::Prepare
+                 || !row.prepare_joined
+@@ -496,6 +498,7 @@
+     /// prepared operation must already have its original joined receipt, and
+     /// an armed Apply remains live/unknown regardless of review retirement.
+     pub(crate) fn review_removed(&self) {
++        if remote_requests::review_removed(self) {return;}
+         if let Ok(mut row) = self.entry.lock() {
+             row.review = None;
+             row.status.review = None;
+@@ -538,6 +541,7 @@
+                 return;
+             }
+         };
++        if self.is_remote() {drop(row);remote_requests::retired(self,result);return;}
+         if self.phase == Phase::Prepare {
+             if row.prepare_joined {
+                 drop(row);
+@@ -650,6 +654,7 @@
+                 self.entry.failed.store(true, Ordering::Release);
+             }
+         }
++        if remote_requests::caller_returned(&mut row,self.phase).is_err() {drop(row);self.entry.unknown();}
+     }
+ }
+ impl Drop for Claim {
+@@ -706,6 +711,7 @@
+                         Family::Index => AdditionalFamily::GitIndex,
+                         Family::Commit => AdditionalFamily::GitCommit,
+                         Family::Repository => AdditionalFamily::GitRepository,
++                        Family::Remote => AdditionalFamily::GitRemote,
+                     },
+                     request_id: entry.input.origin.request_id.clone(),
+                 });
+@@ -856,6 +862,7 @@
+                 claimed: None,
+                 prepare_joined: false,
+                 apply_joined: false,
++                remote: if family==Family::Remote {Some(remote_requests::Retirement::new())} else {None},
+                 review: None,
+                 start: None,
+                 stop: None,
+@@ -949,6 +956,9 @@
+     Ok(value)
+ }
+ 
++#[path = "service_git_remote_requests.rs"]
++mod remote_requests;
++
+ #[path = "service_git_repository_requests.rs"]
+ mod repository_requests;
+ 
+--- a/desktop/src-tauri/src/service_git_document.rs
++++ b/desktop/src-tauri/src/service_git_document.rs
+@@ -16,6 +16,10 @@
+ mod repository;
+ pub(crate) use repository::{decode_repository_allow, decode_repository_empty, RepositoryAllow};
+ pub(super) use repository::agent_git_review;
++#[path = "service_git_remote_document.rs"]
++mod remote;
++pub(crate) use remote::{decode_remote_allow,RemoteAllow};
++pub(super) use remote::{outcome as agent_git_remote_outcome,review as agent_git_remote_review};
+ use std::{path::Path, sync::OnceLock};
+ 
+ #[derive(Deserialize)]
+@@ -63,6 +67,7 @@
+ struct Grant {
+     scope: Arc<requests::NativeScope>,
+     observation: Arc<Observation>,
++    remote: Option<remote::Approval>,
+ }
+ #[derive(Default)]
+ struct Book {
+@@ -83,6 +88,8 @@
+         + std::mem::size_of::<NativeState>()
+         + std::mem::size_of::<Grant>()
+         + 2 * local::REQUEST_LIMIT
++        + 4 * (crate::service_git_remote_protocol::PINS_HEAP + std::mem::size_of::<remote::Approval>())
++        + 16 * 1024 // bounded, fixed Remote mutation projection; no raw result clone
+ }
+ fn public(error: Error) -> BridgeError {
+     application_service::public_error(error)
+@@ -402,6 +409,7 @@
+         book.grant = Some(Arc::new(Grant {
+             scope,
+             observation: original,
++            remote: None,
+         }));
+         Ok(access)
+     }
+@@ -445,6 +453,8 @@
+         epoch: u64,
+         edit: &crate::edit_owner::SavedEditGuard<'_>,
+         action: &local::Action,
++        fetch: Option<&crate::github_connection_session::fetch::Pins>,
++        push: Option<&crate::github_connection_session::push::Pins>,
+     ) -> Result<(), BridgeError> {
+         let book = self
+             .inner
+@@ -456,6 +466,7 @@
+         if link.phase() != phase
+             || !Arc::ptr_eq(link.scope(), &grant.scope)
+             || link.stopped()
++            || !remote::admission(grant,fetch,push)
+             || !repository::action(&grant.scope).is_ok_and(|expected| expected == *action)
+         {
+             return Err(public(Error::Conflict));
+@@ -571,6 +582,7 @@
+                         .bridge
+                         .edits
+                         .saved_registration_guard(&self.inner.session_identity)?;
++                    if !remote::idle_current(&state,&grant) {return Err(public(Error::Conflict));}
+                     self.git_index_observation_current(
+                         &state,
+                         &grant.observation,
+--- a/desktop/src-tauri/src/service_git_repository_document.rs
++++ b/desktop/src-tauri/src/service_git_repository_document.rs
+@@ -133,6 +133,7 @@
+     match &scope.selection {
+         shared::Selected::Files(_) => successful_observe(value),
+         shared::Selected::Repository(s) => selected(value, &s.action),
++        shared::Selected::Remote(s) => super::remote::selected(value,&s.action),
+     }
+ }
+ 
+@@ -304,6 +305,7 @@
+         book.grant = Some(Arc::new(Grant {
+             scope,
+             observation: original,
++            remote: None,
+         }));
+         Ok(access)
+     }
+@@ -341,6 +343,7 @@
+     match &scope.selection {
+         shared::Selected::Files(_) => commit::action(scope),
+         shared::Selected::Repository(selected) => native::action(&selected.action),
++        shared::Selected::Remote(_) => super::remote::action(scope),
+     }
+ }
+ 
+--- a/desktop/src-tauri/src/service_git_repository_native.rs
++++ b/desktop/src-tauri/src/service_git_repository_native.rs
+@@ -97,6 +97,7 @@
+             );
+         }
+         shared::Selected::Repository(selected) => selected,
++        shared::Selected::Remote(_) => return super::super::remote::review(scope,original,review_id,document_revision,registration_generation).map(Into::into),
+     };
+     let actual = action(&selected.action).ok()?;
+     let (reference_revision, preview) = match (original, &actual) {
+--- a/desktop/src-tauri/src/service_git_application.rs
++++ b/desktop/src-tauri/src/service_git_application.rs
+@@ -7,6 +7,8 @@
+ mod commit;
+ #[path = "service_git_repository_application.rs"]
+ mod repository;
++#[path = "service_git_remote_application.rs"]
++mod remote;
+ 
+ impl ApplicationService {
+     pub(crate) fn git_index_requests(&self) -> &Arc<requests::Inbox> {
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -395,18 +395,23 @@
+                 p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
+                 p::RequestBody::GitCommitScope(q) => return self.git_commit_scope(client, &q.project_id),
+                 p::RequestBody::GitRepositoryScope(q) => return self.git_repository_scope(client, &q.project_id),
++                p::RequestBody::GitRemoteScope(q) => return self.git_remote_scope(client, &q.project_id),
+                 p::RequestBody::GitIndexPrepare(v) => return self.git_index_prepare(client, v.clone()),
+                 p::RequestBody::GitCommitPrepare(v) => return self.git_commit_prepare(client, v.clone()),
+                 p::RequestBody::GitRepositoryPrepare(v) => return self.git_repository_prepare(client, v.clone()),
++                p::RequestBody::GitRemotePrepare(v) => return self.git_remote_prepare(client, v.clone()),
+                 p::RequestBody::GitIndexStart(v) => return self.git_index_start(client, v),
+                 p::RequestBody::GitCommitStart(v) => return self.git_commit_start(client, v),
+                 p::RequestBody::GitRepositoryStart(v) => return self.git_repository_start(client, v),
++                p::RequestBody::GitRemoteStart(v) => return self.git_remote_start(client, v),
+                 p::RequestBody::GitIndexStatus(q) => return self.git_index_query(client, q, false),
+                 p::RequestBody::GitCommitStatus(q) => return self.git_commit_query(client, q, false),
+                 p::RequestBody::GitRepositoryStatus(q) => return self.git_repository_query(client, q, false),
++                p::RequestBody::GitRemoteStatus(q) => return self.git_remote_query(client, q, false),
+                 p::RequestBody::GitIndexCancel(q) => return self.git_index_query(client, q, true),
+                 p::RequestBody::GitCommitCancel(q) => return self.git_commit_query(client, q, true),
+                 p::RequestBody::GitRepositoryCancel(q) => return self.git_repository_query(client, q, true),
++                p::RequestBody::GitRemoteCancel(q) => return self.git_remote_query(client, q, true),
+                 p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
+                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
+                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
+@@ -438,6 +443,8 @@
+                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
+                 | p::RequestBody::GitRepositoryScope(_) | p::RequestBody::GitRepositoryPrepare(_)
+                 | p::RequestBody::GitRepositoryStart(_) | p::RequestBody::GitRepositoryStatus(_) | p::RequestBody::GitRepositoryCancel(_)
++                | p::RequestBody::GitRemoteScope(_) | p::RequestBody::GitRemotePrepare(_)
++                | p::RequestBody::GitRemoteStart(_) | p::RequestBody::GitRemoteStatus(_) | p::RequestBody::GitRemoteCancel(_)
+                 | p::RequestBody::GitCommitScope(_) | p::RequestBody::GitCommitPrepare(_)
+                 | p::RequestBody::GitCommitStart(_) | p::RequestBody::GitCommitStatus(_) | p::RequestBody::GitCommitCancel(_) | p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
+                 | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -97,7 +97,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
+-    GitCommit, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
++    GitCommit, GitFetch, GitPush, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+ }
+ 
+ /// Future operation-specific adapters may compare this DATA with a genuine
+@@ -224,6 +224,11 @@
+     #[serde(rename="git-repository.start")] GitRepositoryStart(crate::service_git_repository_protocol::Start),
+     #[serde(rename="git-repository.status")] GitRepositoryStatus(crate::service_git_repository_protocol::Query),
+     #[serde(rename="git-repository.cancel")] GitRepositoryCancel(crate::service_git_repository_protocol::Query),
++    #[serde(rename="git-remote.scope")] GitRemoteScope(ProjectQuery),
++    #[serde(rename="git-remote.prepare")] GitRemotePrepare(crate::service_git_remote_protocol::Prepare),
++    #[serde(rename="git-remote.start")] GitRemoteStart(crate::service_git_remote_protocol::Start),
++    #[serde(rename="git-remote.status")] GitRemoteStatus(crate::service_git_remote_protocol::Query),
++    #[serde(rename="git-remote.cancel")] GitRemoteCancel(crate::service_git_remote_protocol::Query),
+     #[serde(rename = "service.info")] Info(Empty),
+     #[serde(rename = "projects.list")] Projects(Empty),
+     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+@@ -274,6 +279,8 @@
+     GitCommitRequest(crate::service_git_commit_protocol::Status),
+     GitRepositoryScope(crate::service_git_repository_protocol::Scope),
+     GitRepositoryRequest(crate::service_git_repository_protocol::Status),
++    GitRemoteScope(crate::service_git_remote_protocol::Scope),
++    GitRemoteRequest(crate::service_git_remote_protocol::Status),
+     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
+     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+     AndroidTools(crate::service_android_tools::View),
+@@ -320,7 +327,7 @@
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+-    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) = &request.request { input.validate()?; }
++    if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
+@@ -414,6 +421,14 @@
+         },
+         ResponseBody::GitRepositoryRequest(row) => {
+             row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
++            crate::service_git_protocol::response_bound(response, false)?;
++        },
++        ResponseBody::GitRemoteScope(row) => {
++            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
++            crate::service_git_protocol::encoded_bound(response, crate::service_git_remote_protocol::ACCESS_LIMIT)?;
++        },
++        ResponseBody::GitRemoteRequest(row) => {
++            row.validate()?; if row.progress.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+             crate::service_git_protocol::response_bound(response, false)?;
+         },
+         ResponseBody::Observation(row) => project(row)?,
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -164,13 +164,14 @@
+     GitIndex,
+     GitCommit,
+     GitRepository,
++    GitRemote,
+     Identity,
+     VersionReservation,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+         match self {
+-            Self::GitIndex | Self::GitCommit | Self::GitRepository => 0,
++            Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
+         }
+@@ -180,6 +181,7 @@
+             Self::GitIndex => "git-index-status",
+             Self::GitCommit => "git-commit-status",
+             Self::GitRepository => "git-repository-status",
++            Self::GitRemote => "git-remote-status",
+             Self::Identity => "identity-request-status",
+             Self::VersionReservation => "version-reserve-status",
+         }
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -22,6 +22,8 @@
+ mod git_commit;
+ #[path="installed_cli_git_repository.rs"]
+ mod git_repository;
++#[path="installed_cli_git_remote.rs"]
++mod git_remote;
+ #[path="installed_cli_version_reserve.rs"]
+ mod version_reserve;
+ 
+@@ -52,6 +54,11 @@
+   mrk git-repository-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
+   mrk git-repository-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk git-repository-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk git-remote-scope PROJECT_ID [--json]\n\
++  mrk git-remote-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID [--json]\n\
++  mrk git-remote-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
++  mrk git-remote-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk git-remote-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk operations PROJECT_ID [--json]\n\
+   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
+   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
+@@ -237,8 +244,12 @@
+                 "defaultEnabled":false,"oneUse":true,"sharesGitGrantAnd32Requests":true,"requiresRunningDesktop":true,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"fetch":false,"push":false,"nativeAvailabilityChecked":false,
+                 "commands":git_repository::COMMANDS},
++            "gitRemote": {"actions":["fetch","push"],"commands":git_remote::NAMES,
++                "argumentPattern":"gitRepository.commands by position","defaultEnabled":false,"oneUse":true,
++                "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
++                "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -264,7 +275,7 @@
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -361,6 +372,8 @@
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
++        p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
++            "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
+         p::ResponseBody::GitRepositoryScope(_) | p::ResponseBody::GitRepositoryRequest(_) =>
+             "Use git-repository-status with the same original request IDs.\n".into(),
+         p::ResponseBody::GitCommitScope(_) | p::ResponseBody::GitCommitRequest(_) =>
+@@ -394,6 +407,7 @@
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+     if git_repository::recognizes(&args) { return git_repository::run(args); }
++    if git_remote::recognizes(&args) { return git_remote::run(args); }
+     if identity_actions::recognizes(&args) { return identity_actions::run(args); }
+     if local_checks::recognizes(&args) { return local_checks::run(args); }
+     if android_build::recognizes(&args) { return android_build::run(args); }
+--- a/desktop/src-tauri/src/installed_cli_git_index.rs
++++ b/desktop/src-tauri/src/installed_cli_git_index.rs
+@@ -25,6 +25,7 @@
+         Family::Index => &["git-index-scope", "git-index-prepare", "git-index-start", "git-index-status", "git-index-cancel"],
+         Family::Commit => &["git-commit-scope", "git-commit-prepare", "git-commit-start", "git-commit-status", "git-commit-cancel"],
+         Family::Repository => &["git-repository-scope", "git-repository-prepare", "git-repository-start", "git-repository-status", "git-repository-cancel"],
++        Family::Remote => &super::git_remote::NAMES,
+     }
+ }
+ pub(super) fn recognizes(args: &[OsString]) -> bool { recognizes_for(args, Family::Index) }
+@@ -108,6 +109,7 @@
+ }
+ fn output_for(response: &p::Response, project: &Id, origin: Option<&git::Query>, json: bool, family: Family) -> Result<(u8, Vec<u8>), Error> {
+     if family == Family::Repository { return super::git_repository::output(response, project, origin, json); }
++    if family == Family::Remote { return super::git_remote::output(response, project, origin, json); }
+     if let p::ResponseBody::Error(e) = response.response {
+         return Err(e);
+     }
+@@ -231,7 +233,7 @@
+             Command::Scope(p) => (
+                 p.clone(),
+                 None,
+-                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }), Family::Repository => p::RequestBody::GitRepositoryScope(p::ProjectQuery { project_id: p }) },
++                match family { Family::Index => p::RequestBody::GitIndexScope(p::ProjectQuery { project_id: p }), Family::Commit => p::RequestBody::GitCommitScope(p::ProjectQuery { project_id: p }), Family::Repository => p::RequestBody::GitRepositoryScope(p::ProjectQuery { project_id: p }), Family::Remote => p::RequestBody::GitRemoteScope(p::ProjectQuery { project_id: p }) },
+             ),
+             Command::Prepare {
+                 project,
+@@ -250,24 +252,24 @@
+                     Some(q.clone()),
+                     match family {
+                         Family::Index => p::RequestBody::GitIndexPrepare(git::Prepare { origin: q, grant_id: grant }),
+-                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Repository => p::RequestBody::GitRepositoryPrepare(git::Prepare { origin: q, grant_id: grant }),
++                        Family::Commit => p::RequestBody::GitCommitPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Repository => p::RequestBody::GitRepositoryPrepare(git::Prepare { origin: q, grant_id: grant }), Family::Remote => p::RequestBody::GitRemotePrepare(git::Prepare { origin: q, grant_id: grant }),
+                     },
+                 )
+             }
+             Command::Start(s) => (
+                 s.origin.project_id.clone(),
+                 Some(s.origin.clone()),
+-                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s), Family::Repository => p::RequestBody::GitRepositoryStart(s) },
++                match family { Family::Index => p::RequestBody::GitIndexStart(s), Family::Commit => p::RequestBody::GitCommitStart(s), Family::Repository => p::RequestBody::GitRepositoryStart(s), Family::Remote => p::RequestBody::GitRemoteStart(s) },
+             ),
+             Command::Status(q) => (
+                 q.project_id.clone(),
+                 Some(q.clone()),
+-                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q), Family::Repository => p::RequestBody::GitRepositoryStatus(q) },
++                match family { Family::Index => p::RequestBody::GitIndexStatus(q), Family::Commit => p::RequestBody::GitCommitStatus(q), Family::Repository => p::RequestBody::GitRepositoryStatus(q), Family::Remote => p::RequestBody::GitRemoteStatus(q) },
+             ),
+             Command::Cancel(q) => (
+                 q.project_id.clone(),
+                 Some(q.clone()),
+-                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q), Family::Repository => p::RequestBody::GitRepositoryCancel(q) },
++                match family { Family::Index => p::RequestBody::GitIndexCancel(q), Family::Commit => p::RequestBody::GitCommitCancel(q), Family::Repository => p::RequestBody::GitRepositoryCancel(q), Family::Remote => p::RequestBody::GitRemoteCancel(q) },
+             ),
+         };
+         let result = (|| {
+@@ -303,3 +305,6 @@
+ #[cfg(test)]
+ #[path = "installed_cli_git_repository_tests.rs"]
+ mod repository_tests;
++#[cfg(test)]
++#[path = "installed_cli_git_remote_tests.rs"]
++mod remote_tests;
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -10,6 +10,7 @@
+ mod service_git_protocol;
+ mod service_git_commit_protocol;
+ mod service_git_repository_protocol;
++mod service_git_remote_protocol;
+ mod service_git_requests;
+ mod service_setup_guidance;
+ mod service_android_tools;
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -128,6 +128,7 @@
+ mod service_git_protocol;
+ mod service_git_commit_protocol;
+ mod service_git_repository_protocol;
++mod service_git_remote_protocol;
+ mod service_git_requests;
+ mod service_setup_guidance;
+ mod service_android_tools;
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -37,6 +37,7 @@
+ #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
+ #[path = "../src/service_git_commit_protocol.rs"] mod service_git_commit_protocol;
+ #[path = "../src/service_git_repository_protocol.rs"] mod service_git_repository_protocol;
++#[path = "../src/service_git_remote_protocol.rs"] mod service_git_remote_protocol;
+ #[path = "../src/service_git_requests.rs"] mod service_git_requests;
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/service_android_tools.rs"] mod service_android_tools;
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -80,6 +80,7 @@
+             GitLocalReceipt::RetainedUnknown|GitLocalReceipt::Settled {was_unknown:true,..}=>S::Unknown,
+             GitLocalReceipt::Settled {outcome,was_unknown:false}=>match outcome {
+                 Ok(t) if t.result.get("state").and_then(Value::as_str)==Some("recovery-required")=>S::RecoveryRequired,
++                Ok(t) if agent.is_remote()&&t.result.get("state").and_then(Value::as_str)==Some("failed")=>S::Failed,
+                 Ok(t) if t.status==read::Outcome::Ok=>S::Succeeded,
+                 Ok(t) if matches!(t.status,read::Outcome::Cancelled|read::Outcome::TimedOut)=>S::Cancelled,
+                 Err(e) if matches!(e.code.as_str(),"cancelled"|"shutting_down"|"query_timeout")=>S::Cancelled,
+@@ -342,7 +343,8 @@
+     let Some(Entry::Original {ticket,gate})=&state.git_local else {return};
+     if !ticket.settled() {return}
+     let view=projection(state.git_local.as_ref().expect("same original"));
+-    let prepared=if gate.0.phase==wire::Phase::Prepare {
++    let remote=gate.0.agent.as_ref().filter(|a|a.is_remote()).cloned();
++    let mut prepared=if gate.0.phase==wire::Phase::Prepare {
+         match ticket.receipt() {
+             GitLocalReceipt::Settled {outcome:Ok(terminal),was_unknown:false} if terminal.status==read::Outcome::Ok=>{
+                 (|| {
+@@ -350,7 +352,7 @@
+                     let expires=gate.0.admitted.checked_add(REVIEW)?;
+                     if Instant::now()>=expires {return None}
+                     let review=terminal.review().ok()?;
+-                    if let Some(agent)=&gate.0.agent {
++                    if let Some(agent)=gate.0.agent.as_ref().filter(|a|!a.is_remote()) {
+                         let summary=agent_git_index::agent_git_review(agent.scope(),&review,
+                             format!("{}-review",ticket.operation_id()),gate.0.document_revision,gate.0.context.generation)?;
+                         if !agent.ready(summary,expires).ok()? {return None}
+@@ -367,7 +369,38 @@
+         // Original IO may have returned, but contradictory/missing private
+         // Connection retirement evidence cannot free admission or mint a
+         // replacement review. Keep the original entry/hold for attention.
++        if let Some(agent)=&remote {agent.entry().unknown();}
+         state.unknown=true;state.github.retire(crate::github_connection_protocol::Reason::CleanupUnknown);return;
++    }
++    if let Some(agent)=remote {
++        // Native settlement alone is not the Connection's actual return.
++        // finish may return Ok after poisoning/retiring that same Connection.
++        if !state.github.git_remote_finish_known() {
++            agent.entry().unknown();state.unknown=true;return;
++        }
++        // The held-gate candidate was formed BEFORE finish. The hold is now
++        // gone: rematch via the original prepared-current path, never call a
++        // removed-hold gate or create a new review/expiry here.
++        if prepared.as_ref().is_some_and(|r|Instant::now()>=r.expires
++            ||!scope_current(document,state,&r.public.context,&r.root,agent.scope().document_revision)
++            ||!document.android_registration_control.matches_epoch(r.epoch)
++            ||!fetch::review_current(state,r)||!push::review_current(state,r)||agent.stopped()
++            ||document.bridge.edits.saved_registration_guard(&document.session_identity).map_or(true,|e|!e.matches(&r.stamp))) {
++            prepared=None;
++        }
++        let candidate=match prepared.as_ref() {
++            Some(r)=>match agent_git_index::agent_git_remote_review(agent.scope(),&r.public.review,r.public.review_id.clone(),agent.scope().document_revision,r.public.context.generation) {
++                Some(summary)=>Some((summary,r.expires)),
++                None=>{agent.entry().unknown();state.unknown=true;return;}
++            },None=>None,
++        };
++        let returned=agent_git_index::agent_git_remote_outcome(agent.scope(),&view)
++            .map_err(|_|crate::service_protocol::Error::StateUnknown)
++            .and_then(|outcome|agent.remote_connection_returned(candidate,outcome));
++        match returned {
++            Ok(true)=>{},Ok(false)=>prepared=None,
++            Err(_)=>{agent.entry().unknown();state.unknown=true;return;}
++        }
+     }
+     state.git_local_review=prepared;state.git_local=Some(Entry::Finished(view));
+ }
+@@ -375,7 +408,7 @@
+     pub(super) fn git_local_new_gate(&self,state:&DocumentState)->Result<(),BridgeError> {
+         self.git_local_new_gate_for(state,wire::Kind::Stage)
+     }
+-    fn git_local_new_gate_for(&self,state:&DocumentState,kind:wire::Kind)->Result<(),BridgeError> {
++    pub(super) fn git_local_new_gate_for(&self,state:&DocumentState,kind:wire::Kind)->Result<(),BridgeError> {
+         if !state.lifetime.original_bound()||state.lost_observed {return Err(BridgeError::unavailable("The original application document is unavailable."))}
+         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
+         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
+@@ -412,14 +445,14 @@
+             let (generation,root)=self.inner.bridge.native_project(&args.project_id).map_err(|_|changed())?;
+             let fetch=fetch::select(&state,&args.project_id,generation,&args.action,admitted)?;
+             let push=push::select(&state,&args.project_id,generation,&args.action,admitted)?;
+-            if (fetch.is_some()||push.is_some())&&agent.is_some(){return Err(BridgeError::invalid())}
++            if (fetch.is_some()||push.is_some())&&agent.as_ref().is_some_and(|a|!a.is_remote()){return Err(BridgeError::invalid())}
+             let future=GitLocalAdmission::reservation_bytes(args.action.kind()).ok_or_else(BridgeError::invalid)?;
+             lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,args.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
+             let epoch=self.inner.android_registration_control.epoch()?;
+             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+             let stamp=Arc::new(edit.stamp()?);
+             #[cfg(any(target_os="linux",target_os="macos"))]
+-            if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Prepare,&root,generation,epoch,&edit,&args.action)?;}
++            if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Prepare,&root,generation,epoch,&edit,&args.action,fetch.as_ref(),push.as_ref())?;}
+             let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root,
+                 context:wire::Context {project_id:args.project_id.clone(),generation,revision:format!("document-{}",args.expected_document_revision)},
+                 document_revision:state.revision,action:args.action.clone(),phase:wire::Phase::Prepare,admitted,stamp,epoch,review:None,publisher:None,
+@@ -462,13 +495,13 @@
+                 if !app_data.is_absolute()||app_data.as_os_str().len()>4096 {return Err(BridgeError::invalid())}
+                 let fetch=fetch::selected_review(&state,review,admitted)?;
+                 let push=push::selected_review(&state,review,admitted)?;
+-                if (fetch.is_some()||push.is_some())&&agent.is_some(){return Err(BridgeError::invalid())}
++                if (fetch.is_some()||push.is_some())&&agent.as_ref().is_some_and(|a|!a.is_remote()){return Err(BridgeError::invalid())}
+                 let future=GitLocalAdmission::reservation_bytes(review.action.kind()).ok_or_else(BridgeError::invalid)?;
+                 lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,review.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
+                 let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+                 if !edit.matches(&review.stamp) {return Err(changed())}
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+-                if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Apply,&review.root,review.public.context.generation,epoch,&edit,&review.action)?;}
++                if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Apply,&review.root,review.public.context.generation,epoch,&edit,&review.action,fetch.as_ref(),push.as_ref())?;}
+                 let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root:review.root.clone(),
+                     context:wire::Context {project_id:args.project_id.clone(),generation:review.public.context.generation,
+                         revision:format!("document-{}",args.expected_document_revision)},document_revision:state.revision,
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -631,6 +631,11 @@
+     }
+     pub(crate) fn registration(&self) -> Option<(&str, u32)> {
+         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
++    }
++    // Comparison only, called under SAME Doc immediately AFTER the actual
++    // matching Git hold finish returned. This cannot stand in for that call.
++    pub(crate) fn git_remote_finish_known(&self) -> bool {
++        !self.unknown && !self.exhausted && self.fetch.is_none() && self.push.is_none()
+     }
+     pub(crate) fn material_settled(&self) -> bool {
+         self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending()
+--- a/desktop/src-tauri/src/git_fetch_connection.rs
++++ b/desktop/src-tauri/src/git_fetch_connection.rs
+@@ -180,6 +180,12 @@
+         }
+         self.fetch_pin_current(&pins, now, work_end)?;
+         Ok(pins)
++    }
++    /// Delegation liveness only. No new operation budget or token is issued;
++    /// native Prepare/Apply/GO still run their full original gates.
++    pub(crate) fn git_fetch_delegation_current(&self,pins:&Pins,action:&fetch::Action,now:Instant)->bool {
++        !self.native_work_pending() && action.valid() && action.connection_session_id==pins.session
++            && action.reference==pins.target.reference && self.fetch_pin_current(pins,now,now).is_ok()
+     }
+     pub(crate) fn git_fetch_review_current(
+         &self,
+@@ -498,4 +504,21 @@
+         assert!(!s.git_fetch_prepared_current(&p, &r, at));
+         assert!(p.target(Some(&r)).is_err());
+     }
++    #[test]
++    fn remote_delegation_current_uses_original_pins_and_never_renews_expiry() {
++        let at=Instant::now();let mut s=connected(at);let a=data::action();
++        let p=s.select_git_fetch("project-1",2,&a,at,at+Duration::from_secs(45)).unwrap();
++        assert!(s.git_fetch_delegation_current(&p,&a,at));
++        let end=s.private.as_ref().unwrap().clock.end;
++        s.status.revision+=1;assert!(s.git_fetch_delegation_current(&p,&a,at));
++        assert_eq!(s.private.as_ref().unwrap().clock.end,end);
++        s.status.account.state=FactState::Stale;assert!(!s.git_fetch_delegation_current(&p,&a,at));
++        s.status.account.state=FactState::Observed;
++        s.unknown=true;assert!(!s.git_remote_finish_known());assert!(!s.git_fetch_delegation_current(&p,&a,at));
++        s.unknown=false;s.private.as_mut().unwrap().clock.end=at;
++        assert!(!s.git_fetch_delegation_current(&p,&a,at));
++        // finish-known alone is NOT credential liveness or actual return.
++        assert!(s.git_remote_finish_known());
++    }
++
+ }
+--- a/desktop/src-tauri/src/git_push_connection.rs
++++ b/desktop/src-tauri/src/git_push_connection.rs
+@@ -187,6 +187,10 @@
+         }
+         self.push_pin_current(&pins, now, work_end)?;
+         Ok(pins)
++    }
++    /// Delegation liveness only; cannot replace original Apply/GO checks.
++    pub(crate) fn git_push_delegation_current(&self,pins:&Pins,action:&push::Action,now:Instant)->bool {
++        !self.native_work_pending() && action==&pins.action && self.push_pin_current(pins,now,now).is_ok()
+     }
+     pub(crate) fn git_push_review_current(
+         &self,
+@@ -575,4 +579,21 @@
+         s.private.as_mut().unwrap().clock.end = original + Duration::from_secs(1);
+         assert!(s.push_pin_current(&pins, at, end).is_err());
+     }
++    #[test]
++    fn remote_delegation_current_uses_original_pins_and_never_renews_expiry() {
++        let at=Instant::now();let mut s=connected(at);let a=data::action();
++        let p=s.select_git_push("project-1",2,&a,at,at+Duration::from_secs(45)).unwrap();
++        assert!(s.git_push_delegation_current(&p,&a,at));
++        let end=s.private.as_ref().unwrap().clock.end;
++        s.status.revision+=1;assert!(s.git_push_delegation_current(&p,&a,at));
++        assert_eq!(s.private.as_ref().unwrap().clock.end,end);
++        s.status.account.state=FactState::Stale;assert!(!s.git_push_delegation_current(&p,&a,at));
++        s.status.account.state=FactState::Observed;
++        s.unknown=true;assert!(!s.git_remote_finish_known());assert!(!s.git_push_delegation_current(&p,&a,at));
++        s.unknown=false;s.private.as_mut().unwrap().clock.end=at;
++        assert!(!s.git_push_delegation_current(&p,&a,at));
++        // finish-known alone is NOT credential liveness or actual return.
++        assert!(s.git_remote_finish_known());
++    }
++
+ }
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1735,6 +1735,43 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local Git repository changes are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_git_remote_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        crate::asset_session::agent_git_index::decode_repository_empty(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_git_remote_access(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn allow_agent_git_remote(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
++        let args=crate::asset_session::agent_git_index::decode_remote_allow(raw)?;
++        serde_json::to_value(state.document.allow_agent_git_remote(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn revoke_agent_git_remote(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        crate::asset_session::agent_git_index::decode_repository_empty(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_git_remote(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
+ }
+ #[tauri::command]
+ async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -5173,6 +5210,7 @@
+             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
+             agent_git_repository_access, allow_agent_git_repository, revoke_agent_git_repository,
++            agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -287,6 +287,7 @@
+     "allow_agent_git_commit",
+     "revoke_agent_git_commit",
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
++    "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -11,6 +11,7 @@
+     "allow-allow-agent-git-commit",
+     "allow-revoke-agent-git-commit",
+     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
++    "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
+     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -56,6 +56,8 @@
+ import { GitRepositoryPermission } from './service_git_repository_permission.ts';
+ import { gitRepositoryPermissionContext } from './gitRepositoryPermissionSelection.ts';
+ import { ServiceGitRepositoryAccess } from './components/ServiceGitRepositoryAccess.tsx';
++import { GitRemotePermission, gitRemotePermissionContext } from './service_git_remote_permission.ts';
++import { ServiceGitRemoteAccess } from './components/ServiceGitRemoteAccess.tsx';
+ import { ServiceGitCommitAccess } from './components/ServiceGitCommitAccess.tsx';
+ import { gitReadPathOrder } from './gitReadProtocol.ts';
+ import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
+@@ -1195,6 +1197,18 @@
+   }));
+   // Display/currentness only; the retained Permission owns every actual call.
+   useEffect(() => { agentGitRepository.syncContext(); });
++  const [agentGitRemote] = useState(() => new GitRemotePermission((kind) => {
++    const service = pathService.current, projectId = workspaceRef.current.selectedId;
++    return gitRemotePermissionContext(kind, {
++      api: service.api?.mode === 'native' ? service.api.agentGitRemote ?? null : null,
++      session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
++      projectId, epoch: gitReadEpoch.current, repository: gitRepositories.current.find(v => v.service === service && v.projectId === projectId)?.controller ?? null,
++      reader: gitReadRef.current, local: gitLocalRef.current, connection: githubConnection.getSnapshot(),
++      blocked: connectionPicking.current ? 'Finish selecting the original native project first.' :
++        gitLocalAdmission.current(kind === 'fetch' ? 'git-fetch' : 'git-push') ?? gitLocalRef.current?.ownerReason() ?? null,
++    });
++  }));
++  useEffect(() => { agentGitRemote.syncContext(); });
+   const requests = useRef(0);
+   const bootGeneration = useRef(0);
+   const [cliReadAccess] = useState(() => new CliReadAccessController({
+@@ -2220,6 +2234,8 @@
+               <ServiceGitIndexAccess controller={agentGitIndex} />
+               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
+             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
++            <ServiceGitRemoteAccess controller={agentGitRemote} repository={gitRepository} reader={gitRead} local={gitLocal}
++              connection={githubConnection} projectName={session?.project.name ?? 'No project selected'} />
+             <ServiceGitRepositoryAccess controller={agentGitRepository} repository={gitRepository} reader={gitRead} local={gitLocal}
+               projectName={session?.project.name ?? 'No project selected'} />
+             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-push.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-push.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -89,6 +89,7 @@
+ import { createGitIndexApi } from './service_git_permission.ts';
+ import { createGitCommitApi } from './service_git_commit_permission.ts';
+ import { createGitRepositoryPermissionApi } from './service_git_repository_permission.ts';
++import { createGitRemotePermissionApi } from './service_git_remote_permission.ts';
+ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+@@ -416,6 +417,7 @@
+     agentGitIndex: createGitIndexApi(mode, invoke),
+     agentGitCommit: createGitCommitApi(mode, invoke),
+     agentGitRepository: createGitRepositoryPermissionApi(mode, invoke),
++    agentGitRemote: createGitRemotePermissionApi(mode, invoke),
+     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -430,6 +430,7 @@
+   readonly agentIOSArchive?: import('./agentIOSArchive.ts').AgentIOSArchiveApi | null;
+   readonly agentGitCommit?: import('./service_git_commit_permission.ts').GitCommitApi | null;
+   readonly agentGitRepository?: import('./service_git_repository_permission.ts').GitRepositoryPermissionApi | null;
++  readonly agentGitRemote?: import('./service_git_remote_permission.ts').GitRemotePermissionApi | null;
+   readonly agentGitIndex?: import('./service_git_permission.ts').PermissionApi<import('./service_git_permission.ts').GitIndexApproval> | null;
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;

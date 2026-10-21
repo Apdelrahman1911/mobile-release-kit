@@ -97,6 +97,7 @@ pub(in crate::asset_session) fn review(
             );
         }
         shared::Selected::Repository(selected) => selected,
+        shared::Selected::Remote(_) => return super::super::remote::review(scope,original,review_id,document_revision,registration_generation).map(Into::into),
     };
     let actual = action(&selected.action).ok()?;
     let (reference_revision, preview) = match (original, &actual) {

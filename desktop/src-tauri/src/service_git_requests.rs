@@ -15,18 +15,16 @@ use std::{
     time::Instant,
 };
 
-// Thirty-two metadata rows, ONE selected pathset (plus one old handoff stack),
-// and the SAME eight IPC workers' typed/encoded responses. The existing native
-// Git owner separately charges its action/review/runtime/source/job originals.
-// No diff, file bytes or raw native result is retained here. Repository rows
-// add <=2KiB selection + TWO <=2.5KiB review summaries; charge 8KiB per row
-// instead of the old 4KiB, inside the unchanged global Document limit. The
-// existing scope/8-worker reserves already exceed the bounded repository DTOs.
-// One private Commit draft is retained only with the active scope/handoff,
-// never in the 32 metadata tombstones or public IPC responses.
+// SAME thirty-two rows/one scope, not a second Remote inbox. ROW_HEAP names
+// simultaneous Remote selection (<=2.5KiB), private/public/pending review
+// summaries (<=3KiB each), final effect (<=1KiB) and transition copies. Local
+// rows stay within that quote. The SAME eight IPC workers below reserve their
+// typed+encoded scope/status copies (SCOPE_BACKING exceeds Remote metadata).
+// Full native action/review/Connection runtime remains on its existing owners.
+// Private Commit draft remains only in the original active scope/handoff.
 const SCOPE_BACKING: usize = p::PATH_LIMIT * (1024 + std::mem::size_of::<String>()) + 8192;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT
-    * (8192 + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
+    * (crate::service_git_remote_protocol::ROW_HEAP + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
     + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING)
     + 8 * (p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096);
 
@@ -51,7 +49,7 @@ impl NativeScope {
             && match (&self.commit, &self.selection) {
                 (Some(draft), shared::Selected::Files(v)) if v.summary.action == p::Action::Commit => draft.valid(),
                 (None, shared::Selected::Files(v)) => matches!(v.summary.action,p::Action::Stage|p::Action::Unstage),
-                (None, shared::Selected::Repository(_)) => true,
+                (None, shared::Selected::Repository(_) | shared::Selected::Remote(_)) => true,
                 _ => false,
             }
             && match &self.selection {
@@ -104,6 +102,7 @@ struct Row {
     claimed: Option<Phase>,
     prepare_joined: bool,
     apply_joined: bool,
+    remote: Option<remote_requests::Retirement>,
     // Only actual native reconcile supplies this. It is removed by the SAME
     // original ReadyReview's retirement, never a status/EOF/socket assumption.
     review: Option<(shared::Reviewed, Instant)>,
@@ -294,7 +293,7 @@ impl Entry {
                     || row
                         .review
                         .as_ref()
-                        .is_none_or(|(r, end)| r.id() != input.review_id || now >= *end)
+                        .is_none_or(|(r, end)| r.id() != input.review_id || now >= *end || !r.can_apply())
                 {
                     return Err(Error::Conflict);
                 }
@@ -413,6 +412,7 @@ impl NativeLink {
                 row.status.review = None;
             }
         }
+        remote_requests::armed(&mut row,self.phase)?;
         self.armed.store(true, Ordering::Release);
         change(&mut row)
     }
@@ -443,6 +443,7 @@ impl NativeLink {
         Arc::ptr_eq(&self.entry, &other.entry) && Arc::ptr_eq(&self.lease, &other.lease)
     }
     pub(crate) fn ready(&self, review: impl Into<shared::Reviewed>, expires: Instant) -> Result<bool, Error> {
+        if self.is_remote() { return Err(Error::StateUnknown); } // Remote needs actual Connection finish first.
         let review = review.into();
         let mut row = self.entry.lock()?;
         if !review.matches(&row.status.selection) { return Err(Error::InvalidRequest); }
@@ -474,6 +475,7 @@ impl NativeLink {
     /// Called only when the original Prepare receipt has really joined but
     /// native reconcile cannot retain a current usable review.
     pub(crate) fn no_review(&self) {
+        if remote_requests::review_removed(self) {return;}
         if let Ok(mut row) = self.entry.lock() {
             if self.phase != Phase::Prepare
                 || !row.prepare_joined
@@ -496,6 +498,7 @@ impl NativeLink {
     /// prepared operation must already have its original joined receipt, and
     /// an armed Apply remains live/unknown regardless of review retirement.
     pub(crate) fn review_removed(&self) {
+        if remote_requests::review_removed(self) {return;}
         if let Ok(mut row) = self.entry.lock() {
             row.review = None;
             row.status.review = None;
@@ -538,6 +541,7 @@ impl NativeLink {
                 return;
             }
         };
+        if self.is_remote() {drop(row);remote_requests::retired(self,result);return;}
         if self.phase == Phase::Prepare {
             if row.prepare_joined {
                 drop(row);
@@ -650,6 +654,7 @@ impl Claim {
                 self.entry.failed.store(true, Ordering::Release);
             }
         }
+        if remote_requests::caller_returned(&mut row,self.phase).is_err() {drop(row);self.entry.unknown();}
     }
 }
 impl Drop for Claim {
@@ -706,6 +711,7 @@ impl Inbox {
                         Family::Index => AdditionalFamily::GitIndex,
                         Family::Commit => AdditionalFamily::GitCommit,
                         Family::Repository => AdditionalFamily::GitRepository,
+                        Family::Remote => AdditionalFamily::GitRemote,
                     },
                     request_id: entry.input.origin.request_id.clone(),
                 });
@@ -856,6 +862,7 @@ impl Inbox {
                 claimed: None,
                 prepare_joined: false,
                 apply_joined: false,
+                remote: if family==Family::Remote {Some(remote_requests::Retirement::new())} else {None},
                 review: None,
                 start: None,
                 stop: None,
@@ -948,6 +955,9 @@ fn access(book: &Book, project: Option<&Id>, family: Family) -> Result<shared::A
     value.validate_shared()?;
     Ok(value)
 }
+
+#[path = "service_git_remote_requests.rs"]
+mod remote_requests;
 
 #[path = "service_git_repository_requests.rs"]
 mod repository_requests;

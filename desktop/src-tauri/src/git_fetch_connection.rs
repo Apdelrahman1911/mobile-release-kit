@@ -181,6 +181,12 @@ impl ConnectionState {
         self.fetch_pin_current(&pins, now, work_end)?;
         Ok(pins)
     }
+    /// Delegation liveness only. No new operation budget or token is issued;
+    /// native Prepare/Apply/GO still run their full original gates.
+    pub(crate) fn git_fetch_delegation_current(&self,pins:&Pins,action:&fetch::Action,now:Instant)->bool {
+        !self.native_work_pending() && action.valid() && action.connection_session_id==pins.session
+            && action.reference==pins.target.reference && self.fetch_pin_current(pins,now,now).is_ok()
+    }
     pub(crate) fn git_fetch_review_current(
         &self,
         pins: &Pins,
@@ -498,4 +504,21 @@ mod tests {
         assert!(!s.git_fetch_prepared_current(&p, &r, at));
         assert!(p.target(Some(&r)).is_err());
     }
+    #[test]
+    fn remote_delegation_current_uses_original_pins_and_never_renews_expiry() {
+        let at=Instant::now();let mut s=connected(at);let a=data::action();
+        let p=s.select_git_fetch("project-1",2,&a,at,at+Duration::from_secs(45)).unwrap();
+        assert!(s.git_fetch_delegation_current(&p,&a,at));
+        let end=s.private.as_ref().unwrap().clock.end;
+        s.status.revision+=1;assert!(s.git_fetch_delegation_current(&p,&a,at));
+        assert_eq!(s.private.as_ref().unwrap().clock.end,end);
+        s.status.account.state=FactState::Stale;assert!(!s.git_fetch_delegation_current(&p,&a,at));
+        s.status.account.state=FactState::Observed;
+        s.unknown=true;assert!(!s.git_remote_finish_known());assert!(!s.git_fetch_delegation_current(&p,&a,at));
+        s.unknown=false;s.private.as_mut().unwrap().clock.end=at;
+        assert!(!s.git_fetch_delegation_current(&p,&a,at));
+        // finish-known alone is NOT credential liveness or actual return.
+        assert!(s.git_remote_finish_known());
+    }
+
 }

@@ -11,6 +11,7 @@
     "allow-allow-agent-git-commit",
     "allow-revoke-agent-git-commit",
     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
+    "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
     "allow-agent-git-index-access",
     "allow-allow-agent-git-index",

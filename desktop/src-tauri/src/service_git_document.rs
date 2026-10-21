@@ -16,6 +16,10 @@ pub(crate) use commit::{decode_commit_allow, CommitAllow};
 mod repository;
 pub(crate) use repository::{decode_repository_allow, decode_repository_empty, RepositoryAllow};
 pub(super) use repository::agent_git_review;
+#[path = "service_git_remote_document.rs"]
+mod remote;
+pub(crate) use remote::{decode_remote_allow,RemoteAllow};
+pub(super) use remote::{outcome as agent_git_remote_outcome,review as agent_git_remote_review};
 use std::{path::Path, sync::OnceLock};
 
 #[derive(Deserialize)]
@@ -63,6 +67,7 @@ struct Observed {
 struct Grant {
     scope: Arc<requests::NativeScope>,
     observation: Arc<Observation>,
+    remote: Option<remote::Approval>,
 }
 #[derive(Default)]
 struct Book {
@@ -83,6 +88,8 @@ pub(super) const fn document_backing() -> usize {
         + std::mem::size_of::<NativeState>()
         + std::mem::size_of::<Grant>()
         + 2 * local::REQUEST_LIMIT
+        + 4 * (crate::service_git_remote_protocol::PINS_HEAP + std::mem::size_of::<remote::Approval>())
+        + 16 * 1024 // bounded, fixed Remote mutation projection; no raw result clone
 }
 fn public(error: Error) -> BridgeError {
     application_service::public_error(error)
@@ -402,6 +409,7 @@ impl DocumentBinding {
         book.grant = Some(Arc::new(Grant {
             scope,
             observation: original,
+            remote: None,
         }));
         Ok(access)
     }
@@ -445,6 +453,8 @@ impl DocumentBinding {
         epoch: u64,
         edit: &crate::edit_owner::SavedEditGuard<'_>,
         action: &local::Action,
+        fetch: Option<&crate::github_connection_session::fetch::Pins>,
+        push: Option<&crate::github_connection_session::push::Pins>,
     ) -> Result<(), BridgeError> {
         let book = self
             .inner
@@ -456,6 +466,7 @@ impl DocumentBinding {
         if link.phase() != phase
             || !Arc::ptr_eq(link.scope(), &grant.scope)
             || link.stopped()
+            || !remote::admission(grant,fetch,push)
             || !repository::action(&grant.scope).is_ok_and(|expected| expected == *action)
         {
             return Err(public(Error::Conflict));
@@ -571,6 +582,7 @@ impl DocumentBinding {
                         .bridge
                         .edits
                         .saved_registration_guard(&self.inner.session_identity)?;
+                    if !remote::idle_current(&state,&grant) {return Err(public(Error::Conflict));}
                     self.git_index_observation_current(
                         &state,
                         &grant.observation,

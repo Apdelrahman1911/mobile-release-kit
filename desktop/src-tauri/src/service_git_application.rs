@@ -7,6 +7,8 @@ use crate::{service_git_protocol as git, service_git_requests as requests};
 mod commit;
 #[path = "service_git_repository_application.rs"]
 mod repository;
+#[path = "service_git_remote_application.rs"]
+mod remote;
 
 impl ApplicationService {
     pub(crate) fn git_index_requests(&self) -> &Arc<requests::Inbox> {

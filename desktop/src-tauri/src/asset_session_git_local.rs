@@ -80,6 +80,7 @@ impl GitLocalGate {
             GitLocalReceipt::RetainedUnknown|GitLocalReceipt::Settled {was_unknown:true,..}=>S::Unknown,
             GitLocalReceipt::Settled {outcome,was_unknown:false}=>match outcome {
                 Ok(t) if t.result.get("state").and_then(Value::as_str)==Some("recovery-required")=>S::RecoveryRequired,
+                Ok(t) if agent.is_remote()&&t.result.get("state").and_then(Value::as_str)==Some("failed")=>S::Failed,
                 Ok(t) if t.status==read::Outcome::Ok=>S::Succeeded,
                 Ok(t) if matches!(t.status,read::Outcome::Cancelled|read::Outcome::TimedOut)=>S::Cancelled,
                 Err(e) if matches!(e.code.as_str(),"cancelled"|"shutting_down"|"query_timeout")=>S::Cancelled,
@@ -342,7 +343,8 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
     let Some(Entry::Original {ticket,gate})=&state.git_local else {return};
     if !ticket.settled() {return}
     let view=projection(state.git_local.as_ref().expect("same original"));
-    let prepared=if gate.0.phase==wire::Phase::Prepare {
+    let remote=gate.0.agent.as_ref().filter(|a|a.is_remote()).cloned();
+    let mut prepared=if gate.0.phase==wire::Phase::Prepare {
         match ticket.receipt() {
             GitLocalReceipt::Settled {outcome:Ok(terminal),was_unknown:false} if terminal.status==read::Outcome::Ok=>{
                 (|| {
@@ -350,7 +352,7 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
                     let expires=gate.0.admitted.checked_add(REVIEW)?;
                     if Instant::now()>=expires {return None}
                     let review=terminal.review().ok()?;
-                    if let Some(agent)=&gate.0.agent {
+                    if let Some(agent)=gate.0.agent.as_ref().filter(|a|!a.is_remote()) {
                         let summary=agent_git_index::agent_git_review(agent.scope(),&review,
                             format!("{}-review",ticket.operation_id()),gate.0.document_revision,gate.0.context.generation)?;
                         if !agent.ready(summary,expires).ok()? {return None}
@@ -367,7 +369,38 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
         // Original IO may have returned, but contradictory/missing private
         // Connection retirement evidence cannot free admission or mint a
         // replacement review. Keep the original entry/hold for attention.
+        if let Some(agent)=&remote {agent.entry().unknown();}
         state.unknown=true;state.github.retire(crate::github_connection_protocol::Reason::CleanupUnknown);return;
+    }
+    if let Some(agent)=remote {
+        // Native settlement alone is not the Connection's actual return.
+        // finish may return Ok after poisoning/retiring that same Connection.
+        if !state.github.git_remote_finish_known() {
+            agent.entry().unknown();state.unknown=true;return;
+        }
+        // The held-gate candidate was formed BEFORE finish. The hold is now
+        // gone: rematch via the original prepared-current path, never call a
+        // removed-hold gate or create a new review/expiry here.
+        if prepared.as_ref().is_some_and(|r|Instant::now()>=r.expires
+            ||!scope_current(document,state,&r.public.context,&r.root,agent.scope().document_revision)
+            ||!document.android_registration_control.matches_epoch(r.epoch)
+            ||!fetch::review_current(state,r)||!push::review_current(state,r)||agent.stopped()
+            ||document.bridge.edits.saved_registration_guard(&document.session_identity).map_or(true,|e|!e.matches(&r.stamp))) {
+            prepared=None;
+        }
+        let candidate=match prepared.as_ref() {
+            Some(r)=>match agent_git_index::agent_git_remote_review(agent.scope(),&r.public.review,r.public.review_id.clone(),agent.scope().document_revision,r.public.context.generation) {
+                Some(summary)=>Some((summary,r.expires)),
+                None=>{agent.entry().unknown();state.unknown=true;return;}
+            },None=>None,
+        };
+        let returned=agent_git_index::agent_git_remote_outcome(agent.scope(),&view)
+            .map_err(|_|crate::service_protocol::Error::StateUnknown)
+            .and_then(|outcome|agent.remote_connection_returned(candidate,outcome));
+        match returned {
+            Ok(true)=>{},Ok(false)=>prepared=None,
+            Err(_)=>{agent.entry().unknown();state.unknown=true;return;}
+        }
     }
     state.git_local_review=prepared;state.git_local=Some(Entry::Finished(view));
 }
@@ -375,7 +408,7 @@ impl DocumentBinding {
     pub(super) fn git_local_new_gate(&self,state:&DocumentState)->Result<(),BridgeError> {
         self.git_local_new_gate_for(state,wire::Kind::Stage)
     }
-    fn git_local_new_gate_for(&self,state:&DocumentState,kind:wire::Kind)->Result<(),BridgeError> {
+    pub(super) fn git_local_new_gate_for(&self,state:&DocumentState,kind:wire::Kind)->Result<(),BridgeError> {
         if !state.lifetime.original_bound()||state.lost_observed {return Err(BridgeError::unavailable("The original application document is unavailable."))}
         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
@@ -412,14 +445,14 @@ impl DocumentBinding {
             let (generation,root)=self.inner.bridge.native_project(&args.project_id).map_err(|_|changed())?;
             let fetch=fetch::select(&state,&args.project_id,generation,&args.action,admitted)?;
             let push=push::select(&state,&args.project_id,generation,&args.action,admitted)?;
-            if (fetch.is_some()||push.is_some())&&agent.is_some(){return Err(BridgeError::invalid())}
+            if (fetch.is_some()||push.is_some())&&agent.as_ref().is_some_and(|a|!a.is_remote()){return Err(BridgeError::invalid())}
             let future=GitLocalAdmission::reservation_bytes(args.action.kind()).ok_or_else(BridgeError::invalid)?;
             lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,args.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
             let epoch=self.inner.android_registration_control.epoch()?;
             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
             let stamp=Arc::new(edit.stamp()?);
             #[cfg(any(target_os="linux",target_os="macos"))]
-            if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Prepare,&root,generation,epoch,&edit,&args.action)?;}
+            if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Prepare,&root,generation,epoch,&edit,&args.action,fetch.as_ref(),push.as_ref())?;}
             let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root,
                 context:wire::Context {project_id:args.project_id.clone(),generation,revision:format!("document-{}",args.expected_document_revision)},
                 document_revision:state.revision,action:args.action.clone(),phase:wire::Phase::Prepare,admitted,stamp,epoch,review:None,publisher:None,
@@ -462,13 +495,13 @@ impl DocumentBinding {
                 if !app_data.is_absolute()||app_data.as_os_str().len()>4096 {return Err(BridgeError::invalid())}
                 let fetch=fetch::selected_review(&state,review,admitted)?;
                 let push=push::selected_review(&state,review,admitted)?;
-                if (fetch.is_some()||push.is_some())&&agent.is_some(){return Err(BridgeError::invalid())}
+                if (fetch.is_some()||push.is_some())&&agent.as_ref().is_some_and(|a|!a.is_remote()){return Err(BridgeError::invalid())}
                 let future=GitLocalAdmission::reservation_bytes(review.action.kind()).ok_or_else(BridgeError::invalid)?;
                 lookup_memory::git_local_admission_bytes_for(&self.inner,&state,future,review.action.kind()).map_err(|_|BridgeError::new("busy","The current native tasks leave insufficient Git working storage."))?;
                 let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
                 if !edit.matches(&review.stamp) {return Err(changed())}
                 #[cfg(any(target_os="linux",target_os="macos"))]
-                if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Apply,&review.root,review.public.context.generation,epoch,&edit,&review.action)?;}
+                if let Some(agent)=&agent {self.agent_git_index_admission(&state,agent,crate::service_git_requests::Phase::Apply,&review.root,review.public.context.generation,epoch,&edit,&review.action,fetch.as_ref(),push.as_ref())?;}
                 let gate=GitLocalGate(Arc::new(Selection {document:Arc::downgrade(&self.inner),root:review.root.clone(),
                     context:wire::Context {project_id:args.project_id.clone(),generation:review.public.context.generation,
                         revision:format!("document-{}",args.expected_document_revision)},document_revision:state.revision,

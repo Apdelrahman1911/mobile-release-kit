@@ -11,13 +11,14 @@ pub(crate) enum Family {
     Index,
     Commit,
     Repository,
+    Remote,
 }
 impl Family {
     pub(crate) fn matches(self, action: p::Action) -> bool {
         match self {
             Self::Index => matches!(action, p::Action::Stage | p::Action::Unstage),
             Self::Commit => action == p::Action::Commit,
-            Self::Repository => false,
+            Self::Repository | Self::Remote => false,
         }
     }
 }
