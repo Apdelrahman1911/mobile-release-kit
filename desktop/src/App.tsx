@@ -695,6 +695,12 @@ export function App() {
     // native rematches its exact original pins at every publisher transition.
     reservedOperationReason: () => localHistoryBusy() ?? storeBusy() ?? historyBusy() ??
       savedCommandPrerequisiteReason(true, false, undefined, false, true),
+    hostedGit: () => {
+      const service = pathService.current, projectId = workspaceRef.current.selectedId;
+      const entry = gitRepositories.current.find(value => value.service === service && value.projectId === projectId);
+      return { session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
+        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, reader: gitReadRef.current };
+    },
     onSaveBoundary: () => {
       retireGitRead();
       // Retire before the submitted intent/outcome can notify subscribers, even
@@ -2138,7 +2144,7 @@ export function App() {
           appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
-          versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}
+          versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} onGit={() => navigate('github')} /></>}
           releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}
           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="Set up your project" description="Change your app settings one group at a time. Review the proposed file changes before saving." />{editor()}

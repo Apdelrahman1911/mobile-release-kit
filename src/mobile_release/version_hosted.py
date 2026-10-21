@@ -595,6 +595,7 @@ def _reserve(source, settings, selected_policy, remote, material):
     row = outcome.reservation
     return {"schemaVersion": 1, "status": "reserved", "candidateId": request.candidate_id,
         "rowSha256": row.sha256, "sourceCommit": source.binding.commit,
+        "sourceRef": source.binding.ref, "configSha256": request.source.configuration_sha256,
         "version": p.version_value(row.version), "releaseEligibility": "not-established",
         "historicalUniqueness": "not-established", "sourceWrite": "not-performed",
         "authorityVariable": p.canonical({"schemaVersion": 1, "authority": settings.authority.value(),

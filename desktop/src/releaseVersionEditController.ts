@@ -4,6 +4,9 @@ import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedT
 import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { parseReservedVersion } from './versionReserve.ts';
 import type { ReservedVersion } from './versionReserve.ts';
+import { captureHostedImportGit, hostedImportCommitMessage, hostedImportGitUnchanged, hostedProposalCheckoutMatches,
+  hostedProposalViewMatches, parseHostedVersionProposal, sameHostedImportService } from './hostedVersionImport.ts';
+import type { HostedImportGitCapture, HostedImportGitSource, HostedVersionProposal } from './hostedVersionImport.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { normalVersionEditResult, parseVersionEditGuide, parseVersionEditStatus, sameVersionData as same,
   versionEditError, versionEditRequestFits, versionProjectionProgress, versionStatusProgress, versionValuesBounded,
@@ -24,7 +27,7 @@ interface ContextBinding {
   startStatusRevision: number; previousTerminalId: string | null; reload: boolean;
   expectedOriginal: VersionCheckout | null;
   reserved?: ReservedVersion; // Display/input binding only; native owns the consume-once handoff.
-
+  proposal?: HostedVersionProposal; // Unverified pasted DATA; ordinary native Open only.
 }
 interface Submission {
   expectedBaseline: VersionBaseline; intent: VersionIntent; values: VersionValues; draftRevision: number; baselineGeneration: number;
@@ -43,6 +46,7 @@ interface OwnerState {
 export interface VersionEditState {
   mode: BridgeMode; projectId: string | null; visible: boolean; selectionPending: boolean; contextGeneration: number; connectionGeneration: number;
   entries: Readonly<Record<string, VersionDraft>>; help: VersionEditGuide | null; error: ApiError | null; edit: OwnerState;
+  hostedImportIssue?: string | null;
 }
 export interface VersionApplyBinding { sessionId: string; planToken: string; draftRevision: number; baselineGeneration: number }
 export interface VersionResetBinding { projectId: string; revision: number; baselineGeneration: number; contextGeneration: number }
@@ -55,6 +59,7 @@ interface Context {
   // Closed reserved handoff may retain its idle selected GitHub connection;
   // no other owner/uncertainty gate is waived. Ordinary manual path unchanged.
   reservedOperationReason?: () => string | null;
+  hostedGit?: () => HostedImportGitSource;
   onSaveBoundary: (projectId: string) => void;
   now?: () => number;
 }
@@ -102,6 +107,7 @@ export function currentVersionApplyBinding(state: VersionEditState): VersionAppl
   if (!usable(edit) || !attempt?.submission || !owner?.prepared || !attempt.prepareClaimed || attempt.applyClaimed || attempt.closeRequested ||
       attempt.invalidated || attempt.handled || owner.phase !== 'reviewing' || owner.nativeReason !== 'none' || owner.nativeFinality !== 'pending' ||
       owner.reviewRemainingMs === 0 || owner.applySubmitted || !versionPreparedMatches(attempt) || edit.status?.active?.sessionId !== owner.sessionId ||
+      attempt.binding.proposal && !hostedProposalViewMatches(attempt.binding.proposal, owner.prepared.view) ||
       owner.ownerGeneration !== edit.status.windowGeneration) return null;
   return { sessionId: owner.sessionId, planToken: owner.prepared.planToken, draftRevision: attempt.submission.draftRevision, baselineGeneration: attempt.submission.baselineGeneration };
 }
@@ -122,6 +128,7 @@ export class ReleaseVersionEditController {
   private deadline: { sessionId: string; at: number } | null = null;
   // One private, context-bound completion; never an owner-generation ordering.
   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
+  private proposal: { binding: ContextBinding; git: HostedImportGitCapture; draft: VersionDraft | null; retired: boolean; copied: boolean } | null = null;
   private readonly context: Context;
   constructor(context: Context) { this.context = context; }
   getSnapshot = (): VersionEditState => this.state;
@@ -235,6 +242,69 @@ export class ReleaseVersionEditController {
       same(entry.values, input.values) && same(entry.original.baseline, input.expectedBaseline) && !entry.stale;
   }
   open(): boolean { return this.start(false, false); }
+  hostedOpenReason(): string | null {
+    const entry = this.selectedEntry();
+    return this.openReason() ?? (entry && (entry.stale || versionDraftDirty(entry)) ?
+      'Keep or explicitly discard the existing version draft first. Pasted values will not overwrite it.' : null) ??
+      (!this.context.hostedGit ? 'Hosted-result import needs this native project’s existing Git view.' : null);
+  }
+  openHostedProposal(raw: string): boolean {
+    const p = parseHostedVersionProposal(raw), reason = this.hostedOpenReason();
+    if (!p || reason) {
+      this.publish({ ...this.state, hostedImportIssue: reason ?? 'Paste the complete unmodified JSON result from a current reserve-version workflow. Older results without source/config comparisons need manual review.' });
+      return false;
+    }
+    return this.start(false, false, undefined, p);
+  }
+  private hostedGit(): HostedImportGitSource | null {
+    try { return this.context.hostedGit?.() ?? null; } catch { return null; }
+  }
+  private proposalDraftMatches(): boolean {
+    const original = this.proposal?.draft, entry = this.selectedEntry();
+    return original === null ? entry === null : !!original && !!entry && !entry.stale && !versionDraftDirty(entry) &&
+      entry.revision === original.revision && entry.baselineGeneration === original.baselineGeneration &&
+      same(entry.original, original.original) && same(entry.values, original.values);
+  }
+  private proposalServiceMatches(binding: ContextBinding): boolean {
+    return this.proposal?.binding === binding && !this.proposal.retired && sameHostedImportService(this.proposal.git.source, this.hostedGit());
+  }
+  private proposalOpenMatches(binding: ContextBinding): boolean {
+    return this.proposalServiceMatches(binding) && this.proposalDraftMatches() && hostedImportGitUnchanged(this.proposal!.git, this.hostedGit());
+  }
+  private refuseProposal(message: string): void {
+    if (this.proposal?.binding === this.state.edit.attempt?.binding) this.proposal.retired = true;
+    this.publish({ ...this.state, hostedImportIssue: message });
+    // A bad pasted comparison is not a malformed native result. Keep original
+    // work/drafts and request its ordinary Close; never poison native integrity.
+    this.invalidate();
+  }
+  hostedCommitReason(): string | null {
+    const held = this.proposal, attempt = this.state.edit.attempt, entry = this.selectedEntry(), owner = attempt?.projection;
+    if (!held || held.retired || held.copied || !attempt || held.binding !== attempt.binding || !attempt.binding.proposal ||
+      !attempt.handled || !attempt.applyClaimed || !owner?.prepared || normalVersionEditResult(owner) !== 'saved' ||
+      attempt.submittedPlanToken !== owner.prepared.planToken || !versionPreparedMatches(attempt) ||
+      !hostedProposalViewMatches(attempt.binding.proposal, owner.prepared.view) || !usable(this.state.edit) ||
+      !entry || entry.stale || versionDraftDirty(entry) || !same(entry.outcome, owner) || !this.sameContext(attempt.binding, false) ||
+      this.state.projectId !== attempt.binding.projectId || this.context.selectedProject()?.project.id !== attempt.binding.projectId ||
+      !this.proposalServiceMatches(attempt.binding)) return 'Save this exact proposed review successfully before preparing its commit message. No saved result is inferred from a missing reply.';
+    const git = captureHostedImportGit(this.hostedGit(), attempt.binding.proposal, 'after-save');
+    if (!git || git.read.original?.operationId === held.git.read.original?.operationId) return 'After saving, refresh Changes in Git. Only this regular version file may be modified or staged, on the original commit and branch.';
+    if (git.repository.draft.message !== '') return 'Keep your existing commit message. This shortcut never replaces a message, including whitespace.';
+    return null;
+  }
+  prefillHostedCommitMessage(): boolean {
+    const reason = this.hostedCommitReason(), held = this.proposal, attempt = this.state.edit.attempt;
+    if (reason || !held || !attempt?.binding.proposal) {
+      this.publish({ ...this.state, hostedImportIssue: reason }); return false;
+    }
+    const git = captureHostedImportGit(this.hostedGit(), attempt.binding.proposal, 'after-save');
+    if (!git || git.repository.draft.message !== '' || !hostedImportGitUnchanged(git, this.hostedGit()) || this.hostedCommitReason()) return false;
+    held.copied = true; // The following local draft notification may re-enter.
+    const copied = git.source.repository!.editDraft('message', hostedImportCommitMessage(attempt.binding.proposal));
+    this.publish({ ...this.state, hostedImportIssue: copied ? 'Commit message prepared in Git. Review and stage the version file, then review the complete commit separately. CI still verifies the reservation.' :
+      'The existing commit draft could not accept the message. It was not committed or retried.' });
+    return copied;
+  }
   reservedOpenReason(): string | null {
     const entry = this.selectedEntry();
     return this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
@@ -247,23 +317,28 @@ export class ReleaseVersionEditController {
     if (!reserved || this.reservedOpenReason()) return false;
     return this.start(false, false, reserved);
   }
-  private start(review: boolean, reload: boolean, reserved?: ReservedVersion): boolean {
-    if (this.disposed || !this.api || (reserved ? this.reservedOpenReason() : this.openReason())) return false;
+  private start(review: boolean, reload: boolean, reserved?: ReservedVersion, proposal?: HostedVersionProposal): boolean {
+    if (this.disposed || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
     const project = this.context.selectedProject(), status = this.state.edit.status, entry = this.selectedEntry();
     if (!project || !status || review && (!entry || entry.stale || !versionValuesBounded(entry.values))) return false;
+    const git = proposal ? captureHostedImportGit(this.hostedGit(), proposal, 'before-open') : null;
+    if (proposal && (!git || git.source.projectId !== project.project.id)) {
+      this.publish({ ...this.state, hostedImportIssue: 'Refresh Changes in Git for this project first. The checkout must be clean at the result’s exact source commit and branch.' }); return false;
+    }
     const binding = freeze<ContextBinding>({ projectId: project.project.id, configRevision: project.revision, configBaselineGeneration: project.baselineGeneration,
       configObservationGeneration: project.observationGeneration, contextGeneration: this.state.contextGeneration, connectionGeneration: this.state.connectionGeneration,
       windowGeneration: status.windowGeneration, startStatusRevision: status.statusRevision, previousTerminalId: status.lastTerminal?.sessionId ?? null,
-      reload, expectedOriginal: reload ? null : entry?.original ?? null, ...(reserved ? { reserved } : {}) });
+      reload, expectedOriginal: reload ? null : entry?.original ?? null, ...(reserved ? { reserved } : {}), ...(proposal ? { proposal } : {}) });
     const submission = review && entry ? this.submission(entry) : null;
     const originalApi = this.api;
-    this.publish({ ...this.state, error: null, edit: { ...this.state.edit, attempt: { binding, submission, sessionId: null, projection: null,
+    this.proposal = proposal && git ? { binding, git, draft: entry, retired: false, copied: false } : null;
+    this.publish({ ...this.state, error: null, hostedImportIssue: null, edit: { ...this.state.edit, attempt: { binding, submission, sessionId: null, projection: null,
       projectionRevision: status.statusRevision, openAdopted: false, prepareClaimed: false, applyClaimed: false, submittedPlanToken: null,
       closeRequested: false, closeClaimed: false, invalidated: false, handled: false, outcomeNotified: false, outcomeFingerprint: null } } });
     if (review || reserved) this.context.onSaveBoundary(project.project.id);
     if (this.state.edit.attempt?.binding !== binding || this.state.edit.attempt.closeRequested) return false;
-    if (reserved && (this.api !== originalApi || !this.sameContext(binding) || this.configReason() ||
-        this.context.otherEditReason(binding.projectId) || this.operationReason(true))) {
+    if ((reserved || proposal) && (this.api !== originalApi || !this.sameContext(binding) || this.configReason() ||
+        this.context.otherEditReason(binding.projectId) || this.operationReason(!!reserved) || proposal && !this.proposalOpenMatches(binding))) {
       this.invalidate(); return false;
     }
     void this.command('open', binding, () => originalApi.openReleaseVersionEdit(reserved ?
@@ -279,8 +354,13 @@ export class ReleaseVersionEditController {
     }
     if (entry.values[id] === value) return false;
     const attempt = this.state.edit.attempt;
+    const imported = !!attempt?.binding.proposal && !attempt.handled && !attempt.applyClaimed;
+    if (imported) this.refuseProposal('Changed values are kept as a manual draft. Close this original edit before reviewing them again; no imported commit message will be prepared.');
     // Reload consent covers the confirmed draft, never edits made while its Open is pending.
     if (attempt && !attempt.applyClaimed && (attempt.submission || attempt.binding.reload && !attempt.openAdopted)) this.invalidate();
+    // Refusal/Close notifications may edit or restore the draft synchronously.
+    // Keep that newer immutable entry; never publish a captured older revision.
+    if (imported && (this.disposed || this.selectedEntry() !== entry || this.state.edit.attempt?.binding !== attempt?.binding)) return false;
     this.put({ ...entry, revision: entry.revision + 1, values: { ...entry.values, [id]: value }, error: null });
     this.process(); return true;
   }
@@ -308,7 +388,8 @@ export class ReleaseVersionEditController {
   canApply(binding?: VersionApplyBinding): boolean {
     const current = currentVersionApplyBinding(this.state), attempt = this.state.edit.attempt;
     return !!current && !!attempt && this.remainingReviewMs() > 0 && this.sameContext(attempt.binding) && this.matchesSubmission(attempt) &&
-      !this.configReason() && !this.context.otherEditReason(attempt.binding.projectId) && !this.operationReason() && (!binding || same(current, binding));
+      !this.configReason() && !this.context.otherEditReason(attempt.binding.projectId) && !this.operationReason() &&
+      (!attempt.binding.proposal || this.proposalServiceMatches(attempt.binding)) && (!binding || same(current, binding));
   }
   apply(binding: VersionApplyBinding): boolean {
     if (!this.api || !this.canApply(binding)) return false;
@@ -316,7 +397,9 @@ export class ReleaseVersionEditController {
     this.attempt({ applyClaimed: true, submittedPlanToken: binding.planToken });
     this.context.onSaveBoundary(original.projectId);
     if (this.state.edit.attempt?.binding === original && !this.state.edit.attempt.closeRequested &&
-        (!original.reserved || this.api === api && this.sameContext(original) && !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(true)))
+        (!(original.reserved || original.proposal) || this.api === api && this.sameContext(original) && !this.configReason() &&
+          !this.context.otherEditReason(original.projectId) && !this.operationReason(!!original.reserved) &&
+          (!original.proposal || this.proposalServiceMatches(original))))
       void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
     return true;
   }
@@ -473,6 +556,10 @@ export class ReleaseVersionEditController {
     const opened = attempt.projection?.checkout;
     if (!opened || attempt.openAdopted || attempt.invalidated || attempt.closeRequested || !this.sameContext(attempt.binding)) return;
     const expected = attempt.binding.expectedOriginal, entry = this.state.entries[attempt.binding.projectId];
+    const proposal = attempt.binding.proposal;
+    if (proposal && (!this.proposalOpenMatches(attempt.binding) || !hostedProposalCheckoutMatches(proposal, opened))) {
+      this.refuseProposal('The current draft, saved configuration or version source does not match the pasted result. Your existing draft is kept; no values were imported.'); return;
+    }
     if (expected && !same({ ...expected, revision: '' }, { ...opened, revision: '' })) {
       if (entry) this.put({ ...entry, stale: true, error: versionEditError({ code: 'VersionEditContextChanged' }) });
       this.invalidate(); return;
@@ -491,6 +578,10 @@ export class ReleaseVersionEditController {
       // The original native Open must have returned this bound checkout first.
       // Never autofill a detached manual draft or auto-prepare/auto-apply.
       next = { ...next, revision: next.revision + 1, values: { name: reserved.name, build: String(reserved.build) } };
+    }
+    if (proposal) {
+      if (next.revision >= U32_MAX - 1) { this.refuseProposal('This original draft revision is exhausted. No imported revision will be reused.'); return; }
+      next = { ...next, revision: next.revision + 1, values: { name: proposal.name, build: proposal.build } };
     }
     this.publish({ ...this.state, entries: { ...this.state.entries, [next.projectId]: next },
       edit: { ...this.state.edit, attempt: { ...this.state.edit.attempt!, openAdopted: true } } });
@@ -673,6 +764,10 @@ export class ReleaseVersionEditController {
         attempt = this.state.edit.attempt; if (!attempt) continue;
         const owner = attempt.projection;
         if (owner?.prepared && !versionPreparedMatches(attempt) && !this.state.edit.integrityFailed) { this.observationFailed(true); continue; }
+        if (owner?.prepared && attempt.binding.proposal && !attempt.applyClaimed && !attempt.invalidated && !attempt.handled &&
+          !hostedProposalViewMatches(attempt.binding.proposal, owner.prepared.view)) {
+          this.refuseProposal('The native review does not match the pasted result’s expected file and values. No Save was sent; keep the original draft and correct or discard the proposal.'); continue;
+        }
         // Late original evidence can refine an unknown effect/cleanup state.
         // Keep it visible without treating a new observer or late join as success,
         // and do not reapply a settled baseline on unrelated status revisions.
@@ -699,8 +794,9 @@ export class ReleaseVersionEditController {
           if (!versionEditRequestFits('release_version_edit_prepare', request)) { this.observationFailed(true); continue; }
           const api: DesktopApi = this.api;
           this.attempt({ prepareClaimed: true });
-          if (binding.reserved && (this.api !== api || !this.sameContext(binding) || this.configReason() ||
-              this.context.otherEditReason(binding.projectId) || this.operationReason(true))) { this.invalidate(); continue; }
+          if ((binding.reserved || binding.proposal) && (this.api !== api || !this.sameContext(binding) || this.configReason() ||
+              this.context.otherEditReason(binding.projectId) || this.operationReason(!!binding.reserved) ||
+              binding.proposal && !this.proposalServiceMatches(binding))) { this.invalidate(); continue; }
           if (this.state.edit.attempt?.binding === binding && !this.state.edit.attempt.closeRequested)
             void this.command('prepare', binding, () => api.prepareReleaseVersionEdit(request));
         }

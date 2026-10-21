@@ -5,6 +5,7 @@ version renderer run against those doubles. This is not hosted qualification.
 """
 import base64
 import copy
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -210,6 +211,9 @@ class HostedAllocationTests(unittest.TestCase):
         self.assertIsNone(final.state.selected(self.fixture.authority).pending)
         self.assertEqual(final.state.candidates[0].reservation, self.repo.ledger.reservations[0])
         self.assertEqual(result["candidateId"], final.state.candidates[0].request.candidate_id)
+        self.assertEqual(result["sourceRef"], final.state.candidates[0].request.source.ref)
+        self.assertEqual(result["configSha256"], final.state.candidates[0].request.source.configuration_sha256)
+        self.assertEqual(result["configSha256"], hashlib.sha256(self.fixture.config_raw).hexdigest())
         changed = self.fixture.before
         for row in sorted(result["versionFile"]["replacements"], key=lambda row: row["start"], reverse=True):
             changed = changed[:row["start"]] + row["value"].encode() + changed[row["end"]:]

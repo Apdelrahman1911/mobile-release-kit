@@ -12,6 +12,7 @@ import { normalVersionEditResult, parseVersionEditGuide, parseVersionEditStatus,
   versionLineEndings, versionNoOp, versionProjectionProgress, versionValuesBounded } from '../src/releaseVersionEdit.ts';
 import { ReleaseVersionEditController, currentVersionApplyBinding, versionDraftDirty, versionOwnerReason,
   versionPreparedMatches, versionProjectDirty, versionRetainsDraft } from '../src/releaseVersionEditController.ts';
+import { canonical as hostedCanonical, gitFixture, modifiedVersion, workflowResult } from './hosted-version-import.fixture.mjs';
 
 const ID = { window: 'a'.repeat(32), session: 'b'.repeat(32), revision: 'c'.repeat(32), plan: 'd'.repeat(32) };
 const SOURCE = 'public/version.properties';
@@ -68,7 +69,7 @@ function projection(phase, opened = checkout(), preparedView = view(opened, open
       journal: versionNoOp(preparedView) ? 'not_created' : 'clean', resources: 'settled', reason: 'none' } : null,
     nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
 }
-function harness({ raw = ORIGINAL, opened = checkout(raw), config = BASE, nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason } = {}) {
+function harness({ raw = ORIGINAL, opened = checkout(raw), config = BASE, nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason, hostedGit } = {}) {
   let workspace = addProject(initialWorkspace, 'p', config), registry = clone(nativeStatus), listener, clock = 100, other = null, operation = null;
   let sessionId = ID.session; const calls = [], boundaries = [], reads = [];
   const selected = () => workspace.projects[workspace.selectedId] ?? null;
@@ -80,7 +81,7 @@ function harness({ raw = ORIGINAL, opened = checkout(raw), config = BASE, native
     applyReleaseVersionEdit: (sessionId, planToken, intent) => request('apply', intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }), closeReleaseVersionEdit: (sessionId) => request('close', { sessionId }),
   };
   const controller = new ReleaseVersionEditController({ selectedProject: selected, project: (id) => workspace.projects[id] ?? null,
-    otherEditReason: () => other, otherOperationReason: () => operation, reservedOperationReason, now: () => clock,
+    otherEditReason: () => other, otherOperationReason: () => operation, reservedOperationReason, hostedGit, now: () => clock,
     onSaveBoundary: (id) => { boundaries.push(id); onSaveBoundary(id); } });
   controller.beginConnection(); controller.setHelp(guideResource); controller.syncProject();
   const h = { controller, api, selected, calls, boundaries,
@@ -806,4 +807,173 @@ test('reserved handoff notification cannot dispatch Prepare or Apply after peer 
     assert.equal(h.count(phase), 0); assert.ok(h.state.edit.attempt.binding.reserved);
     assert.deepEqual(h.controller.selectedEntry().values, VALUES); // kept, not saved
   }
+});
+
+// Pasted hosted output selects ordinary Open only. These are the real existing
+// UI controllers with inert native callbacks, not a verified hosted receipt.
+async function imported({ android = false, name = '2.3.4', build = 8 } = {}) {
+  const config = android ? { ...clone(BASE), android: { enabled: true }, ios: { enabled: false } } : clone(BASE);
+  const opened = checkout(ORIGINAL, { name: '1.2.3', build: '7' }, { iosEnabled: !android,
+    baseline: { savedConfig: digest(JSON.stringify(config)), savedVersion: { state: 'present', ...digest(ORIGINAL) } } });
+  const values = { name, build: String(build) }, expected = view(opened, ORIGINAL, values);
+  const result = workflowResult({ name, build, config: opened.baseline.savedConfig.sha256,
+    before: opened.baseline.savedVersion.sha256, after: expected.file.after.sha256 });
+  const git = await gitFixture(), h = await connected({ config, opened, hostedGit: git.source, onSaveBoundary: git.invalidate });
+  return { h, git, result, values, opened };
+}
+async function importOpen(f) {
+  assert.equal(f.h.controller.openHostedProposal(hostedCanonical(f.result) + '\n'), true);
+  assert.deepEqual(f.h.last('open').args, { projectId: 'p' });
+  const opening = f.h.publish(f.h.owner('opening')); f.h.last('open').resolve(opening); await flush();
+  f.h.publish(f.h.owner('editing'));
+  assert.deepEqual(f.h.controller.selectedEntry().values, f.values);
+}
+async function importReview(f) {
+  assert.equal(f.h.controller.review(), true);
+  const review = f.h.publish(f.h.owner('reviewing')); f.h.last('prepare').resolve(review); await flush();
+}
+async function importSave(f) {
+  const binding = currentVersionApplyBinding(f.h.state); assert.ok(binding);
+  assert.equal(f.h.controller.apply(binding), true);
+  const applying = f.h.publish(f.h.owner('applying')); f.h.last('apply').resolve(applying); await flush();
+  f.h.publish(f.h.owner('final')); assert.equal(f.h.state.edit.attempt.handled, true);
+}
+test('unverified iOS/Android proposals use ordinary Open, one atomic draft adoption and separate explicit review/Save', async () => {
+  for (const options of [{ name: '1.2' }, { android: true, build: 10000 }]) {
+    const f = await imported(options), { h, git } = f;
+    const observedValues = [];
+    h.controller.subscribe(() => { const v = h.controller.selectedEntry()?.values; if (v) observedValues.push(clone(v)); });
+    const reads = git.calls.length; await importOpen(f);
+    assert.ok(observedValues.every(v => v.name === f.values.name && v.build === f.values.build));
+    assert.equal(h.state.edit.attempt.binding.reserved, undefined);
+    assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0); assert.equal(git.calls.length, reads);
+    await importReview(f); assert.equal(git.reader.getSnapshot().stale, true); // own invalidation is NOT waived into a fresh Git lease
+    assert.ok(currentVersionApplyBinding(h.state)); assert.equal(h.count('apply'), 0);
+    await importSave(f); assert.deepEqual(h.controller.selectedEntry().original.values, f.values);
+    assert.equal(h.controller.selectedEntry().outcome.coreOutcome.journal, 'clean');
+    assert.equal(h.controller.prefillHostedCommitMessage(), false); // no post-Save Observe yet
+    assert.equal(git.repository.getSnapshot().draft.message, '');
+  }
+});
+test('bad pasted afterhash is a local refusal, not native protocol poisoning or a Save', async () => {
+  const f = await imported(); f.result.versionFile.afterSha256 = '0'.repeat(64);
+  await importOpen(f); await importReview(f);
+  assert.equal(versionPreparedMatches(f.h.state.edit.attempt), true);
+  assert.equal(f.h.state.edit.integrityFailed, false); assert.equal(f.h.state.edit.nativeBlocked, false);
+  assert.equal(f.h.state.edit.attempt.invalidated, true); assert.equal(f.h.state.edit.attempt.closeRequested, true);
+  assert.equal(currentVersionApplyBinding(f.h.state), null); assert.equal(f.h.count('apply'), 0);
+  assert.deepEqual(f.h.controller.selectedEntry().values, f.values); assert.match(f.h.state.hostedImportIssue, /native review does not match/);
+});
+test('pasted config/path/before mismatch keeps the original draft and never prepares', async () => {
+  for (const change of [r => { r.configSha256 = '0'.repeat(64); }, r => { r.versionFile.beforeSha256 = '0'.repeat(64); },
+      r => { r.versionFile.path = 'public/other.properties'; }]) {
+    const f = await imported(); change(f.result);
+    assert.equal(f.h.controller.openHostedProposal(hostedCanonical(f.result)), true);
+    const opening = f.h.publish(f.h.owner('opening')); f.h.last('open').resolve(opening); await flush();
+    f.h.publish(f.h.owner('editing'));
+    assert.equal(f.h.controller.selectedEntry(), null); assert.equal(f.h.count('prepare'), 0);
+    assert.equal(f.h.state.edit.attempt.invalidated, true); assert.equal(f.h.state.edit.integrityFailed, false);
+  }
+});
+test('dirty existing values and pending-Open edit/ABA are never overwritten by a pasted proposal', async () => {
+  for (const kind of ['dirty', 'edit', 'ABA']) {
+    const f = await imported(), { h } = f;
+    await openSaved(h); h.last('open').resolve(h.frame); await flush(); h.closeFinal();
+    h.original(ORIGINAL, f.opened);
+    const original = clone(h.controller.selectedEntry());
+    if (kind === 'dirty') {
+      h.controller.editField('name', '9.8.7'); const changed = clone(h.controller.selectedEntry());
+      assert.equal(h.controller.openHostedProposal(hostedCanonical(f.result)), false);
+      assert.deepEqual(h.controller.selectedEntry(), changed); assert.equal(h.count('open'), 1); continue;
+    }
+    assert.equal(h.controller.openHostedProposal(hostedCanonical(f.result)), true);
+    h.controller.editField('name', '9.8.7');
+    if (kind === 'ABA') h.controller.editField('name', original.values.name);
+    const changed = clone(h.controller.selectedEntry());
+    h.publish(h.owner('editing')); h.last('open').resolve(h.frame); await flush();
+    assert.deepEqual(h.controller.selectedEntry(), changed); assert.ok(changed.revision > original.revision);
+    assert.equal(h.state.edit.attempt.invalidated, true); assert.equal(h.state.edit.integrityFailed, false); assert.equal(h.count('prepare'), 0);
+  }
+});
+test('proposal refusal notifications preserve newer reentrant draft edits and edit/restore revisions', async () => {
+  for (const phase of ['editing', 'reviewing']) for (const kind of ['other-field', 'same-field-restore']) {
+    const f = await imported(), { h } = f; await importOpen(f);
+    if (phase === 'reviewing') await importReview(f);
+    const before = clone(h.controller.selectedEntry()); let notified = false;
+    h.controller.subscribe(() => {
+      if (notified || !h.state.hostedImportIssue?.startsWith('Changed values')) return;
+      notified = true;
+      if (kind === 'other-field') h.controller.editField('build', '9');
+      else { h.controller.editField('name', '9.0'); h.controller.editField('name', before.values.name); }
+    });
+    const accepted = h.controller.editField('name', '3.0');
+    assert.equal(notified, true);
+    const retained = h.controller.selectedEntry();
+    assert.deepEqual(retained.values, kind === 'other-field' ? { ...before.values, build: '9' } : before.values);
+    assert.equal(retained.revision, before.revision + (kind === 'other-field' ? 1 : 2));
+    assert.equal(accepted, false);
+    assert.equal(h.state.edit.attempt.invalidated, true); assert.equal(h.state.edit.attempt.closeRequested, true);
+    assert.equal(h.count('close'), 1); assert.equal(h.count('apply'), 0); assert.equal(h.state.edit.integrityFailed, false);
+  }
+});
+test('new proposal Open/Prepare/Apply notifications cannot bypass context, service or peer retirement', async () => {
+  for (const phase of ['open', 'prepare', 'apply']) for (const kind of ['context', 'service', 'peer']) {
+    const f = await imported(), { h, git } = f;
+    if (phase !== 'open') await importOpen(f);
+    if (phase === 'apply') await importReview(f);
+    let once = false;
+    h.controller.subscribe(() => {
+      const a = h.state.edit.attempt;
+      if (once || !a?.binding.proposal || !(phase === 'open' ? !a.openAdopted : phase === 'prepare' ? a.prepareClaimed : a.applyClaimed)) return;
+      once = true;
+      if (kind === 'context') { h.controller.selectionIntent(); h.controller.syncProject(); }
+      if (kind === 'service') git.change({ session: {} });
+      if (kind === 'peer') h.operation('Foreign original work');
+    });
+    const count = h.count(phase);
+    if (phase === 'open') h.controller.openHostedProposal(hostedCanonical(f.result));
+    else if (phase === 'prepare') h.controller.review();
+    else h.controller.apply(currentVersionApplyBinding(h.state));
+    assert.equal(once, true, phase + kind); assert.equal(h.count(phase), count, phase + kind);
+    assert.equal(h.state.edit.integrityFailed, false);
+  }
+});
+test('only saved exact original plus fresh Observe permits a message draft; navigation does not pretend atomic source', async () => {
+  const f = await imported(), { h, git } = f;
+  git.repository.editDraft('authorName', 'Existing author'); git.repository.editDraft('authorEmail', 'author@example.invalid');
+  await importOpen(f); await importReview(f); await importSave(f);
+  assert.notEqual(h.controller.hostedCommitReason(), null);
+  h.controller.setVisible(false); await git.refresh(modifiedVersion()); h.controller.setVisible(true); // existing Git page, then editor
+  assert.equal(h.controller.hostedCommitReason(), null);
+  const reads = git.calls.length;
+  assert.equal(h.controller.prefillHostedCommitMessage(), true);
+  assert.deepEqual(git.repository.getSnapshot().draft, { message: `Update version to ${f.values.name} (build ${f.values.build})\n\n${f.result.commitTrailer}`,
+    authorName: 'Existing author', authorEmail: 'author@example.invalid' });
+  assert.equal(h.controller.prefillHostedCommitMessage(), false); assert.equal(git.calls.length, reads);
+  assert.equal(h.count('apply'), 1); assert.ok(git.calls.every(([kind]) => ['start', 'status'].includes(kind)));
+});
+test('message shortcut preserves nonempty drafts, rejects foreign current source and never starts Git itself', async () => {
+  for (const kind of ['message', 'whitespace', 'other-path', 'head', 'branch', 'service']) {
+    const f = await imported(), { h, git } = f;
+    await importOpen(f); await importReview(f); await importSave(f);
+    const changes = kind === 'other-path' ? [...modifiedVersion(), { path: 'other.txt', index: 'M', worktree: ' ', kind: 'file', conflict: false }] : modifiedVersion();
+    await git.refresh(changes, kind === 'head' ? { head: 'b'.repeat(40) } : kind === 'branch' ? { branch: 'refs/heads/other' } : {});
+    if (kind === 'message' || kind === 'whitespace') git.repository.editDraft('message', kind === 'message' ? 'Keep my message' : ' ');
+    if (kind === 'service') git.change({ session: {} });
+    const before = clone(git.repository.getSnapshot().draft), reads = git.calls.length;
+    assert.equal(h.controller.prefillHostedCommitMessage(), false, kind);
+    assert.deepEqual(git.repository.getSnapshot().draft, before); assert.equal(git.calls.length, reads);
+  }
+});
+test('unchanged or lost/unknown Save cannot mint an imported commit message', async () => {
+  const noOp = await imported({ name: '1.2.3', build: 7 });
+  await importOpen(noOp); await importReview(noOp); await importSave(noOp); await noOp.git.refresh(modifiedVersion());
+  assert.equal(normalVersionEditResult(noOp.h.state.edit.attempt.projection), 'unchanged');
+  assert.equal(noOp.h.controller.prefillHostedCommitMessage(), false);
+  const lost = await imported(); await importOpen(lost); await importReview(lost);
+  assert.equal(lost.h.controller.apply(currentVersionApplyBinding(lost.h.state)), true);
+  lost.h.publish(lost.h.owner('applying')); lost.h.last('apply').reject(new Error('inert lost reply')); await flush();
+  assert.equal(lost.h.controller.prefillHostedCommitMessage(), false); assert.equal(lost.h.count('apply'), 1);
+  lost.h.publish(lost.h.owner('unknown'));
+  assert.equal(lost.h.controller.prefillHostedCommitMessage(), false); assert.equal(lost.git.repository.getSnapshot().draft.message, '');
 });

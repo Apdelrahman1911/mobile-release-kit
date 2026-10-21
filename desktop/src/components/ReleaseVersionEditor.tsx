@@ -8,6 +8,7 @@ import type { ReleaseVersionEditController, VersionApplyBinding, VersionEditStat
 import type { HelpContent } from '../types.ts';
 import { SavedTextRecoveryPanel } from './MetadataTextEditor.tsx';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
+import { HostedVersionImportPanel } from './HostedVersionImportPanel.tsx';
 
 function RawVersion({ view, side }: { view: VersionPreparedView; side: 'before' | 'after' }) {
   const value = side === 'before' ? view.file.before.state === 'present' ? view.file.before : null : view.file.after;
@@ -102,9 +103,9 @@ export function ReleaseVersionSave({ state, controller, onShowProject }: {
     {(state.edit.observationIssue || state.edit.integrityFailed || state.edit.generationLost) && <p role="alert">Original ownership is unverified. A later observer or missing reply cannot authorize another save.</p>}
   </section>;
 }
-export function ReleaseVersionEditor({ state, controller, session, onSettings, onHelp, onShowProject }: {
+export function ReleaseVersionEditor({ state, controller, session, onSettings, onHelp, onShowProject, onGit }: {
   state: VersionEditState; controller: ReleaseVersionEditController; session: ProjectSession | null;
-  onSettings: () => void; onHelp: (help: HelpContent) => void; onShowProject: (projectId: string) => void;
+  onSettings: () => void; onHelp: (help: HelpContent) => void; onShowProject: (projectId: string) => void; onGit?: () => void;
 }) {
   const [confirmation, setConfirmation] = useState<VersionApplyBinding | null>(null);
   const [reset, setReset] = useState<{ action: 'reload' | 'discard'; binding: VersionResetBinding } | null>(null);
@@ -121,6 +122,7 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
       <Badge>{state.edit.status?.capability.available ? 'Separate native writer' : 'Writer unavailable'}</Badge>
     </SectionHeading>
     <p>Project: <strong>{session?.project.name ?? 'No native project selected'}</strong>. No automatic bump, trimming or numeric coercion.</p>
+    <HostedVersionImportPanel state={state} controller={controller} onGit={onGit} />
     {session && isDirty(session) && <p className="review-caution"><strong>Unsaved Settings are not applied.</strong> The source, keys and iOS policy below come only from the saved configuration. Save Settings separately to change them; then explicitly reload this editor.</p>}
     <div className="button-row"><button type="button" className="button secondary" disabled={openReason !== null} title={openReason ?? undefined} onClick={() => controller.open()}>Open saved version editor</button>
       <button type="button" className="text-button" onClick={onSettings}>Project Settings / ignore prerequisite</button>
