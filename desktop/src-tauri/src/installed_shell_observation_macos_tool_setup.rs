@@ -765,7 +765,7 @@ impl Observation {
                     else {
                         let observed=s.observation.filter(|o|o.native_settled && !o.mutation_entered && !o.mutation_uncertain).ok_or_else(invalid)?;
                         if s.phase==registration::ServicePhase::Complete && s.reason==registration::Reason::None
-                            && s.prerequisite==registration::Prerequisite::Ready && observed.state==registration::ServiceState::Enabled {Some(Step::Catalog)}
+                            && s.prerequisite==registration::Prerequisite::Ready && observed.state==registration::ServiceState::Enabled {Some(Step::Choose(0))}
                         else if matches!(s.phase,registration::ServicePhase::Complete|registration::ServicePhase::Refused)
                             && s.reason!=registration::Reason::CleanupUnknown {Some(Step::Finish)}
                         else {return Err(invalid());}
@@ -776,7 +776,7 @@ impl Observation {
                     let s=document.android_toolchain_catalog_status()?;
                     if s.phase==catalog::Phase::Reading {None}
                     else if s.phase==catalog::Phase::Ready && s.reason==catalog::Reason::None && s.selected.is_none() {
-                        if s.entries.is_empty() {Some(Step::Choose(0))} else {Some(Step::Finish)}
+                        if s.entries.is_empty() {Some(Step::Inspect)} else {Some(Step::Finish)}
                     } else {return Err(invalid());}
                 },
                 Step::Choose(i) => {
@@ -801,7 +801,7 @@ impl Observation {
                         let record=r.tool_setup.as_mut().ok_or_else(invalid)?;
                         if record.sources[usize::from(i)] || record.source_generation!=s.source_generation {return Err(invalid());}
                         record.sources[usize::from(i)]=true;
-                        Some(if i<2 {Step::Choose(i+1)} else if i==2 {Step::Inspect} else {Step::RegisterInspect})
+                        Some(if i<2 {Step::Choose(i+1)} else if i==2 {Step::Catalog} else {Step::RegisterInspect})
                     } else {return Err(invalid());}
                 },
                 Step::Inspect|Step::Reuse => {
