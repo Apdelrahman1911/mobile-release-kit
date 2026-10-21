@@ -256,6 +256,7 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     let bytes = p::encode_response(&response)?;
     match &response.response {
         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+        p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,

@@ -1,3 +1,4 @@
+import { AgentVersionEditAccess } from './AgentVersionEditAccess.tsx';
 import { useEffect, useId, useRef, useState } from 'react';
 import { isDirty } from '../drafts.ts';
 import type { ProjectSession } from '../drafts.ts';
@@ -160,6 +161,7 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
       <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>
       <button type="button" className="button primary" disabled={!current || !controller.canApply(current)} onClick={() => { if (current) setConfirmation(current); }}>
         {versionNoOp(prepared.view) ? 'Confirm unchanged values…' : prepared.view.intent === 'create' ? 'Create version file…' : 'Save version values…'}</button></>}
+    <AgentVersionEditAccess controller={controller.agent} />
     {confirmation && prepared && <Confirmation view={prepared.view} allowed={controller.canApply(confirmation)} onCancel={() => setConfirmation(null)}
       onConfirm={() => { if (controller.apply(confirmation)) setConfirmation(null); }} />}
     {reset && <ResetConfirmation action={reset.action} allowed={!retained && sameVersionData(reset.binding, controller.resetBinding()) && (reset.action === 'discard' || openReason === null)}

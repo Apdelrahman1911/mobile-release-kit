@@ -410,6 +410,39 @@ impl EditOwner {
     }
 }
 
+// Prepared version delegation has consumed Opened+Prepared out of THREE
+// TOTAL reader frames. A malformed third Prepared can still be decoded before
+// sequence rejection: reserve BOTH the Seed Value and typed nested Value
+// backing, not only the expected 16KiB terminal. Four response-size terms cover
+// rounded raw Vec capacity plus independent JSON/typed string backing. The
+// actual closed version encoder (not write-side generic wire ceiling) caps
+// each of the existing one-slot command and writer buffers at 16KiB.
+const VERSION_FUTURE:usize = 2*crate::protocol::NODE_LIMIT*512
+    + 4*v::RESPONSE_LIMIT + 2*v::REQUEST_LIMIT + 2*v::STATUS_LIMIT + 1024*1024;
+impl EditOwner {
+    pub(crate) fn version_agent_edit_backing(&self)->Result<usize,BridgeError>{
+        let r=self.inner.registry.try_lock().map_err(|_|invalid_owner())?;
+        if self.inner.poisoned.load(Ordering::SeqCst)||r.exhausted{return Err(edit_unknown())}
+        let mut n=Usage{bytes:size_of::<Registry>(),nodes:0};
+        r.generation.heap(&mut n)?;r.loss_generation.heap(&mut n)?;r.window.heap(&mut n)?;
+        for keys in [&r.blocked_projects,&r.image_recovery_projects,&r.workflow_recovery_projects]{
+            n.add(keys.len().checked_mul(1024).ok_or_else(invalid_owner)?)?;
+            for key in keys{key.heap(&mut n)?;}
+        }
+        n.add(r.domain_blocks.0.len().checked_mul(4096).ok_or_else(invalid_owner)?)?;
+        for key in r.domain_blocks.0.keys(){key.heap(&mut n)?;}
+        for p in r.last.iter().chain(r.active.iter().map(|a|&a.projection)){
+            n.add(projection(p)?.checked_mul(if p.domain==EditDomain::ReleaseVersion{3}else{1}).ok_or_else(invalid_owner)?)?;
+        }
+        if let Some(a)=&r.active{
+            if a.session.domain!=EditDomain::ReleaseVersion{return Err(invalid_owner())}
+            n.add(size_of::<Session>())?;
+            if a.session.reserved_version.is_some(){n.add(NativeReservedVersionHandoff::backing_bytes().ok_or_else(invalid_owner)?)?;}
+        }
+        n.add(VERSION_FUTURE)?;Ok(n.bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

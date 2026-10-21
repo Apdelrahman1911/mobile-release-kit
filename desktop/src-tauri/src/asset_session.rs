@@ -1158,6 +1158,9 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
         && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_version_edit.rs"]
+pub(crate) mod agent_version_edit;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path="asset_session_service_configuration.rs"]
 mod agent_configuration;
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2207,6 +2210,8 @@ mod lookup_memory {
             self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(agent_upload_key::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_version_edit_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
             #[cfg(any(target_os="linux",target_os="macos"))]

@@ -1057,6 +1057,13 @@ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, B
         tauri::ipc::InvokeBody::Raw(_) => Err(BridgeError::invalid()),
     }
 }
+#[cfg(any(target_os="linux",target_os="macos"))]
+fn version_edit_agent_request_body(body:&tauri::ipc::InvokeBody)->Result<Value,BridgeError>{
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes)=>crate::asset_session::agent_version_edit::raw_request(bytes),
+        tauri::ipc::InvokeBody::Json(_)=>Err(BridgeError::invalid()),
+    }
+}
 fn artifact_inspection_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
     match body {
         tauri::ipc::InvokeBody::Raw(bytes) => crate::artifact_inspection_protocol::raw_request(bytes),
@@ -1644,6 +1651,34 @@ async fn revoke_agent_upload_key(webview:Webview,request:tauri::ipc::Request<'_>
     #[cfg(not(any(target_os="linux",target_os="macos")))]
     {let _=(window,request,state);Err(BridgeError::unavailable("Upload-key delegation is unavailable on this platform."))}
 }
+#[tauri::command]
+async fn agent_version_edit_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let args=crate::asset_session::agent_version_edit::status_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.agent_version_edit_status(args.as_ref())?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_version_edit_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let args=crate::asset_session::agent_version_edit::allow_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.allow_agent_version_edit_apply(window,args)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_version_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let args=crate::asset_session::agent_version_edit::revoke_request(version_edit_agent_request_body(request.body())?)?;serde_json::to_value(state.document.revoke_agent_version_edit(window,args)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
+}
+
 #[tauri::command]
 async fn agent_configuration_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -2235,7 +2270,17 @@ async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Req
 async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if matches!(request.body(),tauri::ipc::InvokeBody::Raw(_)) {
+        let origin=crate::asset_session::agent_version_edit::apply_request(version_edit_agent_request_body(request.body())?)?;
+        return state.document.apply_agent_version_edit(window,&origin);
+    }
     let body = request_body(&request);
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if body.as_ref().is_ok_and(|v|v.get("intent").is_none()&&v["sessionId"].as_str().is_some_and(|id|state.bridge.edits.version_edit_has_lease(id))) {
+        let args=body.and_then(edit_commands::apply)?;
+        return state.document.apply_version_edit_permitted(window,&args.session_id,&args.plan_token,None);
+    }
     if body.as_ref().is_ok_and(|body| body.get("intent").is_some()) {
         let result = body.and_then(crate::saved_text_recovery_protocol::apply)
             .and_then(|args| state.bridge.apply_release_version_recovery(&state.document, window, args));
@@ -3435,6 +3480,10 @@ struct UploadKeyRelayGuard {document:DocumentBinding,slot:Arc<crate::asset_sessi
 impl Drop for UploadKeyRelayGuard {fn drop(&mut self){if !self.closed{self.slot.lost(&self.document);}}}
 #[deny(unused_variables, unused_assignments)]
 #[cfg(any(target_os="linux",target_os="macos"))]
+struct VersionEditAgentRelayGuard(crate::asset_session::DocumentBinding);
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for VersionEditAgentRelayGuard{fn drop(&mut self){self.0.agent_version_edit_relay_lost();}}
+#[cfg(any(target_os="linux",target_os="macos"))]
 struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();}}
@@ -3456,6 +3505,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
     #[cfg(any(target_os="linux",target_os="macos"))]
     let configuration_guard=ConfigurationAgentRelayGuard(document.clone());
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let version_edit_guard=VersionEditAgentRelayGuard(document.clone());
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
@@ -3533,6 +3584,10 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let _configuration_guard=configuration_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let _version_edit_guard=version_edit_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut version_edit_key=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut configuration_revision=None;
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
@@ -3588,6 +3643,13 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // SAME retained relay owns the call; no detached writer is created.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let _ = application_history.publish_identity_history();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(status)=document.agent_version_edit_status(None){
+                let key=(status.grant_id.clone(),status.live,status.request.as_ref().map(|r|(r.origin.request_id.clone(),r.revision,r.phase)));
+                if version_edit_key.as_ref()!=Some(&key){
+                    let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-edit",&status);version_edit_key=Some(key);
+                }
+            }
             #[cfg(any(target_os="linux",target_os="macos"))]
             if let Ok(Some(status))=document.agent_configuration_relay(){
                 let key=(status.service_instance.clone(),status.revision);
@@ -5545,6 +5607,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+            agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,

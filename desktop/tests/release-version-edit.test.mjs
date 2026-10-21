@@ -1002,3 +1002,81 @@ test('unchanged or lost/unknown Save cannot mint an imported commit message', as
   lost.h.publish(lost.h.owner('unknown'));
   assert.equal(lost.h.controller.prefillHostedCommitMessage(), false); assert.equal(lost.git.repository.getSnapshot().draft.message, '');
 });
+
+// Existing actual controller, original native-status parser and controlled API
+// promises. These tests do not claim a fake native lease, write or joined IO.
+function versionDelegate(h) {
+  let listener, access, allowHook = null;
+  const requests = [], revokes = [];
+  const api = {
+    subscribe: async fn => { listener=fn; return ()=>{listener=null;}; },
+    allow: async input => {
+      requests.push(input);if(allowHook)await allowHook();
+      const owner=h.state.edit.attempt.projection, v=owner.prepared.view;
+      return access={schemaVersion:1,serviceInstance:'1'.repeat(32),projectId:'2'.repeat(32),grantId:'3'.repeat(32),nonce:input.nonce,
+        review:{original:clone(input.original),nativeStatusRevision:input.statusRevision,name:v.values.name,build:v.values.build,source:v.source,
+          beforeBytes:v.file.before.bytes,beforeSha256:v.file.before.sha256,afterBytes:v.file.after.bytes,afterSha256:v.file.after.sha256,candidateId:h.state.edit.attempt.binding.reserved?.candidateId??null},
+        live:true,remainingMs:800000,request:null};
+    },
+    revoke: async nonce => {revokes.push(nonce);return access?{...access,live:false,remainingMs:0}:{schemaVersion:1,serviceInstance:null,projectId:null,grantId:null,nonce:null,review:null,live:false,remainingMs:0,request:null};},
+    status: async()=>access,
+    apply: origin => {const p=deferred();requests.push({kind:'apply',origin:clone(origin),...p});return p.promise;},
+  };
+  h.api.agentVersionEdit=api;
+  return {requests,revokes,api,get access(){return access;},allowHook:fn=>{allowHook=fn;},submit:()=>{
+    const a=clone(access);a.live=false;a.remainingMs=0;a.request={schemaVersion:1,origin:{projectId:a.projectId,serviceInstance:a.serviceInstance,requestId:'4'.repeat(32)},grantId:a.grantId,revision:1,phase:'queued',settlement:'pending',review:clone(a.review),cancelRequested:false,result:null,doNotReplay:true};
+    listener(a);return a;
+  }};
+}
+async function delegateReview({reserved=false,onSaveBoundary}={}) {
+  const h=harness({onSaveBoundary});const d=versionDelegate(h);await h.controller.connect(h.api);
+  if(reserved){
+    const value={id:'e'.repeat(32),candidateId:'f1234567-1234-4234-8234-123456789012',name:VALUES.name,build:Number(VALUES.build)};
+    assert.equal(h.controller.openReserved(value),true);h.publish(h.owner('opening'));h.publish(h.owner('editing'));assert.equal(h.controller.review(),true);h.publish(h.owner('reviewing'));
+  } else await reviewing(h);
+  assert.equal(h.controller.agent.canAllow(),true);await h.controller.agent.allow();assert.ok(d.access?.live);return {h,d};
+}
+
+test('manual and genuine reserved controller review delegate one Apply; final event cannot join pending API',async()=>{
+ for(const reserved of [false,true]){
+  const {h,d}=await delegateReview({reserved});d.submit();await flush();const apply=d.requests.find(x=>x.kind==='apply');assert.ok(apply);
+  assert.equal(h.count('apply'),0);assert.equal(h.state.edit.attempt.applyClaimed,true);assert.equal(h.controller.apply(currentVersionApplyBinding(h.state)),false);
+  h.publish(h.owner('applying'));const final=h.publish(h.owner('final'));assert.equal(h.state.edit.attempt.handled,true);assert.equal(versionDraftDirty(h.controller.selectedEntry()),false);
+  assert.equal(h.controller.agent.retains(),true);assert.notEqual(h.controller.openReason(),null);assert.equal(h.controller.open(),false);
+  apply.resolve(final);await flush();assert.equal(h.controller.agent.retains(),false);assert.equal(d.requests.filter(x=>x.kind==='apply').length,1);assert.equal(h.count('open'),1);
+ }
+});
+
+test('claimed delegation rechecks subscriber and save-boundary drift before Apply, retains STOP until original final',async()=>{
+ for(const cut of ['event','boundary','draft','peer']){
+  let h,armed=false;const v=await delegateReview({onSaveBoundary:()=>{if(armed&&cut==='boundary')h.controller.selectionIntent();}});h=v.h;const d=v.d;armed=true;
+  let fired=false;const off=h.controller.agent.subscribe(()=>{if(!fired&&h.controller.agent.delegated()){fired=true;
+   if(cut==='event')h.controller.selectionIntent();if(cut==='draft')h.controller.editField('build','9');if(cut==='peer')h.operation('another original');
+  }});
+  d.submit();await flush();off();assert.equal(d.requests.filter(x=>x.kind==='apply').length,0,cut);assert.equal(d.revokes.length,1,cut);assert.equal(h.controller.agent.retains(),true);
+  h.closeFinal();await flush();assert.equal(h.controller.agent.retains(),false,cut);if(cut==='draft')assert.equal(h.controller.selectedEntry().values.build,'9');
+ }
+});
+
+test('delegated lost ACK never replays; newer draft and original exact final survive later status',async()=>{
+ const {h,d}=await delegateReview();d.submit();await flush();const apply=d.requests.find(x=>x.kind==='apply');h.publish(h.owner('applying'));h.controller.editField('build','9');
+ const final=h.publish(h.owner('final'));assert.equal(h.controller.selectedEntry().values.build,'9');assert.equal(h.controller.selectedEntry().stale,true);
+ // A later, different lastTerminal is not the old caller's return or outcome.
+ const next={...clone(final.lastTerminal),sessionId:'f'.repeat(32)};h.emit(status(final.statusRevision+1,null,next));assert.equal(h.controller.agent.retains(),true);
+ apply.reject({code:'IpcReplyLost'});await flush();assert.equal(d.requests.filter(x=>x.kind==='apply').length,1);assert.equal(h.controller.agent.retains(),false);
+ assert.equal(h.state.edit.attempt.projection.sessionId,ID.session);assert.equal(h.controller.selectedEntry().values.build,'9');
+});
+
+test('Allow pending retains old API; reentrant revoke and replaced context never issue delegated Apply',async()=>{
+ const h=harness(),d=versionDelegate(h);await h.controller.connect(h.api);await reviewing(h);const wait=deferred();d.allowHook(()=>wait.promise);
+ const allowed=h.controller.agent.allow();await flush();assert.equal(d.requests.length,1);h.controller.agent.revoke();h.controller.beginConnection();
+ assert.equal(h.controller.agent.retains(),true);wait.resolve();await allowed;await flush();assert.equal(d.revokes.length,1);assert.equal(d.requests.filter(x=>x.kind==='apply').length,0);
+});
+
+test('GUI winner before Submit remains ordinary Apply; unused allowance revokes without another command', async()=>{
+ const {h,d}=await delegateReview();const binding=currentVersionApplyBinding(h.state);
+ assert.equal(h.controller.apply(binding),true);await flush();assert.equal(h.count('apply'),1);assert.equal(d.revokes.length,1);
+ assert.equal(d.requests.filter(x=>x.kind==='apply').length,0);assert.equal(h.controller.agent.delegated(),false);
+ h.publish(h.owner('applying'));const final=h.publish(h.owner('final'));h.last('apply').resolve(final);await flush();
+ assert.equal(h.state.edit.attempt.handled,true);assert.equal(h.controller.agent.retains(),false);assert.equal(h.count('close'),0);
+});

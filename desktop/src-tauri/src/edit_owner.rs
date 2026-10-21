@@ -46,6 +46,14 @@ pub(crate) struct ConfigurationAgentLink;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path="edit_owner_service_version_edit.rs"]
+mod agent_version_edit;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use agent_version_edit::{Claim as VersionEditClaim, Decision as VersionEditDecision};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct VersionEditClaim;
+
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
@@ -982,6 +990,8 @@ struct Session {
     reserved_version: Option<NativeReservedVersionHandoff>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_configuration: Option<Arc<ConfigurationAgentLink>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_version_edit: std::sync::OnceLock<Arc<agent_version_edit::Link>>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -993,7 +1003,7 @@ struct Session {
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture_metadata_context: Option<metadata_wire::Context>,
     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
-    stop: watch::Sender<bool>, wake: Notify, force_due: AtomicBool, driver_done: AtomicBool,
+    stop: watch::Sender<bool>, wake: Arc<Notify>, force_due: AtomicBool, driver_done: AtomicBool,
     pipes: watch::Sender<PipeAcquisition>, frames: mpsc::Sender<ChildFrame>,
     driver_joined: AtomicBool, driver_join_failed: AtomicBool,
     watchdog_joined: AtomicBool, watchdog_join_failed: AtomicBool, manager_join_failed: AtomicBool,
@@ -1635,6 +1645,8 @@ impl Inner {
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&a.session);
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_version_edit::unknown(&a.session);
             a.unknown = true;
             a.projection.phase = Phase::Unknown;
             a.projection.native_finality = NativeFinality::Unknown;
@@ -1684,6 +1696,11 @@ impl Inner {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
             agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+            self.trigger_locked(publication,r,id,reason,at);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+            agent_version_edit::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
             self.trigger_locked(publication,r,id,reason,at);
         }
         // Evaluate the original phase endpoint before a new native F can clear
@@ -2331,6 +2348,8 @@ impl EditOwner {
             reserved_version,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_configuration,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_version_edit:std::sync::OnceLock::new(),
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2341,7 +2360,7 @@ impl EditOwner {
             fixture_version,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_metadata_context: metadata.clone(),
-            wake: Notify::new(), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
+            wake: Arc::new(Notify::new()), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
             pipes, frames, driver_joined: AtomicBool::new(false), driver_join_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_join_failed: AtomicBool::new(false), manager_join_failed: AtomicBool::new(false),
             driver_join_panicked: AtomicBool::new(false), watchdog_join_panicked: AtomicBool::new(false), manager_join_panicked: AtomicBool::new(false),
@@ -2663,11 +2682,12 @@ impl EditOwner {
     }
     fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
-        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None)
+        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None,None)
     }
     fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
         registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
-        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>)->Result<DomainStatus,BridgeError>{
+        if agent_version.is_some()&&(domain!=EditDomain::ReleaseVersion||recovery_intent){return Err(invalid_owner());}
         if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
@@ -2722,6 +2742,8 @@ impl EditOwner {
             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Start) {
                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_version_edit::consume(a,agent_version){return Err(invalid_owner());}
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3534,7 +3556,7 @@ fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
 }
 fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
     end
 }
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
@@ -3550,10 +3572,16 @@ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
         let now = Instant::now();
         return if let Some(start) = cleanup {
             if now >= reserved_cleanup_end(owner,start + FINALIZATION) && !unknown { inner.unknown(&owner.id); continue; }
-            if now >= start + SOFT_STOP {
+            let end=if now >= start + SOFT_STOP {
                 if !owner.force_due.swap(true, Ordering::SeqCst) { owner.wake.notify_waiters(); }
                 if unknown { None } else { Some(reserved_cleanup_end(owner,start + FINALIZATION)) }
-            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) }
+            } else { Some(reserved_cleanup_end(owner,start + SOFT_STOP)) };
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            let end=match owner.agent_version_edit.get(){
+                Some(link) if !unknown=>end.map(|end|link.lease.cleanup_poll_end(end,now)),
+                _=>end,
+            };
+            end
         } else {
             let end = phase_deadline(review, phase, applying).unwrap_or(review);
             if now >= end {
@@ -4575,7 +4603,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
           agent_identity::actions::retired(&r, &a.session, a.unknown);
-          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current); }
+          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current);
+          agent_version_edit::retired(&r,&a.session,a.unknown); }
     }
     guard.completed = true;
     })();

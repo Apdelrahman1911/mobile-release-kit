@@ -29,6 +29,8 @@ mod git_repository;
 mod git_remote;
 #[path="installed_cli_version_reserve.rs"]
 mod version_reserve;
+#[path="installed_cli_version_edit.rs"]
+mod version_edit;
 #[path="installed_cli_store.rs"]
 mod store;
 #[path="installed_cli_apple_provisioning.rs"]
@@ -64,6 +66,9 @@ Usage:\n\
   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n\
+  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -275,6 +280,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
+            "versionEdit": {"scope":"already-desktop-prepared-version-save","commands":version_edit::COMMANDS,"defaultEnabled":false,"oneUse":true,
+                "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
+                "cliOpenPrepare":false,"readGrantAuthorizesEdits":false,"reservedHandoffReconstructed":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
@@ -348,6 +356,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
         text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("\nVersion editing delegates only one existing Desktop-prepared review. No CLI Open/Prepare or automatic allocation.\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
@@ -447,6 +456,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+        p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
             "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
@@ -481,6 +491,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     if configuration::recognizes(&args){return configuration::run(args);}
     if identity::recognizes(&args) { return identity::run(args); }
     if upload_key::recognizes(&args) { return upload_key::run(args); }
+    if version_edit::recognizes(&args) { return version_edit::run(args); }
     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
     if store::recognizes(&args){return store::run(args);}
     if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
@@ -573,7 +584,7 @@ mod tests {
         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 320); // Two detail inboxes plus eight distinct 32-row metadata namespaces.
+        assert_eq!(caps["requestDiscovery"]["maxRequests"], 352); // Two detail inboxes plus nine distinct 32-row metadata namespaces.
         assert!(caps["requestDiscovery"]["families"].as_array().unwrap().iter().any(|family| family == "play-cleanup"));
     }
     #[test]

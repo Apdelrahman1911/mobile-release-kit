@@ -63,6 +63,7 @@ impl ApplicationService {
         additional_requests.extend(self.configuration_requests.catalogue(project)?);
         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
+        additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::PlayCleanup,request_id}));
         let view = data::Catalogue {
             schema_version: 2,

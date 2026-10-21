@@ -1,5 +1,8 @@
 // App-retained two-string draft and observer. The SAME native EditOwner owns
 // all leases, one-use plans, processes, journals, cancellation and finality.
+import { ServiceVersionEditController } from './serviceVersionEditController.ts';
+import type { VersionEditCandidate } from './serviceVersionEditController.ts';
+import type { VersionEditOrigin, VersionEditReview } from './serviceVersionEditProtocol.ts';
 import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedTextRecoverySettled, savedTextRecoverySucceeded } from './savedTextRecovery.ts';
 import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { parseReservedVersion } from './versionReserve.ts';
@@ -130,7 +133,8 @@ export class ReleaseVersionEditController {
   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
   private proposal: { binding: ContextBinding; git: HostedImportGitCapture; draft: VersionDraft | null; retired: boolean; copied: boolean } | null = null;
   private readonly context: Context;
-  constructor(context: Context) { this.context = context; }
+  readonly agent: ServiceVersionEditController;
+  constructor(context: Context) { this.context = context; this.agent = new ServiceVersionEditController(() => this.agentCandidate()); }
   getSnapshot = (): VersionEditState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(next: VersionEditState): void {
@@ -140,6 +144,7 @@ export class ReleaseVersionEditController {
         this.state.edit.status?.windowGeneration !== this.recoveryCompletion.binding.windowGeneration ||
         !usable(this.state.edit) || this.state.edit.unknownEvidence)) this.recoveryCompletion = null;
     for (const listener of this.listeners) listener();
+    this.agent.sourceChanged();
   }
   private edit(next: OwnerState): void { this.publish({ ...this.state, edit: next }); }
   private attempt(patch: Partial<VersionAttempt>): void {
@@ -223,7 +228,7 @@ export class ReleaseVersionEditController {
     return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.operationReason(reserved);
   }
   openReason(): string | null {
-    return this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+    return (this.agent.retains() ? 'Wait for the original delegated Save call AND native retirement. Do not resend Apply.' : null) ?? this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
       (!this.selectedEntry() && Object.keys(this.state.entries).length >= 16 ? 'Sixteen in-memory version drafts are already retained. No draft will be evicted automatically.' : null);
   }
   private sameContext(binding: ContextBinding, selected = true): boolean {
@@ -308,7 +313,7 @@ export class ReleaseVersionEditController {
   }
   reservedOpenReason(): string | null {
     const entry = this.selectedEntry();
-    return this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+    return (this.agent.retains() ? 'Wait for the original delegated Save call and native retirement.' : null) ?? this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
       (!entry && Object.keys(this.state.entries).length >= 16 ? 'Existing version drafts are retained; no draft will be evicted.' : null) ??
       (entry && (entry.stale || versionDraftDirty(entry)) ?
       'Keep or explicitly discard the existing version draft before opening a reservation. It will not be overwritten.' : null);
@@ -319,7 +324,7 @@ export class ReleaseVersionEditController {
     return this.start(false, false, reserved);
   }
   private start(review: boolean, reload: boolean, reserved?: ReservedVersion, proposal?: HostedVersionProposal): boolean {
-    if (this.disposed || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
+    if (this.disposed || this.agent.retains() || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
     const project = this.context.selectedProject(), status = this.state.edit.status, entry = this.selectedEntry();
     if (!project || !status || review && (!entry || entry.stale || !versionValuesBounded(entry.values))) return false;
     const git = proposal ? captureHostedImportGit(this.hostedGit(), proposal, 'before-open') : null;
@@ -332,6 +337,9 @@ export class ReleaseVersionEditController {
       reload, expectedOriginal: reload ? null : entry?.original ?? null, ...(reserved ? { reserved } : {}), ...(proposal ? { proposal } : {}) });
     const submission = review && entry ? this.submission(entry) : null;
     const originalApi = this.api;
+    this.agent.newOriginal();
+    // Revoking the previous unused permission can synchronously notify UI.
+    if (this.disposed || this.api !== originalApi || this.context.selectedProject() !== project || this.selectedEntry() !== entry || this.agent.retains()) return false;
     this.proposal = proposal && git ? { binding, git, draft: entry, retired: false, copied: false } : null;
     this.publish({ ...this.state, error: null, hostedImportIssue: null, edit: { ...this.state.edit, attempt: { binding, submission, sessionId: null, projection: null,
       projectionRevision: status.statusRevision, openAdopted: false, prepareClaimed: false, applyClaimed: false, submittedPlanToken: null,
@@ -393,7 +401,7 @@ export class ReleaseVersionEditController {
       (!attempt.binding.proposal || this.proposalServiceMatches(attempt.binding)) && (!binding || same(current, binding));
   }
   apply(binding: VersionApplyBinding): boolean {
-    if (!this.api || !this.canApply(binding)) return false;
+    if (!this.api || this.agent.delegated() || !this.canApply(binding)) return false;
     const original = this.state.edit.attempt!.binding, api = this.api;
     this.attempt({ applyClaimed: true, submittedPlanToken: binding.planToken });
     this.context.onSaveBoundary(original.projectId);
@@ -403,6 +411,35 @@ export class ReleaseVersionEditController {
           (!original.proposal || this.proposalServiceMatches(original))))
       void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
     return true;
+  }
+  private agentCandidate(): VersionEditCandidate | null {
+    const api = this.api, port = api?.agentVersionEdit, attempt = this.state.edit.attempt, entry = this.selectedEntry();
+    const project = this.context.selectedProject(), status = this.state.edit.status, binding = currentVersionApplyBinding(this.state);
+    const owner = attempt?.projection, view = owner?.prepared?.view;
+    if (!api || !port || !attempt || !entry || !project || !status || !binding || !view || !owner?.checkout ||
+        attempt.binding.proposal || view.intent !== 'edit' || view.file.before.state !== 'present' || !this.canApply(binding)) return null;
+    const original = attempt.binding;
+    const review: VersionEditReview = freeze({original:{sessionId:binding.sessionId,ownerGeneration:owner.ownerGeneration,
+      revision:owner.checkout.revision,planToken:binding.planToken},nativeStatusRevision:status.statusRevision,
+      name:view.values.name,build:view.values.build,source:view.source,beforeBytes:view.file.before.bytes,beforeSha256:view.file.before.sha256,
+      afterBytes:view.file.after.bytes,afterSha256:view.file.after.sha256,candidateId:original.reserved?.candidateId ?? null});
+    const live = () => !this.disposed && this.api === api && this.api.agentVersionEdit === port &&
+      this.state.edit.attempt?.binding === original && this.context.selectedProject() === project && this.sameContext(original) &&
+      !this.state.edit.integrityFailed && !this.state.edit.generationLost && !this.state.edit.nativeBlocked && !this.state.edit.observationIssue &&
+      !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(!!original.reserved);
+    const current = () => live() && this.selectedEntry() === entry && this.state.edit.status?.statusRevision === review.nativeStatusRevision && this.canApply(binding);
+    return {projectId:project.project.id,api:port,review,current,live,apply:async (origin: VersionEditOrigin) => {
+      if (!current()) throw new Error('Version edit source or approval changed.');
+      this.attempt({applyClaimed:true,submittedPlanToken:binding.planToken});
+      this.context.onSaveBoundary(original.projectId);
+      // Applies equally to manual and genuine reserved inputs. Nothing from
+      // a listener, navigation or another draft can retarget this native call.
+      if (!live() || this.selectedEntry() !== entry || this.state.edit.attempt?.closeRequested ||
+          this.state.edit.status?.statusRevision !== review.nativeStatusRevision || this.remainingReviewMs() <= 0) {
+        this.requestClose(); throw new Error('Original delegated Save refused before invocation.');
+      }
+      await this.command('apply',original,() => port.apply(origin)); // Retain actual caller return, not apply()'s boolean.
+    }};
   }
   requestClose(): void {
     const attempt = this.state.edit.attempt;
@@ -426,7 +463,7 @@ export class ReleaseVersionEditController {
   beginConnection(): void {
     if (this.disposed) return;
     this.invalidate();
-    const held = !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
+    const held = this.agent.retains() || !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
     this.publish({ ...this.state, mode: 'unavailable', help: null, connectionGeneration: Math.min(U32_MAX, this.state.connectionGeneration + 1),
       edit: { ...this.state.edit, nativeBlocked: this.state.edit.nativeBlocked || held } });
     if (held) return; // Retain the ORIGINAL API/subscription for its own finality.
@@ -439,6 +476,7 @@ export class ReleaseVersionEditController {
     if (this.api) this.beginConnection();
     if (this.api || this.state.edit.nativeBlocked || this.state.edit.integrityFailed || this.state.edit.generationLost) return;
     this.api = api; this.publish({ ...this.state, mode: api.mode, edit: { ...this.state.edit, mode: api.mode } });
+    await this.agent.connect(api.agentVersionEdit);
     this.syncProject(); if (api.mode === 'native') await this.checkStatus();
   }
   async checkStatus(): Promise<void> {
@@ -625,6 +663,7 @@ export class ReleaseVersionEditController {
   }
   inspectRecoveryReason(): string | null {
     const edit = this.state.edit, project = this.context.selectedProject();
+    if (this.agent.retains()) return 'Wait for the original delegated Save call and native retirement.';
     if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native saved-version service; browser preview cannot inspect files.';
     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
       return 'Original native ownership or cleanup is unverified. Keep the original operation; recovery cannot reset that block.';
@@ -780,6 +819,8 @@ export class ReleaseVersionEditController {
           this.adoptOutcome(attempt);
         }
         attempt = this.state.edit.attempt; if (!attempt) continue;
+        if (attempt.projection?.phase === 'final' && attempt.projection.nativeFinality === 'settled' && !attempt.projection.lateSettled)
+          this.agent.nativeFinal(attempt.projection.sessionId,attempt.projection.ownerGeneration,!this.state.edit.integrityFailed && !this.state.edit.unknownEvidence);
         if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled) this.attempt({ handled: true });
         attempt = this.state.edit.attempt;
         if (!attempt || attempt.handled || !attempt.sessionId || !attempt.projection || this.state.edit.generationLost ||
@@ -818,6 +859,7 @@ export class ReleaseVersionEditController {
   }
   dispose(): void {
     if (this.disposed) return;
+    this.agent.dispose();
     this.shutdownIntent();
     const attempt = this.state.edit.attempt;
     if (this.api?.mode === 'native' && attempt?.sessionId && attempt.projection && !attempt.closeClaimed && !this.state.edit.generationLost &&

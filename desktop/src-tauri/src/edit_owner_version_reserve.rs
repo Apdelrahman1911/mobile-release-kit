@@ -150,6 +150,7 @@ impl NativeReservedVersionHandoff {
             sources: Mutex::new(crate::asset_source::GitReadSources::new()),
         })
     }
+    pub(crate) fn candidate_data(&self) -> &str { self.data["reservation"]["request"]["candidateId"].as_str().unwrap_or("") }
     pub(crate) fn backing_bytes() -> Option<usize> {
         let bytes = std::mem::size_of::<Self>().checked_add(6 * 12 * 1024 + 8192)?;
         #[cfg(all(

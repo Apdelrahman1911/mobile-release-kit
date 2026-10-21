@@ -11,7 +11,7 @@ use crate::{
 };
 use std::sync::{OnceLock, Weak};
 #[path = "edit_owner_service_configuration_memory.rs"]
-mod memory;
+pub(super) mod memory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -376,6 +376,7 @@ impl EditOwner {
             false,
             None,
             Some(&link.entry),
+            None,
         )?
         .configuration()
     }

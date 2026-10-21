@@ -616,6 +616,8 @@ impl DesktopBridge {
     pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         #[cfg(any(target_os="linux",target_os="macos"))]
+        if self.edits.version_edit_has_lease(session_id){return document.apply_version_edit_permitted(window,session_id,plan_token,None);}
+        #[cfg(any(target_os="linux",target_os="macos"))]
         if let Some(observed)=self.edits.reserved_version_apply_observation(window,session_id,plan_token)? {return Ok(observed);}
         #[cfg(any(target_os="linux",target_os="macos"))]
         return document.release_version_phase_admit(session_id,crate::edit_owner::ReservedVersionStep::Apply,|bridge,registration,publisher|

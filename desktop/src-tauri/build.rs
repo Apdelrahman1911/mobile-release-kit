@@ -288,6 +288,7 @@ fn main() {
     "revoke_agent_git_commit",
     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+    "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",

@@ -5,6 +5,9 @@
   "windows": ["main"],
   "local": true,
   "permissions": [
+    "allow-agent-version-edit-status",
+    "allow-allow-agent-version-edit-apply",
+    "allow-revoke-agent-version-edit",
     "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",

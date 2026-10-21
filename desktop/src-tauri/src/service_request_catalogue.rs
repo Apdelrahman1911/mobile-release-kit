@@ -15,7 +15,8 @@ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_
     + crate::service_configuration_protocol::REQUEST_LIMIT
     + crate::service_store_protocol::REQUEST_LIMIT
     + crate::service_play_cleanup_protocol::REQUEST_LIMIT
-    + crate::service_apple_provisioning_protocol::REQUEST_LIMIT;
+    + crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+    + crate::service_version_edit_protocol::REQUEST_LIMIT;
 pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
 pub const VIEW_BYTES: usize = 64 * 1024;
 // Same eight IPC workers: one typed view, its encoded output, finite borrowed
@@ -177,6 +178,7 @@ pub enum AdditionalFamily {
     Store,
     PlayCleanup,
     AppleProvisioning,
+    VersionEdit,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
@@ -189,6 +191,7 @@ impl AdditionalFamily {
             Self::Store => 5,
             Self::PlayCleanup => 6,
             Self::AppleProvisioning=>7,
+            Self::VersionEdit=>8,
         }
     }
     fn status_command(self) -> &'static str {
@@ -204,6 +207,7 @@ impl AdditionalFamily {
             Self::Store => "store-status",
             Self::PlayCleanup => "play-cleanup-status",
             Self::AppleProvisioning=>"apple-provisioning-status",
+            Self::VersionEdit=>"version-edit-status",
         }
     }
 }
@@ -265,7 +269,7 @@ impl Catalogue {
         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
             return Err(Error::InvalidRequest);
         }
-        let mut counts = [0usize; 8];
+        let mut counts = [0usize; 9];
         for (index, row) in additional.iter().enumerate() {
             let namespace = row.family.namespace();
             counts[namespace] += 1;
@@ -283,6 +287,7 @@ impl Catalogue {
             || counts[5] > crate::service_store_protocol::REQUEST_LIMIT
             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
             || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+            || counts[8] > crate::service_version_edit_protocol::REQUEST_LIMIT
         {
             return Err(Error::InvalidRequest);
         }
@@ -493,7 +498,7 @@ mod tests {
         }
         fullest.schema_version = 2;
         fullest.additional_requests = Some(
-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning]
+            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit]
                 .into_iter()
                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
                 .collect(),
@@ -552,12 +557,13 @@ mod tests {
             AdditionalRequest { family: AdditionalFamily::Store, request_id: id(3) },
             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
             AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::VersionEdit, request_id: id(3) },
         ]);
         current.validate().unwrap();
         let text = human(&current);
         assert!(!text.contains("No requests retained"));
         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3)] {
+            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3)] {
             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
         }
         let encoded = serde_json::to_value(&current).unwrap();
@@ -572,7 +578,7 @@ mod tests {
         assert!(!accepted(changed));
         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning] {
+        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit] {
             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
             assert!(current.validate().is_err());
             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);

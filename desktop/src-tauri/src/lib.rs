@@ -125,6 +125,8 @@ mod git_local_state;
 mod service_protocol;
 mod service_upload_key_protocol;
 mod service_upload_key_requests;
+mod service_version_edit_protocol;
+mod service_version_edit_requests;
 mod service_configuration_protocol;
 mod service_configuration_requests;
 #[path="service_version_reserve_protocol.rs"]

@@ -1292,6 +1292,11 @@ impl DocumentBinding {
     }
     /// Prepare/Apply reuse their existing commands and writer. A normal manual
     /// Session has no handoff and follows the UNCHANGED registered edit path.
+    pub(super) fn release_version_prepared_current(&self,state:&DocumentState,session:&str)->Result<(),BridgeError>{
+        if let Some(access)=self.inner.bridge.edits.reserved_version_access(MAIN,session)?{
+            let h=access.handoff();h.gate().locked(self,state,h,None)
+        } else if state.github.native_work_pending()||version_allocation::pending(state){Err(p::refused())} else {state.github.setup_ensure_idle()}
+    }
     pub(crate) fn release_version_phase_admit<T>(
         &self,
         session: &str,
