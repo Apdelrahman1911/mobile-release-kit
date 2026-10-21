@@ -2278,7 +2278,7 @@ jobs:
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
-      - name: Observe four Fetch then three Push cases on the same current installed Git observer
+      - name: Observe four Fetch, three Push and five create-only Push cases on the same installed Git observer
         id: git_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && matrix.target == 'aarch64-apple-darwin' && matrix.native_scope == 'git-native' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
         timeout-minutes: 25
@@ -2289,15 +2289,18 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # Two explicit invocations of the existing owner, not a combined case
-          # or a renewed operation clock. Each retains its existing600s suite,
-          # 120s case and45/55s original endpoints. All four runtime originals
-          # stay bound to the same installed M, including the unused peer pair.
-          # Nonzero/unknown/78 in Fetch prevents Push; no fallback or retry.
+          # Three success-ordered invocations of the existing owner, not a
+          # combined case or renewed clock. Each keeps600s suite/120s case and
+          # 45/55s original endpoints; all four runtime originals remain bound
+          # to the same installed M, including the unused peer pair.
+          # Twelve cases share the unchanged25min outer limit: this is not a
+          # promise every worst-case runtime plus admission overhead will fit.
+          # Any nonzero/unknown/78 prevents the next call; no fallback/retry.
           # Synthetic provider responses prove neither TLS nor a live account,
           # and no shipping tool nomination is changed by these observations.
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-fetch-native
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
       - name: Observe four original identity edits on the current installed observer
         id: identity_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'

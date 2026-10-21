@@ -15,13 +15,14 @@ impl GitLocalSources {
     }
     pub(super) fn observed_push_tool(
         &mut self,
+        kind:wire::Kind,
         stop: &mut dyn FnMut() -> bool,
     ) -> Result<bool, Reason> {
         let Some(control) = self.push_observation.clone() else {
             return Ok(false);
         };
         let n = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
-        if !control.live()
+        if !control.live() || control.kind()!=kind
             || std::path::Path::new(&n.root) != control.project()
             || self.push_observation_file.is_some()
         {

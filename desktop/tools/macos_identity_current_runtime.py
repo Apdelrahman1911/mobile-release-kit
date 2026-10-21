@@ -13,6 +13,7 @@ import sys
 
 SCOPE = "project-identity-native"
 PUSH_SCOPE = "git-push-native"
+PUSH_CREATE_SCOPE = "git-push-create-native"
 FETCH_SCOPE = "git-fetch-native"
 GIT_SCOPE = "git-native"
 TOOLS_SCOPE = "tool-setup"
@@ -102,7 +103,7 @@ def observation_scope(environment, scope):
     """
     native = environment.get("MRK_MACOS_NATIVE_SCOPE")
     need(type(scope) is str and ((native == SCOPE and scope == SCOPE) or (native == PUSH_SCOPE and scope == PUSH_SCOPE) or (native == FETCH_SCOPE and scope == FETCH_SCOPE)
-         or (native == GIT_SCOPE and scope in (FETCH_SCOPE, PUSH_SCOPE))
+         or (native == GIT_SCOPE and scope in (FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE))
          or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE))),
          "current-native-observation-scope")
     return scope
@@ -112,7 +113,7 @@ def arguments(argv):
     if argv == ["--target", TARGET]:
         return SCOPE  # Preserve the original identity-only invocation.
     need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
-         and type(argv[3]) is str and argv[3] in (SCOPE, FETCH_SCOPE, PUSH_SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
+         and type(argv[3]) is str and argv[3] in (SCOPE, FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
          "identity-native-arguments")
     return argv[3]
 
@@ -245,7 +246,7 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
         not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
         aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
                   and len(set(not_executed)) == len(not_executed) and count == len(cases)
-                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, FETCH_SCOPE: 4, PUSH_SCOPE: 3, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
+                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, FETCH_SCOPE: 4, PUSH_SCOPE: 3, PUSH_CREATE_SCOPE: 5, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
                   "identity-native-incomplete")
         aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, BACKUP_SCOPE), "identity-native-incomplete")
         _current(aqua, fixtures)
@@ -264,7 +265,7 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
             pass  # No retry or masking of the original unknown/failed call.
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     try:
-        kind = "macos-git-push-current-complete" if scope == PUSH_SCOPE else "macos-git-fetch-current-complete" if scope == FETCH_SCOPE else "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
+        kind = "macos-git-push-create-current-complete" if scope == PUSH_CREATE_SCOPE else "macos-git-push-current-complete" if scope == PUSH_SCOPE else "macos-git-fetch-current-complete" if scope == FETCH_SCOPE else "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
             "macos-identity-current-complete" if scope == SCOPE else (
                 "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete"))
         if not_executed:

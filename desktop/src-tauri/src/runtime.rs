@@ -439,7 +439,7 @@ impl GitLocalInstalledProfile {
         }
         if self.kind.is_push() {
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-            if let Some(c)=&self.push_observation{if self.kind!=crate::git_local_protocol::Kind::Push||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+            if let Some(c)=&self.push_observation{if self.kind!=c.kind()||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
             return git_push::selection_for(self.kind);
         }
         if !macos_bindings() { return Err(unavailable()); }
@@ -1951,7 +1951,7 @@ impl RuntimeConfig {
     }
     pub(crate) fn git_push_profile_available_for(&self,kind:crate::git_local_protocol::Kind)->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        if kind==crate::git_local_protocol::Kind::Push && self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
+        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some_and(|c|c.kind()==kind))}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {git_push::available_for(kind)}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]

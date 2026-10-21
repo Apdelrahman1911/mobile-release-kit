@@ -35,7 +35,7 @@ class _Fixture:
     """At most four added leases/64 calls, retained before any acquisition."""
     def __init__(self, entry, case):
         data.need(type(entry) is original._Entry and type(entry.binding) is private.Binding
-                  and case in data.CASES and entry.get_returned and not hasattr(entry, "_observation_fixture"))
+                  and case in data.ALL_CASES and entry.get_returned and not hasattr(entry, "_observation_fixture"))
         self.entry, self.case = entry, case
         self.leases, self.edges = [], []
         self.calls = 0
@@ -167,6 +167,8 @@ def audit(entry, supplier):
     remote, helper = entry.transport, entry.helper
     data.need(type(remote) is push._PushTransport and remote.budget is entry.budget
               and remote.target is entry.binding.target)
+    if case in data.create.CASES:
+        return data.create.audit(entry, supplier)
     if mode == "review":
         data.need(type(helper) is _ReviewHelper and helper.finished and helper.input_eof and not helper.failed
                   and remote.finished and not remote.failed and remote.phase == 5
@@ -203,7 +205,7 @@ def audit(entry, supplier):
 def _hold_refused(entry, supplier):
     """C only: after the REAL refused frame/ordinary close, within original F+10."""
     audit(entry, supplier)
-    data.need(supplier.transcript.case == data.CASES[2] and entry.binding.mode == "apply"
+    data.need(supplier.transcript.case in (data.CASES[2], data.create.CASES[4]) and entry.binding.mode == "apply"
               and entry.closed and entry.return_entered and not entry.unknown
               and entry.pipes_close_entered and all(p.state == "CLOSED" for p in entry.pipes)
               and entry.body_parent.state == entry.body_file.state == "CLOSED")
@@ -249,7 +251,7 @@ def helper(*, remote, url, runtime_dir, started):
                 finally:
                     entry.close_pipes()
         code = entry.complete()
-        if code == 70 and supplier.transcript is not None and supplier.transcript.case == data.CASES[2]:
+        if code == 70 and supplier.transcript is not None and supplier.transcript.case in (data.CASES[2], data.create.CASES[4]):
             return _hold_refused(entry, supplier)
         return code
     except BaseException as error:
@@ -266,7 +268,10 @@ def marker_ready(channel):
     if type(channel) is not PushInputChannel or channel.binding is None:
         return False
     value = channel.helper_return
-    if (channel.binding.mode != "apply" or channel.binding.target.repository != data.coordinate(data.CASES[2])
+    if (channel.binding.mode != "apply" or not ((channel.binding.remote is not None
+            and type(channel.binding.target.selected) is push.wire.Selection
+            and channel.binding.target.repository == data.coordinate(data.CASES[2]))
+            or data.create.held_binding(channel.binding))
             or type(value) is not private.Returned or value.status != "refused" or value.reason != "response-invalid"):
         return False
     source = channel.source

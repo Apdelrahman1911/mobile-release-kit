@@ -1,0 +1,1017 @@
+--- a/.github/workflows/desktop-macos-installed.yml
++++ b/.github/workflows/desktop-macos-installed.yml
+@@ -2278,7 +2278,7 @@
+           # saved Installer0, same-request readback and known detach permit use.
+           # Unknown resources remain retained; no forced detach or root Python.
+           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+-      - name: Observe four Fetch then three Push cases on the same current installed Git observer
++      - name: Observe four Fetch, three Push and five create-only Push cases on the same installed Git observer
+         id: git_native
+         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && matrix.target == 'aarch64-apple-darwin' && matrix.native_scope == 'git-native' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
+         timeout-minutes: 25
+@@ -2289,15 +2289,18 @@
+           set -euo pipefail
+           umask 077
+           ulimit -c 0
+-          # Two explicit invocations of the existing owner, not a combined case
+-          # or a renewed operation clock. Each retains its existing600s suite,
+-          # 120s case and45/55s original endpoints. All four runtime originals
+-          # stay bound to the same installed M, including the unused peer pair.
+-          # Nonzero/unknown/78 in Fetch prevents Push; no fallback or retry.
++          # Three success-ordered invocations of the existing owner, not a
++          # combined case or renewed clock. Each keeps600s suite/120s case and
++          # 45/55s original endpoints; all four runtime originals remain bound
++          # to the same installed M, including the unused peer pair.
++          # Twelve cases share the unchanged25min outer limit: this is not a
++          # promise every worst-case runtime plus admission overhead will fit.
++          # Any nonzero/unknown/78 prevents the next call; no fallback/retry.
+           # Synthetic provider responses prove neither TLS nor a live account,
+           # and no shipping tool nomination is changed by these observations.
+           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-fetch-native
+-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
++          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
++          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
+       - name: Observe four original identity edits on the current installed observer
+         id: identity_native
+         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -96,7 +96,7 @@
+     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+     pub(crate) fn push_observation_matches(&self,c:&Arc<crate::shell::installed_observation::git_push::Control>)->bool {
+         self.0.document.upgrade().is_some_and(|d|c.bound(&d.session_identity))
+-            &&self.0.root.path==c.project()&&self.0.action.kind()==wire::Kind::Push&&self.0.agent.is_none()
++            &&self.0.root.path==c.project()&&self.0.action.kind()==c.kind()&&self.0.agent.is_none()
+     }
+     pub(crate) fn context(&self)->wire::Context {self.0.context.clone()}
+     pub(crate) fn review(&self)->Option<wire::Review> {self.0.review.clone()}
+--- a/desktop/src-tauri/src/git_push_observation_sources_macos.rs
++++ b/desktop/src-tauri/src/git_push_observation_sources_macos.rs
+@@ -15,13 +15,14 @@
+     }
+     pub(super) fn observed_push_tool(
+         &mut self,
++        kind:wire::Kind,
+         stop: &mut dyn FnMut() -> bool,
+     ) -> Result<bool, Reason> {
+         let Some(control) = self.push_observation.clone() else {
+             return Ok(false);
+         };
+         let n = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
+-        if !control.live()
++        if !control.live() || control.kind()!=kind
+             || std::path::Path::new(&n.root) != control.project()
+             || self.push_observation_file.is_some()
+         {
+--- a/desktop/src-tauri/src/git_push_sources_macos.rs
++++ b/desktop/src-tauri/src/git_push_sources_macos.rs
+@@ -122,7 +122,7 @@
+         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
+         let mut nominated=crate::runtime::git_push::matches_tool_for(kind, &native.tool);
+         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-        {if kind==wire::Kind::Push && self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
++        {if self.push_observation.is_some(){nominated=self.observed_push_tool(kind,stop)?;}}
+         if !nominated {
+             return Err(Reason::SourceRefused);
+         }
+--- a/desktop/src-tauri/src/installed_shell_observation_macos.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos.rs
+@@ -3962,9 +3962,9 @@
+     let upload_suffix;
+     let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
+-    let root = if matches!(case,Case::GitPush(_)) {
++    let root = if let Case::GitPush(c)=case {
+         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+-        if user.uid.as_raw()!=uid{return None}git_push::fixture_root(&user.dir)?
++        if user.uid.as_raw()!=uid{return None}git_push::fixture_root(&user.dir,c)?
+     } else if matches!(case,Case::GitFetch(_)) {
+         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+         if user.uid.as_raw()!=uid{return None}git_fetch::fixture_root(&user.dir)?
+@@ -3973,8 +3973,8 @@
+         if user.uid.as_raw() != uid { return None; }
+         tool_setup::fixture_root(&user.dir, tool_case)?
+     } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
+-    if matches!(case,Case::GitPush(_)){
+-        directory(&root,uid,0o700,&[git_push::NAMES[0],git_push::NAMES[1],git_push::NAMES[2],"state"]).ok()?;
++    if let Case::GitPush(c)=case{
++        directory(&root,uid,0o700,c.namespace()).ok()?;
+     } else if matches!(case,Case::GitFetch(_)){
+         directory(&root,uid,0o700,&[git_fetch::NAMES[0],git_fetch::NAMES[1],git_fetch::NAMES[2],git_fetch::NAMES[3],"state"]).ok()?;
+     } else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_git_push.rs
+@@ -15,6 +15,8 @@
+     },
+ };
+ 
++#[path = "installed_shell_observation_macos_git_push_create.rs"]
++mod create;
+ #[path = "installed_shell_observation_macos_git_push_fixture.rs"]
+ mod fixture;
+ pub(super) use fixture::Fixture;
+@@ -31,11 +33,22 @@
+     Pack,
+     Stale,
+     Held,
++    Create(create::Case),
+ }
+ impl Case {
+-    pub(crate) const ALL: [Self; 3] = [Self::Pack, Self::Stale, Self::Held];
++    pub(crate) const ALL: [Self; 8] = [Self::Pack, Self::Stale, Self::Held,
++        Self::Create(create::Case::Empty), Self::Create(create::Case::Equal),
++        Self::Create(create::Case::Stale), Self::Create(create::Case::Race), Self::Create(create::Case::Held)];
+     pub(crate) fn name(self) -> &'static str {
+-        NAMES[self as usize]
++        match self { Self::Pack=>NAMES[0], Self::Stale=>NAMES[1], Self::Held=>NAMES[2], Self::Create(c)=>c.name() }
++    }
++    fn create(self) -> Option<create::Case> { if let Self::Create(c)=self {Some(c)}else{None} }
++    pub(crate) fn kind(self) -> local::Kind { if self.create().is_some(){local::Kind::PushNewBranch}else{local::Kind::Push} }
++    fn apply_requested(self) -> bool {self.create().is_none_or(create::Case::apply_requested)}
++    fn publication(self) -> bool {matches!(self,Self::Pack|Self::Create(create::Case::Empty))}
++    pub(super) fn namespace(self) -> &'static [&'static str] {
++        if self.create().is_some(){&[create::NAMES[0],create::NAMES[1],create::NAMES[2],create::NAMES[3],create::NAMES[4],"state"]}
++        else{&[NAMES[0],NAMES[1],NAMES[2],"state"]}
+     }
+     pub(super) fn parse(v: &std::ffi::OsStr) -> Option<Self> {
+         Self::ALL.into_iter().find(|c| v == c.name())
+@@ -65,15 +78,17 @@
+     (home != Path::new("/") && crate::asset_session::installed_macos_selection_path_bounded(home))
+         .then(|| home.join("Library/Application Support"))
+ }
+-pub(super) fn fixture_root(home: &Path) -> Option<PathBuf> {
++pub(super) fn fixture_root(home: &Path, case: Case) -> Option<PathBuf> {
+     let (s, r, a) = tuple()?;
+-    Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-git-push-native")))
++    let scope=if case.create().is_some(){create::SCOPE}else{"git-push-native"};
++    Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-{scope}")))
+ }
+ fn application_root(home: &Path, case: Case) -> Option<PathBuf> {
+     let (s, r, a) = tuple()?;
++    let tag=if case.create().is_some(){"push-create"}else{"push"};
+     Some(
+         support(home)?
+-            .join(format!("mrk-macos-aqua-push-{s}-{r}-{a}"))
++            .join(format!("mrk-macos-aqua-{tag}-{s}-{r}-{a}"))
+             .join(case.name())
+             .join("dev.mobile-release-kit.desktop"),
+     )
+@@ -125,7 +140,7 @@
+         let u = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+             .map_err(|_| ())?
+             .ok_or(())?;
+-        if u.uid.as_raw() != uid || project != fixture_root(&u.dir).ok_or(())?.join(case.name()) {
++        if u.uid.as_raw() != uid || project != fixture_root(&u.dir,case).ok_or(())?.join(case.name()) {
+             return Err(());
+         }
+         Ok(Arc::new(Self {
+@@ -183,8 +198,9 @@
+     pub(crate) fn application(&self) -> &Path {
+         &self.application
+     }
++    pub(crate) fn kind(&self) -> local::Kind {self.case.kind()}
+     pub(crate) fn held_case(&self) -> bool {
+-        self.case == Case::Held
++        matches!(self.case,Case::Held|Case::Create(create::Case::Held))
+     }
+     pub(crate) fn completed(&self) -> bool {
+         self.complete.load(Ordering::SeqCst)
+@@ -221,7 +237,7 @@
+     }
+     pub(crate) fn observed(&self, request: &local::Request) -> bool {
+         if !self.live()
+-            || request.action.kind() != local::Kind::Push
++            || request.action.kind() != self.kind()
+             || request.native.as_ref().is_none_or(|n| {
+                 Path::new(&n.root) != self.project || self.tool.get() != Some(&n.tool)
+             })
+@@ -259,7 +275,7 @@
+             return false;
+         };
+         if !self.live()
+-            || self.case != Case::Held
++            || !self.held_case()
+             || t.marker
+             || t.stop
+             || t.apply
+@@ -286,7 +302,7 @@
+             return false;
+         };
+         if !self.live()
+-            || self.case != Case::Held
++            || !self.held_case()
+             || !t.marker
+             || t.stop
+             || t.apply
+@@ -405,7 +421,7 @@
+                         s.ok && s.status == p.outcome
+                             && s.reason == p.reason
+                             && s.publication
+-                                == (phase == local::Phase::Apply && self.case == Case::Pack)
++                                == (phase == local::Phase::Apply && self.case.publication())
+                     })
+             })
+         })
+@@ -460,15 +476,12 @@
+         if !self.live()
+             || self.tool.get().is_none()
+             || self.data.get().is_none()
+-            || t.prepare
+-                .as_ref()
+-                .and_then(|p| p.result.as_ref())
+-                .is_none_or(|s| !s.ok || s.status != Some(read::Outcome::Ok) || s.publication)
+-            || t.apply
+-                .as_ref()
+-                .and_then(|p| p.result.as_ref())
+-                .is_none_or(|s| !s.ok)
+-            || (self.case == Case::Held) != (t.marker && t.producer_pending && t.stop)
++            || t.prepare.as_ref().and_then(|p|p.result.as_ref()).is_none_or(|s|
++                !s.ok || s.publication || if self.case.apply_requested(){s.status!=Some(read::Outcome::Ok)}
++                    else{s.status!=Some(read::Outcome::Refused)||s.reason.as_deref()!=Some("target-changed")})
++            || if self.case.apply_requested(){t.apply.as_ref().and_then(|p|p.result.as_ref()).is_none_or(|s|!s.ok)}
++                else{t.apply.is_some()}
++            || self.held_case() != (t.marker && t.producer_pending && t.stop)
+         {
+             return false;
+         }
+@@ -597,7 +610,7 @@
+             || id != 2
+             || !self.connected
+             || !self.read
+-            || !self.applied
++            || self.applied != c.case.apply_requested()
+             || !self.disconnected
+         {
+             return false;
+@@ -611,16 +624,20 @@
+         }
+         let t = c.trace.try_lock().ok()?;
+         let tool = c.tool.get()?;
+-        let p = t.apply.as_ref()?.result.as_ref()?;
+-        Some(
+-            json!({"mechanism":"same-original-git-push-v1","case":c.case.name(),
++        let publication=if c.case.apply_requested(){t.apply.as_ref()?.result.as_ref()?.publication}else{
++            if t.apply.is_some() || self.applied{return None} false};
++        let mut value=json!({"mechanism":"same-original-git-push-v1","case":c.case.name(),
+             "syntheticProviderBytes":true,"connectionOriginalJoined":self.connected,"readOriginalJoined":self.read,
+             "prepareOriginalJoined":true,"applyOriginalJoined":self.applied,"connectionRetired":self.disconnected,
+-            "remoteReturned":p.publication,"helperRefusedBeforeAllCopyEof":t.marker,"producerPendingBeforeStop":t.producer_pending,
++            "remoteReturned":publication,"helperRefusedBeforeAllCopyEof":t.marker,"producerPendingBeforeStop":t.producer_pending,
+             "sameTicketStop":t.stop,"toolSha256":tool.sha256,"normalQuitOriginal":2,
+             "allOriginalsSettled":true,"worktreePreserved":true,"shippingNominationEnabled":false,
+-            "tlsQualified":false,"liveAccountQualified":false,"productionQualified":false}),
+-        )
++            "tlsQualified":false,"liveAccountQualified":false,"productionQualified":false});
++        if c.case.create().is_some(){
++            value["mechanism"]=json!("same-original-git-push-create-v1");
++            value["applyRequested"]=json!(c.case.apply_requested());
++        }
++        Some(value)
+     }
+ }
+ impl Observation {
+@@ -744,13 +761,13 @@
+                     let read_matches = p.result["basis"] == "local-refs-no-fetch"
+                         && p.result["observation"]["head"] == f.target()
+                         && p.result["observation"]["branch"] == "refs/heads/main"
+-                        && p.result["tracking"]["state"] == "complete"
++                        && if control.case.create().is_some(){create::tracking(&p.result["tracking"])}else{p.result["tracking"]["state"] == "complete"
+                         && p.result["tracking"]["remote"] == "origin"
+                         && p.result["tracking"]["localRef"] == "refs/remotes/origin/main"
+                         && p.result["tracking"]["mergeRef"] == "refs/heads/main"
+                         && p.result["tracking"]["head"] == f.base()
+                         && p.result["tracking"]["ahead"] == 1
+-                        && p.result["tracking"]["behind"] == 0;
++                        && p.result["tracking"]["behind"] == 0};
+                     let v = r.git_push.as_mut().ok_or_else(invalid)?;
+                     if v.read_operation.as_deref() != Some(&p.operation_id) {
+                         return Err(invalid());
+@@ -788,22 +805,22 @@
+                         let r = self.record().ok_or_else(invalid)?;
+                         let v = r.git_push.as_ref().ok_or_else(invalid)?;
+                         push::Action {
+-                            kind: push::Kind::Push,
++                            kind: if control.case.create().is_some(){push::Kind::PushNewBranch}else{push::Kind::Push},
+                             expected_revision: v.revision.clone().ok_or_else(invalid)?,
+                             expected_reference_revision: v
+                                 .reference_revision
+                                 .clone()
+                                 .ok_or_else(invalid)?,
+-                            remote: Some("origin".into()),
++                            remote: if control.case.create().is_some(){None}else{Some("origin".into())},
+                             local_ref: "refs/heads/main".into(),
+                             remote_ref: "refs/heads/main".into(),
+-                            old_oid: r
++                            old_oid: if control.case.create().is_some(){push::new_branch::ZERO.into()}else{r
+                                 .fixture
+                                 .git_push
+                                 .as_ref()
+                                 .ok_or_else(invalid)?
+                                 .base()
+-                                .into(),
++                                .into()},
+                             new_oid: r
+                                 .fixture
+                                 .git_push
+@@ -843,6 +860,11 @@
+                     }
+                     if matches!(p.stage, read::Phase::Starting | read::Phase::Running) {
+                         None
++                    } else if control.case==Case::Create(create::Case::Equal){
++                        if !create::refused_prepare(create::Case::Equal,&p,s.review.is_none())
++                            || !control.checked_sample(local::Phase::Prepare,&p){return Err(invalid())}
++                        r.git_push.as_mut().ok_or_else(invalid)?.result=p.result;
++                        Some(Step::Disconnect)
+                     } else {
+                         if p.stage != read::Phase::Settled
+                             || p.outcome != Some(read::Outcome::Ok)
+@@ -863,13 +885,13 @@
+                             return Err(invalid());
+                         }
+                         let f = r.fixture.git_push.as_ref().ok_or_else(invalid)?;
+-                        if review.head != f.target()
++                        if if control.case.create().is_some(){!create::review(review,f.base(),f.target())}else{review.head != f.target()
+                             || review.expected_remote_oid != f.base()
+                             || review.branch != "refs/heads/main"
+                             || review.upstream_ref != "refs/heads/main"
+                             || review.tracking_ref.as_deref() != Some("refs/remotes/origin/main")
+                             || review.commits != [f.target()]
+-                            || !review.valid()
++                            || !review.valid()}
+                         {
+                             return Err(invalid());
+                         }
+@@ -1040,6 +1062,7 @@
+         return false;
+     }
+     match case {
++        Case::Create(c) => create::expected_apply(c,p),
+         Case::Pack => {
+             p.outcome == Some(read::Outcome::Ok)
+                 && p.reason.is_none()
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_git_push_fixture.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_git_push_fixture.rs
+@@ -40,21 +40,22 @@
+     ("app", &["build.gradle.kts"]),
+     ("release", &["mobile-release.json"]),
+ ];
+-const ORIGINALS: [&str; 8] = [
++const ORIGINALS: [&str; 6] = [
+     "HEAD",
+     "config",
+     "index",
+     "refs/heads/main",
+     "logs/HEAD",
+     "logs/refs/heads/main",
+-    "refs/remotes/origin/main",
+-    "logs/refs/remotes/origin/main",
+ ];
++const TRACKING:[&str;2]=["refs/remotes/origin/main","logs/refs/remotes/origin/main"];
+ #[derive(Clone)]
+ pub(crate) struct Fixture {
+     files: [FileFact; 6],
+     dirs: [[u64; 6]; 3],
+-    originals: [FileFact; 8],
++    originals: [FileFact; 6],
++    tracking: Option<[FileFact;2]>,
++    absent_tracking: Option<[[u64;6];2]>,
+     data: FileFact,
+     base: String,
+     target: String,
+@@ -118,15 +119,21 @@
+         {
+             return Err(());
+         }
+-        let (_, body) = read(&root.join(".git/refs/remotes/origin/main"), uid, 64)?;
+-        if body != format!("{base}\n").as_bytes() {
+-            return Err(());
+-        }
++        let (tracking,absent_tracking)=if case.create().is_some(){
++            (None,Some(super::create::absent_tracking(root,uid)?))
++        }else{
++            let facts=TRACKING.iter().map(|p|read(&root.join(".git").join(p),uid,65536).map(|v|v.0))
++                .collect::<Result<Vec<_>,_>>()?.try_into().map_err(|_|())?;
++            if read(&root.join(".git/refs/remotes/origin/main"),uid,64)?.1!=format!("{base}\n").as_bytes(){return Err(())}
++            (Some(facts),None)
++        };
+         directory(&root.join(".git/objects/pack"), uid, 0o700, &[])?;
+         Ok(Self {
+             files,
+             dirs,
+             originals,
++            tracking,
++            absent_tracking,
+             data,
+             base,
+             target,
+@@ -157,6 +164,7 @@
+         self.files
+             .iter()
+             .chain(&self.originals)
++            .chain(self.tracking.iter().flatten())
+             .chain([&self.data])
+             .try_fold(
+                 std::mem::size_of::<Self>()
+@@ -187,6 +195,14 @@
+                 return Err(());
+             }
+         }
++        if case.create().is_some(){
++            if self.tracking.is_some()||self.absent_tracking!=Some(super::create::absent_tracking(root,uid)?){return Err(())}
++        }else{
++            if self.absent_tracking.is_some(){return Err(())}
++            for (p,old) in TRACKING.iter().zip(self.tracking.as_ref().ok_or(())?){
++                if read(&root.join(".git").join(p),uid,65536)?.0!=*old{return Err(())}
++            }
++        }
+         if read(&root.join(".git").join(DATA_FILE), uid, DATA_LIMIT)?.0 != self.data {
+             return Err(());
+         }
+@@ -194,7 +210,7 @@
+         // local object/HEAD/index/log. The setup's complete loose-object
+         // inventory is additionally compared by the SAME outer Fixtures.
+         directory(&root.join(".git/objects/pack"), uid, 0o700, &[])?;
+-        if case == Case::Pack
++        if case.publication()
+             && (result["state"] != "succeeded" || result["effectPhase"] != "remote-returned")
+         {
+             return Err(());
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -439,7 +439,7 @@
+         }
+         if self.kind.is_push() {
+             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-            if let Some(c)=&self.push_observation{if self.kind!=crate::git_local_protocol::Kind::Push||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
++            if let Some(c)=&self.push_observation{if self.kind!=c.kind()||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+             return git_push::selection_for(self.kind);
+         }
+         if !macos_bindings() { return Err(unavailable()); }
+@@ -1951,7 +1951,7 @@
+     }
+     pub(crate) fn git_push_profile_available_for(&self,kind:crate::git_local_protocol::Kind)->bool {
+         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-        if kind==crate::git_local_protocol::Kind::Push && self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
++        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some_and(|c|c.kind()==kind))}
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+         {git_push::available_for(kind)}
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -326,7 +326,7 @@
+             }
+         }
+         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-        if self.action.kind()==wire::Kind::Push {
++        if self.action.kind().is_push() {
+             if let Some(c)=runtime.push_observation()? {
+                 if !self.gate.push_observation_matches(&c){return Err(BridgeError::invalid())}
+                 self.push_observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;
+--- a/desktop/tools/macos_aqua_qualification.py
++++ b/desktop/tools/macos_aqua_qualification.py
+@@ -1125,7 +1125,7 @@
+ )
+ PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
+                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
+-ALL_CASES = (*PUSH.CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
++ALL_CASES = (*PUSH.ALL_CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
+ EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
+ REPOSITORY = "Apdelrahman1911/mobile-release-kit"
+ REF = "refs/heads/verify/desktop-macos-aqua"
+@@ -1761,9 +1761,9 @@
+ 
+ 
+ def selected_cases(scope=None):
+-    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, PUSH.SCOPE, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
+-    if scope == PUSH.SCOPE:
+-        return PUSH.CASES
++    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, *PUSH.SCOPES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
++    if scope in PUSH.SCOPES:
++        return PUSH.CREATE.CASES if scope == PUSH.CREATE.SCOPE else PUSH.CASES
+     if scope == FETCH.SCOPE:
+         return FETCH.CASES
+     if scope == TOOLS.SERVICE_SCOPE:
+@@ -1805,7 +1805,8 @@
+                                or argv == ["--scope", identity_qualification.SCOPE]
+                                or argv == ["--scope", TOOLS.SCOPE]
+                                or argv == ["--scope", FETCH.SCOPE]
+-                               or argv == ["--scope", PUSH.SCOPE]), "arguments-not-supported")
++                               or argv == ["--scope", PUSH.SCOPE]
++                               or argv == ["--scope", PUSH.CREATE.SCOPE]), "arguments-not-supported")
+     return argv[1] if argv else None
+ 
+ 
+@@ -1822,7 +1823,7 @@
+ 
+ def case_timeout(case):
+     need(type(case) is str and case in ALL_CASES, "case-binding")
+-    if case in PUSH.CASES:
++    if case in PUSH.ALL_CASES:
+         return PUSH.TIMEOUT
+     if case in FETCH.CASES:
+         return FETCH.TIMEOUT
+@@ -2611,10 +2612,10 @@
+         value["native"]["panelAttachments"] = [False, True, False, False]
+         value["reload"] = dict.fromkeys(value["reload"], False)
+         return value
+-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.CASES:
++    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.ALL_CASES:
+         value = expected_result(binding, "noop-stale")
+         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+-        if case in PUSH.CASES:
++        if case in PUSH.ALL_CASES:
+             value["gitPush"] = None  # Genuine returned original facts only.
+         if case in FETCH.CASES:
+             value["gitFetch"] = None  # Genuine returned original facts only.
+@@ -2871,7 +2872,7 @@
+     except (ValueError, RecursionError, UnicodeError) as error:
+         raise Refused("result-json") from error
+     expected = expected_result(binding, case)
+-    if case in PUSH.CASES:
++    if case in PUSH.ALL_CASES:
+         need(type(value) is dict and "gitPush" in value, "push-original-report")
+         expected["gitPush"] = PUSH.report(value["gitPush"], case, need)
+     if case in FETCH.CASES:
+@@ -4477,7 +4478,7 @@
+ 
+ 
+ def fixture_data(case, final, *, ios_output_created=None):
+-    if case in PUSH.CASES:
++    if case in PUSH.ALL_CASES:
+         return PUSH.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX, SOURCE)
+     if case in FETCH.CASES:
+         return FETCH.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX, SOURCE)
+@@ -4662,7 +4663,7 @@
+     def __init__(self, binding, uid, gid, scope=None):
+         self.binding, self.uid, self.gid = binding, uid, gid
+         self.cases = selected_cases(scope)
+-        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, PUSH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+@@ -4797,7 +4798,7 @@
+                  "fixture-write-original")
+ 
+     def prepare(self):
+-        if self.cases == PUSH.CASES:
++        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
+             PUSH.prepare_namespace(self)
+         elif self.cases == FETCH.CASES:
+             FETCH.prepare_namespace(self)
+@@ -4854,7 +4855,7 @@
+             else:
+                 self.originals[case] = self._capture(case, False)
+         self._namespace()
+-        if self.cases == PUSH.CASES:
++        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
+             PUSH.prepare_parents(self)
+         if self.cases == FETCH.CASES:
+             FETCH.prepare_parents(self)
+@@ -4866,7 +4867,7 @@
+             self._prepare_account()
+ 
+     def _namespace(self):
+-        if self.cases == PUSH.CASES:
++        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
+             PUSH.namespace_current(self)
+         elif self.cases == FETCH.CASES:
+             FETCH.namespace_current(self)
+@@ -5009,7 +5010,7 @@
+     def before_call(self, case):
+         self.case, self.stage = case, "before-invocation"
+         self._namespace()
+-        if case in PUSH.CASES:
++        if case in PUSH.ALL_CASES:
+             PUSH.before_call(self, case)
+         elif case in FETCH.CASES:
+             FETCH.before_call(self, case)
+@@ -5450,7 +5451,7 @@
+ 
+     def admit_normal_account_runtime(self, source, work, *, application_source):
+         """Same-job installed originals, not a fabricated producer/supplier result."""
+-        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES)
++        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES, PUSH.CREATE.CASES)
+               or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
+              and not self.inflight and self.recovery_runtime is None,
+              "normal-account-runtime-order")
+@@ -5855,7 +5856,7 @@
+     cases = selected_cases(scope)
+     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
+     not_executed = []
+-    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, PUSH.SCOPE):
++    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, *PUSH.SCOPES):
+         # Root's CURRENT normal-package preparation must call the same original
+         # admit_normal_account_runtime first. No historical Aqua supplier route.
+         fixtures.recovery_runtime_paths()
+@@ -5870,10 +5871,10 @@
+                 app_environment(fixtures.path / "state" / case, uid, username))
+         if scope == FETCH.SCOPE:
+             FETCH.before_invocation(fixtures, case, run_owned, username)
+-        if scope == PUSH.SCOPE:
++        if scope in PUSH.SCOPES:
+             PUSH.before_invocation(fixtures, case, run_owned, username)
+         fixtures.before_call(case)
+-        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, PUSH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+@@ -5890,7 +5891,7 @@
+         # unknown, with no readback, close or later invocation.
+         try:
+             result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
+-                               timeout=(PUSH.remaining(fixtures, case) if scope == PUSH.SCOPE else FETCH.remaining(fixtures, case) if scope == FETCH.SCOPE else case_timeout(case)), capture=True, text=False, output_limit=OUTPUT_LIMIT)
++                               timeout=(PUSH.remaining(fixtures, case) if scope in PUSH.SCOPES else FETCH.remaining(fixtures, case) if scope == FETCH.SCOPE else case_timeout(case)), capture=True, text=False, output_limit=OUTPUT_LIMIT)
+         except BaseException as error:
+             # Diagnostics only: preserve identical error, inflight, unknown
+             # finality and the no-readback/no-close/no-next-call boundary.
+@@ -5923,7 +5924,7 @@
+             fixtures.accept_account_app(report["iosArchive"])
+             _run_ios_account_child(fixtures, run_owned, uid, username, "observe")
+             readback = fixtures.readback_account(report["iosArchive"])
+-        elif case in PUSH.CASES:
++        elif case in PUSH.ALL_CASES:
+             readback = PUSH.readback(fixtures, case, report["gitPush"], need)
+         elif case in FETCH.CASES:
+             readback = FETCH.readback(fixtures, case, report["gitFetch"], need)
+@@ -5967,7 +5968,7 @@
+                  "fixture-local-readback")
+         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
+               "originalCallReturned": True, "observer": report, "independentReadback": readback})
+-        if scope == PUSH.SCOPE:
++        if scope in PUSH.SCOPES:
+             PUSH.remaining(fixtures, case)
+         if scope == FETCH.SCOPE:
+             FETCH.remaining(fixtures, case)
+--- a/desktop/tools/macos_git_push_qualification.py
++++ b/desktop/tools/macos_git_push_qualification.py
+@@ -6,6 +6,7 @@
+ call below is the original run_owned supplied by macos_aqua_qualification.
+ """
+ from contextlib import ExitStack
++from importlib.util import module_from_spec, spec_from_file_location
+ import hashlib
+ import json
+ import math
+@@ -16,8 +17,23 @@
+ import subprocess
+ import time
+ 
++_create_spec = spec_from_file_location("mrk_macos_git_push_create_qualification", Path(__file__).with_name("macos_git_push_create_qualification.py"))
++if _create_spec is None or _create_spec.loader is None:
++    raise RuntimeError("push-create-observation-module-unavailable")
++CREATE = module_from_spec(_create_spec)
++_create_spec.loader.exec_module(CREATE)
++del _create_spec
++
+ SCOPE = "git-push-native"
+ CASES = ("git-push-pack", "git-push-stale", "git-push-held-refusal")
++ALL_CASES = CASES + CREATE.CASES
++SCOPES = (SCOPE, CREATE.SCOPE)
++
++def case_family(cases):
++    _need(type(cases) is tuple and cases in (CASES, CREATE.CASES), "push-fixed-case-family")
++    return cases
++
++
+ BOOTSTRAPS = ("github_push_connection_observation_bootstrap.py", "git_push_observation_bootstrap.py")
+ GIT = "/Library/Developer/CommandLineTools/usr/bin/git"
+ ACCOUNT = "mrk-push-fixture"
+@@ -63,12 +79,14 @@
+ 
+ 
+ def application_path(binding, home, case):
+-    _need(type(case) is str and case in CASES, "push-fixture-case")
+-    return _support(binding, home) / f"mrk-macos-aqua-push-{binding.source}-{binding.run}-{binding.attempt}" / case / APPLICATION
+-
+-
+-def fixture_path(binding, home):
+-    return _support(binding, home) / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{SCOPE}"
++    _need(type(case) is str and case in ALL_CASES, "push-fixture-case")
++    tag = "push-create" if case in CREATE.CASES else "push"
++    return _support(binding, home) / f"mrk-macos-aqua-{tag}-{binding.source}-{binding.run}-{binding.attempt}" / case / APPLICATION
++
++
++def fixture_path(binding, home, *, cases=CASES):
++    scope = CREATE.SCOPE if case_family(cases) == CREATE.CASES else SCOPE
++    return _support(binding, home) / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{scope}"
+ 
+ 
+ def _ancestors(f, path, roster):
+@@ -95,30 +113,30 @@
+ 
+ def prepare_namespace(f):
+     import pwd
+-    _need(f.cases == CASES and f.path is None and not f.push_ancestors and not f.inflight, "push-namespace-order")
++    _need(f.cases == case_family(f.cases) and f.path is None and not f.push_ancestors and not f.inflight, "push-namespace-order")
+     _need(f.push_end is None, "push-original-suite-clock")
+     f.push_end = time.monotonic() + TOTAL_TIMEOUT
+     u = pwd.getpwuid(f.uid)
+     _need(f.uid > 0 and (u.pw_uid, u.pw_gid) == (f.uid, f.gid), "push-native-user")
+-    f.path = fixture_path(f.binding, u.pw_dir)
++    f.path = fixture_path(f.binding, u.pw_dir, cases=f.cases)
+     f.parent = _ancestors(f, f.path.parent, f.push_ancestors)
+-    f.push_paths = {c: application_path(f.binding, u.pw_dir, c) for c in CASES}
++    f.push_paths = {c: application_path(f.binding, u.pw_dir, c) for c in f.cases}
+     namespace_current(f)
+ 
+ 
+ def namespace_current(f):
+-    _need(f.cases == CASES and f.path is not None and f.parent == f.push_ancestors[-1][2], "push-parent-original")
++    _need(f.cases == case_family(f.cases) and f.path is not None and f.parent == f.push_ancestors[-1][2], "push-parent-original")
+     _parents_current(f, f.push_ancestors)
+ 
+ 
+ def prepare_parents(f):
+-    _need(f.cases == CASES and not f.inflight and f.push_namespace is None, "push-app-parent-order")
++    _need(f.cases == case_family(f.cases) and not f.inflight and f.push_namespace is None, "push-app-parent-order")
+     namespace_current(f)
+     # The admitted application-data parent shares the same native home/support
+     # ancestors; no ancestor repair or alternate /tmp/keyring/Host route.
+-    name = f.push_paths[CASES[0]].parents[1].name
++    name = f.push_paths[f.cases[0]].parents[1].name
+     f.push_namespace = f._mkdir(f.parent, name)
+-    for case in CASES:
++    for case in f.cases:
+         f.push_parents[case] = f._mkdir(f.push_namespace, case)
+         f._roster(f.push_parents[case], (), "push-app-parent-occupied")
+     # Only the existing native Host may create its application-data leaf.
+@@ -127,10 +145,10 @@
+ 
+ def parents_current(f):
+     namespace_current(f)
+-    _need(f.push_namespace is not None and set(f.push_parents) == set(CASES), "push-app-parent-custody")
+-    f._named(f.parent, f.push_paths[CASES[0]].parents[1].name, f.push_namespace, 0o700)
+-    f._roster(f.push_namespace, CASES, "push-app-namespace")
+-    for case in CASES:
++    _need(f.push_namespace is not None and set(f.push_parents) == set(f.cases), "push-app-parent-custody")
++    f._named(f.parent, f.push_paths[f.cases[0]].parents[1].name, f.push_namespace, 0o700)
++    f._roster(f.push_namespace, f.cases, "push-app-namespace")
++    for case in f.cases:
+         f._named(f.push_namespace, case, f.push_parents[case], 0o700)
+         if case not in f.push_entered:
+             f._roster(f.push_parents[case], (), "push-unentered-app-parent")
+@@ -285,7 +303,7 @@
+ 
+ 
+ def _transcript(case, base, target, other):
+-    _need(case in CASES and len({base, target, other}) == 3
++    _need(case in ALL_CASES and len({base, target, other}) == 3
+           and all(type(v) is str and re.fullmatch("[0-9a-f]{40}", v) and v != ZERO for v in (base, target, other)),
+           "push-distinct-original-commits")
+     raw = json.dumps({"schemaVersion": 1, "case": case, "base": base, "target": target,
+@@ -297,9 +315,11 @@
+ def _capture(f, case):
+     root, rows = f.projects[case], {}
+     with f._temporary(f._open(".git", root, directory=True)) as git:
+-        for name in ORIGINALS:
++        for name in CREATE.ORIGINALS if case in CREATE.CASES else ORIGINALS:
+             rows[".git/" + name] = _at(f, git, name)[:2]
+         rows["objects"] = _objects(f, git)
++        if case in CREATE.CASES:
++            rows["absent-tracking"] = CREATE.absence(f, git, _sig, _names, _need)
+     for name in FILES:
+         rows[name] = _at(f, root, name)[:2]
+     rows["root"] = _sig(os.fstat(root))[:6]
+@@ -307,7 +327,9 @@
+ 
+ 
+ def _configuration(case):
+-    _need(type(case) is str and case in CASES, "push-fixture-case")
++    if case in CREATE.CASES:
++        return CREATE.configuration(case, _need)
++    _need(type(case) is str and case in ALL_CASES, "push-fixture-case")
+     return ("[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\nlogallrefupdates = true\n"
+             "[user]\nname = MRK Push Fixture\nemail = push-fixture@example.invalid\n"
+             f'[remote "origin"]\nurl = https://github.com/{ACCOUNT}/{case}.git\nfetch = +refs/heads/*:refs/remotes/origin/*\n'
+@@ -316,7 +338,7 @@
+ 
+ def before_invocation(f, case, run_owned, username):
+     """Fixed local setup ONLY; no stock Git remote/auth/server command."""
+-    _need(f.cases == CASES and case in CASES and case not in f.push_cases
++    _need(f.cases == case_family(f.cases) and case in f.cases and case not in f.push_cases
+           and not f.inflight and not f.close_errors, "push-fixture-single-attempt")
+     f._namespace(); parents_current(f)
+     now = time.monotonic()
+@@ -348,7 +370,8 @@
+                 other = _oid(_call(f, case, run_owned, env,
+                     ["commit-tree", "HEAD^{tree}", "-p", base, "-m", "MRK public distinct Push peer"]))
+                 data = _transcript(case, base, target, other)
+-                _call(f, case, run_owned, env, ["update-ref", "--no-deref", "refs/remotes/origin/main", base, ZERO])
++                if case not in CREATE.CASES:
++                    _call(f, case, run_owned, env, ["update-ref", "--no-deref", "refs/remotes/origin/main", base, ZERO])
+                 # HEAD stays at the one outgoing target. No reset, checkout,
+                 # fetch, remote process, object removal or separate pack spool.
+                 f._write(git, DATA, data)
+@@ -374,12 +397,14 @@
+ 
+ 
+ def report(value, case, need):
++    if case in CREATE.CASES:
++        return CREATE.report(value, case, need)
+     fields = {"mechanism", "case", "syntheticProviderBytes", "connectionOriginalJoined", "readOriginalJoined",
+               "prepareOriginalJoined", "applyOriginalJoined", "connectionRetired", "remoteReturned",
+               "helperRefusedBeforeAllCopyEof", "producerPendingBeforeStop", "sameTicketStop", "toolSha256",
+               "normalQuitOriginal", "allOriginalsSettled", "worktreePreserved", "shippingNominationEnabled",
+               "tlsQualified", "liveAccountQualified", "productionQualified"}
+-    need(type(value) is dict and value.keys() == fields and type(case) is str and case in CASES
++    need(type(value) is dict and value.keys() == fields and type(case) is str and case in ALL_CASES
+          and value["case"] == case and value["mechanism"] == "same-original-git-push-v1", "push-observer-report")
+     for key in ("syntheticProviderBytes", "connectionOriginalJoined", "readOriginalJoined", "prepareOriginalJoined",
+                 "applyOriginalJoined", "connectionRetired", "allOriginalsSettled", "worktreePreserved"):
+@@ -408,6 +433,6 @@
+     remaining(f, case)
+     f.push_completed.add(case)
+     return {"mechanism": "same-fixtures-git-push-readback-v1", "originalIdentitiesMatched": True,
+-            "headIndexWorktreeUnchanged": True, "remoteReturned": case == CASES[0], "toolSha256": f.push_tool[3],
+-            "cltBuildMetadata": row["version"], "localTrackingUnchanged": True, "untrackedPreserved": True, "localSetupCalls": row["calls"],
++            "headIndexWorktreeUnchanged": True, "remoteReturned": case in (CASES[0], CREATE.CASES[0]), "toolSha256": f.push_tool[3],
++            "cltBuildMetadata": row["version"], "localTrackingUnchanged": True, **({"upstreamAbsent": True, "localTrackingAbsent": True} if case in CREATE.CASES else {}), "untrackedPreserved": True, "localSetupCalls": row["calls"],
+             "syntheticProviderBytes": True, "shippingNominationEnabled": False, "nativeAuthority": False}
+--- a/desktop/tools/macos_identity_current_runtime.py
++++ b/desktop/tools/macos_identity_current_runtime.py
+@@ -13,6 +13,7 @@
+ 
+ SCOPE = "project-identity-native"
+ PUSH_SCOPE = "git-push-native"
++PUSH_CREATE_SCOPE = "git-push-create-native"
+ FETCH_SCOPE = "git-fetch-native"
+ GIT_SCOPE = "git-native"
+ TOOLS_SCOPE = "tool-setup"
+@@ -102,7 +103,7 @@
+     """
+     native = environment.get("MRK_MACOS_NATIVE_SCOPE")
+     need(type(scope) is str and ((native == SCOPE and scope == SCOPE) or (native == PUSH_SCOPE and scope == PUSH_SCOPE) or (native == FETCH_SCOPE and scope == FETCH_SCOPE)
+-         or (native == GIT_SCOPE and scope in (FETCH_SCOPE, PUSH_SCOPE))
++         or (native == GIT_SCOPE and scope in (FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE))
+          or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE))),
+          "current-native-observation-scope")
+     return scope
+@@ -112,7 +113,7 @@
+     if argv == ["--target", TARGET]:
+         return SCOPE  # Preserve the original identity-only invocation.
+     need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
+-         and type(argv[3]) is str and argv[3] in (SCOPE, FETCH_SCOPE, PUSH_SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
++         and type(argv[3]) is str and argv[3] in (SCOPE, FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
+          "identity-native-arguments")
+     return argv[3]
+ 
+@@ -245,7 +246,7 @@
+         not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
+         aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
+                   and len(set(not_executed)) == len(not_executed) and count == len(cases)
+-                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, FETCH_SCOPE: 4, PUSH_SCOPE: 3, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
++                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, FETCH_SCOPE: 4, PUSH_SCOPE: 3, PUSH_CREATE_SCOPE: 5, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
+                   "identity-native-incomplete")
+         aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, BACKUP_SCOPE), "identity-native-incomplete")
+         _current(aqua, fixtures)
+@@ -264,7 +265,7 @@
+             pass  # No retry or masking of the original unknown/failed call.
+         return 130 if isinstance(error, KeyboardInterrupt) else 1
+     try:
+-        kind = "macos-git-push-current-complete" if scope == PUSH_SCOPE else "macos-git-fetch-current-complete" if scope == FETCH_SCOPE else "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
++        kind = "macos-git-push-create-current-complete" if scope == PUSH_CREATE_SCOPE else "macos-git-push-current-complete" if scope == PUSH_SCOPE else "macos-git-fetch-current-complete" if scope == FETCH_SCOPE else "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
+             "macos-identity-current-complete" if scope == SCOPE else (
+                 "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete"))
+         if not_executed:
+--- a/src/mobile_release/_git_push_observation_data.py
++++ b/src/mobile_release/_git_push_observation_data.py
+@@ -11,6 +11,9 @@
+ import re
+ 
+ CASES = ("git-push-pack", "git-push-stale", "git-push-held-refusal")
++from . import _git_push_create_observation as create
++
++ALL_CASES = CASES + create.CASES
+ SCOPE = "git-push-native"
+ ACCOUNT, ACCOUNT_ID, REPOSITORY_ID = "mrk-push-fixture", "831", "842"
+ REFERENCE = "refs/heads/main"
+@@ -31,18 +34,18 @@
+ 
+ 
+ def coordinate(case):
+-    need(type(case) is str and case in CASES)
++    need(type(case) is str and case in ALL_CASES)
+     return ACCOUNT + "/" + case
+ 
+ 
+ def token(case):
+-    need(type(case) is str and case in CASES)
++    need(type(case) is str and case in ALL_CASES)
+     return "MRK-NON-CREDENTIAL-PUSH-OBSERVER-" + case
+ 
+ 
+ def token_case(value):
+     need(type(value) is str)
+-    matches = [case for case in CASES if value == token(case)]
++    matches = [case for case in ALL_CASES if value == token(case)]
+     need(len(matches) == 1)
+     return matches[0]
+ 
+@@ -67,7 +70,7 @@
+     other: str
+ 
+     def __post_init__(self):
+-        need(type(self.case) is str and self.case in CASES
++        need(type(self.case) is str and self.case in ALL_CASES
+              and all(oid(v) for v in (self.base, self.target, self.other))
+              and len({self.base, self.target, self.other}) == 3)
+ 
+@@ -80,7 +83,7 @@
+ 
+ 
+ def decode(raw, case):
+-    need(type(raw) is bytes and 0 < len(raw) <= DATA_LIMIT and type(case) is str and case in CASES)
++    need(type(raw) is bytes and 0 < len(raw) <= DATA_LIMIT and type(case) is str and case in ALL_CASES)
+     try:
+         value = json.loads(raw.decode("ascii"), object_pairs_hook=_pairs)
+         need(type(value) is dict and set(value) == {"schemaVersion", "case", "base", "target", "other"}
+@@ -98,6 +101,8 @@
+ 
+ 
+ def advertisement(value, mode, *, after=False):
++    if type(value) is Transcript and value.case in create.CASES:
++        return create.advertisement(value, mode, after=after)
+     need(type(value) is Transcript and mode in ("review", "apply") and type(after) is bool
+          and (not after or mode == "apply" and value.case == CASES[0]))
+     tip = value.target if after else value.other if mode == "apply" and value.case == CASES[1] else value.base
+@@ -108,6 +113,8 @@
+ 
+ 
+ def receive_status(value):
++    if type(value) is Transcript and value.case in create.CASES:
++        return create.receive_status(value)
+     need(type(value) is Transcript and value.case in (CASES[0], CASES[2]))
+     first = packet(b"unpack ok\n")
+     second = packet(("ok " + REFERENCE + "\n").encode("ascii"))
+--- a/src/mobile_release/_git_push_observation_entry.py
++++ b/src/mobile_release/_git_push_observation_entry.py
+@@ -35,7 +35,7 @@
+     """At most four added leases/64 calls, retained before any acquisition."""
+     def __init__(self, entry, case):
+         data.need(type(entry) is original._Entry and type(entry.binding) is private.Binding
+-                  and case in data.CASES and entry.get_returned and not hasattr(entry, "_observation_fixture"))
++                  and case in data.ALL_CASES and entry.get_returned and not hasattr(entry, "_observation_fixture"))
+         self.entry, self.case = entry, case
+         self.leases, self.edges = [], []
+         self.calls = 0
+@@ -167,6 +167,8 @@
+     remote, helper = entry.transport, entry.helper
+     data.need(type(remote) is push._PushTransport and remote.budget is entry.budget
+               and remote.target is entry.binding.target)
++    if case in data.create.CASES:
++        return data.create.audit(entry, supplier)
+     if mode == "review":
+         data.need(type(helper) is _ReviewHelper and helper.finished and helper.input_eof and not helper.failed
+                   and remote.finished and not remote.failed and remote.phase == 5
+@@ -203,7 +205,7 @@
+ def _hold_refused(entry, supplier):
+     """C only: after the REAL refused frame/ordinary close, within original F+10."""
+     audit(entry, supplier)
+-    data.need(supplier.transcript.case == data.CASES[2] and entry.binding.mode == "apply"
++    data.need(supplier.transcript.case in (data.CASES[2], data.create.CASES[4]) and entry.binding.mode == "apply"
+               and entry.closed and entry.return_entered and not entry.unknown
+               and entry.pipes_close_entered and all(p.state == "CLOSED" for p in entry.pipes)
+               and entry.body_parent.state == entry.body_file.state == "CLOSED")
+@@ -249,7 +251,7 @@
+                 finally:
+                     entry.close_pipes()
+         code = entry.complete()
+-        if code == 70 and supplier.transcript is not None and supplier.transcript.case == data.CASES[2]:
++        if code == 70 and supplier.transcript is not None and supplier.transcript.case in (data.CASES[2], data.create.CASES[4]):
+             return _hold_refused(entry, supplier)
+         return code
+     except BaseException as error:
+@@ -266,7 +268,10 @@
+     if type(channel) is not PushInputChannel or channel.binding is None:
+         return False
+     value = channel.helper_return
+-    if (channel.binding.mode != "apply" or channel.binding.target.repository != data.coordinate(data.CASES[2])
++    if (channel.binding.mode != "apply" or not ((channel.binding.remote is not None
++            and type(channel.binding.target.selected) is push.wire.Selection
++            and channel.binding.target.repository == data.coordinate(data.CASES[2]))
++            or data.create.held_binding(channel.binding))
+             or type(value) is not private.Returned or value.status != "refused" or value.reason != "response-invalid"):
+         return False
+     source = channel.source
+--- a/src/mobile_release/_git_push_observation_http.py
++++ b/src/mobile_release/_git_push_observation_http.py
+@@ -80,7 +80,7 @@
+                       and _git_remote_failure is self.entry._failure_callback
+                       and callable(_git_remote_control))
+             self.transcript = read_transcript(self.entry, case)
+-            self.tip = self.transcript.base
++            self.tip = None if case in data.create.CASES else self.transcript.base
+             budget = _setup_budget  # Original raw-clock bridge, not helper +45s.
+         else:
+             data.need(self.entry is None and _setup_budget is None
+@@ -152,6 +152,8 @@
+             data.need(p < len(routes) and role == "standard" and method == "GET" and path == routes[p]
+                       and body is private_body is None)
+             return data.account() if p == 0 else {"total_count": 0, "workflows": []} if p == 2 else data.repository(case)
++        if case in data.create.CASES:
++            return data.create.next_response(self, case, method, path, role, private_body, budget, p)
+         binding, value = self.entry.binding, self.transcript
+         data.need(binding.target.repository == coordinate and binding.target.login == data.ACCOUNT
+                   and binding.target.account_id == data.ACCOUNT_ID and binding.target.repository_id == data.REPOSITORY_ID

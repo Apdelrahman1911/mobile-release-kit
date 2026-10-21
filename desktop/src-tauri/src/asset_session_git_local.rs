@@ -96,7 +96,7 @@ impl GitLocalGate {
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     pub(crate) fn push_observation_matches(&self,c:&Arc<crate::shell::installed_observation::git_push::Control>)->bool {
         self.0.document.upgrade().is_some_and(|d|c.bound(&d.session_identity))
-            &&self.0.root.path==c.project()&&self.0.action.kind()==wire::Kind::Push&&self.0.agent.is_none()
+            &&self.0.root.path==c.project()&&self.0.action.kind()==c.kind()&&self.0.agent.is_none()
     }
     pub(crate) fn context(&self)->wire::Context {self.0.context.clone()}
     pub(crate) fn review(&self)->Option<wire::Review> {self.0.review.clone()}

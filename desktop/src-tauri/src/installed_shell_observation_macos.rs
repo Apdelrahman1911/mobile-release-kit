@@ -3962,9 +3962,9 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let upload_suffix;
     let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
-    let root = if matches!(case,Case::GitPush(_)) {
+    let root = if let Case::GitPush(c)=case {
         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
-        if user.uid.as_raw()!=uid{return None}git_push::fixture_root(&user.dir)?
+        if user.uid.as_raw()!=uid{return None}git_push::fixture_root(&user.dir,c)?
     } else if matches!(case,Case::GitFetch(_)) {
         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
         if user.uid.as_raw()!=uid{return None}git_fetch::fixture_root(&user.dir)?
@@ -3973,8 +3973,8 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         if user.uid.as_raw() != uid { return None; }
         tool_setup::fixture_root(&user.dir, tool_case)?
     } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
-    if matches!(case,Case::GitPush(_)){
-        directory(&root,uid,0o700,&[git_push::NAMES[0],git_push::NAMES[1],git_push::NAMES[2],"state"]).ok()?;
+    if let Case::GitPush(c)=case{
+        directory(&root,uid,0o700,c.namespace()).ok()?;
     } else if matches!(case,Case::GitFetch(_)){
         directory(&root,uid,0o700,&[git_fetch::NAMES[0],git_fetch::NAMES[1],git_fetch::NAMES[2],git_fetch::NAMES[3],"state"]).ok()?;
     } else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){

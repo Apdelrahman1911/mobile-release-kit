@@ -6,6 +6,7 @@ native receipt, admits a credential, or makes a network request. Every Git/app
 call below is the original run_owned supplied by macos_aqua_qualification.
 """
 from contextlib import ExitStack
+from importlib.util import module_from_spec, spec_from_file_location
 import hashlib
 import json
 import math
@@ -16,8 +17,23 @@ import stat
 import subprocess
 import time
 
+_create_spec = spec_from_file_location("mrk_macos_git_push_create_qualification", Path(__file__).with_name("macos_git_push_create_qualification.py"))
+if _create_spec is None or _create_spec.loader is None:
+    raise RuntimeError("push-create-observation-module-unavailable")
+CREATE = module_from_spec(_create_spec)
+_create_spec.loader.exec_module(CREATE)
+del _create_spec
+
 SCOPE = "git-push-native"
 CASES = ("git-push-pack", "git-push-stale", "git-push-held-refusal")
+ALL_CASES = CASES + CREATE.CASES
+SCOPES = (SCOPE, CREATE.SCOPE)
+
+def case_family(cases):
+    _need(type(cases) is tuple and cases in (CASES, CREATE.CASES), "push-fixed-case-family")
+    return cases
+
+
 BOOTSTRAPS = ("github_push_connection_observation_bootstrap.py", "git_push_observation_bootstrap.py")
 GIT = "/Library/Developer/CommandLineTools/usr/bin/git"
 ACCOUNT = "mrk-push-fixture"
@@ -63,12 +79,14 @@ def _support(binding, home):
 
 
 def application_path(binding, home, case):
-    _need(type(case) is str and case in CASES, "push-fixture-case")
-    return _support(binding, home) / f"mrk-macos-aqua-push-{binding.source}-{binding.run}-{binding.attempt}" / case / APPLICATION
+    _need(type(case) is str and case in ALL_CASES, "push-fixture-case")
+    tag = "push-create" if case in CREATE.CASES else "push"
+    return _support(binding, home) / f"mrk-macos-aqua-{tag}-{binding.source}-{binding.run}-{binding.attempt}" / case / APPLICATION
 
 
-def fixture_path(binding, home):
-    return _support(binding, home) / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{SCOPE}"
+def fixture_path(binding, home, *, cases=CASES):
+    scope = CREATE.SCOPE if case_family(cases) == CREATE.CASES else SCOPE
+    return _support(binding, home) / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{scope}"
 
 
 def _ancestors(f, path, roster):
@@ -95,30 +113,30 @@ def _parents_current(f, roster):
 
 def prepare_namespace(f):
     import pwd
-    _need(f.cases == CASES and f.path is None and not f.push_ancestors and not f.inflight, "push-namespace-order")
+    _need(f.cases == case_family(f.cases) and f.path is None and not f.push_ancestors and not f.inflight, "push-namespace-order")
     _need(f.push_end is None, "push-original-suite-clock")
     f.push_end = time.monotonic() + TOTAL_TIMEOUT
     u = pwd.getpwuid(f.uid)
     _need(f.uid > 0 and (u.pw_uid, u.pw_gid) == (f.uid, f.gid), "push-native-user")
-    f.path = fixture_path(f.binding, u.pw_dir)
+    f.path = fixture_path(f.binding, u.pw_dir, cases=f.cases)
     f.parent = _ancestors(f, f.path.parent, f.push_ancestors)
-    f.push_paths = {c: application_path(f.binding, u.pw_dir, c) for c in CASES}
+    f.push_paths = {c: application_path(f.binding, u.pw_dir, c) for c in f.cases}
     namespace_current(f)
 
 
 def namespace_current(f):
-    _need(f.cases == CASES and f.path is not None and f.parent == f.push_ancestors[-1][2], "push-parent-original")
+    _need(f.cases == case_family(f.cases) and f.path is not None and f.parent == f.push_ancestors[-1][2], "push-parent-original")
     _parents_current(f, f.push_ancestors)
 
 
 def prepare_parents(f):
-    _need(f.cases == CASES and not f.inflight and f.push_namespace is None, "push-app-parent-order")
+    _need(f.cases == case_family(f.cases) and not f.inflight and f.push_namespace is None, "push-app-parent-order")
     namespace_current(f)
     # The admitted application-data parent shares the same native home/support
     # ancestors; no ancestor repair or alternate /tmp/keyring/Host route.
-    name = f.push_paths[CASES[0]].parents[1].name
+    name = f.push_paths[f.cases[0]].parents[1].name
     f.push_namespace = f._mkdir(f.parent, name)
-    for case in CASES:
+    for case in f.cases:
         f.push_parents[case] = f._mkdir(f.push_namespace, case)
         f._roster(f.push_parents[case], (), "push-app-parent-occupied")
     # Only the existing native Host may create its application-data leaf.
@@ -127,10 +145,10 @@ def prepare_parents(f):
 
 def parents_current(f):
     namespace_current(f)
-    _need(f.push_namespace is not None and set(f.push_parents) == set(CASES), "push-app-parent-custody")
-    f._named(f.parent, f.push_paths[CASES[0]].parents[1].name, f.push_namespace, 0o700)
-    f._roster(f.push_namespace, CASES, "push-app-namespace")
-    for case in CASES:
+    _need(f.push_namespace is not None and set(f.push_parents) == set(f.cases), "push-app-parent-custody")
+    f._named(f.parent, f.push_paths[f.cases[0]].parents[1].name, f.push_namespace, 0o700)
+    f._roster(f.push_namespace, f.cases, "push-app-namespace")
+    for case in f.cases:
         f._named(f.push_namespace, case, f.push_parents[case], 0o700)
         if case not in f.push_entered:
             f._roster(f.push_parents[case], (), "push-unentered-app-parent")
@@ -285,7 +303,7 @@ def _oid(body):
 
 
 def _transcript(case, base, target, other):
-    _need(case in CASES and len({base, target, other}) == 3
+    _need(case in ALL_CASES and len({base, target, other}) == 3
           and all(type(v) is str and re.fullmatch("[0-9a-f]{40}", v) and v != ZERO for v in (base, target, other)),
           "push-distinct-original-commits")
     raw = json.dumps({"schemaVersion": 1, "case": case, "base": base, "target": target,
@@ -297,9 +315,11 @@ def _transcript(case, base, target, other):
 def _capture(f, case):
     root, rows = f.projects[case], {}
     with f._temporary(f._open(".git", root, directory=True)) as git:
-        for name in ORIGINALS:
+        for name in CREATE.ORIGINALS if case in CREATE.CASES else ORIGINALS:
             rows[".git/" + name] = _at(f, git, name)[:2]
         rows["objects"] = _objects(f, git)
+        if case in CREATE.CASES:
+            rows["absent-tracking"] = CREATE.absence(f, git, _sig, _names, _need)
     for name in FILES:
         rows[name] = _at(f, root, name)[:2]
     rows["root"] = _sig(os.fstat(root))[:6]
@@ -307,7 +327,9 @@ def _capture(f, case):
 
 
 def _configuration(case):
-    _need(type(case) is str and case in CASES, "push-fixture-case")
+    if case in CREATE.CASES:
+        return CREATE.configuration(case, _need)
+    _need(type(case) is str and case in ALL_CASES, "push-fixture-case")
     return ("[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\nlogallrefupdates = true\n"
             "[user]\nname = MRK Push Fixture\nemail = push-fixture@example.invalid\n"
             f'[remote "origin"]\nurl = https://github.com/{ACCOUNT}/{case}.git\nfetch = +refs/heads/*:refs/remotes/origin/*\n'
@@ -316,7 +338,7 @@ def _configuration(case):
 
 def before_invocation(f, case, run_owned, username):
     """Fixed local setup ONLY; no stock Git remote/auth/server command."""
-    _need(f.cases == CASES and case in CASES and case not in f.push_cases
+    _need(f.cases == case_family(f.cases) and case in f.cases and case not in f.push_cases
           and not f.inflight and not f.close_errors, "push-fixture-single-attempt")
     f._namespace(); parents_current(f)
     now = time.monotonic()
@@ -348,7 +370,8 @@ def before_invocation(f, case, run_owned, username):
                 other = _oid(_call(f, case, run_owned, env,
                     ["commit-tree", "HEAD^{tree}", "-p", base, "-m", "MRK public distinct Push peer"]))
                 data = _transcript(case, base, target, other)
-                _call(f, case, run_owned, env, ["update-ref", "--no-deref", "refs/remotes/origin/main", base, ZERO])
+                if case not in CREATE.CASES:
+                    _call(f, case, run_owned, env, ["update-ref", "--no-deref", "refs/remotes/origin/main", base, ZERO])
                 # HEAD stays at the one outgoing target. No reset, checkout,
                 # fetch, remote process, object removal or separate pack spool.
                 f._write(git, DATA, data)
@@ -374,12 +397,14 @@ def before_call(f, case):
 
 
 def report(value, case, need):
+    if case in CREATE.CASES:
+        return CREATE.report(value, case, need)
     fields = {"mechanism", "case", "syntheticProviderBytes", "connectionOriginalJoined", "readOriginalJoined",
               "prepareOriginalJoined", "applyOriginalJoined", "connectionRetired", "remoteReturned",
               "helperRefusedBeforeAllCopyEof", "producerPendingBeforeStop", "sameTicketStop", "toolSha256",
               "normalQuitOriginal", "allOriginalsSettled", "worktreePreserved", "shippingNominationEnabled",
               "tlsQualified", "liveAccountQualified", "productionQualified"}
-    need(type(value) is dict and value.keys() == fields and type(case) is str and case in CASES
+    need(type(value) is dict and value.keys() == fields and type(case) is str and case in ALL_CASES
          and value["case"] == case and value["mechanism"] == "same-original-git-push-v1", "push-observer-report")
     for key in ("syntheticProviderBytes", "connectionOriginalJoined", "readOriginalJoined", "prepareOriginalJoined",
                 "applyOriginalJoined", "connectionRetired", "allOriginalsSettled", "worktreePreserved"):
@@ -408,6 +433,6 @@ def readback(f, case, value, need):
     remaining(f, case)
     f.push_completed.add(case)
     return {"mechanism": "same-fixtures-git-push-readback-v1", "originalIdentitiesMatched": True,
-            "headIndexWorktreeUnchanged": True, "remoteReturned": case == CASES[0], "toolSha256": f.push_tool[3],
-            "cltBuildMetadata": row["version"], "localTrackingUnchanged": True, "untrackedPreserved": True, "localSetupCalls": row["calls"],
+            "headIndexWorktreeUnchanged": True, "remoteReturned": case in (CASES[0], CREATE.CASES[0]), "toolSha256": f.push_tool[3],
+            "cltBuildMetadata": row["version"], "localTrackingUnchanged": True, **({"upstreamAbsent": True, "localTrackingAbsent": True} if case in CREATE.CASES else {}), "untrackedPreserved": True, "localSetupCalls": row["calls"],
             "syntheticProviderBytes": True, "shippingNominationEnabled": False, "nativeAuthority": False}

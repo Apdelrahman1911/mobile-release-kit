@@ -80,7 +80,7 @@ class Supplier:
                       and _git_remote_failure is self.entry._failure_callback
                       and callable(_git_remote_control))
             self.transcript = read_transcript(self.entry, case)
-            self.tip = self.transcript.base
+            self.tip = None if case in data.create.CASES else self.transcript.base
             budget = _setup_budget  # Original raw-clock bridge, not helper +45s.
         else:
             data.need(self.entry is None and _setup_budget is None
@@ -152,6 +152,8 @@ class Supplier:
             data.need(p < len(routes) and role == "standard" and method == "GET" and path == routes[p]
                       and body is private_body is None)
             return data.account() if p == 0 else {"total_count": 0, "workflows": []} if p == 2 else data.repository(case)
+        if case in data.create.CASES:
+            return data.create.next_response(self, case, method, path, role, private_body, budget, p)
         binding, value = self.entry.binding, self.transcript
         data.need(binding.target.repository == coordinate and binding.target.login == data.ACCOUNT
                   and binding.target.account_id == data.ACCOUNT_ID and binding.target.repository_id == data.REPOSITORY_ID

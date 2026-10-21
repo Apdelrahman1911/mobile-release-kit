@@ -122,7 +122,7 @@ impl GitLocalSources {
         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
         let mut nominated=crate::runtime::git_push::matches_tool_for(kind, &native.tool);
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        {if kind==wire::Kind::Push && self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
+        {if self.push_observation.is_some(){nominated=self.observed_push_tool(kind,stop)?;}}
         if !nominated {
             return Err(Reason::SourceRefused);
         }

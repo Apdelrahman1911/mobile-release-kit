@@ -326,7 +326,7 @@ impl Invocation {
             }
         }
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        if self.action.kind()==wire::Kind::Push {
+        if self.action.kind().is_push() {
             if let Some(c)=runtime.push_observation()? {
                 if !self.gate.push_observation_matches(&c){return Err(BridgeError::invalid())}
                 self.push_observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;

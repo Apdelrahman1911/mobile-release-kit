@@ -11,6 +11,9 @@ import json
 import re
 
 CASES = ("git-push-pack", "git-push-stale", "git-push-held-refusal")
+from . import _git_push_create_observation as create
+
+ALL_CASES = CASES + create.CASES
 SCOPE = "git-push-native"
 ACCOUNT, ACCOUNT_ID, REPOSITORY_ID = "mrk-push-fixture", "831", "842"
 REFERENCE = "refs/heads/main"
@@ -31,18 +34,18 @@ def need(value):
 
 
 def coordinate(case):
-    need(type(case) is str and case in CASES)
+    need(type(case) is str and case in ALL_CASES)
     return ACCOUNT + "/" + case
 
 
 def token(case):
-    need(type(case) is str and case in CASES)
+    need(type(case) is str and case in ALL_CASES)
     return "MRK-NON-CREDENTIAL-PUSH-OBSERVER-" + case
 
 
 def token_case(value):
     need(type(value) is str)
-    matches = [case for case in CASES if value == token(case)]
+    matches = [case for case in ALL_CASES if value == token(case)]
     need(len(matches) == 1)
     return matches[0]
 
@@ -67,7 +70,7 @@ class Transcript:
     other: str
 
     def __post_init__(self):
-        need(type(self.case) is str and self.case in CASES
+        need(type(self.case) is str and self.case in ALL_CASES
              and all(oid(v) for v in (self.base, self.target, self.other))
              and len({self.base, self.target, self.other}) == 3)
 
@@ -80,7 +83,7 @@ class Transcript:
 
 
 def decode(raw, case):
-    need(type(raw) is bytes and 0 < len(raw) <= DATA_LIMIT and type(case) is str and case in CASES)
+    need(type(raw) is bytes and 0 < len(raw) <= DATA_LIMIT and type(case) is str and case in ALL_CASES)
     try:
         value = json.loads(raw.decode("ascii"), object_pairs_hook=_pairs)
         need(type(value) is dict and set(value) == {"schemaVersion", "case", "base", "target", "other"}
@@ -98,6 +101,8 @@ def packet(body):
 
 
 def advertisement(value, mode, *, after=False):
+    if type(value) is Transcript and value.case in create.CASES:
+        return create.advertisement(value, mode, after=after)
     need(type(value) is Transcript and mode in ("review", "apply") and type(after) is bool
          and (not after or mode == "apply" and value.case == CASES[0]))
     tip = value.target if after else value.other if mode == "apply" and value.case == CASES[1] else value.base
@@ -108,6 +113,8 @@ def advertisement(value, mode, *, after=False):
 
 
 def receive_status(value):
+    if type(value) is Transcript and value.case in create.CASES:
+        return create.receive_status(value)
     need(type(value) is Transcript and value.case in (CASES[0], CASES[2]))
     first = packet(b"unpack ok\n")
     second = packet(("ok " + REFERENCE + "\n").encode("ascii"))

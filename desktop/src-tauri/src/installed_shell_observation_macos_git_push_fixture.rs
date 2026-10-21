@@ -40,21 +40,22 @@ const DIRS: [(&str, &[&str]); 3] = [
     ("app", &["build.gradle.kts"]),
     ("release", &["mobile-release.json"]),
 ];
-const ORIGINALS: [&str; 8] = [
+const ORIGINALS: [&str; 6] = [
     "HEAD",
     "config",
     "index",
     "refs/heads/main",
     "logs/HEAD",
     "logs/refs/heads/main",
-    "refs/remotes/origin/main",
-    "logs/refs/remotes/origin/main",
 ];
+const TRACKING:[&str;2]=["refs/remotes/origin/main","logs/refs/remotes/origin/main"];
 #[derive(Clone)]
 pub(crate) struct Fixture {
     files: [FileFact; 6],
     dirs: [[u64; 6]; 3],
-    originals: [FileFact; 8],
+    originals: [FileFact; 6],
+    tracking: Option<[FileFact;2]>,
+    absent_tracking: Option<[[u64;6];2]>,
     data: FileFact,
     base: String,
     target: String,
@@ -118,15 +119,21 @@ impl Fixture {
         {
             return Err(());
         }
-        let (_, body) = read(&root.join(".git/refs/remotes/origin/main"), uid, 64)?;
-        if body != format!("{base}\n").as_bytes() {
-            return Err(());
-        }
+        let (tracking,absent_tracking)=if case.create().is_some(){
+            (None,Some(super::create::absent_tracking(root,uid)?))
+        }else{
+            let facts=TRACKING.iter().map(|p|read(&root.join(".git").join(p),uid,65536).map(|v|v.0))
+                .collect::<Result<Vec<_>,_>>()?.try_into().map_err(|_|())?;
+            if read(&root.join(".git/refs/remotes/origin/main"),uid,64)?.1!=format!("{base}\n").as_bytes(){return Err(())}
+            (Some(facts),None)
+        };
         directory(&root.join(".git/objects/pack"), uid, 0o700, &[])?;
         Ok(Self {
             files,
             dirs,
             originals,
+            tracking,
+            absent_tracking,
             data,
             base,
             target,
@@ -157,6 +164,7 @@ impl Fixture {
         self.files
             .iter()
             .chain(&self.originals)
+            .chain(self.tracking.iter().flatten())
             .chain([&self.data])
             .try_fold(
                 std::mem::size_of::<Self>()
@@ -187,6 +195,14 @@ impl Fixture {
                 return Err(());
             }
         }
+        if case.create().is_some(){
+            if self.tracking.is_some()||self.absent_tracking!=Some(super::create::absent_tracking(root,uid)?){return Err(())}
+        }else{
+            if self.absent_tracking.is_some(){return Err(())}
+            for (p,old) in TRACKING.iter().zip(self.tracking.as_ref().ok_or(())?){
+                if read(&root.join(".git").join(p),uid,65536)?.0!=*old{return Err(())}
+            }
+        }
         if read(&root.join(".git").join(DATA_FILE), uid, DATA_LIMIT)?.0 != self.data {
             return Err(());
         }
@@ -194,7 +210,7 @@ impl Fixture {
         // local object/HEAD/index/log. The setup's complete loose-object
         // inventory is additionally compared by the SAME outer Fixtures.
         directory(&root.join(".git/objects/pack"), uid, 0o700, &[])?;
-        if case == Case::Pack
+        if case.publication()
             && (result["state"] != "succeeded" || result["effectPhase"] != "remote-returned")
         {
             return Err(());

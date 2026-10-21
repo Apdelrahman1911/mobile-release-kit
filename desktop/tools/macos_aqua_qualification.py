@@ -1125,7 +1125,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = (*PUSH.CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
+ALL_CASES = (*PUSH.ALL_CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -1761,9 +1761,9 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, PUSH.SCOPE, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
-    if scope == PUSH.SCOPE:
-        return PUSH.CASES
+    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, *PUSH.SCOPES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
+    if scope in PUSH.SCOPES:
+        return PUSH.CREATE.CASES if scope == PUSH.CREATE.SCOPE else PUSH.CASES
     if scope == FETCH.SCOPE:
         return FETCH.CASES
     if scope == TOOLS.SERVICE_SCOPE:
@@ -1805,7 +1805,8 @@ def argument_scope(argv):
                                or argv == ["--scope", identity_qualification.SCOPE]
                                or argv == ["--scope", TOOLS.SCOPE]
                                or argv == ["--scope", FETCH.SCOPE]
-                               or argv == ["--scope", PUSH.SCOPE]), "arguments-not-supported")
+                               or argv == ["--scope", PUSH.SCOPE]
+                               or argv == ["--scope", PUSH.CREATE.SCOPE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
@@ -1822,7 +1823,7 @@ def entry_arguments(argv):
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    if case in PUSH.CASES:
+    if case in PUSH.ALL_CASES:
         return PUSH.TIMEOUT
     if case in FETCH.CASES:
         return FETCH.TIMEOUT
@@ -2611,10 +2612,10 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.CASES:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.ALL_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
-        if case in PUSH.CASES:
+        if case in PUSH.ALL_CASES:
             value["gitPush"] = None  # Genuine returned original facts only.
         if case in FETCH.CASES:
             value["gitFetch"] = None  # Genuine returned original facts only.
@@ -2871,7 +2872,7 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
-    if case in PUSH.CASES:
+    if case in PUSH.ALL_CASES:
         need(type(value) is dict and "gitPush" in value, "push-original-report")
         expected["gitPush"] = PUSH.report(value["gitPush"], case, need)
     if case in FETCH.CASES:
@@ -4477,7 +4478,7 @@ def _expected_local_edits(case):
 
 
 def fixture_data(case, final, *, ios_output_created=None):
-    if case in PUSH.CASES:
+    if case in PUSH.ALL_CASES:
         return PUSH.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX, SOURCE)
     if case in FETCH.CASES:
         return FETCH.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX, SOURCE)
@@ -4662,7 +4663,7 @@ class Fixtures:
     def __init__(self, binding, uid, gid, scope=None):
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
-        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, PUSH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
@@ -4797,7 +4798,7 @@ class Fixtures:
                  "fixture-write-original")
 
     def prepare(self):
-        if self.cases == PUSH.CASES:
+        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
             PUSH.prepare_namespace(self)
         elif self.cases == FETCH.CASES:
             FETCH.prepare_namespace(self)
@@ -4854,7 +4855,7 @@ class Fixtures:
             else:
                 self.originals[case] = self._capture(case, False)
         self._namespace()
-        if self.cases == PUSH.CASES:
+        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
             PUSH.prepare_parents(self)
         if self.cases == FETCH.CASES:
             FETCH.prepare_parents(self)
@@ -4866,7 +4867,7 @@ class Fixtures:
             self._prepare_account()
 
     def _namespace(self):
-        if self.cases == PUSH.CASES:
+        if self.cases in (PUSH.CASES, PUSH.CREATE.CASES):
             PUSH.namespace_current(self)
         elif self.cases == FETCH.CASES:
             FETCH.namespace_current(self)
@@ -5009,7 +5010,7 @@ class Fixtures:
     def before_call(self, case):
         self.case, self.stage = case, "before-invocation"
         self._namespace()
-        if case in PUSH.CASES:
+        if case in PUSH.ALL_CASES:
             PUSH.before_call(self, case)
         elif case in FETCH.CASES:
             FETCH.before_call(self, case)
@@ -5450,7 +5451,7 @@ class Fixtures:
 
     def admit_normal_account_runtime(self, source, work, *, application_source):
         """Same-job installed originals, not a fabricated producer/supplier result."""
-        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES)
+        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES, PUSH.CREATE.CASES)
               or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
              and not self.inflight and self.recovery_runtime is None,
              "normal-account-runtime-order")
@@ -5855,7 +5856,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     cases = selected_cases(scope)
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
     not_executed = []
-    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, PUSH.SCOPE):
+    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, *PUSH.SCOPES):
         # Root's CURRENT normal-package preparation must call the same original
         # admit_normal_account_runtime first. No historical Aqua supplier route.
         fixtures.recovery_runtime_paths()
@@ -5870,10 +5871,10 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
                 app_environment(fixtures.path / "state" / case, uid, username))
         if scope == FETCH.SCOPE:
             FETCH.before_invocation(fixtures, case, run_owned, username)
-        if scope == PUSH.SCOPE:
+        if scope in PUSH.SCOPES:
             PUSH.before_invocation(fixtures, case, run_owned, username)
         fixtures.before_call(case)
-        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, PUSH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
@@ -5890,7 +5891,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         # unknown, with no readback, close or later invocation.
         try:
             result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
-                               timeout=(PUSH.remaining(fixtures, case) if scope == PUSH.SCOPE else FETCH.remaining(fixtures, case) if scope == FETCH.SCOPE else case_timeout(case)), capture=True, text=False, output_limit=OUTPUT_LIMIT)
+                               timeout=(PUSH.remaining(fixtures, case) if scope in PUSH.SCOPES else FETCH.remaining(fixtures, case) if scope == FETCH.SCOPE else case_timeout(case)), capture=True, text=False, output_limit=OUTPUT_LIMIT)
         except BaseException as error:
             # Diagnostics only: preserve identical error, inflight, unknown
             # finality and the no-readback/no-close/no-next-call boundary.
@@ -5923,7 +5924,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
             fixtures.accept_account_app(report["iosArchive"])
             _run_ios_account_child(fixtures, run_owned, uid, username, "observe")
             readback = fixtures.readback_account(report["iosArchive"])
-        elif case in PUSH.CASES:
+        elif case in PUSH.ALL_CASES:
             readback = PUSH.readback(fixtures, case, report["gitPush"], need)
         elif case in FETCH.CASES:
             readback = FETCH.readback(fixtures, case, report["gitFetch"], need)
@@ -5967,7 +5968,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
                  "fixture-local-readback")
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
-        if scope == PUSH.SCOPE:
+        if scope in PUSH.SCOPES:
             PUSH.remaining(fixtures, case)
         if scope == FETCH.SCOPE:
             FETCH.remaining(fixtures, case)

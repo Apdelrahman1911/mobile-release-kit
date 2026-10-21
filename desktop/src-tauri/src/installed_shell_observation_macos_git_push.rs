@@ -15,6 +15,8 @@ use std::{
     },
 };
 
+#[path = "installed_shell_observation_macos_git_push_create.rs"]
+mod create;
 #[path = "installed_shell_observation_macos_git_push_fixture.rs"]
 mod fixture;
 pub(super) use fixture::Fixture;
@@ -31,11 +33,22 @@ pub(crate) enum Case {
     Pack,
     Stale,
     Held,
+    Create(create::Case),
 }
 impl Case {
-    pub(crate) const ALL: [Self; 3] = [Self::Pack, Self::Stale, Self::Held];
+    pub(crate) const ALL: [Self; 8] = [Self::Pack, Self::Stale, Self::Held,
+        Self::Create(create::Case::Empty), Self::Create(create::Case::Equal),
+        Self::Create(create::Case::Stale), Self::Create(create::Case::Race), Self::Create(create::Case::Held)];
     pub(crate) fn name(self) -> &'static str {
-        NAMES[self as usize]
+        match self { Self::Pack=>NAMES[0], Self::Stale=>NAMES[1], Self::Held=>NAMES[2], Self::Create(c)=>c.name() }
+    }
+    fn create(self) -> Option<create::Case> { if let Self::Create(c)=self {Some(c)}else{None} }
+    pub(crate) fn kind(self) -> local::Kind { if self.create().is_some(){local::Kind::PushNewBranch}else{local::Kind::Push} }
+    fn apply_requested(self) -> bool {self.create().is_none_or(create::Case::apply_requested)}
+    fn publication(self) -> bool {matches!(self,Self::Pack|Self::Create(create::Case::Empty))}
+    pub(super) fn namespace(self) -> &'static [&'static str] {
+        if self.create().is_some(){&[create::NAMES[0],create::NAMES[1],create::NAMES[2],create::NAMES[3],create::NAMES[4],"state"]}
+        else{&[NAMES[0],NAMES[1],NAMES[2],"state"]}
     }
     pub(super) fn parse(v: &std::ffi::OsStr) -> Option<Self> {
         Self::ALL.into_iter().find(|c| v == c.name())
@@ -65,15 +78,17 @@ fn support(home: &Path) -> Option<PathBuf> {
     (home != Path::new("/") && crate::asset_session::installed_macos_selection_path_bounded(home))
         .then(|| home.join("Library/Application Support"))
 }
-pub(super) fn fixture_root(home: &Path) -> Option<PathBuf> {
+pub(super) fn fixture_root(home: &Path, case: Case) -> Option<PathBuf> {
     let (s, r, a) = tuple()?;
-    Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-git-push-native")))
+    let scope=if case.create().is_some(){create::SCOPE}else{"git-push-native"};
+    Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-{scope}")))
 }
 fn application_root(home: &Path, case: Case) -> Option<PathBuf> {
     let (s, r, a) = tuple()?;
+    let tag=if case.create().is_some(){"push-create"}else{"push"};
     Some(
         support(home)?
-            .join(format!("mrk-macos-aqua-push-{s}-{r}-{a}"))
+            .join(format!("mrk-macos-aqua-{tag}-{s}-{r}-{a}"))
             .join(case.name())
             .join("dev.mobile-release-kit.desktop"),
     )
@@ -125,7 +140,7 @@ impl Control {
         let u = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
             .map_err(|_| ())?
             .ok_or(())?;
-        if u.uid.as_raw() != uid || project != fixture_root(&u.dir).ok_or(())?.join(case.name()) {
+        if u.uid.as_raw() != uid || project != fixture_root(&u.dir,case).ok_or(())?.join(case.name()) {
             return Err(());
         }
         Ok(Arc::new(Self {
@@ -183,8 +198,9 @@ impl Control {
     pub(crate) fn application(&self) -> &Path {
         &self.application
     }
+    pub(crate) fn kind(&self) -> local::Kind {self.case.kind()}
     pub(crate) fn held_case(&self) -> bool {
-        self.case == Case::Held
+        matches!(self.case,Case::Held|Case::Create(create::Case::Held))
     }
     pub(crate) fn completed(&self) -> bool {
         self.complete.load(Ordering::SeqCst)
@@ -221,7 +237,7 @@ impl Control {
     }
     pub(crate) fn observed(&self, request: &local::Request) -> bool {
         if !self.live()
-            || request.action.kind() != local::Kind::Push
+            || request.action.kind() != self.kind()
             || request.native.as_ref().is_none_or(|n| {
                 Path::new(&n.root) != self.project || self.tool.get() != Some(&n.tool)
             })
@@ -259,7 +275,7 @@ impl Control {
             return false;
         };
         if !self.live()
-            || self.case != Case::Held
+            || !self.held_case()
             || t.marker
             || t.stop
             || t.apply
@@ -286,7 +302,7 @@ impl Control {
             return false;
         };
         if !self.live()
-            || self.case != Case::Held
+            || !self.held_case()
             || !t.marker
             || t.stop
             || t.apply
@@ -405,7 +421,7 @@ impl Control {
                         s.ok && s.status == p.outcome
                             && s.reason == p.reason
                             && s.publication
-                                == (phase == local::Phase::Apply && self.case == Case::Pack)
+                                == (phase == local::Phase::Apply && self.case.publication())
                     })
             })
         })
@@ -460,15 +476,12 @@ impl Control {
         if !self.live()
             || self.tool.get().is_none()
             || self.data.get().is_none()
-            || t.prepare
-                .as_ref()
-                .and_then(|p| p.result.as_ref())
-                .is_none_or(|s| !s.ok || s.status != Some(read::Outcome::Ok) || s.publication)
-            || t.apply
-                .as_ref()
-                .and_then(|p| p.result.as_ref())
-                .is_none_or(|s| !s.ok)
-            || (self.case == Case::Held) != (t.marker && t.producer_pending && t.stop)
+            || t.prepare.as_ref().and_then(|p|p.result.as_ref()).is_none_or(|s|
+                !s.ok || s.publication || if self.case.apply_requested(){s.status!=Some(read::Outcome::Ok)}
+                    else{s.status!=Some(read::Outcome::Refused)||s.reason.as_deref()!=Some("target-changed")})
+            || if self.case.apply_requested(){t.apply.as_ref().and_then(|p|p.result.as_ref()).is_none_or(|s|!s.ok)}
+                else{t.apply.is_some()}
+            || self.held_case() != (t.marker && t.producer_pending && t.stop)
         {
             return false;
         }
@@ -597,7 +610,7 @@ impl Record {
             || id != 2
             || !self.connected
             || !self.read
-            || !self.applied
+            || self.applied != c.case.apply_requested()
             || !self.disconnected
         {
             return false;
@@ -611,16 +624,20 @@ impl Record {
         }
         let t = c.trace.try_lock().ok()?;
         let tool = c.tool.get()?;
-        let p = t.apply.as_ref()?.result.as_ref()?;
-        Some(
-            json!({"mechanism":"same-original-git-push-v1","case":c.case.name(),
+        let publication=if c.case.apply_requested(){t.apply.as_ref()?.result.as_ref()?.publication}else{
+            if t.apply.is_some() || self.applied{return None} false};
+        let mut value=json!({"mechanism":"same-original-git-push-v1","case":c.case.name(),
             "syntheticProviderBytes":true,"connectionOriginalJoined":self.connected,"readOriginalJoined":self.read,
             "prepareOriginalJoined":true,"applyOriginalJoined":self.applied,"connectionRetired":self.disconnected,
-            "remoteReturned":p.publication,"helperRefusedBeforeAllCopyEof":t.marker,"producerPendingBeforeStop":t.producer_pending,
+            "remoteReturned":publication,"helperRefusedBeforeAllCopyEof":t.marker,"producerPendingBeforeStop":t.producer_pending,
             "sameTicketStop":t.stop,"toolSha256":tool.sha256,"normalQuitOriginal":2,
             "allOriginalsSettled":true,"worktreePreserved":true,"shippingNominationEnabled":false,
-            "tlsQualified":false,"liveAccountQualified":false,"productionQualified":false}),
-        )
+            "tlsQualified":false,"liveAccountQualified":false,"productionQualified":false});
+        if c.case.create().is_some(){
+            value["mechanism"]=json!("same-original-git-push-create-v1");
+            value["applyRequested"]=json!(c.case.apply_requested());
+        }
+        Some(value)
     }
 }
 impl Observation {
@@ -744,13 +761,13 @@ impl Observation {
                     let read_matches = p.result["basis"] == "local-refs-no-fetch"
                         && p.result["observation"]["head"] == f.target()
                         && p.result["observation"]["branch"] == "refs/heads/main"
-                        && p.result["tracking"]["state"] == "complete"
+                        && if control.case.create().is_some(){create::tracking(&p.result["tracking"])}else{p.result["tracking"]["state"] == "complete"
                         && p.result["tracking"]["remote"] == "origin"
                         && p.result["tracking"]["localRef"] == "refs/remotes/origin/main"
                         && p.result["tracking"]["mergeRef"] == "refs/heads/main"
                         && p.result["tracking"]["head"] == f.base()
                         && p.result["tracking"]["ahead"] == 1
-                        && p.result["tracking"]["behind"] == 0;
+                        && p.result["tracking"]["behind"] == 0};
                     let v = r.git_push.as_mut().ok_or_else(invalid)?;
                     if v.read_operation.as_deref() != Some(&p.operation_id) {
                         return Err(invalid());
@@ -788,22 +805,22 @@ impl Observation {
                         let r = self.record().ok_or_else(invalid)?;
                         let v = r.git_push.as_ref().ok_or_else(invalid)?;
                         push::Action {
-                            kind: push::Kind::Push,
+                            kind: if control.case.create().is_some(){push::Kind::PushNewBranch}else{push::Kind::Push},
                             expected_revision: v.revision.clone().ok_or_else(invalid)?,
                             expected_reference_revision: v
                                 .reference_revision
                                 .clone()
                                 .ok_or_else(invalid)?,
-                            remote: Some("origin".into()),
+                            remote: if control.case.create().is_some(){None}else{Some("origin".into())},
                             local_ref: "refs/heads/main".into(),
                             remote_ref: "refs/heads/main".into(),
-                            old_oid: r
+                            old_oid: if control.case.create().is_some(){push::new_branch::ZERO.into()}else{r
                                 .fixture
                                 .git_push
                                 .as_ref()
                                 .ok_or_else(invalid)?
                                 .base()
-                                .into(),
+                                .into()},
                             new_oid: r
                                 .fixture
                                 .git_push
@@ -843,6 +860,11 @@ impl Observation {
                     }
                     if matches!(p.stage, read::Phase::Starting | read::Phase::Running) {
                         None
+                    } else if control.case==Case::Create(create::Case::Equal){
+                        if !create::refused_prepare(create::Case::Equal,&p,s.review.is_none())
+                            || !control.checked_sample(local::Phase::Prepare,&p){return Err(invalid())}
+                        r.git_push.as_mut().ok_or_else(invalid)?.result=p.result;
+                        Some(Step::Disconnect)
                     } else {
                         if p.stage != read::Phase::Settled
                             || p.outcome != Some(read::Outcome::Ok)
@@ -863,13 +885,13 @@ impl Observation {
                             return Err(invalid());
                         }
                         let f = r.fixture.git_push.as_ref().ok_or_else(invalid)?;
-                        if review.head != f.target()
+                        if if control.case.create().is_some(){!create::review(review,f.base(),f.target())}else{review.head != f.target()
                             || review.expected_remote_oid != f.base()
                             || review.branch != "refs/heads/main"
                             || review.upstream_ref != "refs/heads/main"
                             || review.tracking_ref.as_deref() != Some("refs/remotes/origin/main")
                             || review.commits != [f.target()]
-                            || !review.valid()
+                            || !review.valid()}
                         {
                             return Err(invalid());
                         }
@@ -1040,6 +1062,7 @@ fn expected_apply(case: Case, p: &local::Projection) -> bool {
         return false;
     }
     match case {
+        Case::Create(c) => create::expected_apply(c,p),
         Case::Pack => {
             p.outcome == Some(read::Outcome::Ok)
                 && p.reason.is_none()
