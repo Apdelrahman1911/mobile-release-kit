@@ -23,6 +23,9 @@ mod private;
 #[path = "saved_command_apple_certificate.rs"]
 pub(in crate::saved_command_owner) mod certificate;
 pub(crate) use certificate::AppleDistributionCertificateBinding;
+#[path="saved_command_apple_key_recovery.rs"]
+pub(in crate::saved_command_owner) mod recovery;
+pub(crate) use recovery::AppleKeyRecoveryVerified;
 #[path="saved_command_apple_p12.rs"]
 pub(in crate::saved_command_owner) mod p12;
 pub(crate) use p12::{AppleP12PendingAck,AppleP12SavePermit,AppleP12NoSaveJoined,AppleP12NativeJoined};
@@ -82,6 +85,7 @@ pub(crate) struct AppleKeySession {
     clock: Arc<super::apple_signing::AppleProvisioningClock>,
     mode: wire::Mode,
     certificate: Option<certificate::State>,
+    recovery: Option<recovery::State>,
     p12: Option<p12::State>,
     original: OnceLock<Weak<OriginalWork>>,
     destination: OnceLock<Weak<AppleDistributionKeyDestination>>,
@@ -142,6 +146,7 @@ pub(super) fn initialize(owner: &Arc<Session>) -> Result<(), BridgeError> {
         mode: context.mode,
         certificate: (context.mode.certificate() || context.mode.p12()).then(certificate::State::default),
         p12: p12::State::reserve(context.mode)?,
+        recovery: (context.mode == wire::Mode::KeyRecover).then(recovery::State::default),
         original: OnceLock::new(),
         destination: OnceLock::new(),
         loan: OnceLock::new(),
@@ -184,7 +189,8 @@ pub(super) fn backing_bytes(mode: wire::Mode) -> Option<usize> {
         .checked_add(std::mem::size_of::<AppleKeyUseJoined>())?
         .checked_add(2 * (4 * 32) + 3 * 64)?
         .checked_add(if mode.certificate() || mode.p12() { certificate::backing_bytes()? } else { 0 })?
-        .checked_add(p12::backing_bytes(mode)?)
+        .checked_add(p12::backing_bytes(mode)?)?
+        .checked_add(if mode == wire::Mode::KeyRecover { recovery::backing_bytes()? } else { 0 })
 }
 
 pub(super) fn stopped(owner: &Session, reason: Reason, at: Instant) {
@@ -1182,7 +1188,7 @@ pub(super) async fn finish_private(owner: &Arc<Session>) -> bool {
             if loan.accept_joined(&asset, proof).is_err() {
                 return false;
             }
-        } else if key.mode == wire::Mode::KeyReview || key.mode.certificate() {
+        } else if key.mode == wire::Mode::KeyReview || key.mode == wire::Mode::KeyRecover || key.mode.certificate() {
             // Inventory-only operation has no generated/loaded private body.
             // Its original source/store still closes in retire_key_asset.
             key.private_drained.store(true, Ordering::SeqCst);

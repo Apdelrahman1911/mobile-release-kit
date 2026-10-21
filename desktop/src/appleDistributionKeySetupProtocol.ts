@@ -8,10 +8,10 @@ import type { LocalStoreProject } from './localStorePreflight.ts';
 import type { PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
 import type { OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
-export const APPLE_DISTRIBUTION_KEY_MODES = Object.freeze(['key-review', 'key-prepare'] as const);
+export const APPLE_DISTRIBUTION_KEY_MODES = Object.freeze(['key-review', 'key-prepare', 'key-recover'] as const);
 export type AppleDistributionKeyMode = typeof APPLE_DISTRIBUTION_KEY_MODES[number];
-export type AppleDistributionKeyDecision = 'prepare-review' | 'recover-existing-key' | 'reuse-existing-identity' | 'bundle-required' | 'blocked' | 'produced';
-export type AppleDistributionKeyReason = 'local-key-required' | 'existing-key' | 'existing-certificate' | 'bundle-registration-required' | 'account-pending' | 'inventory-unavailable' | 'producer-returned';
+export type AppleDistributionKeyDecision = 'prepare-review' | 'recover-existing-key' | 'reuse-existing-identity' | 'bundle-required' | 'blocked' | 'produced' | 'compared';
+export type AppleDistributionKeyReason = 'local-key-required' | 'existing-key' | 'existing-certificate' | 'bundle-registration-required' | 'account-pending' | 'inventory-unavailable' | 'producer-returned' | 'stored-key-checked';
 export interface AppleDistributionKeyResult {
   schemaVersion: 1; scope: 'local-ios-distribution-key'; mode: AppleDistributionKeyMode;
   decision: AppleDistributionKeyDecision; reason: AppleDistributionKeyReason;
@@ -21,7 +21,7 @@ export interface AppleDistributionKeySavedReference {
   vaultId: string; generationId: string; recordId: string; revisionId: string; revisionCounter: number;
 }
 export const isAppleDistributionKeyMode = (mode: unknown): mode is AppleDistributionKeyMode =>
-  mode === 'key-review' || mode === 'key-prepare';
+  mode === 'key-review' || mode === 'key-prepare' || mode === 'key-recover';
 const keys = (value: unknown, names: readonly string[]): value is Record<string, unknown> => !!value &&
   typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
 const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value) && value !== '0'.repeat(32);
@@ -33,7 +33,8 @@ export function parseAppleDistributionKeyResult(value: unknown, mode: unknown): 
     if (!isAppleDistributionKeyMode(mode) || !keys(v, ['schemaVersion', 'scope', 'mode', 'decision', 'reason', 'saved', 'certificateRequested', 'credentialReady']) ||
         v.schemaVersion !== 1 || v.scope !== 'local-ios-distribution-key' || v.mode !== mode ||
         v.saved !== false || v.certificateRequested !== false || v.credentialReady !== false) return null;
-    const valid = mode === 'key-prepare' ? v.decision === 'produced' && v.reason === 'producer-returned' :
+    const valid = mode === 'key-recover' ? v.decision === 'compared' && v.reason === 'stored-key-checked' :
+      mode === 'key-prepare' ? v.decision === 'produced' && v.reason === 'producer-returned' :
       v.decision === 'prepare-review' && v.reason === 'local-key-required' ||
       v.decision === 'recover-existing-key' && (v.reason === 'existing-key' || v.reason === 'existing-certificate') ||
       v.decision === 'reuse-existing-identity' && v.reason === 'existing-certificate' ||
@@ -112,6 +113,10 @@ export function appleDistributionKeyResultCopy(result: AppleDistributionKeyResul
   } : {
     title: 'Setup stopped; the key was saved',
     detail: 'The operation did not complete normally. Its generated key was preserved in encrypted storage, not deleted. Keep this key and the original result; do not generate a replacement. No certificate or signing assignment is confirmed.',
+  };
+  if (result?.mode === 'key-recover' && result.decision === 'compared') return {
+    title: 'Saved key checked against its original record',
+    detail: 'The same encrypted key and certificate request matched the original durable-save record. Earlier setup history is preserved. Review certificate setup separately; no certificate was requested, P12 saved, signing assignment made or backup repaired.',
   };
   if (result?.decision === 'prepare-review') return {
     title: 'Review creating a local signing key',

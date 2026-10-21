@@ -935,6 +935,15 @@ impl AppleDistributionKeyLoan {
             })
     }
 
+    /// Still requires this original loaded loan and the separate genuine
+    /// verifier/joins. A hash alone never adopts a restored NEW reference.
+    pub(crate) fn matches_recovery_frame(&self, owner: &Arc<OriginalWork>, bytes:u32, sha256:&str) -> bool {
+        self.original.same_owner(owner) && !owner.interrupted()
+            && self.progress.try_lock().is_ok_and(|p| p.phase == LoadPhase::Loaded && p.first.is_none()
+                && p.joined.is_none() && p.payload.as_ref().and_then(|p|p.fields.as_ref())
+                    .is_some_and(|fields|commands::apple_distribution_key_frame_matches(fields,bytes,sha256)))
+    }
+
     pub(crate) fn accept_joined(
         &self,
         owner: &Arc<OriginalWork>,

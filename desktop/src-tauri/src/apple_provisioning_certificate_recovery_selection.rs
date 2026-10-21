@@ -101,7 +101,9 @@ pub(crate) fn certificate_key_preparation(account: &AccountSnapshot, scope: &Sco
         if row.intent.destination != certificate.source_key { continue; }
         // An old keySaved ACK is only an additional account/team history gate.
         // Actual key material MUST come from this operation's fresh Load/Check.
-        if result.is_some() || row.unresolved() || row.native_settlement != NativeSettlement::Known
+        let recovered=account.key_recovery(row).map_err(|_|invalid())?;
+        if result.is_some() || account.key_unresolved(row).map_err(|_|invalid())?
+            || row.native_settlement != NativeSettlement::Known && recovered.is_none()
             || row.intent.context.account_ref != scope.provisioning.account_ref
             || row.intent.target.team_id != scope.target.team_id
             || row.intent.target.app_id_prefix != scope.target.app_id_prefix
@@ -116,6 +118,10 @@ pub(crate) fn certificate_key_preparation(account: &AccountSnapshot, scope: &Sco
             source_key: row.intent.destination.clone(), account_ref: row.intent.context.account_ref.clone(),
             team_id: row.intent.target.team_id.clone(), csr_sha256: output.csr_sha256.clone(),
             public_key_sha256: output.public_key_sha256.clone(), update_sha256: row.update.sha256().map_err(|_| invalid())?,
+            recovery: recovered.map(|record|Ok::<_,BridgeError>(CertificateRecoveredKey {
+                stamp:KeyRecoveryStamp{reference:Reference{operation_id:record.provenance.operation_id.as_str().into(),
+                    owner_generation:record.provenance.owner_generation.as_str().into()},sha256:record.sha256().map_err(|_|invalid())?},
+                output:record.output.clone()})).transpose()?,
         });
     }
     Ok(result)
@@ -130,7 +136,7 @@ mod tests {
 
     fn account(scope:&ScopeData)->AccountSnapshot {
         AccountSnapshot { revision:crate::application_state_store::Revision(7),account:scope.provisioning.account_ref.clone(),
-            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![],p12_rows:vec![] }
+            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![],p12_rows:vec![],key_recoveries:vec![] }
     }
     fn reconcile_context(binding: &RequestBinding, reference: Reference) -> Context {
         let mut context = binding.context.clone();
@@ -301,15 +307,17 @@ mod tests {
         let mut context=certificate.context;context.operation_id="6".repeat(32);
         let mut provenance=certificate.provenance;provenance.operation_id=Id::parse(&context.operation_id).unwrap();
         provenance.owner_generation=Id::parse(&"7".repeat(32)).unwrap();
-        let intent=KeyPrepareIntent { context,provenance,target:certificate.target,source_p8:certificate.source_p8,
+        let mut intent=KeyPrepareIntent { context,provenance,target:certificate.target,source_p8:certificate.source_p8,
             destination:certificate.source_key.clone(),algorithm:KeyAlgorithm::Rsa2048Sha256,bundle:certificate.bundle,
             observed_at:certificate.observed_at,valid_until:certificate.valid_until,before_sha256:certificate.before_sha256,
             review_plan_sha256:"b".repeat(64) };
-        KeyPrepareRow { intent, generator_armed:true, update:KeyPrepareUpdate { sequence:3,
+        intent.review_plan_sha256=intent.review_hash().unwrap();
+        let row=KeyPrepareRow { intent, generator_armed:true, update:KeyPrepareUpdate { sequence:3,
             generation:KeyGeneration::Returned,output:Some(KeyOutputMetadata { frame_bytes:4000,frame_sha256:"c".repeat(64),
                 csr_sha256:certificate.csr_sha256,public_key_sha256:certificate.public_key_sha256 }),
             save:ProfileSaveState::ReadBack,saved_reference:Some(certificate.source_key),
-            disposition:KeyDisposition::Cancelled,cancel_requested:true },native_settlement:NativeSettlement::Known }
+            disposition:KeyDisposition::Cancelled,cancel_requested:true },native_settlement:NativeSettlement::Known };
+        row.validate().unwrap();row
     }
     #[test]
     fn key_saved_history_is_extra_fullref_gate_not_current_loan_or_restored_authority() {
@@ -330,5 +338,52 @@ mod tests {
             account.key_rows=vec![changed];
             assert!(certificate_key_preparation(&account,&binding.scope).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn durable_recovery_selection_keeps_pending_and_has_a_distinct_certificate_origin() {
+        use crate::apple_provisioning_journal::{KeyRecoveryRecord,KeyRecoveryOrigin,key_row_sha256};
+        let certificate = binding(Mode::CertificateReview);
+        let mut account = account(&certificate.scope);
+        let mut row = saved_key(&certificate);
+        account.key_rows.push(row.clone());
+        let normal = certificate_key_preparation(&account,&certificate.scope).unwrap().unwrap();
+        assert!(normal.recovery.is_none());
+        assert!(serde_json::to_value(&normal).unwrap().get("recovery").is_none());
+        let mut scope = std::sync::Arc::try_unwrap(binding(Mode::CertificateReview)).ok().unwrap().scope;
+        let source = scope.certificate.take().unwrap();
+        scope.key = Some(KeyScopeData { source_p8:source.source_p8,source_key:Some(source.source_key),
+            destination:None,entitlements:json!({}),review:None,vault_inventory:None,recovery:None });
+        assert!(!key_recovery_selection(&account,&scope).unwrap().needs_record()); // Known: compare only.
+        row.native_settlement=NativeSettlement::Pending;
+        account.key_rows=vec![row.clone()];
+        let original=serde_json::to_value(&row).unwrap();
+        assert!(key_recovery_selection(&account,&scope).unwrap().needs_record());
+        assert!(certificate_key_preparation(&account,&certificate.scope).unwrap().is_none());
+        let record=KeyRecoveryRecord { context:scope.provisioning.clone(),provenance:scope.provenance.clone(),
+            target:row.intent.target.clone(),source_p8:scope.key.as_ref().unwrap().source_p8.clone(),
+            source_key:row.intent.destination.clone(),original:KeyRecoveryOrigin {
+                operation_id:row.intent.provenance.operation_id.clone(),owner_generation:row.intent.provenance.owner_generation.clone(),
+                row_sha256:key_row_sha256(&row).unwrap() },output:row.update.output.clone().unwrap() };
+        record.matches_row(&row).unwrap();
+        account.key_recoveries.push(record.clone());
+        let selected=key_recovery_selection(&account,&scope).unwrap();
+        assert!(!selected.needs_record() && selected.recovery.is_some());
+        let recovered=certificate_key_preparation(&account,&certificate.scope).unwrap().unwrap();
+        assert!(recovered.reference==normal.reference && recovered.update_sha256==normal.update_sha256);
+        assert_eq!(recovered.recovery.unwrap().stamp.sha256,record.sha256().unwrap());
+        assert!(account.key_rows[0].unresolved());
+        assert_eq!(serde_json::to_value(&account.key_rows[0]).unwrap(),original);
+        // Even the same public hashes cannot substitute a restored NEW ref.
+        scope.key.as_mut().unwrap().source_key.as_mut().unwrap().revision_id="9".repeat(32);
+        assert!(key_recovery_selection(&account,&scope).is_err());
+        scope.key.as_mut().unwrap().source_key=Some(row.intent.destination.clone());
+        account.key_recoveries[0].original.row_sha256="e".repeat(64);
+        assert!(key_recovery_selection(&account,&scope).is_err());
+        account.key_recoveries.clear();
+        account.key_rows[0].native_settlement=NativeSettlement::Unknown;
+        assert!(key_recovery_selection(&account,&scope).is_err());
+        account.key_rows=vec![row.clone(),row];
+        assert!(key_recovery_selection(&account,&scope).is_err());
     }
 }

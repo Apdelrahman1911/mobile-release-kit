@@ -97,9 +97,20 @@ def selected(root, runtime, mode="certificate-review", *, key_history=True, prio
 
 
 class CertificateWorkerTests(unittest.TestCase):
-    def execute(self, mode="certificate-review", *, existing=False, fault=None, prior_receipt=None, restored=False):
+    def execute(self, mode="certificate-review", *, existing=False, fault=None, prior_receipt=None, restored=False, recovered=False):
         with old.BundleWorkerTests.files(self) as (base, root, runtime):
             value = selected(root, runtime, mode, key_history=fault != "no-key-history", prior_receipt=prior_receipt)
+            if recovered:
+                from .test_desktop_apple_key_recovery import selected as recovery_selected
+                recovery_value = recovery_selected(root, runtime, associated=True)
+                history = value["native"]["certificate"]["keyPreparation"]
+                selected_key = recovery_value["native"]["key"]["recovery"]
+                history["recovery"] = {"stamp": selected_key["recovery"], "output": selected_key["output"]}
+                value["native"]["pending"] = recovery_value["native"]["pending"]
+                value["native"]["keyRecoveries"] = recovery_value["native"]["keyRecoveries"]
+                if fault == "recovery-private-frame":
+                    history["recovery"]["output"]["frameSha256"] = "d" * 64
+            original_pending = copy.deepcopy(value["native"]["pending"])
             if restored:
                 # NEW-only restore changes all ref identities, never the old
                 # row. The real private verifier below remains explicitly fake.
@@ -153,7 +164,15 @@ class CertificateWorkerTests(unittest.TestCase):
                 digest = api.digest(api.canonical(payload))
                 if kind == "certificate-key":
                     ack = {"keySha256": digest, "csrSha256": api.digest(CSR), "publicKeySha256": api.digest(SPKI),
-                           "keySavedAckSha256": None if restored or fault == "no-key-history" else "8" * 64}
+                           "keySavedAckSha256": None if restored or recovered or fault == "no-key-history" else "9" * 64}
+                    if fault == "normal-wrong-origin": ack["keySavedAckSha256"] = "8" * 64
+                    if fault == "normal-recovery-origin": ack["keyRecoverySha256"] = "e" * 64
+                    if fault == "normal-missing-origin": ack["keySavedAckSha256"] = None
+                    if recovered:
+                        ack["keyRecoverySha256"] = "e" * 64
+                        if fault == "recovery-both-origins": ack["keySavedAckSha256"] = "8" * 64
+                        if fault == "recovery-missing-origin": del ack["keyRecoverySha256"]
+                        if fault == "recovery-wrong-origin": ack["keyRecoverySha256"] = "d" * 64
                     if fault == "restored-key-stop":
                         engine.input.stop("cancelled")
                     if fault == "restored-key-source-changed":
@@ -276,6 +295,11 @@ class CertificateWorkerTests(unittest.TestCase):
                     "ackSha256": engine.input._pending_ack if request.method == "POST" else None,
                     "response": {"status": status, "failure": failure,
                         "bodyBase64": None if failure else base64.b64encode(api.canonical(document)).decode("ascii")}}
+                if post and recovered:
+                    self.assertNotIn("MOBILE_RELEASE_ASC_CERTIFICATE_KEY_SAVED_ACK_SHA256", kwargs["environ"])
+                    self.assertEqual(kwargs["environ"]["MOBILE_RELEASE_ASC_CERTIFICATE_KEY_RECOVERY_SHA256"], "e" * 64)
+                    raw["keyRecoverySha256"] = "e" * 64
+                    self.assertIsNone(raw["keySavedAckSha256"])
                 raw = old.encode(raw)
                 if post:
                     outer.decoded = (raw, b"")
@@ -322,6 +346,7 @@ class CertificateWorkerTests(unittest.TestCase):
             self.assertNotIn(PRIVATE.decode(), repr(frames))
             self.assertNotIn(old.MATERIAL[0].decode(), repr(frames))
             self.assertEqual(value["native"]["certificate"]["prior"], initial_prior)
+            self.assertEqual(value["native"]["pending"], original_pending)
             if fault in {"body-after-returned-201", "earlier-body-then-stop"}:
                 self.assertIs(engine.service.primary, body_error)
             return engine, code, frames, calls

@@ -2,8 +2,8 @@
 
 # Fixed certificate-only command of the SAME Apple SavedSession/Store runtime.
 # No private signing key enters this helper: only selected API P8 and public CSR.
-# The native parent must already own a durable keySaved ACK and (for POST) the
-# durable possible-send ACK. Their digests compare the handoff, not authority.
+# The native parent must already own an actual keySaved or fresh key-recovery
+# association ACK and (for POST) the durable possible-send ACK. Their digests compare the handoff, not authority.
 # Never run Fastfile, read a key path, generate a key, revoke or retry a request.
 require_relative "apple_provisioning_bundle_read"
 
@@ -19,7 +19,8 @@ module MobileReleaseKit
     BASE = %w[BUNDLE_ID BUNDLE_READ_CONTEXT KEY_ID ISSUER_ID PRIVATE_KEY_P8_BASE64].map { |name| "MOBILE_RELEASE_ASC_" + name }.freeze
     LISTS = %w[list_bundle_ids list_certificates list_profiles].freeze
     COMMON = %w[STEP OPERATION_ID].freeze
-    WRITE = %w[PLAN_SHA256 KEY_SAVED_ACK_SHA256 ACK_SHA256 CSR_BASE64].freeze
+    WRITE = %w[PLAN_SHA256 ACK_SHA256 CSR_BASE64].freeze
+    ORIGINS = %w[KEY_SAVED_ACK_SHA256 KEY_RECOVERY_SHA256].freeze
 
     class Error < StandardError
       def initialize = super("The selected Apple certificate request is unconfirmed.")
@@ -30,19 +31,21 @@ module MobileReleaseKit
     end
 
     class Input
-      attr_reader :step, :operation_id, :plan_sha256, :key_saved_ack_sha256, :ack_sha256, :request_sha256
+      attr_reader :step, :operation_id, :plan_sha256, :key_saved_ack_sha256, :key_recovery_sha256, :ack_sha256, :request_sha256
 
       def initialize(environment)
         @key = Read::Input.new(environment) # Selected P8 only; no ambient auth/refresh.
         @step = text(environment, "STEP", 32)
         AppleCertificateIssuance.require!((LISTS + ["create_certificate"]).include?(@step))
-        extra = @step == "create_certificate" ? WRITE : []
+        origins = ORIGINS.select { |name| environment.key?(PREFIX + name) }
+        AppleCertificateIssuance.require!(origins.size == (@step == "create_certificate" ? 1 : 0))
+        extra = @step == "create_certificate" ? WRITE + origins : []
         extra += ["CURSOR"] if LISTS.include?(@step) && environment.key?(PREFIX + "CURSOR")
         AppleCertificateIssuance.require!(environment.keys.select { |name| name.start_with?("MOBILE_RELEASE_ASC_") }.sort ==
           (BASE + (COMMON + extra).map { |name| PREFIX + name }).sort)
         @operation_id = text(environment, "OPERATION_ID", 128)
         AppleCertificateIssuance.require!(@operation_id.match?(Provisioning::ID))
-        @plan_sha256 = @key_saved_ack_sha256 = @ack_sha256 = nil
+        @plan_sha256 = @key_saved_ack_sha256 = @key_recovery_sha256 = @ack_sha256 = nil
         wire = case @step
                when "list_bundle_ids" then @key.request
                when "list_certificates"
@@ -52,10 +55,15 @@ module MobileReleaseKit
                  read("/v1/profiles", { "filter[profileType]" => "IOS_APP_STORE", "fields[profiles]" => Provisioning::PROFILE_FIELDS,
                    **Provisioning::PROFILE_RELATIONS, "limit" => "200" })
                when "create_certificate"
-                 @plan_sha256, @key_saved_ack_sha256, @ack_sha256 = %w[PLAN_SHA256 KEY_SAVED_ACK_SHA256 ACK_SHA256].map do |name|
+                 @plan_sha256, origin, @ack_sha256 = ["PLAN_SHA256", origins.fetch(0), "ACK_SHA256"].map do |name|
                    text(environment, name, 64)
                  end
-                 AppleCertificateIssuance.require!([@plan_sha256, @key_saved_ack_sha256, @ack_sha256].all? do |value|
+                 if origins.fetch(0) == "KEY_SAVED_ACK_SHA256"
+                   @key_saved_ack_sha256 = origin
+                 else
+                   @key_recovery_sha256 = origin
+                 end
+                 AppleCertificateIssuance.require!([@plan_sha256, origin, @ack_sha256].all? do |value|
                    value.match?(Provisioning::SHA256)
                  end)
                  encoded = text(environment, "CSR_BASE64", 4 * ((CSR_LIMIT + 2) / 3))
@@ -94,16 +102,17 @@ module MobileReleaseKit
         AppleCertificateIssuance.require!(@step == "create_certificate" && !@ack_attempted)
         @ack_attempted = true # Failed/foreign admission cannot renew this handoff.
         AppleCertificateIssuance.require!(context == self.context && operation == @operation_id &&
-          plan == @plan_sha256 && request == @request_sha256 && @key_saved_ack_sha256.match?(Provisioning::SHA256))
+          plan == @plan_sha256 && request == @request_sha256 && (@key_saved_ack_sha256 || @key_recovery_sha256).match?(Provisioning::SHA256))
         @ack_consumed = true
         true
       end
 
       def frame(response)
-        JSON.generate({ "schemaVersion" => 1, "scope" => SCOPE, "contextSha256" => context, "bundleId" => bundle_id,
-                        "operationId" => @operation_id, "requestSha256" => @request_sha256,
-                        "keySavedAckSha256" => @key_saved_ack_sha256, "ackSha256" => @ack_sha256,
-                        "response" => response }, ascii_only: true) + "\n"
+        data = { "schemaVersion" => 1, "scope" => SCOPE, "contextSha256" => context, "bundleId" => bundle_id,
+                 "operationId" => @operation_id, "requestSha256" => @request_sha256,
+                 "keySavedAckSha256" => @key_saved_ack_sha256, "ackSha256" => @ack_sha256, "response" => response }
+        data["keyRecoverySha256"] = @key_recovery_sha256 unless @key_recovery_sha256.nil?
+        JSON.generate(data, ascii_only: true) + "\n"
       end
 
       private

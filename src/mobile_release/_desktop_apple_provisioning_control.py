@@ -48,7 +48,7 @@ class AppleProvisioningInput(_SavedCommandInput):
         if operation.request.context["mode"] in wire.P12_MODES:
             from ._desktop_apple_p12_private import receive_material
             return receive_material(self, operation, scratch)
-        if operation.request.context["mode"] in wire.CERTIFICATE_MODES:
+        if operation.request.context["mode"] in wire.CERTIFICATE_MODES | {"key-recover"}:
             from ._desktop_apple_certificate_private import receive_material
             return receive_material(self, operation, scratch)
         from .apple_provisioning_signing import MODES

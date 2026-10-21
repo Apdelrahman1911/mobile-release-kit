@@ -58,6 +58,9 @@ def choice(value, selected_target):
 
 
 def validate_native(selected, native):
+    if selected["mode"] == "key-recover":
+        from ._desktop_apple_key_recovery import validate_native as recovery_native
+        return recovery_native(selected, native)
     scope = _keys(native["key"], {"sourceP8", "sourceKey", "destination", "entitlements", "review", "vaultInventory"})
     inventory = _keys(scope["vaultInventory"], {"records", "keys"})
     need(type(inventory["records"]) is int and 0 <= inventory["records"] <= 128
@@ -119,6 +122,10 @@ def output_metadata(value):
 
 def validate_event(request, kind, payload, sequence):
     mode = request.context["mode"]
+    if mode == "key-recover":
+        from ._desktop_apple_key_recovery import validate_event as recovery_event
+        need(kind == "key-compared")
+        return recovery_event(request, payload, sequence)
     need(mode in LOCAL_MODES)
     if kind == "key-observed":
         need(mode == "key-review" and sequence == 1)
@@ -156,10 +163,12 @@ def validate_event(request, kind, payload, sequence):
 def validate_result(value, request):
     value = _keys(value, {"schemaVersion", "scope", "mode", "decision", "reason", "saved", "certificateRequested", "credentialReady"})
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == "local-ios-distribution-key"
-         and value["mode"] == request.context["mode"] and value["mode"] in LOCAL_MODES
+         and value["mode"] == request.context["mode"] and value["mode"] in LOCAL_MODES | {"key-recover"}
          and value["decision"] in DECISIONS and value["reason"] in REASONS
          and value["saved"] is False and value["certificateRequested"] is False and value["credentialReady"] is False)
-    if value["mode"] == "key-prepare":
+    if value["mode"] == "key-recover":
+        need(value["decision"] == "compared" and value["reason"] == "stored-key-checked")
+    elif value["mode"] == "key-prepare":
         need(value["decision"] == "produced" and value["reason"] == "producer-returned")
     else:
         need(value["decision"] in {"prepare-review", "recover-existing-key", "reuse-existing-identity", "bundle-required", "blocked"})

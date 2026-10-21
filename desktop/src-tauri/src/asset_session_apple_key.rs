@@ -206,7 +206,7 @@ impl DocumentBinding {
         input: &Arc<AppleProvisioningDocumentInput>,
         parent: &Arc<AppleKeySession>,
     ) -> Result<oneshot::Sender<()>, BridgeError> {
-        if !(input.context().mode.local_key() || input.context().mode.certificate() || input.context().mode.p12()) {
+        if !(input.context().mode.local_key() || input.context().mode == crate::apple_provisioning_protocol::Mode::KeyRecover || input.context().mode.certificate() || input.context().mode.p12()) {
             return Err(crate::apple_provisioning_protocol::invalid());
         }
         let sources = input
@@ -246,7 +246,7 @@ impl DocumentBinding {
         }
         let prepare = input.context().mode == crate::apple_provisioning_protocol::Mode::KeyPrepare;
         let p12=input.context().mode.p12();
-        let certificate = input.context().mode.certificate() || p12;
+        let certificate = input.context().mode == crate::apple_provisioning_protocol::Mode::KeyRecover || input.context().mode.certificate() || p12;
         let mut slot = Slot::new(
             owner.clone(),
             if input.context().mode == crate::apple_provisioning_protocol::Mode::P12Save { Operation::AssembleAppleP12 } else if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },

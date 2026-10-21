@@ -77,7 +77,7 @@ def prepare_certificate(context: ProvisioningContext, target: ProvisioningTarget
 
 def response_from_frame(raw: bytes, *, context_sha256: str, operation_id: str, target: ProvisioningTarget,
                         request: api.AppleRequest, csr: PublicCSR | None, key_saved_ack_sha256: str | None,
-                        ack_sha256: str | None, settled: bool) -> api.AppleResponse:
+                        ack_sha256: str | None, settled: bool, key_recovery_sha256: str | None = None) -> api.AppleResponse:
     """Private raw body plus genuine original finality, never a helper claim.
 
     ACK strings only compare the handoff. The same native parent checks the
@@ -88,13 +88,18 @@ def response_from_frame(raw: bytes, *, context_sha256: str, operation_id: str, t
     api.identifier(operation_id)
     api.require(type(context_sha256) is str and api.HEX_RE.fullmatch(context_sha256) is not None
                 and type(settled) is bool, "invalid_adapter_result")
-    for ack in (key_saved_ack_sha256, ack_sha256):
+    origin = key_saved_ack_sha256 if key_recovery_sha256 is None else key_recovery_sha256
+    if key_recovery_sha256 is not None:
+        api.require(request.method == "POST" and key_saved_ack_sha256 is None, "invalid_adapter_result")
+    for ack in (origin, ack_sha256):
         api.require(ack is None if request.method == "GET" else
                     type(ack) is str and api.HEX_RE.fullmatch(ack) is not None, "invalid_adapter_result")
     api.require(type(raw) is bytes and 0 < len(raw) <= FRAME_LIMIT, "invalid_adapter_result")
     value = api.document(raw)
     api.require(set(value) == {"schemaVersion", "scope", "contextSha256", "bundleId", "operationId",
                               "requestSha256", "keySavedAckSha256", "ackSha256", "response"}
+                            | ({"keyRecoverySha256"} if key_recovery_sha256 is not None else set())
+                and value.get("keyRecoverySha256") == key_recovery_sha256
                 and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == SCOPE
                 and value["contextSha256"] == context_sha256 and value["bundleId"] == target.bundle_id
                 and value["operationId"] == operation_id and value["requestSha256"] == api.request_sha256(request)

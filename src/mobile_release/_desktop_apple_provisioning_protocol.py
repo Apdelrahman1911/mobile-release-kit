@@ -26,7 +26,7 @@ BUNDLE_MODES = frozenset({"review", "register", "reconcile"})
 from .apple_provisioning_signing import MODES as PROFILE_MODES
 # Local generation and fresh stored-key certificate verification have closed,
 # separate branches. A new mode is never an alias for local key-save authority.
-KEY_MODES = frozenset({"key-review", "key-prepare"})
+KEY_MODES = frozenset({"key-review", "key-prepare", "key-recover"})
 CERTIFICATE_MODES = frozenset({"certificate-review", "certificate-create", "certificate-reconcile"})
 P12_MODES = frozenset({"p12-review", "p12-reuse", "p12-save"})
 MODES = BUNDLE_MODES | PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES | P12_MODES
@@ -149,7 +149,15 @@ def pending(value, account):
     return tuple(result)
 
 
+def effective_pending(native, account):
+    from ._desktop_apple_key_recovery import effective_pending as validated
+    return validated(native, account)
+
+
 def context(value):
+    if type(value) is dict and value.get("mode") == "key-recover":
+        from ._desktop_apple_key_recovery import context as recovery_context
+        return recovery_context(value)
     if type(value) is dict and value.get("mode") in P12_MODES:
         from ._desktop_apple_p12_protocol import context as p12_context
         return p12_context(value)
@@ -248,7 +256,8 @@ def parse_request(raw):
         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig", "clock", "nonce",
             "provisioning", "target", "reviewedAt", "journalRevision", "pending", "prior"} |
             ({"p12", "certificate"} if selected["mode"] in P12_MODES else {"certificate"} if selected["mode"] in CERTIFICATE_MODES else
-             {"signing"} if selected["mode"] in PROFILE_MODES else {"key"} if selected["mode"] in KEY_MODES else set()))
+             {"signing"} if selected["mode"] in PROFILE_MODES else {"key"} if selected["mode"] in KEY_MODES else set()) |
+            ({"keyRecoveries"} if "keyRecoveries" in value["native"] else set()))
         require(native["profile"] in access.PROFILES and token(native["nonce"]))
         _path(native["projectRoot"]); _path(native["cwd"]); _identity(native["rootIdentity"]); content(native["credentialConfig"])
         clock = _keys(native["clock"], {"workEndNs", "hardEndNs"})
@@ -260,7 +269,7 @@ def parse_request(raw):
                 and owned.credential_context_revision == selected["credentialContextRevision"])
         chosen = target(native["target"])
         require(chosen.display_name == selected["displayName"])
-        pending(native["pending"], owned.account_ref)
+        effective_pending(native, owned.account_ref)
         require(integer(native["journalRevision"], 2**64 - 2))
         if selected["mode"] in P12_MODES:
             from ._desktop_apple_p12_protocol import validate_native as validate_p12_native
@@ -388,7 +397,7 @@ def validate_event(request, kind, payload, sequence):
 
 def response(request, kind, payload, sequence):
     require(type(request) is AppleProvisioningRequest and integer(sequence, max_events(request.context["mode"]) + 1)
-            and kind in {"accepted", "observed", "pending", "attempt", "terminal", "identity", "profile-observed", "profile-pending", "profile-attempt", "key-observed", "key-pending", "key-output", "key-not-generated",
+            and kind in {"accepted", "observed", "pending", "attempt", "terminal", "identity", "profile-observed", "profile-pending", "profile-attempt", "key-observed", "key-pending", "key-output", "key-not-generated", "key-compared",
                          "certificate-key", "certificate-identities", "certificate-policy", "certificate-observed", "certificate-pending", "certificate-attempt", "p12-observed", "p12-pending", "p12-output"})
     if kind == "accepted":
         require(sequence == 0 and payload == {"schemaVersion": 1, "context": request.context})

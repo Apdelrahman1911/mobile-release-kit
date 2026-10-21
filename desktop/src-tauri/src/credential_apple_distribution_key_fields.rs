@@ -323,6 +323,26 @@ pub(crate) fn public_parts_match(fields: &Fields, request: &[u8], public: &[u8])
         })
 }
 
+/// Exact original private-frame comparison, not signature validation or a
+/// current-key capability. Scratch uses the existing bounded zeroizing codec.
+pub(crate) fn frame_matches(fields: &Fields, length: u32, sha256: &str) -> bool {
+    let compare = || -> Result<bool, crypto::Error> {
+        if fields.vault_kind() != Kind::AppleDistributionKey { return Ok(false); }
+        let private = decoded_base64(fields.borrow_value("privateKeyPkcs8Base64").ok_or(crypto::Error::Format)?, KEY_DER_LIMIT)?;
+        let request = fields.borrow_value("csrPem").ok_or(crypto::Error::Format)?;
+        csr(request)?;
+        let public = decoded_base64(fields.borrow_value("publicKeySpkiBase64").ok_or(crypto::Error::Format)?, SPKI_DER_LIMIT)?;
+        let sizes = [private.len(), request.len(), public.len()];
+        let actual = MAGIC.len() + 12 + sizes.iter().sum::<usize>();
+        if actual != length as usize || actual > PRIVATE_FRAME_LIMIT { return Ok(false); }
+        let mut hash = Sha256::new(); hash.update(MAGIC);
+        for size in sizes { hash.update((size as u32).to_be_bytes()); }
+        hash.update(private.as_slice()); hash.update(request.as_bytes()); hash.update(public.as_slice());
+        Ok(crate::service_protocol::hex(&hash.finalize()) == sha256)
+    };
+    compare().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +466,26 @@ mod tests {
             b"different-public-csr",
             &[0x30, 0]
         ));
+    }
+
+    #[test]
+    fn recovery_frame_comparison_includes_private_scalar_not_only_csr_and_spki() {
+        let original = frame(&[0x30, 0], &[0x30, 0]);
+        let digest = crate::service_protocol::hex(&Sha256::digest(&original));
+        let fields = stored_fields(&storage()).unwrap();
+        assert!(frame_matches(&fields, original.len() as u32, &digest));
+        assert!(!frame_matches(&fields, original.len() as u32 + 1, &digest));
+        assert!(!frame_matches(&fields, original.len() as u32, &"f".repeat(64)));
+        let mut different = storage(); different["privateKeyPkcs8Base64"] = json!("MAE=");
+        let changed = stored_fields(&different).unwrap();
+        assert!(public_parts_match(&changed, REQUEST.as_bytes(), &[0x30, 0]));
+        assert!(!frame_matches(&changed, original.len() as u32, &digest));
+        let mut different = storage(); different["csrPem"] = json!(REQUEST.replace("MAA=", "MAE="));
+        assert!(!frame_matches(&stored_fields(&different).unwrap(), original.len() as u32, &digest));
+        let mut different = storage(); different["publicKeySpkiBase64"] = json!("MAE=");
+        assert!(!frame_matches(&stored_fields(&different).unwrap(), original.len() as u32, &digest));
+        // These are fixed codec scalars, not keys. The separate shipped
+        // verifier/native loan is still required for cryptographic validity.
+        assert_eq!(original, frame(&[0x30, 0], &[0x30, 0]));
     }
 }

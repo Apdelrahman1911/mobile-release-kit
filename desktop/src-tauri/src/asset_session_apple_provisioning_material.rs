@@ -132,7 +132,7 @@ impl SelectedStoreMaterial {
             && self.key.revision == context.record_revision
             && self.native.execution_mode == commands::ExecutionMode::Local
             && self.native.platform == Platform::Ios
-            && if context.mode.local_key() || context.mode.certificate() || context.mode.p12() { self.native.purpose == Purpose::Provisioning
+            && if context.mode.local_key() || context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { self.native.purpose == Purpose::Provisioning
                 && self.native.stage == Stage::Candidate && self.key_sources.is_some() && self.profile_sources.is_none()
             } else if context.mode.profile() { self.key_sources.is_none() && self.native.purpose == Purpose::Provisioning
                 && self.native.stage == Stage::Candidate && self.profile_sources.is_some()
@@ -225,7 +225,7 @@ impl DocumentBinding {
         {
             return Err(refused());
         }
-        if context.mode.local_key() || context.mode.certificate() || context.mode.p12() { return super::apple_key::borrow(self, state, context, registration, root); }
+        if context.mode.local_key() || context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { return super::apple_key::borrow(self, state, context, registration, root); }
         if context.mode.profile() {
             return super::apple_profile::borrow(self, state, context, registration, root);
         }
@@ -272,7 +272,7 @@ impl DocumentBinding {
         {
             return Err(refused());
         }
-        if context.mode.certificate() || context.mode.p12() { apple_parts(&material.payload).ok_or_else(refused)?; } else { material.parts()?; }
+        if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { apple_parts(&material.payload).ok_or_else(refused)?; } else { material.parts()?; }
         Ok(())
     }
 }

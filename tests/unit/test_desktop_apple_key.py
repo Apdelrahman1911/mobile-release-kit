@@ -86,16 +86,28 @@ def selected(root, runtime, mode="key-review"):
 class KeyWorkerTests(unittest.TestCase):
     def execute(self, mode="key-prepare", *, fault=None):
         with old.BundleWorkerTests.files(self) as (base, root, runtime):
-            value = selected(root, runtime, mode)
+            if mode == "key-recover":
+                from .test_desktop_apple_key_recovery import selected as recover_selected
+                value = recover_selected(root, runtime)
+                if fault in {"recover-csr", "recover-spki", "recover-frame"}:
+                    field = {"recover-csr": "csrSha256", "recover-spki": "publicKeySha256", "recover-frame": "frameSha256"}[fault]
+                    value["native"]["key"]["recovery"]["output"][field] = "e" * 64
+            else:
+                value = selected(root, runtime, mode)
             if fault == "existing-key":
                 value["native"]["key"]["vaultInventory"]["keys"] = 1
             if fault == "account-pending":
                 value["native"]["pending"] = [{"accountRef": old.ACCOUNT, "operationId": "8" * 32,
                     "action": "key_prepare", "status": "unknown", "nativeSettlement": "known"}]
-            for name in ("apple_provisioning_signing.rb", "apple_distribution_key.rb"):
+            for name in ("apple_provisioning_signing.rb", "apple_distribution_key.rb", "apple_distribution_key_verify.rb"):
                 (runtime / "store/tooling/fastlane" / name).write_bytes(b"INERT never executed")
+            roles, material = ("asc-p8", "asc-key-id", "asc-issuer-id"), old.MATERIAL
+            if mode == "key-recover":
+                from mobile_release._desktop_apple_certificate_private import ROLES
+                roles = tuple(role for role, _ in ROLES)
+                material += (base64.b64encode(KEY if fault != "recover-private" else b"different-inert-private"), CSR, base64.b64encode(SPKI))
             body = old.PREFIX + old.encode({"schemaVersion": 1, "files": [{"role": role, "bytes": len(raw)}
-                for role, raw in zip(("asc-p8", "asc-key-id", "asc-issuer-id"), old.MATERIAL)]}) + b"".join(old.MATERIAL) + old.SUFFIX
+                for role, raw in zip(roles, material)]}) + b"".join(material) + old.SUFFIX
             saved = [os.dup(fd) for fd in (0, 1, 2)]
             readers, writers, frames, calls, received = [], [], [], [], bytearray()
             cwd = Path.cwd()
@@ -140,6 +152,22 @@ class KeyWorkerTests(unittest.TestCase):
                     reply(current, frame, wrong=fault == "wrong-pending")
                 elif frame["kind"] == "key-output" and fault == "stop-before-body":
                     os.write(writers[0], key_wire.STOP)
+                elif frame["kind"] == "key-compared":
+                    if fault == "recover-stop":
+                        current.input.stop("cancelled")
+                        return  # Original STOP prevents the read, not a fabricated reply.
+                    if fault == "recover-source":
+                        (root / "release/version.properties").write_bytes(b"VERSION_NAME=1.2.3\nBUILD_NUMBER=43\n")
+                    ack = {"protocol": wire.PROTOCOL, "operationId": old.OP, "ownerGeneration": old.GENERATION,
+                        "nonce": value["native"]["nonce"], "requestSha256": current.request.digest,
+                        "kind": "key-compared-ack", "step": 1, "payload": {
+                            "comparisonSha256": api.digest(api.canonical(frame["payload"])),
+                            "originalRowSha256": value["native"]["key"]["recovery"]["rowSha256"]}}
+                    if fault == "recover-foreign-ack":
+                        ack["operationId"] = "9" * 32
+                    if fault == "recover-wrong-row":
+                        ack["payload"]["originalRowSha256"] = "0" * 64
+                    os.write(writers[0], b"{}\n" if fault == "recover-partial-ack" else old.encode(ack))
 
             def write_private(output, data):
                 original_private_write(output, data)
@@ -160,7 +188,7 @@ class KeyWorkerTests(unittest.TestCase):
                 ledger._finish_command(fake, dispatched=True, contained=True, cleanup_complete=True)
                 index = len(calls)
                 request = operation._wire_request
-                calls.append(request.kind if request else "generator" if index == 6 else "probe")
+                calls.append(request.kind if request else ("verifier" if mode == "key-recover" else "generator") if index == 6 else "probe")
                 self.assertLessEqual(kwargs["timeout"], 60)
                 if index < 6:
                     text = ("", "3.3.12", "4.0.16", "", "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2", "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2")[index]
@@ -177,6 +205,22 @@ class KeyWorkerTests(unittest.TestCase):
                         "response": {"status": 200, "failure": None, "bodyBase64": base64.b64encode(api.canonical(document)).decode("ascii")}})
                     return subprocess.CompletedProcess(argv, 0, raw, b"")
                 self.assertEqual(index, 6)
+                if mode == "key-recover":
+                    self.assertIsNone(request)
+                    self.assertEqual(engine.input.reply_step, 0)
+                    self.assertFalse(engine.input._ack_consumed)
+                    self.assertTrue(str(argv[3]).endswith("/apple_distribution_key_verify.rb"))
+                    self.assertEqual(kwargs["output_limit"], child.PUBLIC_LIMIT)
+                    self.assertFalse(any("MOBILE_RELEASE_ASC_" in name for name in kwargs["environ"]))
+                    self.assertEqual(Path(argv[4]).read_bytes(), child._stored_frame(material[3:]))
+                    public = child.PUBLIC_MAGIC + struct.pack(">II", len(CSR), len(SPKI)) + CSR + SPKI
+                    outer, slot = object.__new__(_Outer), object.__new__(CommandOutcomeSlot)
+                    slot._engine, outer.slot, outer.guard = outer, slot, engine.guard
+                    outer.scope = outer.binding = outer.evidence = outer._store_timing = None
+                    outer.owns = outer.text = False
+                    outer.decoded, outer.outputs = (public, b""), [bytearray(public), bytearray()]
+                    operation._distribution_key.bind_command_slot(outer, slot)
+                    return subprocess.CompletedProcess(argv, 0, public, b"")
                 self.assertEqual(engine.input.reply_step, 1)
                 self.assertTrue(engine.input._ack_consumed)
                 self.assertFalse(any("MOBILE_RELEASE_ASC_" in key for key in kwargs["environ"]))
@@ -226,7 +270,12 @@ class KeyWorkerTests(unittest.TestCase):
                 for fd in readers + writers:
                     os.close(fd)
             self.assertNotIn(KEY.decode(), repr(frames))
-            self.assertNotIn(CSR.decode(), repr(frames))
+            if mode != "key-recover":
+                self.assertNotIn(CSR.decode(), repr(frames))
+            else:
+                # CSR belongs only to the same PRIVATE native comparison
+                # event, never its public terminal/renderer result.
+                self.assertNotIn(CSR.decode(), repr([row for row in frames if row["kind"] == "terminal"]))
             self.assertFalse((root / ".mobile-release").exists())
             return engine, code, frames, calls, bytes(received)
 

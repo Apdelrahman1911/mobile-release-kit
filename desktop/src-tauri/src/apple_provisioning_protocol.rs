@@ -51,12 +51,18 @@ pub(crate) use key::{KeyScopeData, KeyReviewData, KeyReviewChoice, KeyVaultInven
     KeyObserved, KeyEvent, KeyNotGenerated, KeyResult, KeyDecision, KeyReason,
     key_pending_ack, key_retained_ack, KEY_EVENTS, KEY_JSON_LIMIT, KEY_STOP};
 
+#[path = "apple_provisioning_key_recovery_protocol.rs"]
+mod key_recovery;
+pub(crate) use key_recovery::{KeyRecoveryStamp, KeyRecoverySelection, KeyRecoveryInput,
+    key_recovery_selection, key_recovery_record, key_recovery_ack, key_recovery_relations};
+use key_recovery::key_recovery_input;
+
 #[path = "apple_provisioning_certificate_protocol.rs"]
 mod certificate;
 #[path = "apple_provisioning_certificate_recovery_selection.rs"]
 mod certificate_recovery;
 pub(crate) use certificate_recovery::{CertificateRecoveryHistory, CertificateRecoveryAttempt, certificate_recovery_history, certificate_recovery_scope_matches, certificate_prior, certificate_key_preparation, CERTIFICATE_RECOVERY_LIMIT};
-pub(crate) use certificate::{CertificateChoice, CertificateReviewData, CertificateKeyPreparation,
+pub(crate) use certificate::{CertificateChoice, CertificateReviewData, CertificateKeyPreparation, CertificateRecoveredKey,
     CertificatePriorData, CertificateScopeData, CertificateKeyInput, CertificateCandidateInput,
     CertificateIdentityInput, CertificatePolicyInput, CertificateObserved, CertificateEvent, CertificateResult,
     certificate_reply, certificate_journal_ack, CERTIFICATE_EVENTS, CERTIFICATE_IDENTITY_LIMIT,
@@ -310,10 +316,9 @@ pub(crate) struct Context {
 }
 impl Context {
     pub(crate) fn valid(&self) -> bool {
-        // KeyRecover still has no executable route. Certificate modes use a
-        // separately admitted fresh native key loan, never a keySaved DTO.
-        self.mode != Mode::KeyRecover
-            && valid_id(&self.project_id)
+        // KeyRecover is a separate fresh selected-key operation. It never
+        // restores an old reservation or enters the generator path.
+        valid_id(&self.project_id)
             && self.draft_revision < u32::MAX
             && self.baseline_generation < u32::MAX
             && self.saved_config.valid(524288)
@@ -323,12 +328,12 @@ impl Context {
             && (1..u32::MAX).contains(&self.record_revision)
             && display_name(&self.display_name)
             && self.new_application == (self.mode == Mode::Register)
-            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview | Mode::CertificateReview | Mode::P12Review) {
+            && (if matches!(self.mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview | Mode::KeyRecover | Mode::CertificateReview | Mode::P12Review) {
                 self.reference.is_none()
             } else {
                 self.reference.as_ref().is_some_and(Reference::valid)
             })
-            && (if self.mode.certificate() || self.mode.p12() {
+            && (if self.mode.certificate() || self.mode.p12() || self.mode == Mode::KeyRecover {
                 self.key_record_id.as_ref().is_some_and(|value| token(value))
                     && self.key_record_revision.is_some_and(|value| (1..u32::MAX).contains(&value))
             } else { self.key_record_id.is_none() && self.key_record_revision.is_none() })
@@ -399,7 +404,7 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
     let p12=value.get("mode").and_then(Value::as_str).is_some_and(|mode|matches!(mode,"p12-review"|"p12-reuse"|"p12-save"));
     if profile || p12 { names.extend(["p12RecordId", "p12RecordRevision"]); }
     if value.get("mode").and_then(Value::as_str).is_some_and(|mode|
-        matches!(mode, "certificate-review" | "certificate-create" | "certificate-reconcile")) || p12 {
+        matches!(mode, "certificate-review" | "certificate-create" | "certificate-reconcile" | "key-recover")) || p12 {
         names.extend(["keyRecordId", "keyRecordRevision"]);
     }
     need(keys(value, &names))?;
@@ -422,7 +427,7 @@ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
         token(&input.operation_id)
             && token(&input.owner_generation)
             && [Mode::Review, Mode::Register, Mode::Reconcile, Mode::ProfileReview,
-                Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare,
+                Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile, Mode::KeyReview, Mode::KeyPrepare, Mode::KeyRecover,
                 Mode::CertificateReview, Mode::CertificateCreate, Mode::CertificateReconcile, Mode::P12Review, Mode::P12Reuse, Mode::P12Save]
                 .iter()
                 .any(|mode| input.consent_version == mode.consent()),
@@ -549,6 +554,7 @@ pub(crate) fn request(
     account: &AccountSnapshot,
     prior: Option<&JournalRow>,
 ) -> Result<EncodedRequest, BridgeError> {
+    account.validate_recoveries().map_err(|_| invalid())?;
     if context.mode == Mode::ProfileReconcile {
         let prior = profile_prior(account, &scope, context)?;
         let signing = scope.signing.as_mut().ok_or_else(invalid)?;
@@ -564,7 +570,7 @@ pub(crate) fn request(
             && credential_config == &context.saved_config
             && scope.matches(context, operation, generation, root)
             && account.account == scope.provisioning.account_ref
-            && account.rows.len().saturating_add(account.profile_rows.len()).saturating_add(account.key_rows.len()).saturating_add(account.certificate_rows.len()).saturating_add(account.p12_rows.len()) <= ROWS
+            && account.rows.len().saturating_add(account.profile_rows.len()).saturating_add(account.key_rows.len()).saturating_add(account.certificate_rows.len()).saturating_add(account.p12_rows.len()).saturating_add(account.key_recoveries.len()) <= ROWS
             // Reserve, up to two attempt writes, then final native CAS. Do not
             // arm a provider write if this fixed whole path can overflow.
             && account.revision.0 <= u64::MAX - if context.mode.profile_save() || matches!(context.mode, Mode::KeyPrepare | Mode::P12Save) { 7 } else { 4 }
@@ -587,6 +593,8 @@ pub(crate) fn request(
         && seen.insert(row.intent.context.operation_id.as_str())))?;
     need(account.p12_rows.iter().all(|row| row.intent.context.account_ref == account.account
         && seen.insert(row.intent.context.operation_id.as_str())))?;
+    need(account.key_recoveries.iter().all(|row| row.context.account_ref == account.account
+        && seen.insert(row.context.operation_id.as_str())))?;
     if context.mode == Mode::Reconcile {
         let reference = context.reference.as_ref().ok_or_else(invalid)?;
         let prior = prior.ok_or_else(invalid)?;
@@ -637,6 +645,9 @@ pub(crate) fn request(
             "clock":{"workEndNs":work_end_ns.to_string(),"hardEndNs":hard_end_ns.to_string()},"nonce":nonce,
             "provisioning":scope.provisioning,"target":scope.target,"reviewedAt":scope.reviewed_at,
             "journalRevision":account.revision.0,"pending":pending,"prior":prior}});
+    if !account.key_recoveries.is_empty() {
+        value["native"].as_object_mut().ok_or_else(invalid)?.insert("keyRecoveries".into(), key_recovery_relations(account)?);
+    }
     if context.mode.p12() {
         let data=value["context"].as_object_mut().ok_or_else(invalid)?;
         data.insert("p12RecordId".into(),json!(context.p12_record_id));
@@ -1049,7 +1060,7 @@ impl Terminal {
                 && self.result.as_ref().is_some_and(|result| match result {
                     ResultData::Bundle(result) => !self.context.mode.profile() && !self.context.mode.key() && result.valid(binding, last_update),
                     ResultData::Profile(result) => self.context.mode.profile() && profile.valid_terminal(result, binding),
-                    ResultData::Key(result) => self.context.mode.local_key() && key.valid_terminal(result, binding),
+                    ResultData::Key(result) => (self.context.mode.local_key() || self.context.mode == Mode::KeyRecover) && key.valid_terminal(result, binding),
                     ResultData::P12(result) => self.context.mode.p12() && p12.valid_terminal(result,binding),
                     ResultData::Certificate(result) => self.context.mode.certificate() && certificate.valid_terminal(result, binding),
                 });
@@ -1267,8 +1278,8 @@ impl Decoder {
                 need(binding.context.mode.p12() && bytes.len()<=EVENT_LIMIT)?;
                 Frame::Event(EventDataFrame { sequence:self.next, data:EventData::P12(self.p12.event(binding,self.next,kind,envelope.payload)?) })
             },
-            kind @ ("key-observed" | "key-pending" | "key-output" | "key-not-generated") => {
-                need(binding.context.mode.local_key() && bytes.len() <= EVENT_LIMIT)?;
+            kind @ ("key-observed" | "key-pending" | "key-output" | "key-not-generated" | "key-compared") => {
+                need((binding.context.mode.local_key() || binding.context.mode == Mode::KeyRecover) && bytes.len() <= EVENT_LIMIT)?;
                 Frame::Event(EventDataFrame { sequence: self.next,
                     data: EventData::Key(self.key.event(binding, self.next, kind, envelope.payload)?) })
             },

@@ -50,7 +50,9 @@ pub(crate) struct KeyScopeData {
     pub(crate) review: Option<KeyReviewData>,
     // Projection of the SAME joined native inventory only. These counters
     // never grant absence, a current source loan or generation consent.
-    pub(crate) vault_inventory: KeyVaultInventory,
+    pub(crate) vault_inventory: Option<KeyVaultInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<KeyRecoverySelection>,
 }
 impl KeyScopeData {
     pub(crate) fn target(&self, bundle: &BundleTarget) -> Result<ProfileTarget, BridgeError> {
@@ -76,7 +78,7 @@ impl KeyScopeData {
             || self.source_p8.revision_counter != context.record_revision
             || target.team_id != target.app_id_prefix
             || self.target(target).is_err()
-            || !self.vault_inventory.valid()
+            || self.vault_inventory.as_ref().is_some_and(|inventory| !inventory.valid())
         {
             return false;
         }
@@ -99,12 +101,19 @@ impl KeyScopeData {
         if !source_ok {
             return false;
         }
+        if context.mode == Mode::KeyRecover {
+            return self.source_key.as_ref().is_some_and(|source| context.key_record_id.as_ref() == Some(&source.record_id)
+                    && context.key_record_revision == Some(source.revision_counter))
+                && self.vault_inventory.is_none() && self.destination.is_none() && self.review.is_none()
+                && reviewed.is_none() && self.recovery.as_ref().is_some_and(KeyRecoverySelection::valid);
+        }
+        if self.recovery.is_some() || self.vault_inventory.is_none() { return false; }
         if context.mode == Mode::KeyPrepare {
             let (Some(destination), Some(review)) = (&self.destination, &self.review) else {
                 return false;
             };
             destination.validate().is_ok()
-                && self.vault_inventory.keys == 0
+                && self.vault_inventory.as_ref().is_some_and(|inventory| inventory.keys == 0)
                 && destination.revision_counter == 1
                 && destination.vault_id == self.source_p8.vault_id
                 && destination.generation_id == self.source_p8.generation_id
@@ -217,6 +226,7 @@ pub(crate) enum KeyEvent {
     },
     Output(KeyOutputMetadata),
     NotGenerated(KeyNotGenerated),
+    Compared(KeyRecoveryInput),
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -239,6 +249,7 @@ pub(super) struct KeyDecoder {
     pending: Option<KeyPrepareIntent>,
     output: Option<KeyOutputMetadata>,
     not_generated: Option<KeyNotGenerated>,
+    compared: bool,
 }
 impl KeyDecoder {
     pub(super) fn event(
@@ -249,6 +260,12 @@ impl KeyDecoder {
         value: Value,
     ) -> Result<KeyEvent, BridgeError> {
         match kind {
+            "key-compared" => {
+                need(sequence == 1 && !self.compared && binding.context.mode == Mode::KeyRecover)?;
+                let input = key_recovery_input(binding, value)?;
+                self.compared = true;
+                Ok(KeyEvent::Compared(input))
+            }
             "key-observed" => {
                 need(
                     sequence == 1
@@ -348,6 +365,7 @@ impl KeyDecoder {
             return false;
         }
         match binding.context.mode {
+            Mode::KeyRecover => self.compared && result.decision == KeyDecision::Compared && result.reason == KeyReason::StoredKeyChecked,
             Mode::KeyReview => self.observed.as_ref().is_some_and(|observed| {
                 result.decision == observed.decision && result.reason == observed.reason
             }),

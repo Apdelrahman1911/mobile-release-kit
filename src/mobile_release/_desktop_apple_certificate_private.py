@@ -44,7 +44,7 @@ def receive_material(source, operation, scratch):
     from ._desktop_apple_provisioning_control import AppleProvisioningInput
     wire.need(type(source) is AppleProvisioningInput and type(operation) is AppleProvisioningRun
         and operation.source is source and source.require_operation() is operation
-        and operation.request.context["mode"] in wire.MODES and operation.invocation is not None
+        and operation.request.context["mode"] in wire.MODES | {"key-recover"} and operation.invocation is not None
         and operation.runtime is not None and type(scratch) is FiniteScratch and scratch in operation.scratches
         and scratch.layout == "store-selection" and scratch.cancellation is operation.guard
         and not source._material_read and source.material_pending and not source.material_receiving and not source.reading
@@ -84,7 +84,7 @@ def distribution_key_material(source, operation):
     from ._desktop_apple_provisioning_control import AppleProvisioningInput
     wire.need(type(source) is AppleProvisioningInput and type(operation) is AppleProvisioningRun
         and operation.source is source and source.require_operation() is operation
-        and operation.request.context["mode"] in wire.MODES and source._material_read and not source.close_claimed
+        and operation.request.context["mode"] in wire.MODES | {"key-recover"} and source._material_read and not source.close_claimed
         and not source.material_receiving and not source.material_pending
         and type(source._certificate_material) is tuple and len(source._certificate_material) == 6
         and type(source._material) is tuple and len(source._material) == 3

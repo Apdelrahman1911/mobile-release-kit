@@ -136,7 +136,7 @@ fn apple_start_parent_dispatch_matches_actual_initialized_modes() {
         scope.mode = mode;
         scope.new_application = mode == Mode::Register;
         if !matches!(mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview
-            | Mode::CertificateReview | Mode::P12Review)
+            | Mode::CertificateReview | Mode::P12Review | Mode::KeyRecover)
         {
             scope.reference = Some(apple_wire::Reference {
                 operation_id: "d".repeat(32), owner_generation: "e".repeat(32),
@@ -146,7 +146,7 @@ fn apple_start_parent_dispatch_matches_actual_initialized_modes() {
             scope.p12_record_id = Some("f".repeat(32));
             scope.p12_record_revision = Some(1);
         }
-        if mode.certificate() || mode.p12() {
+        if mode.certificate() || mode.p12() || mode == Mode::KeyRecover {
             scope.key_record_id = Some("1".repeat(32));
             scope.key_record_revision = Some(1);
         }
@@ -174,7 +174,7 @@ fn apple_start_parent_dispatch_matches_actual_initialized_modes() {
         (Mode::Review, false, false), (Mode::Register, false, false), (Mode::Reconcile, false, false),
         (Mode::ProfileReview, true, false), (Mode::ProfileReuse, true, false),
         (Mode::ProfileCreate, true, false), (Mode::ProfileReconcile, true, false),
-        (Mode::KeyReview, false, true), (Mode::KeyPrepare, false, true),
+        (Mode::KeyReview, false, true), (Mode::KeyPrepare, false, true), (Mode::KeyRecover, false, true),
         (Mode::CertificateReview, false, true), (Mode::CertificateCreate, false, true),
         (Mode::CertificateReconcile, false, true), (Mode::P12Review, false, true),
         (Mode::P12Reuse, false, true), (Mode::P12Save, false, true),
@@ -198,7 +198,17 @@ fn apple_start_parent_dispatch_matches_actual_initialized_modes() {
         assert!(!original.watchdog_joined.load(Ordering::SeqCst));
         assert!(!native_complete(&original));
     }
-    assert!(!scope(Mode::KeyRecover).valid());
+    let recovery = scope(Mode::KeyRecover);
+    assert!(recovery.valid());
+    let mut changed = recovery.clone(); changed.key_record_id = None;
+    assert!(!changed.valid());
+    let mut changed = recovery.clone(); changed.reference = Some(apple_wire::Reference {
+        operation_id: "d".repeat(32), owner_generation: "e".repeat(32),
+    });
+    assert!(!changed.valid());
+    let mut changed = recovery; changed.p12_record_id = Some("f".repeat(32));
+    changed.p12_record_revision = Some(1);
+    assert!(!changed.valid());
 }
 
 #[test]
@@ -526,6 +536,7 @@ fn apple_original_store_closure_keeps_mode_and_owner_gates() {
         (Mode::ProfileReconcile, true),
         (Mode::KeyReview, false),
         (Mode::KeyPrepare, false),
+        (Mode::KeyRecover, false),
         (Mode::CertificateReview, false),
         (Mode::CertificateCreate, false),
         (Mode::CertificateReconcile, false),
@@ -537,7 +548,7 @@ fn apple_original_store_closure_keeps_mode_and_owner_gates() {
         scope.mode = mode;
         scope.new_application = mode == Mode::Register;
         if !matches!(mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview
-            | Mode::CertificateReview | Mode::P12Review)
+            | Mode::CertificateReview | Mode::P12Review | Mode::KeyRecover)
         {
             scope.reference = Some(apple_wire::Reference {
                 operation_id: "d".repeat(32), owner_generation: "e".repeat(32),
@@ -547,7 +558,7 @@ fn apple_original_store_closure_keeps_mode_and_owner_gates() {
             scope.p12_record_id = Some("f".repeat(32));
             scope.p12_record_revision = Some(1);
         }
-        if mode.certificate() || mode.p12() {
+        if mode.certificate() || mode.p12() || mode == Mode::KeyRecover {
             scope.key_record_id = Some("1".repeat(32));
             scope.key_record_revision = Some(1);
         }

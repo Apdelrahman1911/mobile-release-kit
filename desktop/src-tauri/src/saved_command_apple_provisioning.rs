@@ -561,6 +561,10 @@ impl State {
                 route.received = event.sequence;
                 route.pending = Some(apple_wire::EventDataFrame { sequence: event.sequence, data });
             },
+            data @ apple_wire::EventData::Key(apple_wire::KeyEvent::Compared(_))
+                if input.context().mode == apple_wire::Mode::KeyRecover && event.sequence == 1 => {
+                route.received = 1; route.pending = Some(apple_wire::EventDataFrame { sequence:1, data });
+            },
             apple_wire::EventData::Profile(apple_wire::ProfileEvent::Observed(observed))
                 if input.context().mode.profile() && !input.context().mode.profile_save()
                     && event.sequence == 2 && route.profile_observed.is_none() => {
@@ -616,6 +620,11 @@ impl State {
         self.route.try_lock().is_ok_and(|route| !route.failed && route.pending.is_none()
             && !route.ack_writing && route.received == route.completed && route.completed >= 1
             && route.ack_entered.first() == Some(&true))
+    }
+    pub(super) fn key_recovery_returned(&self) -> bool {
+        self.input().is_ok_and(|input|input.context().mode == apple_wire::Mode::KeyRecover)
+            && self.certificate_key_returned()
+            && self.route.try_lock().is_ok_and(|route|route.completed == 1)
     }
     /// After F only an already-armed attempt may publish its bounded audit.
     /// This never admits another Pending event or authorizes provider work.

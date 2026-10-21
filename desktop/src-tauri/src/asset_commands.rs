@@ -26,7 +26,8 @@ pub(crate) use apple_p12_fields::{AppleP12Password, output_metadata as apple_p12
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use apple_distribution_key_fields::{AppleDistributionKeyFields, AppleDistributionKeyMetadata,
     PRIVATE_FRAME_LIMIT as APPLE_KEY_PRIVATE_FRAME_LIMIT, CONSTRUCTION_BYTES as APPLE_KEY_CONSTRUCTION_BYTES,
-    public_parts_match as apple_distribution_key_public_matches};
+    public_parts_match as apple_distribution_key_public_matches,
+    frame_matches as apple_distribution_key_frame_matches};
 
 pub(crate) const POLICY: &str = "credential-policy-v1";
 pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;

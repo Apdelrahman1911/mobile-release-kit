@@ -298,7 +298,7 @@ class ProfileSteps:
         self.inventory = signing.observe_signing(op.context, op.target, op, now=datetime.now(timezone.utc))
         self.identity_current()
         mode = op.request.context["mode"]
-        pending = wire.common.pending(op.request.native["pending"], op.context.account_ref)
+        pending = wire.common.effective_pending(op.request.native, op.context.account_ref)
         selected_profile = None
         if mode in wire.SAVE_MODES:
             reviewed = op.request.native["signing"]["review"]

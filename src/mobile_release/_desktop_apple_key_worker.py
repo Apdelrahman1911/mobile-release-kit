@@ -124,7 +124,7 @@ class KeySteps:
         self.inventory = signing.observe_signing(operation.context, operation.target, operation, now=datetime.now(timezone.utc))
         operation.check(operation.context)
         before = self.inventory.observation
-        pending = wire.common.pending(operation.request.native["pending"], operation.context.account_ref)
+        pending = wire.common.effective_pending(operation.request.native, operation.context.account_ref)
         selection = None
         if any(row.unresolved for row in pending):
             decision, reason = "blocked", "account-pending"
@@ -160,7 +160,7 @@ class KeySteps:
         operation = self._bound()
         wire.need(operation.request.context["mode"] == "key-prepare" and operation._next_command == 6
                   and operation.request.native["key"]["vaultInventory"]["keys"] == 0)
-        if any(row.unresolved for row in wire.common.pending(operation.request.native["pending"], operation.context.account_ref)):
+        if any(row.unresolved for row in wire.common.effective_pending(operation.request.native, operation.context.account_ref)):
             raise _Refused("journal-unavailable")
         operation.plan = wire.expected_plan(operation.request)
         wire.need(datetime.now(timezone.utc) < operation.plan.valid_until)

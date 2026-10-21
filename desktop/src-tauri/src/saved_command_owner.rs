@@ -72,7 +72,7 @@ mod apple_signing;
 #[path = "saved_command_apple_key.rs"]
 mod apple_key;
 pub(crate) use apple_key::{AppleKeySession, AppleKeyPendingAck, AppleKeySavePermit,
-    AppleKeyNeverGeneratedJoined, AppleKeyUseJoined, AppleKeyNativeJoined, AppleCertificateNativeJoined};
+    AppleKeyNeverGeneratedJoined, AppleKeyUseJoined, AppleKeyNativeJoined, AppleCertificateNativeJoined, AppleKeyRecoveryVerified};
 pub(crate) use apple_signing::{AppleProfileNativeJoined, AppleProfileSession, AppleProvisioningClock,
     AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};

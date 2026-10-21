@@ -140,7 +140,7 @@ class P12Steps:
         inventory = self.certificate.initial
         if not inventory.observation.available or not inventory.profile_relationships_complete:
             return None, "inventory-unavailable"
-        if any(row.unresolved for row in wire.common.pending(op.request.native["pending"], op.context.account_ref)):
+        if any(row.unresolved for row in wire.common.effective_pending(op.request.native, op.context.account_ref)):
             return None, "account-pending"
         bundles = [row for row in inventory.observation.bundles
                    if row.identifier == op.target.bundle_id and row.seed_id == op.target.app_id_prefix

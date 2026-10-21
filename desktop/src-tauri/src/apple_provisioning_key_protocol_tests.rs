@@ -33,10 +33,11 @@ fn key_binding(mode: Mode) -> Arc<RequestBinding> {
         destination: None,
         entitlements: json!({}),
         review: None,
-        vault_inventory: KeyVaultInventory {
+        vault_inventory: Some(KeyVaultInventory {
             records: 1,
             keys: 0,
-        },
+        }),
+        recovery: None,
     };
     if mode == Mode::KeyPrepare {
         scope.destination = Some(KeyReference {
@@ -120,6 +121,92 @@ fn key_terminal(binding: &RequestBinding) -> Value {
     value["result"] = json!({"schemaVersion":1,"scope":"local-ios-distribution-key","mode":binding.context.mode,
         "decision":"produced","reason":"producer-returned","saved":false,"certificateRequested":false,"credentialReady":false});
     value
+}
+
+fn recovery_binding() -> (Arc<RequestBinding>, Value) {
+    let mut b = Arc::try_unwrap(key_binding(Mode::KeyReview)).ok().unwrap();
+    b.context.mode = Mode::KeyRecover;
+    b.context.key_record_id = Some("e".repeat(32));
+    b.context.key_record_revision = Some(1);
+    assert!(b.context.valid());
+    let scope = b.scope.key.as_mut().unwrap();
+    let source = KeyReference {
+        vault_id: scope.source_p8.vault_id.clone(), generation_id: scope.source_p8.generation_id.clone(),
+        record_id: "e".repeat(32), revision_id: "f".repeat(32), revision_counter: 1,
+    };
+    let csr = "-----BEGIN CERTIFICATE REQUEST-----\nMAA=\n-----END CERTIFICATE REQUEST-----\n";
+    // Deliberately inert framing DATA, not a private key or signed CSR.
+    let output = crate::apple_provisioning_journal::KeyOutputMetadata {
+        frame_bytes: 4000, frame_sha256: "a".repeat(64),
+        csr_sha256: hex(&Sha256::digest(csr.as_bytes())),
+        public_key_sha256: hex(&Sha256::digest([0x30, 0])),
+    };
+    scope.source_key = Some(source.clone());
+    scope.vault_inventory = None;
+    scope.recovery = Some(KeyRecoverySelection {
+        reference: Reference { operation_id: "6".repeat(32), owner_generation: "7".repeat(32) },
+        row_sha256: "b".repeat(64), native_settlement: crate::apple_provisioning_journal::NativeSettlement::Pending,
+        output: output.clone(), recovery: None,
+    });
+    assert!(scope.valid(&b.context, &b.scope.target, None));
+    (Arc::new(b), json!({"sourceKey":source,"csrPem":csr,"publicKeySpkiDer":"MAA=","output":output}))
+}
+
+#[test]
+fn recovery_actual_decoder_requires_exact_original_comparison_before_terminal() {
+    let (b, compared) = recovery_binding();
+    let mut terminal = complete(&b);
+    terminal["result"] = json!({"schemaVersion":1,"scope":"local-ios-distribution-key","mode":"key-recover",
+        "decision":"compared","reason":"stored-key-checked","saved":false,"certificateRequested":false,"credentialReady":false});
+    let fresh = || { let mut d = Decoder::new(b.clone()); d.push(&accepted(&b)).unwrap(); d };
+    assert!(fresh().push(&line(&envelope(&b,1,"terminal",terminal.clone()))).is_err());
+    let mut decoder = fresh();
+    let Frame::Event(event) = decoder.push(&line(&envelope(&b,1,"key-compared",compared.clone()))).unwrap() else { panic!("comparison event") };
+    let EventData::Key(KeyEvent::Compared(input)) = event.data else { panic!("typed comparison") };
+    let ack: Value = serde_json::from_slice(&key_recovery_ack(&b,&input.payload_sha256).unwrap()).unwrap();
+    assert_eq!(ack["kind"], "key-compared-ack");
+    assert_eq!(ack["step"], 1);
+    assert_eq!(ack["requestSha256"], b.sha256);
+    assert_eq!(ack["payload"]["originalRowSha256"], "b".repeat(64));
+    assert!(matches!(decoder.push(&line(&envelope(&b,2,"terminal",terminal.clone()))).unwrap(),Frame::Terminal(_)));
+    for flag in ["saved","certificateRequested","credentialReady"] {
+        let mut decoder = fresh(); decoder.push(&line(&envelope(&b,1,"key-compared",compared.clone()))).unwrap();
+        let mut bad = terminal.clone(); bad["result"][flag] = json!(true);
+        assert!(decoder.push(&line(&envelope(&b,2,"terminal",bad))).is_err());
+    }
+    // A complete private reply/Terminal is still only parser DATA: no native
+    // loan, original writer return, Asset join or journal proof was created.
+}
+
+#[test]
+fn recovery_decoder_rejects_crossref_both_hash_mismatches_foreign_mode_and_partial_frame() {
+    let (b, compared) = recovery_binding();
+    let fresh = || { let mut d = Decoder::new(b.clone()); d.push(&accepted(&b)).unwrap(); d };
+    for case in 0..6 {
+        let mut bad = compared.clone();
+        match case {
+            0 => bad["sourceKey"]["revisionId"] = json!("9".repeat(32)),
+            1 => bad["csrPem"] = json!("-----BEGIN CERTIFICATE REQUEST-----\nMAE=\n-----END CERTIFICATE REQUEST-----\n"),
+            2 => bad["publicKeySpkiDer"] = json!("MAE="),
+            3 => bad["output"]["frameSha256"] = json!("d".repeat(64)),
+            4 => bad["output"]["frameBytes"] = json!(4001),
+            _ => bad["keySavedAckSha256"] = json!("c".repeat(64)),
+        }
+        assert!(fresh().push(&line(&envelope(&b,1,"key-compared",bad))).is_err());
+    }
+    for mode in [Mode::KeyReview,Mode::KeyPrepare,Mode::Review] {
+        let other = if mode == Mode::Review { binding(mode) } else { key_binding(mode) };
+        let mut decoder = Decoder::new(other.clone()); decoder.push(&accepted(&other)).unwrap();
+        assert!(decoder.push(&line(&envelope(&other,1,"key-compared",compared.clone()))).is_err());
+    }
+    let mut decoder = fresh(); decoder.push(&line(&envelope(&b,1,"key-compared",compared.clone()))).unwrap();
+    assert!(decoder.push(&line(&envelope(&b,2,"key-compared",compared.clone()))).is_err());
+    for field in ["operationId","ownerGeneration","nonce","requestSha256"] {
+        let mut foreign = envelope(&b,1,"key-compared",compared.clone()); foreign[field] = json!("8".repeat(32));
+        assert!(fresh().push(&line(&foreign)).is_err());
+    }
+    let bytes = line(&envelope(&b,1,"key-compared",compared));
+    assert!(fresh().push(&bytes[..bytes.len()-1]).is_err());
 }
 
 #[test]

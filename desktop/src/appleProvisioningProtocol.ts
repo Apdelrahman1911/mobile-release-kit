@@ -72,7 +72,7 @@ const requestFields = (value: unknown): readonly string[] => {
   if (value && typeof value === 'object' && 'mode' in value) {
     if (isAppleP12Mode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision', 'p12RecordId', 'p12RecordRevision'];
     if (isAppleProfileMode(value.mode)) return [...fields, 'p12RecordId', 'p12RecordRevision'];
-    if (isAppleDistributionCertificateMode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision'];
+    if (isAppleDistributionCertificateMode(value.mode) || value.mode === 'key-recover') return [...fields, 'keyRecordId', 'keyRecordRevision'];
   }
   return fields;
 };
@@ -89,7 +89,7 @@ function request(value: unknown): value is PrepareAppleProvisioning {
       !token(value.recordId) || !counter(value.recordRevision, 0xfffffffe) || value.recordRevision < 1 || value.executionMode !== 'local' ||
       value.platform !== 'ios' || !oneOf(value.mode, modes) || !appleDisplayName(value.displayName) || value.newApplication !== (value.mode === 'register')) return false;
   if (isAppleProfileMode(value.mode) && (!token(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1)) return false;
-  if ((isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
+  if ((isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode) || value.mode === 'key-recover') && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
       value.keyRecordId === value.recordId || !counter(value.keyRecordRevision, 0xfffffffe) || value.keyRecordRevision < 1)) return false;
   if (isAppleP12Mode(value.mode)) {
     const absent = value.p12RecordId === null && value.p12RecordRevision === null;
@@ -97,7 +97,7 @@ function request(value: unknown): value is PrepareAppleProvisioning {
         [value.recordId, value.keyRecordId].includes(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1) ||
         value.mode === 'p12-save' && !absent || value.mode === 'p12-reuse' && absent) return false;
   }
-  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' || value.mode === 'p12-review' ?
+  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' || value.mode === 'p12-review' || value.mode === 'key-recover' ?
     value.reference === null : identity(value.reference) && (!(isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) ||
       value.reference.operationId !== '0'.repeat(32) && value.reference.ownerGeneration !== '0'.repeat(32));
 }

@@ -59,8 +59,8 @@ pub(crate) fn recovery_history(
     account: &AccountSnapshot,
     scope: &ScopeData,
 ) -> Result<RecoveryHistory, BridgeError> {
-    need(account.account == scope.provisioning.account_ref
-        && account.rows.len().checked_add(account.profile_rows.len()).and_then(|n|n.checked_add(account.key_rows.len())).and_then(|n|n.checked_add(account.certificate_rows.len())).is_some_and(|n| n <= ROWS))?;
+    need(account.account == scope.provisioning.account_ref)?;
+    account.validate_recoveries().map_err(|_|invalid())?;
     let mut seen = BTreeSet::new();
     let mut attempts = Vec::with_capacity(account.rows.len());
     let mut hidden_unresolved = 0;
@@ -102,11 +102,18 @@ pub(crate) fn recovery_history(
     }
     for row in &account.key_rows {
         need(row.intent.context.account_ref == account.account && seen.insert(row.intent.context.operation_id.clone()))?;
-        if row.unresolved() { hidden_unresolved += 1; }
+        if account.key_unresolved(row).map_err(|_|invalid())? { hidden_unresolved += 1; }
     }
     for row in &account.certificate_rows {
         need(row.intent.context.account_ref == account.account && seen.insert(row.intent.context.operation_id.clone()))?;
         if row.unresolved() { hidden_unresolved += 1; }
+    }
+    for row in &account.p12_rows {
+        need(row.intent.context.account_ref == account.account && seen.insert(row.intent.context.operation_id.clone()))?;
+        if row.unresolved() { hidden_unresolved += 1; }
+    }
+    for record in &account.key_recoveries {
+        need(seen.insert(record.provenance.operation_id.as_str().into()))?;
     }
     // Deterministic display only, not an automatic selection or latest-result
     // authority. Canonical UTC timestamps retain their original precision.
@@ -173,7 +180,7 @@ pub(crate) mod tests {
                 revision: Revision(7),
                 account,
                 rows: vec![row],
-                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![], p12_rows: vec![],
+                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![], p12_rows: vec![], key_recoveries: vec![],
             },
             scope,
         )

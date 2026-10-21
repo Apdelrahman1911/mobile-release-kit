@@ -14,7 +14,7 @@ struct PublicKey {
     spki: Vec<u8>,
     csr_sha256: String,
     spki_sha256: String,
-    history_sha256: Option<String>,
+    account_history_sha256: Option<String>,
 }
 struct Selected {
     id: String,
@@ -167,18 +167,27 @@ pub(in crate::saved_command_owner) fn key_ack(owner: &Arc<Session>, sequence: u3
     if !scope.prior_key_matches(parent.mode, &input.csr_sha256, &input.public_key_sha256) {
         return Err(invalid());
     }
-    let history = scope.key_preparation.as_ref().filter(|history|
-        history.csr_sha256 == input.csr_sha256 && history.public_key_sha256 == input.public_key_sha256)
-        .map(|history| history.update_sha256.clone());
+    let selected = scope.key_preparation.as_ref().filter(|history|
+        history.csr_sha256 == input.csr_sha256 && history.public_key_sha256 == input.public_key_sha256);
+    if scope.key_preparation.as_ref().is_some_and(|history|history.recovery.is_some()) && selected.is_none() {
+        return Err(invalid());
+    }
+    if let Some(recovered)=selected.and_then(|history|history.recovery.as_ref()) {
+        if !loan.matches_recovery_frame(&asset,recovered.output.frame_bytes,&recovered.output.frame_sha256) {return Err(invalid());}
+    }
+    let saved = selected.filter(|history|history.recovery.is_none()).map(|history|history.update_sha256.clone());
+    let recovered=selected.and_then(|history|history.recovery.as_ref()).map(|history|history.stamp.sha256.clone());
+    let history=saved.clone().or_else(||recovered.clone());
     if parent.mode == wire::Mode::CertificateCreate && history.is_none() { return Err(invalid()); }
-    let bytes = wire::certificate_reply(&binding, sequence, "certificate-key", json!({
-        "keySha256":input.payload_sha256,"csrSha256":input.csr_sha256,
-        "publicKeySha256":input.public_key_sha256,"keySavedAckSha256":history}))?.0;
+    let mut payload=json!({"keySha256":input.payload_sha256,"csrSha256":input.csr_sha256,
+        "publicKeySha256":input.public_key_sha256,"keySavedAckSha256":saved});
+    if let Some(recovered)=recovered { payload["keyRecoverySha256"]=json!(recovered); }
+    let bytes = wire::certificate_reply(&binding, sequence, "certificate-key", payload)?.0;
     owner.apple.input()?.current()?;
     let mut facts = state(&parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
     if facts.key.is_some() { return Err(invalid()); }
     facts.key = Some(PublicKey { csr: input.csr, spki: input.spki, csr_sha256: input.csr_sha256,
-        spki_sha256: input.public_key_sha256, history_sha256: history });
+        spki_sha256: input.public_key_sha256, account_history_sha256: history });
     Ok(bytes)
 }
 
@@ -275,7 +284,7 @@ pub(in crate::saved_command_owner) fn current_pending(owner: &Arc<Session>, inte
     let key = facts.key.as_ref().ok_or_else(invalid)?;
     let batch = facts.batch.as_ref().ok_or_else(invalid)?;
     if parent.mode != wire::Mode::CertificateCreate || facts.policy.is_some() || batch.number != 1
-        || batch.ambiguous || batch.selected.is_some() || key.history_sha256.is_none()
+        || batch.ambiguous || batch.selected.is_some() || key.account_history_sha256.is_none()
         || intent.context != binding.scope.provisioning || intent.source_key != loan.reference()
         || intent.csr_sha256 != key.csr_sha256 || intent.public_key_sha256 != key.spki_sha256
         || !loan.matches_public_material(&asset, key.csr.as_bytes(), &key.spki) { return Err(invalid()); }

@@ -43,6 +43,11 @@ pub(crate) use key::{KeyAlgorithm, KeyPrepareIntent, KeyOutputMetadata, KeyGener
     KeyPrepareUpdate, KeyPrepareRow, CertificateIssuanceIntent, CertificateCreateAction,
     CertificateAttemptRecord, CertificateCreationReceipt, CertificateUpdate, CertificateIssuanceRow, KEY_PROTOCOL};
 
+#[path = "apple_provisioning_key_recovery_data.rs"]
+pub(super) mod key_recovery;
+pub(crate) use key_recovery::{KeyRecoveryOrigin, KeyRecoveryRecord, KEY_RECOVERY_PROTOCOL,
+    durable_key_row, key_row_sha256, key_recovery_for, validate_key_recoveries};
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128

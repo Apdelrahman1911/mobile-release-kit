@@ -290,6 +290,17 @@ class AppleDistributionKeyWork:
         return (self._mode == PREPARE_MODE and outcome is not None and outcome.no_target is not None
                 and self._frame is None and self._parts is None and not any(self._slot._engine.outputs))
 
+    def recovery_metadata(self, operation):
+        from .apple_provisioning_api import digest
+        csr, spki = self.verified_public_parts(operation)
+        _need((self._mode == "key-recover" or self._mode in
+               {"certificate-review", "certificate-create", "certificate-reconcile"}
+               and operation.request.native["certificate"]["keyPreparation"] is not None
+               and "recovery" in operation.request.native["certificate"]["keyPreparation"])
+              and type(self._private_input) is bytes)
+        return {"frameBytes": len(self._private_input), "frameSha256": digest(self._private_input),
+                "csrSha256": digest(csr), "publicKeySha256": digest(spki)}
+
     def retire_non_generated(self, operation):
         """Only a verifier loan or actual no-target preparation can use this.
 

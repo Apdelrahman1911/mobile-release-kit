@@ -1,9 +1,9 @@
 // Closed DATA for one actual Desktop Prepared. No public material or Prepare.
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
-import type { AppleProvisioningMode } from './appleProvisioningTypes.ts';
 export const appleCliModes = ['review','register','reconcile','profile-review','profile-reuse','profile-create','profile-reconcile',
   'key-review','key-prepare','certificate-review','certificate-create','certificate-reconcile','p12-review','p12-reuse','p12-save'] as const;
-export interface AppleCliReview { readonly mode:AppleProvisioningMode; readonly operationId:string; readonly ownerGeneration:string; readonly statusRevision:number;
+type AppleCliMode = typeof appleCliModes[number];
+export interface AppleCliReview { readonly mode:AppleCliMode; readonly operationId:string; readonly ownerGeneration:string; readonly statusRevision:number;
   readonly savedConfig:{readonly bytes:number;readonly sha256:string}; readonly savedVersion:{readonly bytes:number;readonly sha256:string;readonly name:string;readonly build:number} }
 export interface AppleCliQuery {readonly projectId:string;readonly serviceInstance:string;readonly requestId:string}
 export interface AppleCliRecord {readonly kind:'apple-profile'|'apple-distribution-key'|'apple-p12'; readonly reference:{readonly vaultId:string;readonly generationId:string;readonly recordId:string;readonly revisionId:string;readonly revisionCounter:1}}
@@ -25,14 +25,14 @@ const num=(v:unknown,min:number,max:number):v is number=>typeof v==='number'&&Nu
 const obj=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const keys=(v:unknown,names:readonly string[]):v is Record<string,unknown>=>obj(v)&&Object.keys(v).length===names.length&&names.every(k=>Object.hasOwn(v,k));
 const one=(v:unknown,values:readonly string[])=>typeof v==='string'&&values.includes(v);
-export const appleCliConsent=(mode:AppleProvisioningMode)=>`agent-apple-${mode}-once-v1`;
+export const appleCliConsent=(mode:AppleCliMode)=>`agent-apple-${mode}-once-v1`;
 function review(v:unknown):v is AppleCliReview{return keys(v,['mode','operationId','ownerGeneration','statusRevision','savedConfig','savedVersion'])&&one(v.mode,appleCliModes)&&
   appleCliId(v.operationId)&&appleCliId(v.ownerGeneration)&&num(v.statusRevision,1,0xffff_fffe)&&keys(v.savedConfig,['bytes','sha256'])&&num(v.savedConfig.bytes,1,524288)&&sha(v.savedConfig.sha256)&&
   keys(v.savedVersion,['bytes','sha256','name','build'])&&num(v.savedVersion.bytes,1,65536)&&sha(v.savedVersion.sha256)&&num(v.savedVersion.build,1,2100000000)&&typeof v.savedVersion.name==='string'&&/^[A-Za-z0-9.+-]{1,64}$/.test(v.savedVersion.name);}
 function freeze<T>(v:T):T{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;}
 export function parseAppleCliReview(raw:unknown):AppleCliReview|null{try{const v=copyBoundedComparisonData(raw,2048,48);return review(v)?freeze(v):null;}catch{return null;}}
 export const sameAppleCliReview=(a:AppleCliReview|null,b:AppleCliReview|null)=>!!a&&!!b&&JSON.stringify(a)===JSON.stringify(b);
-const decisions:Record<AppleProvisioningMode,readonly string[]>={
+const decisions:Record<AppleCliMode,readonly string[]>={
   review:['reuse','review-required','blocked'],register:['reuse','review-required','blocked','registration-confirmed','registration-unconfirmed'],reconcile:['comparison-only'],
   'profile-review':['reuse-available','create-available','blocked'],'profile-reuse':['download-returned','creation-unconfirmed','blocked'],'profile-create':['download-returned','creation-unconfirmed','blocked'],'profile-reconcile':['comparison-only'],
   'key-review':['prepare-review','recover-existing-key','reuse-existing-identity','bundle-required','blocked'],'key-prepare':['produced','blocked'],
@@ -90,7 +90,7 @@ export function appleCliCommands(value:AppleCliAccess|null):readonly string[]{co
   const prefix=`${a.projectId} ${a.serviceInstance}`;return a.requestId?[`mrk apple-provisioning-status ${prefix} ${a.requestId}`,`mrk apple-provisioning-cancel ${prefix} ${a.requestId}`]:
     a.enabled?[`mrk apple-provisioning-submit ${prefix} ${a.grantId} ${a.reviewId} --reviewed`]:[];
 }
-export function appleCliEffect(mode:AppleProvisioningMode):string {
+export function appleCliEffect(mode:AppleCliMode):string {
   if(mode==='register')return 'May register one new Bundle ID after the existing reuse-first checks. No automatic retry.';
   if(mode==='profile-create')return 'May request one profile and save the returned profile encrypted. No assignment or build.';
   if(mode==='certificate-create')return 'May request one Distribution certificate for the current saved key. No replacement key, P12, or retry.';

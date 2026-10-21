@@ -86,7 +86,7 @@ async function cancelPrepared(h, op, revision) {
   h.reply(call, status(revision, cancelled(op))); await work;
 }
 
-test('only two local-key modes use the original RAW4, with exact P8-only requests and distinct consents', async () => {
+test('original review and generation keep the RAW4 P8-only requests and distinct consents', async () => {
   const calls = [], events = [];
   const api = createAppleProvisioningApi('native', async (command, bytes) => { calls.push([command, JSON.parse(new TextDecoder().decode(bytes))]); return status(); },
     async (event, _listener) => { events.push(event); return () => {}; });
@@ -102,8 +102,7 @@ test('only two local-key modes use the original RAW4, with exact P8-only request
   }
   for (const mode of ['key-recover', 'certificate-review', 'certificate-create', 'certificate-reconcile']) {
     assert.equal(parseAppleProvisioningRequest({ ...request(), mode }), null);
-    if (mode === 'key-recover') assert.equal(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }), null);
-    else assert.ok(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }));
+    assert.ok(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: `local-ios-${mode}-v1` }));
   }
   assert.equal(parseAppleProvisioningRequest({ ...request(), reference: id('1') }), null);
   assert.equal(parseAppleProvisioningRequest({ ...request('key-prepare'), reference: null }), null);
@@ -376,4 +375,105 @@ test('reuse/recovery, absent bundle and failed inventory results never offer gen
     await h.controller.prepare('key-prepare'); assert.equal(h.calls.filter(row => row.kind === 'prepare').length, 1);
     assert.ok(appleDistributionKeyResultCopy(h.state.keyResult, null, 'complete'));
   }
+});
+
+function selectRecoveryKey(h) {
+  const a = h.assets;
+  a.status.records.push({ recordId: '8'.repeat(32), revision: 1, kind: 'apple-distribution-key',
+    availability: 'unassigned', storage: 'encrypted', label: null, payloadState: 'not-checked' });
+  h.replaceAssets(a);
+  h.controller.selectCertificateKey('8'.repeat(32), 1);
+  assert.equal(h.state.keyRecoverReason, null);
+}
+const compared = () => result('key-recover', 'compared', 'stored-key-checked');
+
+test('known-durable recovery is selected-key/null-reference only, with a separate comparison result and no saved ref', () => {
+  const r = { ...request('key-review'), mode: 'key-recover', keyRecordId: '8'.repeat(32), keyRecordRevision: 1 };
+  assert.ok(parseAppleProvisioningRequest(r));
+  assert.equal(appleProvisioningConsent('key-recover'), 'local-ios-key-recover-v1');
+  for (const change of ['missing-key', 'old-reference', 'extra-p12', 'same-p8', 'raw-private', 'zero-revision']) {
+    const bad = clone(r);
+    if (change === 'missing-key') delete bad.keyRecordId;
+    if (change === 'old-reference') bad.reference = id('5');
+    if (change === 'extra-p12') bad.p12RecordId = 'd'.repeat(32);
+    if (change === 'same-p8') bad.keyRecordId = bad.recordId;
+    if (change === 'raw-private') bad.privateKey = 'not permitted';
+    if (change === 'zero-revision') bad.keyRecordRevision = 0;
+    assert.equal(parseAppleProvisioningRequest(bad), null, change);
+  }
+  assert.ok(parseAppleDistributionKeyResult(compared(), 'key-recover'));
+  for (const mode of ['key-review', 'key-prepare']) assert.equal(parseAppleDistributionKeyResult(compared(), mode), null);
+  const op = complete(operation(r), compared());
+  assert.ok(parseAppleProvisioningStatus(status(3, op)));
+  assert.equal(parseAppleProvisioningStatus(status(3, { ...op, savedKey: saved() })), null);
+  assert.equal(parseAppleProvisioningStatus(status(3, { ...op, outcome: 'cancelled', reason: 'cancelled' })), null);
+  assert.match(appleDistributionKeyResultCopy(compared(), null, 'complete').detail, /Earlier setup history is preserved/);
+});
+
+test('explicit original recovery uses real Prepare/Start/read returns and cannot delegate unchanged CLI15 or mint next consent', async t => {
+  const h = harness(t); await h.ready; selectRecoveryKey(h);
+  const op = await prepared(h, 'key-recover');
+  assert.equal(op.context.reference, null);
+  assert.equal(op.context.keyRecordId, '8'.repeat(32));
+  assert.equal(h.state.consent.acknowledged, false);
+  assert.equal(h.controller.delegationReview(), null);
+  await h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.length, 1);
+  h.controller.acknowledge(op.operationId, op.ownerGeneration, true);
+  const running = h.controller.start(op.operationId, op.ownerGeneration);
+  const call = h.calls.at(-1); assert.equal(call.kind, 'start');
+  assert.equal(call.request.consentVersion, 'local-ios-key-recover-v1');
+  h.emit(status(3, complete(op, compared()))); await flush();
+  assert.equal(h.state.keyResult, null); assert.equal(h.state.keyTerminalRead, false);
+  h.reply(call, status(3, complete(op, compared()))); await running;
+  assert.equal(h.state.keyTerminalRead, true); assert.deepEqual({ ...h.state.keyResult }, compared());
+  assert.equal(h.state.savedKey, null);
+  assert.equal(h.state.keyReviewReference, null); assert.equal(h.state.certificateReviewReference, null);
+  assert.equal(h.state.p12ReviewReference, null); assert.notEqual(h.state.certificateCreateReason, null);
+  const count = h.calls.length; await h.controller.prepare('certificate-create');
+  assert.equal(h.calls.length, count);
+});
+
+test('same Use-key material is correlation only; pending read and changed source cannot be replaced by a complete event', async t => {
+  const h = harness(t); await h.ready; selectRecoveryKey(h);
+  const op = await prepared(h, 'key-recover');
+  h.controller.acknowledge(op.operationId, op.ownerGeneration, true);
+  const running = h.controller.start(op.operationId, op.ownerGeneration), call = h.calls.at(-1);
+  const current = h.assets, held = mutation(current); held.status.operation.operation = 'use-apple-distribution-key';
+  held.status.operation.phase = 'admitting'; held.status.operation.storageOutcome = null;
+  h.replaceAssets(held);
+  assert.equal(h.state.historical, false); assert.equal(h.state.issue, null);
+  const read = deferred(); h.readQueue.push(read);
+  h.reply(call, status(3, complete(op, compared()))); await flush();
+  assert.equal(h.state.keyTerminalRead, false); assert.equal(h.state.keyResult, null);
+  h.replaceAssets(current);
+  read.resolve(status(3, complete(op, compared()))); await running;
+  assert.equal(h.state.keyTerminalRead, true);
+  const changed = h.assets; changed.status.records.find(row => row.kind === 'apple-distribution-key').revision++;
+  h.replaceAssets(changed);
+  assert.equal(h.state.historical, true); assert.notEqual(h.state.keyRecoverReason, null);
+  assert.equal(h.state.certificateReviewReference, null);
+});
+
+test('recovery source ABA before Prepare and lost Start keep original claims without generation or automatic replay', async t => {
+  const h = harness(t); await h.ready; selectRecoveryKey(h);
+  let once = true;
+  const off = h.controller.subscribe(() => {
+    if (!once) return; once = false;
+    const p = h.project, changed = { ...p, observationGeneration: p.observationGeneration + 1 };
+    h.replaceProject(changed); h.replaceProject(p);
+  });
+  await h.controller.prepare('key-recover'); off();
+  assert.equal(h.calls.length, 0);
+  h.controller.selectCertificateKey(null, null); h.controller.selectCertificateKey('8'.repeat(32), 1);
+  assert.equal(h.state.keyRecoverReason, null);
+  const op = await prepared(h, 'key-recover');
+  h.controller.acknowledge(op.operationId, op.ownerGeneration, true);
+  const work = h.controller.start(op.operationId, op.ownerGeneration), call = h.calls.at(-1);
+  h.emit(status(3, unknown(op))); call.reject(new Error('inert lost original Start'));
+  await work;
+  assert.ok(h.state.issue); assert.equal(h.state.keyResult, null); assert.equal(h.state.savedKey, null);
+  const count = h.calls.length;
+  await h.controller.prepare('key-recover'); await h.controller.prepare('key-prepare'); await h.controller.prepare('certificate-create');
+  assert.equal(h.calls.length, count); assert.equal(h.state.retained, true);
 });

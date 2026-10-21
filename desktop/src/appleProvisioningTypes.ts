@@ -20,7 +20,7 @@ export interface PrepareAppleProvisioning {
   keyRecordId?: string; keyRecordRevision?: number;
 }
 export interface AppleProvisioningContext extends PrepareAppleProvisioning { operation: 'apple-bundle-provisioning' }
-export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1' | 'local-ios-certificate-review-v1' | 'local-ios-certificate-create-v1' | 'local-ios-certificate-reconcile-v1' | 'local-ios-p12-review-v1' | 'local-ios-p12-reuse-v1' | 'local-ios-p12-save-v1';
+export type AppleProvisioningConsent = 'local-ios-bundle-review-v1' | 'local-ios-bundle-register-v1' | 'local-ios-bundle-reconcile-v1' | 'local-ios-profile-review-v1' | 'local-ios-profile-reuse-v1' | 'local-ios-profile-create-v1' | 'local-ios-profile-reconcile-v1' | 'local-ios-key-review-v1' | 'local-ios-key-prepare-v1' | 'local-ios-key-recover-v1' | 'local-ios-certificate-review-v1' | 'local-ios-certificate-create-v1' | 'local-ios-certificate-reconcile-v1' | 'local-ios-p12-review-v1' | 'local-ios-p12-reuse-v1' | 'local-ios-p12-save-v1';
 export interface StartAppleProvisioning extends AppleProvisioningIdentity { consentVersion: AppleProvisioningConsent }
 export type AppleProvisioningReason = 'none' | 'cancelled' | 'context-changed' | 'document-lost' | 'shutdown' | 'timed-out' |
   'protocol-error' | 'runtime-unavailable' | 'intent-expired' | 'stale-intent' | 'saved-source-changed' | 'saved-source-invalid' |

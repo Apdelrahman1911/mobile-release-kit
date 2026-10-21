@@ -91,11 +91,24 @@ def validate_native(selected, native):
          and native["target"]["appIdPrefix"] == native["target"]["teamId"] and native["prior"] is None)
     history = value["keyPreparation"]
     if history is not None:
-        history = _keys(history, {"reference", "sourceKey", "accountRef", "teamId", "csrSha256", "publicKeySha256", "updateSha256"})
+        history = _keys(history, {"reference", "sourceKey", "accountRef", "teamId", "csrSha256", "publicKeySha256", "updateSha256"}
+            | ({"recovery"} if "recovery" in history else set()))
         reference = _keys(history["reference"], {"operationId", "ownerGeneration"})
         need(all(common.token(item) for item in reference.values()) and history["sourceKey"] == value["sourceKey"]
              and history["accountRef"] == native["provisioning"]["accountRef"] and history["teamId"] == native["target"]["teamId"]
              and all(common.sha(history[name]) for name in ("csrSha256", "publicKeySha256", "updateSha256")))
+    if history is not None and "recovery" in history:
+        from ._desktop_apple_key_protocol import output_metadata
+        recovered = _keys(history["recovery"], {"stamp", "output"})
+        stamp = _keys(recovered["stamp"], {"reference", "sha256"})
+        ref = _keys(stamp["reference"], {"operationId", "ownerGeneration"})
+        need(all(common.token(v) for v in ref.values()) and ref != history["reference"] and common.sha(stamp["sha256"]))
+        output_metadata(recovered["output"])
+        need(all(recovered["output"][name] == history[name] for name in ("csrSha256", "publicKeySha256")))
+        relations = [row for row in native.get("keyRecoveries", []) if row["originalOperationId"] == history["reference"]["operationId"]]
+        need(len(relations) == 1 and relations[0]["originalOwnerGeneration"] == history["reference"]["ownerGeneration"]
+            and relations[0]["recordSha256"] == stamp["sha256"]
+            and {name: relations[0][name] for name in ("operationId", "ownerGeneration")} == ref)
     if selected["mode"] == "certificate-create":
         review = _keys(value["review"], {"reference", "observedAt", "validUntil", "selection"})
         need(history is not None and review["reference"] == selected["reference"] and native["reviewedAt"] == review["observedAt"]
@@ -252,10 +265,21 @@ def reply(raw, request, sequence, kind, payload):
     result = value["payload"]
     expected = api.digest(api.canonical(payload))
     if kind == "certificate-key":
-        result = _keys(result, {"keySha256", "csrSha256", "publicKeySha256", "keySavedAckSha256"})
+        history = request.native["certificate"]["keyPreparation"]
+        recovered = history.get("recovery") if history is not None else None
+        result = _keys(result, {"keySha256", "csrSha256", "publicKeySha256", "keySavedAckSha256"}
+            | ({"keyRecoverySha256"} if recovered is not None else set()))
         need(result["keySha256"] == expected and result["csrSha256"] == payload["csrSha256"]
-             and result["publicKeySha256"] == payload["publicKeySha256"]
-             and (result["keySavedAckSha256"] is None or common.sha(result["keySavedAckSha256"])))
+             and result["publicKeySha256"] == payload["publicKeySha256"])
+        matched = history is not None and all(history[name] == payload[name]
+            for name in ("csrSha256", "publicKeySha256"))
+        if recovered is not None:
+            need(matched and result["keySavedAckSha256"] is None
+                 and result["keyRecoverySha256"] == recovered["stamp"]["sha256"])
+        else:
+            # The old carrier keeps its exact shape. A source history that
+            # did not match may support read-only reuse, never a POST origin.
+            need(result["keySavedAckSha256"] == (history["updateSha256"] if matched else None))
     elif kind == "certificate-identities":
         result = _keys(result, {"identitySha256", "batch", "seen", "ambiguous", "selected", "checkedAt"})
         need(result["identitySha256"] == expected and result["batch"] == payload["batch"]

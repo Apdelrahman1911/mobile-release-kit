@@ -14,7 +14,7 @@ pub(super) fn borrow(
     registration: u32,
     root: &asset_source::RegisteredRoot,
 ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
-    if !(context.mode.local_key() || context.mode.certificate() || context.mode.p12()) || !context.valid() {
+    if !(context.mode.local_key() || context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12()) || !context.valid() {
         return Err(refused());
     }
     let native = state
@@ -41,7 +41,7 @@ pub(super) fn borrow(
     let payload = github_secret::assigned(state, &key, Kind::AscP8, &native)
         .ok_or_else(refused)?
         .clone();
-    let selected_key = if context.mode.certificate() || context.mode.p12() { Some(RecordKey {
+    let selected_key = if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { Some(RecordKey {
         id: Token(context.key_record_id.clone().ok_or_else(refused)?), revision: context.key_record_revision.ok_or_else(refused)?,
     }) } else { None };
     let selected_p12=match (&context.p12_record_id,context.p12_record_revision) {
@@ -66,7 +66,7 @@ pub(super) fn borrow(
     {
         return Err(refused());
     }
-    if context.mode.certificate() || context.mode.p12() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
+    if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
     Ok(result)
 }
 
@@ -98,7 +98,7 @@ impl CertificateMaterial<'_> {
     }
 }
 impl SelectedStoreMaterial {
-    pub(super) fn certificate_material(&self) -> bool { matches!(&self.command, Some(StoreCommand::Provisioning(context)) if context.mode.certificate()) }
+    pub(super) fn certificate_material(&self) -> bool { matches!(&self.command, Some(StoreCommand::Provisioning(context)) if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate()) }
     pub(crate) fn certificate_input(&self) -> Result<Option<CertificateMaterial<'_>>, BridgeError> {
         if !self.certificate_material() { return Ok(None); }
         let payload=self.key_sources.as_ref().and_then(|sources|sources.certificate_payload()).ok_or_else(refused)?;
@@ -122,7 +122,7 @@ impl SelectedStoreMaterial {
         let Some(document) = self.prepare_document.as_ref().and_then(Weak::upgrade) else {
             return false;
         };
-        (context.mode.local_key() || context.mode.certificate() || context.mode.p12())
+        (context.mode.local_key() || context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12())
             && self.provisioning_matches(context, registration, root)
             && self.profile_sources.is_none()
             && self.supplemental.iter().all(Option::is_none)

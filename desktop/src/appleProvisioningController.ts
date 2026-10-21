@@ -30,7 +30,7 @@ interface Source {
 }
 type Base = Omit<PrepareAppleProvisioning, 'mode' | 'reference' | 'newApplication' | 'displayName'>;
 type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate' | 'p12';
-const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) || mode === 'key-recover' ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
 interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
 interface DelegatedStart { nonce: string; review: AppleCliReview; anchor: number; allowJoined: boolean; submitted: boolean; final: boolean; checking: boolean; abandonedBeforeAllow: boolean }
 interface Attempt {
@@ -63,7 +63,7 @@ export interface AppleProvisioningState {
   registrationReference: AppleProvisioningIdentity | null;
   profileResult: AppleProfileSetupResult | null; savedProfile: AppleProfileSavedReference | null;
   keyResult: AppleDistributionKeyResult | null; savedKey: AppleDistributionKeySavedReference | null; keyTerminalRead: boolean;
-  keyReviewReference: AppleProvisioningIdentity | null; keyReviewReason: string | null; keyPrepareReason: string | null;
+  keyReviewReference: AppleProvisioningIdentity | null; keyReviewReason: string | null; keyPrepareReason: string | null; keyRecoverReason: string | null;
   profileReviewReference: AppleProvisioningIdentity | null; profileAttemptReference: AppleProvisioningIdentity | null;
   profileReviewReason: string | null; profileReuseReason: string | null; profileCreateReason: string | null; profileReconcileReason: string | null;
   reviewReason: string | null; registerReason: string | null; reconcileReason: string | null; startReason: string | null;
@@ -136,7 +136,7 @@ export class AppleProvisioningController {
       if (!base && family === 'key' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
         base = retainedAppleDistributionKeyInput(project, assets, a.witness.base);
       }
-      if (!base && family === 'certificate' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
+      if (!base && family === 'certificate' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && (isAppleDistributionCertificateMode(a.request.mode) || a.request.mode === 'key-recover')) {
         base = retainedAppleDistributionCertificateInput(project, assets, this.certificateKey, a.witness.base);
       }
       if (!base && family === 'p12' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleP12Mode(a.request.mode)) {
@@ -323,7 +323,7 @@ export class AppleProvisioningController {
       keyResult: keyTerminalRead && readResult?.scope === 'local-ios-distribution-key' ? readResult : null,
       savedKey: keyTerminalRead ? op?.savedKey ?? null : null, keyTerminalRead,
       keyReviewReference: this.referenceCurrent(this.keyReview) ? this.keyReview.identity : null,
-      keyReviewReason: this.reason('key-review'), keyPrepareReason: this.reason('key-prepare'),
+      keyReviewReason: this.reason('key-review'), keyPrepareReason: this.reason('key-prepare'), keyRecoverReason: this.reason('key-recover'),
       savedProfile: readResult?.scope === 'local-ios-profile-setup' ? op?.savedProfile ?? null : null,
       profileReviewReference: this.referenceCurrent(this.profileReview) ? this.profileReview.identity : null,
       profileAttemptReference: this.restoredProfile?.identity ?? this.profileAttempt?.identity ?? null,
@@ -563,7 +563,7 @@ export class AppleProvisioningController {
         !sameWitness(target, this.witness) || !sameWitness(target, this.capture(family)) ||
         continuation && (this.original !== continuation.api || this.witness !== continuation.witness || this.epoch !== continuation.epoch) ||
         this.disposed || !this.visible || this.reason(mode) || !this.witness || !this.status) return Promise.resolve();
-    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' || mode === 'p12-review' ? null :
+    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' || mode === 'p12-review' || mode === 'key-recover' ? null :
       mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.identity :
       mode === 'certificate-create' ? this.certificateReview?.identity : mode === 'certificate-reconcile' ? this.certificateReconciliationReference()?.identity : mode === 'key-prepare' ? this.keyReview?.identity :
       mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
@@ -578,6 +578,7 @@ export class AppleProvisioningController {
     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
     if (isAppleP12Mode(mode)) this.clearP12Review(); // An uncertain Prepare never restores save/reuse consent.
     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
+    if (mode === 'key-recover') { this.clearCertificateReview(); this.clearP12Review(); }
     if (isAppleDistributionCertificateMode(mode)) this.certificateReview = null; // Lost Prepare never restores issuance review.
     if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
     this.cancelClaim = null; this.cancelRequested = false; this.clearConsent(); this.mutation++;

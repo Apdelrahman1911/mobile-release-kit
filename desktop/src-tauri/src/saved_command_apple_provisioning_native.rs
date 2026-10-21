@@ -28,6 +28,8 @@ const JOBS: usize = 11;
 mod profile;
 #[path = "saved_command_apple_key_native.rs"]
 mod key_phases;
+#[path="saved_command_apple_key_recovery_native.rs"]
+mod recovery_phases;
 #[path = "saved_command_apple_certificate_native.rs"]
 mod certificate_phases;
 #[path="saved_command_apple_p12_native.rs"]
@@ -46,9 +48,11 @@ enum Value {
     KeyWritten(crate::apple_provisioning_journal::KeyJournalAck),
     CertificateWritten(crate::apple_provisioning_journal::CertificateJournalAck),
     P12Written(crate::apple_provisioning_journal::P12JournalAck),
+    RecoveryWritten(crate::apple_provisioning_journal::KeyRecoveryJournalAck),
     Retired,
 }
 enum Call {
+    KeyRecover(Revision,crate::apple_provisioning_journal::KeyRecoveryRecord,super::super::apple_key::AppleKeyRecoveryVerified),
     P12Reserve(crate::apple_provisioning_journal::P12SaveIntent,crate::apple_provisioning_journal::P12SaveUpdate),
     P12Record(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,crate::apple_provisioning_journal::P12SaveUpdate),
     P12Finish(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,super::super::apple_key::AppleP12NativeJoined),
@@ -214,7 +218,7 @@ fn journal_cutoff(owner: &Session) -> Instant {
     // Local key cleanup jobs (including final CAS/NativeUse retirement) use
     // the SAME original cleanup window. New effects retain their work gate;
     // private preservation additionally checks its fixed all-failure permit.
-    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key() || context.mode.p12()) {
+    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key() || context.mode == apple_wire::Mode::KeyRecover || context.mode.p12()) {
         owner.apple_key.get().map_or(*owner.native_audit_cutoff.borrow(), |key|key.clock().cleanup_end())
     } else { *owner.native_audit_cutoff.borrow() }
 }
@@ -248,7 +252,8 @@ async fn call(
     let profile_mode = mode.profile();
     let key_mode = mode.local_key();
     let certificate_mode=mode.certificate();let p12_mode=mode.p12();
-    let role_ok = !profile_mode && !key_mode && !certificate_mode && !p12_mode && matches!(
+    let recovery_mode = mode == apple_wire::Mode::KeyRecover;
+    let role_ok = !profile_mode && !key_mode && !certificate_mode && !p12_mode && !recovery_mode && matches!(
         (&selected, index),
         (Call::Initialize, INITIAL)
             | (Call::Reserve(_, _), 1)
@@ -267,9 +272,10 @@ async fn call(
             | (Call::CertificateReserve(_,_),1) | (Call::CertificateRecord(_,_,_),2..=AUDIT)
             | (Call::CertificateFinish(_,_,_),PROFILE_FINISH) | (Call::Retire(_),PROFILE_RETIRE))
         || p12_mode && matches!((&selected,index),(Call::Initialize,INITIAL)|(Call::Retire(_),PROFILE_RETIRE))
+        || recovery_mode && matches!((&selected,index),(Call::Initialize,INITIAL)|(Call::KeyRecover(_,_,_),PROFILE_FINISH)|(Call::Retire(_),PROFILE_RETIRE))
         || mode==apple_wire::Mode::P12Save && matches!((&selected,index),
             (Call::P12Reserve(_,_),1)|(Call::P12Record(_,_,_),AUDIT|PROFILE_ARM|PROFILE_SAVED)|(Call::P12Finish(_,_,_),PROFILE_FINISH));
-    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode || p12_mode { PROFILE_RETIRE } else { RETIRE }) {
+    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode || p12_mode || recovery_mode { PROFILE_RETIRE } else { RETIRE }) {
         return Err(local_error(owner, apple_wire::invalid()));
     }
     let end = call_end(owner)?;
@@ -287,6 +293,8 @@ async fn call(
         super::super::apple_key::p12::post_worker_save_clear(parent, owner)
             .map_err(|error| local_error(owner, error))?;
     }
+    let recovery_parent = matches!(&selected,Call::KeyRecover(_,_,_)).then(||inner.clone());
+    if let Some(parent)=&recovery_parent { super::super::apple_key::recovery::post_worker_clear(parent,owner).map_err(|e|local_error(owner,e))?; }
     let input = owner.apple.input()?.clone();
     let held = jobs.hold.clone();
     let original = owner.clone();
@@ -307,6 +315,7 @@ async fn call(
             super::super::apple_key::p12::post_worker_save_clear(parent, &original)
                 .map_err(|error| local_error(&original, error))?;
         }
+        if let Some(parent)=&recovery_parent { super::super::apple_key::recovery::post_worker_clear(parent,&original).map_err(|e|local_error(&original,e))?; }
         // This mutex is ONLY the finite operation's journal backing. Neither
         // STOP nor a Document/Host status path takes it. The slot's actual
         // JoinHandle, not this mutex or returned JSON, decides join finality.
@@ -397,6 +406,8 @@ async fn call(
                 .record_profile(revision, &reservation, update).map(Value::ProfileWritten),
             Call::ProfileFinish(revision, reservation, joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
                 .finish_profile_native(revision, &reservation, &joined).map(Value::ProfileWritten),
+            Call::KeyRecover(revision,record,joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .record_key_recovery(revision,record,joined).map(Value::RecoveryWritten),
             Call::Retire(joined) => {
                 let lease = held.lease.as_ref().ok_or_else(apple_wire::invalid)?;
                 if !joined.matches(lease.native_use()) {
@@ -505,6 +516,7 @@ pub(super) fn request(
         let review = owner.apple.intent.as_ref().and_then(|intent| intent.key_review.as_ref()).map(|review| review.data());
         scope.key = Some(input.key_scope(parent, review)?);
     }
+    if input.context().mode == apple_wire::Mode::KeyRecover { scope.key=Some(input.key_recovery_scope()?); }
     if input.context().mode.certificate() {
         let review=owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data());
         scope.certificate=Some(input.certificate_scope(review)?);
@@ -526,6 +538,10 @@ pub(super) fn request(
     let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
         return Err(apple_wire::invalid());
     };
+    if input.context().mode == apple_wire::Mode::KeyRecover {
+        let selection=apple_wire::key_recovery_selection(account,&scope)?;
+        scope.key.as_mut().ok_or_else(apple_wire::invalid)?.recovery=Some(selection);
+    }
     if input.context().mode.p12() {
         let held=scope.p12.as_mut().ok_or_else(apple_wire::invalid)?;
         held.previous.try_reserve_exact(account.p12_rows.len()).map_err(|_|apple_wire::invalid())?;
@@ -630,7 +646,7 @@ pub(super) async fn write_phases(
     }
     if mode.certificate() { return certificate_phases::write_phases(inner,owner,writer).await; }
     if mode.p12() {return p12_phases::write_phases(inner,owner,writer).await;}
-    if mode != apple_wire::Mode::Register && !mode.profile() {
+    if mode != apple_wire::Mode::Register && mode != apple_wire::Mode::KeyRecover && !mode.profile() {
         return Ok(());
     }
     loop {
@@ -656,7 +672,10 @@ pub(super) async fn write_phases(
             continue;
         };
         let index = usize::try_from(event.sequence).map_err(|_| apple_wire::invalid())?;
-        let (bytes, audit) = if mode.profile() {
+        let (bytes, audit) = if mode == apple_wire::Mode::KeyRecover {
+            let apple_wire::EventData::Key(apple_wire::KeyEvent::Compared(input))=event.data else {return Err(apple_wire::invalid());};
+            (super::super::apple_key::recovery::key_ack(owner,event.sequence,input)?,false)
+        } else if mode.profile() {
             profile::event_reply(inner, owner, event.sequence, event.data).await?
         } else {
             let (selected, update, previous) = {
@@ -853,6 +872,7 @@ pub(super) async fn finish_after_manager(inner: &Arc<Inner>, owner: &Arc<Session
     if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key()) {
         return key_phases::finish(inner, owner).await;
     }
+    if matches!(&owner.context,Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::KeyRecover) { return recovery_phases::finish(inner,owner).await; }
     if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate()) {
         return certificate_phases::finish(inner,owner).await;
     }

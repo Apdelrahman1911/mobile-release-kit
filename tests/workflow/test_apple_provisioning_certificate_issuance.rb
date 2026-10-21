@@ -35,6 +35,52 @@ class AppleCertificateIssuanceTest < Minitest::Test
     refute frame.key?("settled")
   end
 
+  def test_original_and_recovered_origin_carriers_are_exclusive_without_any_sdk_or_wire
+    [false, true].each do |recovered|
+      env = environment
+      if recovered
+        env.delete(PREFIX + "KEY_SAVED_ACK_SHA256")
+        env[PREFIX + "KEY_RECOVERY_SHA256"] = "e" * 64
+      end
+      input = Issuance::Input.new(env)
+      assert input.consume_ack!(input.context, input.operation_id, input.plan_sha256, input.request_sha256)
+      assert_raises(Issuance::Error) { input.consume_ack!(input.context, input.operation_id, input.plan_sha256, input.request_sha256) }
+      frame = JSON.parse(input.frame("status" => 201, "bodyBase64" => "e30=", "failure" => nil))
+      if recovered
+        assert_nil frame.fetch("keySavedAckSha256")
+        assert_equal "e" * 64, frame.fetch("keyRecoverySha256")
+      else
+        assert_equal "d" * 64, frame.fetch("keySavedAckSha256")
+        refute frame.key?("keyRecoverySha256") # Old shape is unchanged.
+      end
+      assert_equal "c" * 64, frame.fetch("ackSha256")
+      refute frame.key?("settled")
+    end
+    assert_empty FAKE.wire
+    assert_equal 0, FAKE.loads
+  end
+
+  def test_recovery_carrier_rejects_neither_both_foreign_get_or_failed_claim_without_sdk
+    recovered = environment
+    recovered.delete(PREFIX + "KEY_SAVED_ACK_SHA256")
+    recovered[PREFIX + "KEY_RECOVERY_SHA256"] = "e" * 64
+    [->(e) { e.delete(PREFIX + "KEY_RECOVERY_SHA256") },
+     ->(e) { e[PREFIX + "KEY_SAVED_ACK_SHA256"] = "d" * 64 },
+     ->(e) { e[PREFIX + "KEY_RECOVERY_SHA256"] = "malformed" },
+     ->(e) { e.delete(PREFIX + "ACK_SHA256") }].each do |change|
+      env = recovered.dup; change.call(env)
+      assert_raises(Issuance::Error) { Issuance::Input.new(env) }
+    end
+    env = environment("list_certificates").merge(PREFIX + "KEY_RECOVERY_SHA256" => "e" * 64)
+    assert_raises(Issuance::Error) { Issuance::Input.new(env) }
+    input = Issuance::Input.new(recovered)
+    assert_raises(Issuance::Error) { input.consume_ack!(input.context, "foreign", input.plan_sha256, input.request_sha256) }
+    assert_raises(Issuance::Error) { input.consume_ack!(input.context, input.operation_id, input.plan_sha256, input.request_sha256) }
+    refute input.ack_consumed?
+    assert_empty FAKE.wire
+    assert_equal 0, FAKE.loads
+  end
+
   def test_fixed_post_has_only_public_csr_and_distribution_no_profile_or_revoke
     FAKE.status = 201
     FAKE.body = '{"data":{"type":"certificates","id":"created-fixture"}}'

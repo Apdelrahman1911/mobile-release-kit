@@ -34,6 +34,7 @@ class CertificateSteps:
         operation._certificate = self
         self.public_csr = self.key_payload = self.key_ack = self.key_ack_bytes = None
         self.key_saved_ack = self.inventory = self.initial = None
+        self.key_recovery_ack = None
         self.policy = self.policy_result = self.policy_ack = None
         self.identity = self.identity_payload = self.identity_ack = None
         self._exchange = None
@@ -103,9 +104,16 @@ class CertificateSteps:
             prior = op.request.native["certificate"]["prior"]
             wire.need(prior is not None and prior["csrSha256"] == api.digest(csr)
                       and prior["publicKeySha256"] == api.digest(spki))
+        history = op.request.native["certificate"]["keyPreparation"]
+        recovered = history.get("recovery") if history is not None else None
+        if recovered is not None:
+            wire.need(self.key_saved_ack is None and self.key_recovery_ack == recovered["stamp"]["sha256"]
+                      and op._distribution_key.recovery_metadata(op) == recovered["output"])
+        else:
+            wire.need(self.key_recovery_ack is None)
         if require_history:
-            history = op.request.native["certificate"]["keyPreparation"]
-            wire.need(history is not None and wire.common.sha(self.key_saved_ack)
+            wire.need(history is not None and (self.key_saved_ack == history["updateSha256"] if recovered is None else
+                      self.key_saved_ack is None and self.key_recovery_ack == recovered["stamp"]["sha256"])
                       and history["csrSha256"] == api.digest(csr) and history["publicKeySha256"] == api.digest(spki))
 
     def admit_exchange(self, kind, payload):
@@ -151,6 +159,7 @@ class CertificateSteps:
             self.key_ack = result
             self.key_ack_bytes = api.canonical(result)
             self.key_saved_ack = result["keySavedAckSha256"]
+            self.key_recovery_ack = result.get("keyRecoverySha256")
         elif kind == "certificate-identities":
             self.identity, self.identity_payload, self.identity_ack = result, payload, digest
         elif kind == "certificate-policy":
@@ -178,11 +187,15 @@ class CertificateSteps:
         if "cursor" in dict(request.query):
             values["MOBILE_RELEASE_ASC_CERTIFICATE_CURSOR"] = dict(request.query)["cursor"]
         if request.method == "POST":
-            wire.need(op.source._ack_consumed and self.pending_returned and request == op.plan.request and wire.common.sha(self.key_saved_ack))
+            self.current_key(require_history=True)
+            wire.need(op.source._ack_consumed and self.pending_returned and request == op.plan.request
+                      and (wire.common.sha(self.key_saved_ack) and self.key_recovery_ack is None
+                           or self.key_saved_ack is None and wire.common.sha(self.key_recovery_ack)))
             values.update(MOBILE_RELEASE_ASC_CERTIFICATE_PLAN_SHA256=op.plan.sha256,
-                MOBILE_RELEASE_ASC_CERTIFICATE_KEY_SAVED_ACK_SHA256=self.key_saved_ack,
                 MOBILE_RELEASE_ASC_CERTIFICATE_ACK_SHA256=op.source._pending_ack,
                 MOBILE_RELEASE_ASC_CERTIFICATE_CSR_BASE64=base64.b64encode(self.public_csr.csr_pem).decode("ascii"))
+            origin = "KEY_SAVED_ACK_SHA256" if self.key_recovery_ack is None else "KEY_RECOVERY_SHA256"
+            values["MOBILE_RELEASE_ASC_CERTIFICATE_" + origin] = self.key_saved_ack or self.key_recovery_ack
         return values
 
     def _admit_request(self, request):
@@ -224,6 +237,7 @@ class CertificateSteps:
                         context_sha256=api.digest(api.canonical(wire.common.core_context_wire(op.context))),
                         operation_id=op.request.operation_id, target=op.target, request=request, csr=self.public_csr,
                         key_saved_ack_sha256=self.key_saved_ack if request.method == "POST" else None,
+                        key_recovery_sha256=self.key_recovery_ack if request.method == "POST" else None,
                         ack_sha256=op.source._pending_ack if request.method == "POST" else None, settled=True)
                     if request.method == "POST":
                         op._post_receipt = (op.guard.lifetime_ledger, verdict.commands)
@@ -361,7 +375,7 @@ class CertificateSteps:
         if plan.action == "reuse_certificate":
             return "reuse", "existing-certificate"
         if plan.action == "create_certificate":
-            return ("request-review", "certificate-required") if self.key_saved_ack is not None else ("blocked", "key-history-unavailable")
+            return ("request-review", "certificate-required") if self.key_saved_ack is not None or self.key_recovery_ack is not None else ("blocked", "key-history-unavailable")
         if plan.action == "reconcile":
             return "blocked", "account-pending"
         if plan.reason == "bundle_registration_required" or plan.bundle is None and not self.initial.observation.bundles:
@@ -402,7 +416,7 @@ class CertificateSteps:
         if op.request.context["mode"] == "certificate-reconcile":
             self._reconcile(bindings)
             return
-        pending = wire.common.pending(op.request.native["pending"], op.context.account_ref)
+        pending = wire.common.effective_pending(op.request.native, op.context.account_ref)
         op.plan = issuance.prepare_certificate(op.context, op.target, self.initial, bindings=bindings,
             csr=self.public_csr, pending=pending, now=datetime.now(timezone.utc))
         decision, reason = self._decision(op.plan)

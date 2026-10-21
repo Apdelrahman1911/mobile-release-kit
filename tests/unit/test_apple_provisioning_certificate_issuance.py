@@ -6,6 +6,7 @@ that these tests do NOT qualify. No test opens a vault or grants a saved ACK.
 from __future__ import annotations
 
 import base64
+import copy
 import unittest
 from dataclasses import replace
 from datetime import timedelta
@@ -277,6 +278,29 @@ class AppleCertificateFrameTests(unittest.TestCase):
         return issuance.response_from_frame(api.canonical(value), context_sha256="a" * 64,
             operation_id=CONTEXT.operation_id, target=TARGET, request=api.create_certificate(CSR.csr_pem), csr=CSR,
             key_saved_ack_sha256="b" * 64, ack_sha256="c" * 64, settled=settled)
+
+    def test_recovered_origin_is_distinct_exclusive_and_never_creates_settlement(self):
+        value = self.frame()
+        value.update(keySavedAckSha256=None, keyRecoverySha256="d" * 64)
+        def parse(data, saved=None, recovery="d" * 64, request=None):
+            return issuance.response_from_frame(api.canonical(data), context_sha256="a" * 64,
+                operation_id=CONTEXT.operation_id, target=TARGET,
+                request=request or api.create_certificate(CSR.csr_pem), csr=CSR,
+                key_saved_ack_sha256=saved, key_recovery_sha256=recovery, ack_sha256="c" * 64, settled=False)
+        result = parse(value)
+        self.assertFalse(result.settled)
+        self.assertEqual(result.body, b'{"data":[]}')
+        for change in ("both", "neither", "missing", "old-shape", "foreign", "nonpost"):
+            bad = copy.deepcopy(value)
+            arguments = {}
+            if change == "both": bad["keySavedAckSha256"] = "b" * 64; arguments["saved"] = "b" * 64
+            if change == "neither": bad.pop("keyRecoverySha256"); arguments["recovery"] = None
+            if change == "missing": bad.pop("keyRecoverySha256")
+            if change == "old-shape": arguments.update(saved="b" * 64, recovery=None)
+            if change == "foreign": bad["keyRecoverySha256"] = "e" * 64
+            if change == "nonpost": arguments["request"] = api.list_certificates()
+            with self.subTest(change=change), self.assertRaises(api.ProvisioningError):
+                parse(bad, **arguments)
 
     def test_raw_duplicates_and_external_finality_remain_separate(self):
         raw = b'{"data":{},"data":[]}'

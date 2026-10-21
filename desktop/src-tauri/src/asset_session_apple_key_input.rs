@@ -13,7 +13,7 @@ impl AppleProvisioningDocumentInput {
         &self,
         original: &Arc<OriginalWork>,
     ) -> Result<(), BridgeError> {
-        if !(self.context.mode.local_key() || self.context.mode.certificate() || self.context.mode.p12()) || self.key_sources().is_none() {
+        if !(self.context.mode.local_key() || self.context.mode == wire::Mode::KeyRecover || self.context.mode.certificate() || self.context.mode.p12()) || self.key_sources().is_none() {
             return Err(wire::invalid());
         }
         let mut held = self
@@ -111,11 +111,32 @@ impl AppleProvisioningDocumentInput {
             destination: parent.destination_data()?,
             entitlements: serde_json::json!({}),
             review,
-            vault_inventory: wire::KeyVaultInventory {
+            recovery: None,
+            vault_inventory: Some(wire::KeyVaultInventory {
                 records: u32::try_from(records).map_err(|_| wire::invalid())?,
                 keys: u32::try_from(keys).map_err(|_| wire::invalid())?,
-            },
+            }),
         })
+    }
+    pub(crate) fn key_recovery_scope(&self) -> Result<wire::KeyScopeData, BridgeError> {
+        if self.context.mode != wire::Mode::KeyRecover { return Err(wire::invalid()); }
+        let sources = self.key_sources().ok_or_else(wire::invalid)?;
+        let original = sources.owner().ok_or_else(wire::invalid)?;
+        if !sources.certificate_checked(&original, vault::key_sources::certificate::CheckPoint::Initial) {
+            return Err(wire::invalid());
+        }
+        let loan = sources.certificate_loan().ok_or_else(wire::invalid)?;
+        Ok(wire::KeyScopeData { source_p8:sources.reference(), source_key:Some(loan.reference()),
+            destination:None, entitlements:serde_json::json!({}), review:None, vault_inventory:None, recovery:None })
+    }
+    #[cfg(feature = "desktop-shell")]
+    pub(crate) async fn check_key_recovery_source(&self) -> Result<(), BridgeError> {
+        if self.context.mode != wire::Mode::KeyRecover { return Err(wire::invalid()); }
+        let original=self.key_asset.try_lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)?;
+        let document=self.key_document(&original)?;
+        self.current()?;
+        super::super::apple_key::recheck_certificate_before_pending(&document,&original).await?;
+        self.current()
     }
     pub(crate) fn certificate_scope(
         &self,
@@ -215,6 +236,9 @@ impl AppleProvisioningDocumentInput {
 // No original lookup or Option::None is presented as native closure.
 #[cfg(not(feature = "desktop-shell"))]
 impl AppleProvisioningDocumentInput {
+    pub(crate) async fn check_key_recovery_source(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::unavailable("Key recovery requires the desktop application."))
+    }
     pub(crate) async fn check_certificate_before_pending(&self) -> Result<(), BridgeError> {
         Err(BridgeError::unavailable("Certificate requests require the desktop application."))
     }

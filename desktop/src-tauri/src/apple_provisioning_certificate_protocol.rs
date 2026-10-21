@@ -57,6 +57,15 @@ pub(crate) struct CertificateKeyPreparation {
     pub(crate) csr_sha256: String,
     pub(crate) public_key_sha256: String,
     pub(crate) update_sha256: String,
+    // Explicit history origin, never an invented old keySaved acknowledgement.
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub(crate) recovery: Option<CertificateRecoveredKey>,
+}
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct CertificateRecoveredKey {
+    pub(crate) stamp: KeyRecoveryStamp,
+    pub(crate) output: crate::apple_provisioning_journal::KeyOutputMetadata,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +114,9 @@ impl CertificateScopeData {
         }
         if let Some(key) = &self.key_preparation {
             if !key.reference.valid() || key.source_key != self.source_key || key.account_ref != scope.provisioning.account_ref
-                || key.team_id != target.team_id || !sha(&key.csr_sha256) || !sha(&key.public_key_sha256) || !sha(&key.update_sha256) { return false; }
+                || key.team_id != target.team_id || !sha(&key.csr_sha256) || !sha(&key.public_key_sha256) || !sha(&key.update_sha256)
+                || key.recovery.as_ref().is_some_and(|r| !r.stamp.reference.valid() || r.stamp.reference==key.reference
+                    || !sha(&r.stamp.sha256) || !r.output.valid() || r.output.csr_sha256!=key.csr_sha256 || r.output.public_key_sha256!=key.public_key_sha256) { return false; }
         }
         if context.mode == Mode::CertificateCreate {
             let (Some(review), Some(key)) = (&self.review, &self.key_preparation) else { return false; };
@@ -474,7 +485,7 @@ pub(in crate::apple_provisioning_protocol) mod tests {
             scope.certificate=Some(CertificateScopeData { source_p8:p8,source_key:key.clone(),entitlements:json!({}),
                 key_preparation:Some(CertificateKeyPreparation { reference:Reference { operation_id:"6".repeat(32),owner_generation:"7".repeat(32) },
                     source_key:key,account_ref:scope.provisioning.account_ref.clone(),team_id:scope.target.team_id.clone(),
-                    csr_sha256:hex(&Sha256::digest(CSR.as_bytes())),public_key_sha256:hex(&Sha256::digest(b"spki")),update_sha256:"a".repeat(64) }),
+                    csr_sha256:hex(&Sha256::digest(CSR.as_bytes())),public_key_sha256:hex(&Sha256::digest(b"spki")),update_sha256:"a".repeat(64), recovery:None }),
                 review:None,prior:None });
         }
         let context=prepare(&input).unwrap().context;
