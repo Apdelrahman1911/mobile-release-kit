@@ -1,3 +1,4 @@
+import { AgentMetadataImagesAccess } from './AgentMetadataImagesAccess.tsx';
 import { useEffect, useId, useState } from 'react';
 import type { HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
@@ -108,6 +109,9 @@ function operationCopy(state: MetadataImagesState): { title: string; detail: str
   if (state.integrityFailed || state.nativeBlocked || state.generationLost || state.unknownSelection || state.unknownEdit || state.selectionIssue || state.editIssue)
     return { title: 'Original image operation is unverified', danger: true,
       detail: 'Keep the original files and operation evidence. Unknown or late settlement does not mean success, undo, or permission to import again.' };
+  if (owner?.phase === 'final' && (state.callerPending || state.delegationRetained))
+    return { title: 'Waiting for the original image operation to return', danger: false,
+      detail: 'The native outcome is retained below. Wait for the original Desktop calls and any delegated request to finish; do not repeat the copy.' };
   if (state.attempt?.applyClaimed && owner && !owner.applySubmitted && owner.phase !== 'final')
     return { title: 'Image Apply submitted; awaiting original status', danger: false,
       detail: 'The original request may already be running. A stale review is not proof that no files changed. Observe the same owner; do not repeat Apply.' };
@@ -190,6 +194,7 @@ export function MetadataImagesOperation({ state, controller, detailed, onShowPro
         {view.kind === 'recover' ? 'Apply reviewed recovery' : 'Confirm local image copy'}</button>
       {!controller.canAcknowledge(binding) && <p className="review-caution">This prepared view is no longer current or the native owner is unavailable. No acknowledgement or Apply can be reused.</p>}
     </section>}
+    <AgentMetadataImagesAccess controller={controller.agent} />
     <div className="button-row"><button type="button" className="button secondary" disabled={state.mode !== 'native' || state.reading} onClick={() => void controller.checkStatus()}>
       <Icon name="refresh" size={15} />{state.reading ? 'Observing original status…' : 'Observe original status'}</button>
       {owned && <button type="button" className="button secondary" disabled={stopReason !== null || Boolean(attempt && !imageAttemptFinished(attempt) && (attempt.cancelClaimed || attempt.closeClaimed))}

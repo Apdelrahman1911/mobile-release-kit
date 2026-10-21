@@ -15,6 +15,8 @@ mod service_version_edit_prepare_protocol;
 mod service_version_edit_prepare_requests;
 mod service_configuration_protocol;
 mod bounded_json_seed;
+mod service_metadata_images_protocol;
+mod service_metadata_images_requests;
 mod service_metadata_text_protocol;
 mod service_metadata_text_requests;
 mod service_configuration_requests;

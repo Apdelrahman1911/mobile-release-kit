@@ -9,6 +9,7 @@
     "allow-allow-agent-version-edit-apply",
     "allow-revoke-agent-version-edit",
     "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
+    "allow-agent-metadata-images-status", "allow-allow-agent-metadata-images-apply", "allow-revoke-agent-metadata-images",
     "allow-agent-metadata-text-status", "allow-allow-agent-metadata-text-apply", "allow-revoke-agent-metadata-text",
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",

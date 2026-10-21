@@ -96,6 +96,8 @@ mod request_catalogue;
 mod git_index;
 #[path="service_configuration_application.rs"]
 mod agent_configuration;
+#[path="service_metadata_images_application.rs"]
+mod agent_metadata_images;
 #[path="service_metadata_text_application.rs"]
 mod agent_metadata_text;
 #[path="service_version_reserve_application.rs"]
@@ -517,6 +519,10 @@ impl ApplicationService {
                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
+                p::RequestBody::MetadataImagesScope(v)=>return self.metadata_images_scope(client,v),
+                p::RequestBody::MetadataImagesSubmit(v)=>return self.metadata_images_submit(client,v.clone()),
+                p::RequestBody::MetadataImagesStatus(q)=>return self.metadata_images_query(client,q,false),
+                p::RequestBody::MetadataImagesCancel(q)=>return self.metadata_images_query(client,q,true),
                 p::RequestBody::MetadataTextRead(v) => return self.metadata_text_read(client,v.clone()),
                 p::RequestBody::MetadataTextPrepare(v) => return self.metadata_text_prepare(client,v.clone()),
                 p::RequestBody::MetadataTextApply(v) => return self.metadata_text_apply(client,v.clone()),
@@ -538,6 +544,7 @@ impl ApplicationService {
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                p::RequestBody::MetadataImagesScope(_)|p::RequestBody::MetadataImagesSubmit(_)|p::RequestBody::MetadataImagesStatus(_)|p::RequestBody::MetadataImagesCancel(_)|
                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |

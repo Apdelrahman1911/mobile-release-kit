@@ -33,6 +33,14 @@ const publicCatalog = () => ({ schemaVersion: catalogResource.schemaVersion, pol
   types: clone(catalogResource.types), limits: clone(limits), help: clone(helpResource.fields) });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+// Terminal event DATA is not a return receipt for an outstanding native call.
+// These fixtures return only the already-observed original terminal snapshots.
+async function returnOriginalCalls(h) {
+  for (const call of h.calls) if (call.resolve)
+    call.resolve(['choose', 'cancel'].includes(call.kind) ? h.selectionFrame : h.editFrame);
+  await flush();
+}
+
 
 function importView() {
   const folder = 'release/store/android/en-US/images/phoneScreenshots';
@@ -445,7 +453,8 @@ test('Choose and original cancellation claim once, including a late selected tok
   h.controller.requestStop(); h.controller.requestStop(); assert.equal(h.count('cancel'), 1);
   assert.equal(h.controller.choose(), false);
   const cancelled = selection('cancelled', { items: captureItems() }); h.publishSelection(cancelled);
-  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(metadataImagesOwnerReason(h.state), null);
+  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.ok(metadataImagesOwnerReason(h.state)); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(metadataImagesOwnerReason(h.state), null);
   assert.equal(h.controller.choose(), true); assert.equal(h.count('choose'), 2);
 });
 
@@ -609,6 +618,7 @@ test('orphan selected custody arriving before original read is retained, cancell
   assert.equal(h.controller.choose(), false); assert.equal(h.count('open'), 0);
   h.controller.requestStop(); h.controller.requestStop(); assert.equal(h.count('cancel'), 1);
   h.publishSelection(selection('cancelled', { items: captureItems() }));
+  assert.equal(h.controller.choose(), false); await returnOriginalCalls(h);
   assert.equal(h.controller.choose(), true);
 });
 
@@ -616,6 +626,7 @@ test('a new attempt or held orphan selection cannot inherit an earlier edit succ
   const h = await connected(); const binding = reviewing(h); h.controller.acknowledge(true); h.controller.apply(binding);
   h.publishEdit(h.owner('applying')); h.publishEdit(h.owner('final'));
   assert.equal(normalMetadataImagesResult(retainedMetadataImagesOperation(h.state).owner), 'copied');
+  assert.equal(h.controller.choose(), false); await returnOriginalCalls(h);
   assert.equal(h.controller.choose(), true);
   assert.deepEqual(retainedMetadataImagesOperation(h.state), { owner: null, selection: null });
   const orphan = { ...h.state, attempt: null, selectionStatus: selectionStatus(5, null, selection('selected', { operationId: ID.other })) };
@@ -666,7 +677,8 @@ test('a still-held source token can be cancelled after its original edit already
   h.publishEdit(h.owner('opening')); h.publishEdit(h.owner('editing')); h.controller.requestStop();
   h.publishEdit(h.closed()); assert.equal(imageAttemptFinished(h.state.attempt), true); assert.ok(metadataImagesOwnerReason(h.state));
   h.controller.requestStop(); h.controller.requestStop(); assert.equal(h.count('close'), 1); assert.equal(h.count('cancel'), 1);
-  h.publishSelection(selection('cancelled', { items: captureItems() })); assert.equal(metadataImagesOwnerReason(h.state), null);
+  h.publishSelection(selection('cancelled', { items: captureItems() })); assert.ok(metadataImagesOwnerReason(h.state)); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(metadataImagesOwnerReason(h.state), null);
 });
 
 test('service replacement and exhausted correlation counters cannot create another owner', async () => {
@@ -870,7 +882,8 @@ test('unmatched Open retires only that Open and settles the retained selection t
   h.controller.requestStop(); h.controller.syncAssetSession();
   assert.equal(h.count('cancel'), 1); assert.equal(h.count('open'), 1);
   h.publishSelection(selection('cancelled', { items: captureItems() }));
-  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(metadataImagesOwnerReason(h.state), null);
+  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.ok(metadataImagesOwnerReason(h.state)); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(metadataImagesOwnerReason(h.state), null);
   assert.equal(h.state.error.code, 'metadata_images_import_not_matched');
 });
 
@@ -995,7 +1008,8 @@ test('matched pre-edit rejection releases only Open after the original selection
   h.last('open').reject({ code: 'metadata_images_import_not_admitted' }); await flush();
   assert.equal(h.state.attempt.binding.serial, serial); assert.equal(h.state.attempt.openClaimed, false);
   assert.equal(h.state.attempt.invalidated, true); assert.equal(h.state.attempt.projection, null);
-  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(metadataImagesOwnerReason(h.state), null);
+  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.ok(metadataImagesOwnerReason(h.state)); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(metadataImagesOwnerReason(h.state), null);
   assert.equal(h.state.acknowledged, null); assert.equal(currentMetadataImagesApplyBinding(h.state), null);
   h.controller.requestStop(); h.controller.syncAssetSession();
   assert.equal(h.count('open'), 1); assert.equal(h.count('cancel'), 0); assert.equal(h.count('close'), 0);
@@ -1018,7 +1032,8 @@ test('matched pre-edit rejection cannot skip original status observation or decl
   assert.equal(h.count('close'), 0); assert.equal(h.count('open'), 1); assert.equal(imageAttemptFinished(h.state.attempt), false);
   h.publishSelection(selection('failed', { reason: 'busy', items: captureItems() }));
   h.last('cancel').resolve(h.selectionFrame); await flush();
-  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(metadataImagesOwnerReason(h.state), null);
+  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.ok(metadataImagesOwnerReason(h.state)); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(metadataImagesOwnerReason(h.state), null);
   assert.equal(h.count('cancel'), 1); assert.equal(h.count('close'), 0); assert.equal(h.count('open'), 1);
 });
 
@@ -1067,13 +1082,16 @@ test('matched pre-edit rejection cannot clear foreign active ownership or a diff
   assert.equal(h.count('cancel'), 0); assert.equal(h.count('close'), 0); assert.equal(h.count('open'), 1);
 });
 
-test('a late matched-no-edit marker from an earlier Open cannot retire a newer local selection serial', async () => {
+test('a late matched-no-edit marker must return before a newer local selection serial is admitted', async () => {
   const h = await connected(); checkedOut(h); const earlierOpen = h.last('open');
   h.controller.requestStop(); h.publishEdit(h.closed());
-  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(h.controller.choose(), true);
-  const serial = h.state.attempt.binding.serial;
-  h.publishSelection(selection('selecting', { operationId: ID.other }));
+  assert.equal(imageAttemptFinished(h.state.attempt), true); assert.equal(h.controller.choose(), false);
+  const oldSerial = h.state.attempt.binding.serial;
   earlierOpen.reject({ code: 'metadata_images_import_not_admitted' }); await flush();
+  assert.equal(h.state.attempt.binding.serial, oldSerial); assert.equal(h.controller.choose(), false);
+  await returnOriginalCalls(h); assert.equal(h.controller.choose(), true);
+  const serial = h.state.attempt.binding.serial; assert.ok(serial > oldSerial);
+  h.publishSelection(selection('selecting', { operationId: ID.other })); await flush();
   assert.equal(h.state.integrityFailed, false); assert.equal(h.state.attempt.binding.serial, serial);
   assert.equal(h.state.attempt.selection.operationId, ID.other); assert.equal(h.state.attempt.invalidated, false);
   assert.equal(h.state.attempt.cancelRequested, false); assert.equal(imageAttemptFinished(h.state.attempt), false);

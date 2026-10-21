@@ -1179,6 +1179,11 @@ mod agent_configuration;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_configuration::ConfigurationAgentGate;
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_metadata_images.rs"]
+pub(crate) mod agent_metadata_images;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_metadata_images::MetadataImagesAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_service_metadata_text.rs"]
 mod agent_metadata_text;
 #[cfg(any(target_os="linux",target_os="macos"))]

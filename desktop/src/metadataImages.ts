@@ -1,6 +1,7 @@
 // Bounded, public image-summary DATA. Tokens correlate an original native owner;
 // none of these types authorizes a renderer path, byte buffer or transaction.
 import type { BridgeMode, CoreEditOutcome, EditAvailability, HelpContent, NativeEditReason } from './types.ts';
+import type { MetadataImagesAgentApi } from './serviceMetadataImagesProtocol.ts';
 import type { MetadataPlatform } from './metadataText.ts';
 
 export interface ImageContentDigest { byteLength: number; sha256: string }
@@ -135,6 +136,7 @@ export type MetadataImagesCommand = 'metadata_images_catalog' | 'metadata_images
   'metadata_images_edit_apply' | 'metadata_images_edit_close' | 'metadata_images_edit_status';
 export interface MetadataImagesApi {
   mode: BridgeMode;
+  agent?: MetadataImagesAgentApi;
   metadataImagesCatalog(): Promise<MetadataImagesCatalog>;
   chooseMetadataImages(input: ChooseMetadataImagesRequest): Promise<MetadataImagesSelectionStatus>;
   metadataImagesSelectionStatus(): Promise<MetadataImagesSelectionStatus>;

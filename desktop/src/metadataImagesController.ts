@@ -1,5 +1,8 @@
 // One app-retained image selection/review. This orchestrates existing native
 // owners; it never creates a transaction, owns source bytes or retries a write.
+import { ServiceMetadataImagesController } from './serviceMetadataImagesController.ts';
+import type { ImagesAgentCandidate } from './serviceMetadataImagesController.ts';
+import type { ImagesAgentSummary } from './serviceMetadataImagesProtocol.ts';
 import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { imageConfigReason, imageConfiguredChoices, imageProjectBinding } from './metadataImagesContext.ts';
@@ -75,6 +78,8 @@ export interface MetadataImagesState {
   selectionBuffered: MetadataImagesSelectionStatus | null;
   editBuffered: MetadataImagesEditStatus | null;
   reading: boolean;
+  callerPending: boolean;
+  delegationRetained: boolean;
   selectionIssue: boolean;
   editIssue: boolean;
   integrityFailed: boolean;
@@ -128,7 +133,7 @@ export function metadataImagesAssetSessionReason(state: AssetDisplayState, step?
 }
 
 export function metadataImagesOwnerReason(state: MetadataImagesState, projectId = state.projectId ?? ''): string | null {
-  const owns = Boolean(heldSelection(state) || state.editStatus?.active || !imageAttemptFinished(state.attempt) ||
+  const owns = Boolean(state.callerPending || state.delegationRetained || heldSelection(state) || state.editStatus?.active || !imageAttemptFinished(state.attempt) ||
     state.unknownSelection || state.unknownEdit || state.nativeBlocked);
   if (state.integrityFailed || state.generationLost || state.nativeBlocked || state.selectionIssue || state.editIssue)
     return 'Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.';
@@ -179,10 +184,12 @@ export class MetadataImagesController {
     contextGeneration: 0, serviceGeneration: 0, visible: false, selectionPending: false,
     catalog: null, catalogPending: false, catalogError: null,
     selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
-    selectionStatus: null, editStatus: null, selectionBuffered: null, editBuffered: null, reading: false,
+    selectionStatus: null, editStatus: null, selectionBuffered: null, editBuffered: null, reading: false, callerPending: false, delegationRetained: false,
     selectionIssue: false, editIssue: false, integrityFailed: false, generationLost: false, nativeBlocked: false,
     unknownSelection: null, unknownEdit: null, recoveryProjects: [], attempt: null, acknowledged: null, error: null,
   });
+  readonly agent: ServiceMetadataImagesController;
+  private pendingCalls = 0;
   private readonly context: Context;
   private api: MetadataImagesApi | null = null;
   private listeners = new Set<() => void>();
@@ -200,13 +207,22 @@ export class MetadataImagesController {
   private orphanCancel: string | null = null;
   private rejectedOpenAwaitingRead: number | null = null;
 
-  constructor(context: Context) { this.context = context; }
+  constructor(context: Context) {
+    this.context = context;
+    this.agent = new ServiceMetadataImagesController(() => this.agentCandidate(), () => this.now());
+    this.agent.subscribe(() => {
+      const retained = this.agent.retains();
+      if (!this.disposed && this.state.delegationRetained !== retained) this.publish({...this.state,delegationRetained:retained});
+      if (this.disposed) this.retireListeners();
+    });
+  }
   getSnapshot = (): MetadataImagesState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(next: MetadataImagesState): void {
     if (this.disposed) return;
     this.state = freeze(next);
     for (const listener of this.listeners) listener();
+    this.agent.sourceChanged();
   }
   private attempt(patch: Partial<MetadataImagesAttempt>): void {
     if (this.state.attempt) {
@@ -305,7 +321,7 @@ export class MetadataImagesController {
   async connect(api: MetadataImagesApi): Promise<void> {
     if (this.disposed) return;
     if (this.api === api) return this.checkStatus();
-    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.reading || this.catalogRead)) {
+    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead)) {
       this.publish({ ...this.state, generationLost: true, acknowledged: null, error: metadataImagesError({ code: 'metadata_images_context_changed' }) });
       this.retire(); this.process(); return;
     }
@@ -316,7 +332,7 @@ export class MetadataImagesController {
       catalog: null, catalogError: null, selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
       selectionBuffered: null, editBuffered: null, acknowledged: null });
     this.syncProject();
-    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus()]);
+    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus(), this.agent.connect(api.agent)]);
   }
   async loadCatalog(): Promise<void> {
     if (this.disposed || this.api?.mode !== 'native') return;
@@ -339,6 +355,7 @@ export class MetadataImagesController {
     this.catalogRead = work; this.publish({ ...this.state, catalogPending: true });
     try { await work; } finally {
       if (this.catalogRead === work) { this.catalogRead = null; this.publish({ ...this.state, catalogPending: false }); }
+      this.retireListeners();
     }
   }
   // The existing generic asset watcher can settle after the image event. This
@@ -346,7 +363,7 @@ export class MetadataImagesController {
   syncAssetSession = (): void => { this.process(); };
 
   passiveBusyReason(): string | null {
-    return this.reading || this.catalogRead ? 'An original image status or catalogue query is still pending.' : null;
+    return this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead ? 'An original image call, permission, status or catalogue query is still pending.' : null;
   }
   async checkStatus(): Promise<void> {
     if (this.disposed || this.api?.mode !== 'native') return;
@@ -378,6 +395,7 @@ export class MetadataImagesController {
     this.reading = work; this.publish({ ...this.state, reading: true, acknowledged: null });
     try { await work; } finally {
       if (this.reading === work) { this.reading = null; this.publish({ ...this.state, reading: false }); this.process(); }
+      this.retireListeners();
     }
   }
   private fail(stream: 'selection' | 'edit', protocol: boolean): void {
@@ -486,7 +504,7 @@ export class MetadataImagesController {
     const project = this.context.selectedProject();
     if (!project) return 'Choose the registered project whose local image files you want to inspect.';
     const other = this.context.otherOperationReason(); if (other) return other;
-    if (heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
+    if (this.pendingCalls || this.agent.retains() || heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
       return 'Finish or cancel the original image operation and wait for its settlement before starting another.';
     const caps = [this.state.selectionStatus!.capability, this.state.editStatus!.capability];
     if (caps.some((cap) => !cap.available))
@@ -519,13 +537,14 @@ export class MetadataImagesController {
   choose(): boolean {
     this.syncProject();
     if (this.disposed || !this.api || this.startReason() !== null) return false;
+    if (!this.agent.newOriginal()) return false;
     const attempt = this.newAttempt('import'); const selected = attempt?.binding.context;
     if (!attempt || !selected) return false;
     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
     if (this.state.attempt?.binding.serial !== attempt.binding.serial || this.state.attempt.invalidated) {
       this.publish({ ...this.state, attempt: null }); return false;
     }
-    void this.command('choose', attempt.binding.serial, () => this.api!.chooseMetadataImages({
+    void this.command('choose', attempt.binding.serial, (api) => api.chooseMetadataImages({
       projectId: selected.projectId, platform: selected.platform, locale: selected.locale, assetType: selected.assetType,
     }));
     return true;
@@ -533,12 +552,13 @@ export class MetadataImagesController {
   inspectRecovery(): boolean {
     this.syncProject();
     if (this.disposed || !this.api || this.startReason('recover') !== null) return false;
+    if (!this.agent.newOriginal()) return false;
     const attempt = this.newAttempt('recover'); if (!attempt) return false;
     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
     if (this.state.attempt?.binding.serial !== attempt.binding.serial || this.state.attempt.invalidated) {
       this.publish({ ...this.state, attempt: null }); return false;
     }
-    void this.command('recover', attempt.binding.serial, () => this.api!.openMetadataImagesRecovery(attempt.binding.projectId));
+    void this.command('recover', attempt.binding.serial, (api) => api.openMetadataImagesRecovery(attempt.binding.projectId));
     return true;
   }
   setReplacement(itemId: string, replaceExisting: boolean): boolean {
@@ -573,7 +593,7 @@ export class MetadataImagesController {
     if (!metadataImagesRequestFits('metadata_images_edit_prepare', request)) { this.fail('edit', true); return false; }
     this.publish({ ...this.state, acknowledged: null, attempt: { ...attempt, prepareClaimed: true, prepareRequest: request } });
     if (this.state.attempt?.binding.serial === attempt.binding.serial && !this.state.attempt.closeRequested)
-      void this.command('prepare', attempt.binding.serial, () => this.api!.prepareMetadataImagesEdit(request));
+      void this.command('prepare', attempt.binding.serial, (api) => api.prepareMetadataImagesEdit(request));
     return true;
   }
   canAcknowledge(binding = currentMetadataImagesApplyBinding(this.state)): boolean {
@@ -586,14 +606,15 @@ export class MetadataImagesController {
     this.publish({ ...this.state, acknowledged: checked && this.canAcknowledge(binding) ? binding : null });
   }
   canApply(binding = currentMetadataImagesApplyBinding(this.state)): boolean {
-    return Boolean(binding && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
+    return Boolean(binding && this.agent.guiAllowed() && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
   }
   apply(binding: MetadataImagesApplyBinding): boolean {
     if (this.disposed || !this.api || !this.canApply(binding)) return false;
     const attempt = this.state.attempt!;
+    if (!this.agent.guiClaim() || !this.canApply(binding)) return false;
     this.publish({ ...this.state, acknowledged: null, attempt: { ...attempt, applyClaimed: true, submittedPlanToken: binding.planToken } });
     if (this.state.attempt?.binding.serial === attempt.binding.serial && !this.state.attempt.closeRequested)
-      void this.command('apply', attempt.binding.serial, () => this.api!.applyMetadataImagesEdit(binding.sessionId, binding.planToken));
+      void this.command('apply', attempt.binding.serial, (api) => api.applyMetadataImagesEdit(binding.sessionId, binding.planToken));
     return true;
   }
   private retire(user = false): void {
@@ -612,9 +633,9 @@ export class MetadataImagesController {
       const edit = this.state.editStatus?.active;
       const selection = heldSelection(this.state);
       if (!this.state.generationLost && edit && edit.phase !== 'unknown' && edit.ownerGeneration === this.state.editStatus?.windowGeneration && this.orphanClose !== edit.sessionId) {
-        this.orphanClose = edit.sessionId; void this.command('close', null, () => this.api!.closeMetadataImagesEdit(edit.sessionId));
+        this.orphanClose = edit.sessionId; void this.command('close', null, (api) => api.closeMetadataImagesEdit(edit.sessionId));
       } else if (!this.state.generationLost && selection && selection.phase !== 'unknown' && this.orphanCancel !== selection.operationId) {
-        this.orphanCancel = selection.operationId; void this.command('cancel', null, () => this.api!.cancelMetadataImagesSelection(selection.operationId));
+        this.orphanCancel = selection.operationId; void this.command('cancel', null, (api) => api.cancelMetadataImagesSelection(selection.operationId));
       }
     }
   }
@@ -658,12 +679,12 @@ export class MetadataImagesController {
             attempt.selection && attempt.selection.phase !== 'unknown' &&
             !['cancelled', 'failed'].includes(attempt.selection.phase)) {
           const operationId = attempt.selection.operationId; const serial = attempt.binding.serial;
-          this.attempt({ cancelClaimed: true }); void this.command('cancel', serial, () => this.api!.cancelMetadataImagesSelection(operationId)); continue;
+          this.attempt({ cancelClaimed: true }); void this.command('cancel', serial, (api) => api.cancelMetadataImagesSelection(operationId)); continue;
         }
         if (attempt.closeRequested && !attempt.closeClaimed && attempt.projection && !['final', 'unknown'].includes(attempt.projection.phase) &&
             attempt.projection.ownerGeneration === this.state.editStatus?.windowGeneration) {
           const sessionId = attempt.projection.sessionId; const serial = attempt.binding.serial;
-          this.attempt({ closeClaimed: true }); void this.command('close', serial, () => this.api!.closeMetadataImagesEdit(sessionId)); continue;
+          this.attempt({ closeClaimed: true }); void this.command('close', serial, (api) => api.closeMetadataImagesEdit(sessionId)); continue;
         }
         const selection = attempt.selection;
         if (attempt.binding.intent === 'import' && !attempt.openClaimed && !attempt.cancelRequested && !attempt.invalidated &&
@@ -672,11 +693,49 @@ export class MetadataImagesController {
           const serial = attempt.binding.serial; const selectionToken = selection.selectionToken; const projectId = attempt.binding.projectId;
           this.attempt({ openClaimed: true });
           if (this.state.attempt?.binding.serial === serial && !this.state.attempt.closeRequested)
-            void this.command('open', serial, () => this.api!.openMetadataImagesEdit({ projectId, selectionToken }));
+            void this.command('open', serial, (api) => api.openMetadataImagesEdit({ projectId, selectionToken }));
           else { this.attempt({ openClaimed: false, cancelRequested: true }); this.processAgain = true; }
         }
       } while (this.processAgain);
     } finally { this.processing = false; }
+  }
+  private agentCandidate(): ImagesAgentCandidate | null {
+    const api = this.api, port = api?.agent, a = this.state.attempt, project = this.context.selectedProject();
+    const owner = a?.projection, prepared = owner?.details?.prepared;
+    if (!api || !port || !a || !project || !owner || !prepared || prepared.view.kind !== 'import' || a.binding.intent !== 'import' ||
+        !a.prepareRequest || !a.choices || !currentMetadataImagesApplyBinding(this.state)) return null;
+    const view = prepared.view, catalog = this.state.catalog;
+    const summary: ImagesAgentSummary = {original:{sessionId:owner.sessionId,ownerGeneration:owner.ownerGeneration,revision:prepared.revision,
+      planToken:prepared.planToken,draftRevision:prepared.draftRevision,baselineGeneration:prepared.baselineGeneration},
+      nativeStatusRevision:this.state.editStatus!.statusRevision,platform:view.platform,locale:view.locale,assetType:view.assetType,
+      fileCount:view.files.length,createCount:view.files.filter(x=>x.action==='create').length,replaceCount:view.files.filter(x=>x.action==='replace').length,
+      preserveCount:view.files.filter(x=>x.action==='preserve').length,selectedBytes:view.files.reduce((n,x)=>n+x.selected.byteLength,0)};
+    const sameOriginal = () => {
+      const next = this.state.attempt;
+      return !this.disposed && this.api === api && this.context.selectedProject() === project && this.state.catalog === catalog &&
+        next?.binding === a.binding && next.prepareRequest === a.prepareRequest && next.choices === a.choices && this.matches(next) &&
+        !next.invalidated && !next.cancelRequested && !next.closeRequested && !this.state.generationLost && !this.state.integrityFailed &&
+        !this.state.nativeBlocked && !this.state.selectionIssue && !this.state.editIssue &&
+        next.projection?.sessionId === owner.sessionId && next.projection.ownerGeneration === owner.ownerGeneration &&
+        same(next.projection.details?.prepared,prepared);
+    };
+    const ready = () => sameOriginal() && !this.pendingCalls && this.usable() && this.state.visible && this.remainingReviewMs()>0 &&
+      this.state.editStatus?.statusRevision === summary.nativeStatusRevision && !!this.state.editStatus?.capability.available &&
+      !this.context.otherOperationReason() && !!currentMetadataImagesApplyBinding(this.state);
+    const candidate: ImagesAgentCandidate = {projectId:a.binding.projectId,api:port,summary,remainingMs:this.remainingReviewMs(),same:sameOriginal,ready,
+      native:() => {const p=this.state.attempt?.binding===a.binding?this.state.attempt.projection:null;
+        return p?.sessionId===owner.sessionId&&p.ownerGeneration===owner.ownerGeneration?p:null;},
+      apply:async(q) => {
+        if (!ready()) return false;
+        const current = this.state.attempt!;
+        this.publish({...this.state,acknowledged:null,attempt:{...current,applyClaimed:true,submittedPlanToken:prepared.planToken}});
+        // Permit only our intended claim delta; reentrant edits/navigation/STOP
+        // cannot be rebased onto a newer original by this outer invocation.
+        if (!sameOriginal() || !this.state.attempt?.applyClaimed || this.state.attempt.submittedPlanToken!==prepared.planToken ||
+            this.pendingCalls || this.context.otherOperationReason()) return false;
+        return this.command('apply',a.binding.serial,() => port.apply(q));
+      }};
+    return candidate;
   }
   private rejectBeforeOwner(kind: string, serial: number | null, error: ApiError): boolean {
     const attempt = this.state.attempt;
@@ -708,19 +767,37 @@ export class MetadataImagesController {
     return false;
   }
   private async command(kind: 'choose' | 'cancel' | 'open' | 'recover' | 'prepare' | 'apply' | 'close', serial: number | null,
-    call: () => Promise<MetadataImagesSelectionStatus | MetadataImagesEditStatus>): Promise<void> {
+    call: (api: MetadataImagesApi) => Promise<MetadataImagesSelectionStatus | MetadataImagesEditStatus>): Promise<boolean> {
     const api = this.api;
+    if (!api || this.pendingCalls >= 32) { this.fail('edit',true); return false; }
+    this.pendingCalls += 1;
+    if (this.pendingCalls === 1) this.publish({...this.state,callerPending:true});
     try {
-      const status = await call();
-      if (this.disposed || this.api !== api) return;
+      const attempt = this.state.attempt;
+      if (this.disposed || this.api !== api || !['close','cancel'].includes(kind) &&
+          (!attempt || attempt.binding.serial !== serial || attempt.invalidated || attempt.closeRequested || attempt.cancelRequested || !this.matches(attempt))) {
+        // This exact call has not entered native. Do not turn that fact into
+        // another operation's settlement or permission to replay a plan.
+        if (attempt?.binding.serial === serial) {
+          if ((kind === 'choose' || kind === 'recover') && !attempt.selection && !attempt.projection)
+            this.publish({...this.state,attempt:null,acknowledged:null});
+          else if (kind === 'open' && !attempt.projection) this.attempt({openClaimed:false,cancelRequested:true,invalidated:true});
+          else this.retire(true);
+          this.process();
+        }
+        return false;
+      }
+      const status = await call(api);
+      if (this.disposed || this.api !== api) return false;
       if (kind === 'choose' || kind === 'cancel') this.receiveSelection(status, 'reply'); else this.receiveEdit(status, 'reply');
+      return !this.state.integrityFailed && !this.state.generationLost;
     } catch (error) {
-      if (this.disposed || this.api !== api) return;
+      if (this.disposed || this.api !== api) return false;
       const safe = metadataImagesError(error);
       if (this.rejectBeforeOwner(kind, serial, safe)) {
         // Refresh existing status once before accepting another explicit action.
         // This negative admission fact is not a global idle or cleanup receipt.
-        await this.checkStatus(); return;
+        await this.checkStatus(); return false;
       }
       const stream = kind === 'choose' || kind === 'cancel' ? 'selection' : 'edit';
       this.fail(stream, safe.code === 'metadata_images_status_invalid');
@@ -728,15 +805,23 @@ export class MetadataImagesController {
       this.process();
       // Observe the same owner once. Never repeat Choose, Open, Prepare, Apply,
       // Cancel or Close to turn a lost reply into a fabricated successful retry.
-      await this.checkStatus();
+      await this.checkStatus(); return false;
+    } finally {
+      this.pendingCalls -= 1;
+      if (this.pendingCalls === 0) { this.publish({...this.state,callerPending:false}); this.process(); }
+      this.retireListeners();
     }
+  }
+  private retireListeners(): void {
+    if (!this.disposed || this.pendingCalls || this.reading || this.catalogRead || this.agent.hasPendingCalls()) return;
+    try { this.unlistenSelection?.(); } catch { /* Not native settlement. */ }
+    try { this.unlistenEdit?.(); } catch { /* Not native settlement. */ }
+    this.unlistenSelection = null; this.unlistenEdit = null;
   }
   dispose(): void {
     if (this.disposed) return;
     // At most the one original STOP. Disposing listeners is not undo/finality.
-    this.requestStop(); this.disposed = true;
-    try { this.unlistenSelection?.(); } catch { /* Not native settlement. */ }
-    try { this.unlistenEdit?.(); } catch { /* Not native settlement. */ }
-    this.unlistenSelection = null; this.unlistenEdit = null; this.listeners.clear();
+    this.requestStop(); this.agent.dispose(); this.disposed = true;
+    this.retireListeners(); this.listeners.clear();
   }
 }

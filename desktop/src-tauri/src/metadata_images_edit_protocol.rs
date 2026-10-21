@@ -200,14 +200,15 @@ impl Details {
                 && file["selected"]["byteLength"] == selected.byte_length && file["selected"]["sha256"] == selected.sha256
                 && file["action"] == if file["before"].is_null() { "create" } else { "preserve" })
     }
-    pub(crate) fn prepared_matches(&self, prepared: &PreparedReply) -> bool {
+    pub(crate) fn prepared_matches(&self, prepared: &PreparedReply) -> bool { self.prepared_view_matches(&prepared.view) }
+    pub(crate) fn prepared_view_matches(&self, view: &Value) -> bool {
         let (Some(checkout), Some(submission)) = (&self.checkout, &self.submission) else { return false; };
-        if !view_valid(&prepared.view, true) || submission.expected_baseline != checkout.baseline { return false; }
-        if self.intent == Intent::Recover { return submission.choices.is_empty() && prepared.view == checkout.view; }
+        if !view_valid(view, true) || submission.expected_baseline != checkout.baseline { return false; }
+        if self.intent == Intent::Recover { return submission.choices.is_empty() && *view == checkout.view; }
         for key in ["kind", "policy", "platform", "locale", "assetType", "metadataRoot", "folder", "existing", "assurance"] {
-            if prepared.view[key] != checkout.view[key] { return false; }
+            if view[key] != checkout.view[key] { return false; }
         }
-        let (Some(old), Some(new)) = (checkout.view["files"].as_array(), prepared.view["files"].as_array()) else { return false; };
+        let (Some(old), Some(new)) = (checkout.view["files"].as_array(), view["files"].as_array()) else { return false; };
         old.len() == new.len() && old.len() == submission.choices.len()
             && old.iter().zip(new).zip(&submission.choices).all(|((old, new), choice)| {
                 if ["itemId", "displayName", "path", "before", "selected", "canReplace", "issues"].iter().any(|key| old[*key] != new[*key])

@@ -100,7 +100,7 @@ impl CredentialReference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
-    ObserveProject, EditConfiguration, EditMetadataText, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
+    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
 
@@ -213,6 +213,10 @@ pub enum RequestBody {
     #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
     #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
     #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
+    #[serde(rename="metadata-images.scope")] MetadataImagesScope(crate::service_metadata_images_protocol::Scope),
+    #[serde(rename="metadata-images.submit")] MetadataImagesSubmit(crate::service_metadata_images_protocol::Submit),
+    #[serde(rename="metadata-images.status")] MetadataImagesStatus(crate::service_metadata_images_protocol::Query),
+    #[serde(rename="metadata-images.cancel")] MetadataImagesCancel(crate::service_metadata_images_protocol::Query),
     #[serde(rename="metadata-text.read")] MetadataTextRead(crate::service_metadata_text_protocol::Read),
     #[serde(rename="metadata-text.prepare")] MetadataTextPrepare(crate::service_metadata_text_protocol::Prepare),
     #[serde(rename="metadata-text.apply")] MetadataTextApply(crate::service_metadata_text_protocol::Apply),
@@ -310,6 +314,8 @@ pub struct ServiceInfo {
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
     GitHubActionRequest(crate::service_github_action_protocol::Status),
+    MetadataImagesAccess(crate::service_metadata_images_protocol::Access),
+    MetadataImagesRequest(crate::service_metadata_images_protocol::Status),
     MetadataTextRequest(crate::service_metadata_text_protocol::Status),
     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
     UploadKeyAccess(crate::service_upload_key_protocol::Access),
@@ -404,6 +410,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
+    if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -482,6 +489,14 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         ResponseBody::GitHubActionRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::MetadataImagesAccess(row)=>{
+            row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+            crate::service_metadata_images_protocol::bounded(response,crate::service_metadata_images_protocol::STATUS_BYTES)?;
+        },
+        ResponseBody::MetadataImagesRequest(row)=>{
+            row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+            crate::service_metadata_images_protocol::bounded(response,crate::service_metadata_images_protocol::STATUS_BYTES)?;
         },
         ResponseBody::MetadataTextRequest(row)=>{
             row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}

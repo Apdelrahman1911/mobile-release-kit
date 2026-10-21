@@ -45,6 +45,10 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
 #[path="../src/bounded_json_seed.rs"]
 mod bounded_json_seed;
+#[path="../src/service_metadata_images_protocol.rs"]
+mod service_metadata_images_protocol;
+#[path="../src/service_metadata_images_requests.rs"]
+mod service_metadata_images_requests;
 #[path="../src/service_metadata_text_protocol.rs"]
 mod service_metadata_text_protocol;
 #[path="../src/service_metadata_text_requests.rs"]

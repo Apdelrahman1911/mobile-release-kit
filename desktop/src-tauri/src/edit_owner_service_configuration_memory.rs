@@ -8,6 +8,8 @@ use crate::{
     saved_text_recovery_protocol as r,
 };
 use std::mem::size_of;
+#[path = "edit_owner_service_metadata_images_memory.rs"]
+mod images;
 
 // SAME Seed's fixed pre-allocation limits. Three TOTAL frames are checked by
 // the original reader before decode (not merely a channel with three slots).

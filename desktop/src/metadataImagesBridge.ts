@@ -1,3 +1,4 @@
+import { createMetadataImagesAgentApi, METADATA_IMAGES_AGENT_EVENT } from './serviceMetadataImagesProtocol.ts';
 // The same Tauri invoke/listen seam as the other edit domains, with a closed
 // image-only DTO. This adapter never accepts browser Files, paths or image bytes.
 import type { BridgeMode } from './types.ts';
@@ -5,8 +6,8 @@ import type { MetadataImagesApi, MetadataImagesCommand, MetadataImagesEditStatus
 import { metadataImagesError, metadataImagesRequestFits, parseMetadataImagesCatalog, parseMetadataImagesEditStatus,
   parseMetadataImagesSelectionStatus, METADATA_IMAGES_EDIT_EVENT, METADATA_IMAGES_SELECTION_EVENT } from './metadataImagesProtocol.ts';
 
-export type MetadataImagesInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type MetadataImagesListen = (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT,
+export type MetadataImagesInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+export type MetadataImagesListen = (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT,
   onStatus: (status: unknown) => void) => Promise<() => void>;
 
 export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImagesInvoke, listen?: MetadataImagesListen): MetadataImagesApi {
@@ -24,7 +25,7 @@ export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImages
     call(command, input, parseMetadataImagesSelectionStatus);
   const edit = (command: MetadataImagesCommand, input: unknown): Promise<MetadataImagesEditStatus> =>
     call(command, input, parseMetadataImagesEditStatus);
-  const subscribe = async (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT,
+  const subscribe = async (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT,
     receive: (value: unknown) => void): Promise<() => void> => {
     try {
       if (mode !== 'native' || !listen) throw { code: 'metadata_images_unavailable' };
@@ -34,6 +35,7 @@ export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImages
   };
   return {
     mode,
+    agent: createMetadataImagesAgentApi(mode,invoke,listen),
     metadataImagesCatalog: () => call('metadata_images_catalog', {}, parseMetadataImagesCatalog),
     chooseMetadataImages: (input) => selection('metadata_images_choose', input),
     metadataImagesSelectionStatus: () => selection('metadata_images_selection_status', {}),

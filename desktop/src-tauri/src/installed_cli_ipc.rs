@@ -300,6 +300,8 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
     let bytes = p::encode_response(&response)?;
     match &response.response {
         p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+        p::ResponseBody::MetadataImagesAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
         p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
