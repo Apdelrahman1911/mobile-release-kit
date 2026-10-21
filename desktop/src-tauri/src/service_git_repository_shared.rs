@@ -106,7 +106,13 @@ impl From<Review> for Reviewed {
 }
 impl From<crate::service_git_remote_protocol::Review> for Reviewed { fn from(v: crate::service_git_remote_protocol::Review) -> Self { Self::Remote(v) } }
 impl Reviewed {
-    pub(crate) fn can_apply(&self) -> bool { match self { Self::Remote(r) => r.can_apply(), _ => true } }
+    pub(crate) fn can_apply(&self) -> bool {
+        match self {
+            Self::Repository(r) => !matches!(r.preview, Preview::SetUpstream { unchanged: true, .. }),
+            Self::Remote(r) => r.can_apply(),
+            _ => true,
+        }
+    }
     pub(crate) fn id(&self) -> &str {
         match self {
             Self::Files(v) => &v.review_id,

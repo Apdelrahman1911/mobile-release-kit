@@ -178,6 +178,7 @@ impl Request {
             digest,
             native: Some(native.clone()),
             initialization: None,
+            upstream_sources: None,
             switch_sources: None,
             rename_sources: None,
             fast_forward_sources: None,

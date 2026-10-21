@@ -120,7 +120,14 @@ impl Jobs {
                         if originals.candidate.is_some() {return Err(Failure::JoinUnknown)}
                         let ack=Arc::new(originals.journal.as_mut().ok_or(Failure::JoinUnknown)?
                             .candidate(expected,&original,&candidate.intent).map_err(Failure::Store)?);
-                        originals.candidate=Some(ack.clone());Ok(Value::Ack(ack))
+                        originals.candidate=Some(ack.clone());
+                        // Original durable Candidate is retained first. This SAME
+                        // job performs the closed directory creation before ACK;
+                        // no held Store/Doc lock, ninth job or finality wait.
+                        drop(originals);
+                        worker.git_local.as_ref().ok_or(Failure::JoinUnknown)?
+                            .after_candidate(&worker).map_err(Failure::Bridge)?;
+                        Ok(Value::Ack(ack))
                     },
                     Task::Finish {expected,original,joined}=>{
                         let mut originals=held.lock().map_err(|_|Failure::JoinUnknown)?;

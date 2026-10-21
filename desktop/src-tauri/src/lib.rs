@@ -107,6 +107,8 @@ mod git_read_protocol;
 mod version_enrollment_protocol;
 mod version_reserve_protocol;
 mod git_local_protocol;
+mod git_upstream_protocol;
+mod git_upstream_state;
 mod git_branch_protocol;
 mod git_switch_protocol;
 mod git_fast_forward_protocol;

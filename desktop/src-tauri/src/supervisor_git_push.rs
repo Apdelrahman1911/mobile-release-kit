@@ -104,6 +104,7 @@ mod tests {
             request,
             candidate,
             publication: wire::Publication::PushReturned,
+            upstream_returned: None,
             fetch_keep: None,
             fetch_returned: None,
             push_returned: Some(data::returned()),

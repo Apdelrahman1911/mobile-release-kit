@@ -41,6 +41,7 @@ pub(super) struct Invocation {
     candidate:Mutex<Option<Arc<wire::Candidate>>>,ack_returned:AtomicBool,control_closed:Mutex<Option<ControlClosed>>,
     publication:Mutex<Option<GitLocalPublication>>,
     fetch_keep:Mutex<Option<wire::fetch_worker::Keep>>,
+    upstream_ack:Mutex<Option<String>>,
     fetch_go_claimed:AtomicBool,
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     pub(super) observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_fetch::Control>>,
@@ -63,8 +64,21 @@ pub(crate) struct GitLocalPublication {
     request:Arc<wire::Request>,candidate:Arc<wire::Candidate>,publication:wire::Publication,
     fetch_keep:Option<wire::fetch_worker::Keep>,fetch_returned:Option<wire::fetch_worker::Returned>,
     push_returned:Option<wire::push_worker::Returned>,
+    upstream_returned:Option<crate::git_upstream_protocol::FinalData>,
 }
 impl GitLocalPublication {
+    pub(crate) fn upstream_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_upstream_protocol::Sources)
+        ->Result<(&crate::git_upstream_protocol::Intent,&crate::git_upstream_protocol::FinalData),crate::asset_commands::Reason> {
+        let bad=crate::asset_commands::Reason::SourceChanged;
+        let i=self.candidate.intent.upstream_details().ok_or(bad)?;
+        let d=self.upstream_returned.as_ref().ok_or(bad)?;
+        if self.request.action.kind()!=wire::Kind::SetUpstream || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+            ||self.request.upstream_sources.as_ref()!=Some(sources)||!self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            ||!self.candidate.intent.matches(review)||!d.valid(i)||self.publication==wire::Publication::NotReported
+            ||crate::git_upstream_protocol::effect(self.publication)!=Some(d.effect_phase.as_str()) {return Err(bad)}
+        Ok((i,d))
+    }
+
     pub(crate) fn push_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<(&crate::git_push_protocol::Intent,&wire::push_worker::Returned),crate::asset_commands::Reason> {
         let bad=crate::asset_commands::Reason::SourceChanged;
@@ -101,7 +115,7 @@ impl GitLocalPublication {
 
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch|wire::Kind::SetUpstream) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
@@ -148,6 +162,7 @@ pub(crate) struct GitLocalNativeJoined {
     fast_forward_final:Option<crate::git_fast_forward_protocol::FinalData>,
     fetch_final:Option<crate::git_fetch_state::FinalData>,
     push_final:Option<crate::git_push_state::FinalData>,
+    upstream_final:Option<crate::git_upstream_protocol::FinalData>,
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl GitLocalNativeJoined {
@@ -155,6 +170,7 @@ impl GitLocalNativeJoined {
         Arc::ptr_eq(&self.native_use,native_use)&&Arc::ptr_eq(&self.original,original)
     }
     pub(crate) fn completion(&self)->Completion {self.completion}
+    pub(crate) fn upstream_final(&self)->Option<&crate::git_upstream_protocol::FinalData>{self.upstream_final.as_ref()}
     pub(crate) fn push_final(&self)->Option<&crate::git_push_state::FinalData> {self.push_final.as_ref()}
     pub(crate) fn fetch_final(&self)->Option<&crate::git_fetch_state::FinalData> {self.fetch_final.as_ref()}
     pub(crate) fn rename_final(&self)->Option<&crate::git_rename_protocol::FinalData> {self.rename_final.as_ref()}
@@ -194,7 +210,7 @@ impl GitLocalAdmission {
             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
-                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
+                fetch_keep:Mutex::new(None),upstream_ack:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:std::sync::OnceLock::new(),fetch_joined:Arc::new(std::sync::OnceLock::new()),
                 push_go_claimed:AtomicBool::new(false),
                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:std::sync::OnceLock::new(),push_joined:Arc::new(std::sync::OnceLock::new()),
@@ -342,12 +358,15 @@ impl Invocation {
             (wire::Phase::Prepare,None,None)|(wire::Phase::Apply,Some(_),Some(_))) {
             return Err(BridgeError::cleanup_unknown())
         }
-        let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
-            let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
-                &owner.id,self.action.kind(),review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+        let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization,upstream_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            let mut cut=||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint();
+            let result=if let wire::Action::Upstream(action)=&self.action {
+                sources.inspect_upstream(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),&owner.id,action,review.as_ref(),&mut cut)
+            }else{sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
+                &owner.id,self.action.kind(),review.as_ref(),&mut cut)};
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
             (if self.action.kind()==wire::Kind::Initialize {None}else{Some(sources.native_snapshot().map_err(source_error)?.clone())},
-                sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned())};
+                sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned(),sources.upstream_snapshot().map_err(source_error)?) };
         let binding=match (self.phase,review,preparing) {
             (wire::Phase::Prepare,None,None)=>None,
             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
@@ -359,6 +378,8 @@ impl Invocation {
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
         let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
             wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
+        } else if self.action.kind()==wire::Kind::SetUpstream {
+            wire::Request::from_upstream_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding,upstream_sources.ok_or_else(BridgeError::protocol)?)?
         } else if self.action.kind().is_push() {
             wire::Request::from_push_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,
                 clock_data,binding,self.gate.push_target(&owner.id)?)?
@@ -388,6 +409,14 @@ impl Invocation {
         if self.phase!=wire::Phase::Apply {return Err(BridgeError::protocol())}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {
+            if self.action.kind()==wire::Kind::SetUpstream {
+                self.gate.check_current(&owner.id)?;
+                let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
+                let stop=owner.stop.subscribe();
+                let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let result=sources.before_upstream_candidate(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+                observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
+            }
             if self.action.kind()==wire::Kind::Initialize {
                 self.gate.check_current(&owner.id)?;
                 let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
@@ -411,6 +440,23 @@ impl Invocation {
         }
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {let _=owner;Err(BridgeError::unavailable("The original Git writer is unavailable."))}
+    }
+    pub(super) fn after_candidate(&self,owner:&Owner)->Result<(),BridgeError> {
+        if self.action.kind()!=wire::Kind::SetUpstream{return Ok(())}
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {
+            self.gate.check_current(&owner.id)?;
+            let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::protocol)?;
+            let stop=owner.stop.subscribe();
+            let digest={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let result=sources.create_upstream_directories(&candidate.intent,&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+                observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?};
+            self.gate.check_current(&owner.id)?;
+            let mut slot=self.upstream_ack.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            if slot.is_some(){return Err(BridgeError::cleanup_unknown())}*slot=Some(digest);Ok(())
+        }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {let _=owner;Err(BridgeError::unavailable("The original local Git writer is unavailable."))}
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     fn post_before_effect(&self,owner:&Owner)->Result<(),BridgeError> {
@@ -455,9 +501,10 @@ impl Invocation {
             }
             let mut slot=self.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             if slot.is_some() {return Err(BridgeError::cleanup_unknown())}
-            *slot=Some(GitLocalPublication {request:request.clone(),candidate,publication:terminal.publication,
+            *slot=Some(GitLocalPublication {request:request.clone(),candidate:candidate.clone(),publication:terminal.publication,
                 fetch_keep:self.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone(),
-                fetch_returned:terminal.fetch_publication.clone(),push_returned:terminal.push_transmission.clone()});
+                fetch_returned:terminal.fetch_publication.clone(),push_returned:terminal.push_transmission.clone(),
+                upstream_returned:if request.action.kind()==wire::Kind::SetUpstream {Some(crate::git_upstream_protocol::final_data(&terminal,candidate.intent.upstream_details().ok_or_else(BridgeError::protocol)?)?)}else{None}});
         }
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         if let Some(first)=terminal.first_failure_ns {
@@ -529,7 +576,10 @@ pub(super) async fn candidate_returned(r:&mut Resources,inner:&Inner,owner:&Arc<
         invocation.gate.check_current(&owner.id)?;
         if owner.failed()||Instant::now()>=owner.endpoint() {return Err(BridgeError::timeout())}
         let request=invocation.request()?;
-        if invocation.action.kind().is_push() {
+        if invocation.action.kind()==wire::Kind::SetUpstream {
+            let digest=invocation.upstream_ack.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            request.upstream_ack(&candidate,ack.revision.0,digest.as_deref().ok_or_else(BridgeError::cleanup_unknown)?)
+        } else if invocation.action.kind().is_push() {
             request.push_ack(&candidate,ack.revision.0)
         } else if invocation.action.kind()==wire::Kind::Fetch {
             let keep=invocation.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -616,7 +666,10 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
                 None=>None,
             }
         } else {None};
-        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final,fetch_final,push_final}))
+        let upstream_final=if invocation.action.kind()==wire::Kind::SetUpstream {
+            invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?.as_ref().and_then(|p|p.upstream_returned.clone())
+        }else{None};
+        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final,fetch_final,push_final,upstream_final}))
     })();
     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
@@ -684,9 +737,9 @@ pub(super) fn settle(owner:&Owner,slots:&Arc<Mutex<crate::installed_runtime::Git
     // are known too. All old actions keep their original order. This body is
     // already after process/pipe joins; later management/journal/NativeUse
     // joins are still mandatory, never inferred from a positive publication.
-    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Fetch) {
+    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Fetch|wire::Kind::SetUpstream) {
         let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
-        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::Fetch {sources.retain_fetch_unknown();} else if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
+        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::SetUpstream {sources.retain_upstream_unknown();} else if local.action.kind()==wire::Kind::Fetch {sources.retain_fetch_unknown();} else if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
         (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
     } else {
         let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();

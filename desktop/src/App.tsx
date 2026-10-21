@@ -113,6 +113,7 @@ import type { GitLocalAdmissionScope } from './gitLocalController.ts';
 import { gitConnectionBlocksSavedWork } from './gitPushSelection.ts';
 import type { GitConnectedAdmission } from './gitPushSelection.ts';
 import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
+import { GitUpstreamSetup } from './components/GitUpstreamSetup.tsx';
 import { GitBranches } from './components/GitBranches.tsx';
 import { GitInitialization } from './components/GitInitialization.tsx';
 import { GitFetch } from './components/GitFetch.tsx';
@@ -2240,6 +2241,7 @@ export function App() {
               <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
                 originalProjectName={gitLocalProjectName} />
               <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+              <GitUpstreamSetup controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
               <GitPush controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />

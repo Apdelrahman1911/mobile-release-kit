@@ -3,12 +3,17 @@
 use super::*;
 use crate::{
     git_branch_protocol as branch, git_fast_forward_protocol as ff, git_init_protocol as init,
-    git_rename_protocol as rename, git_switch_protocol as switch,
+    git_rename_protocol as rename, git_switch_protocol as switch, git_upstream_protocol as upstream,
 };
 
 pub(super) fn action(selected: &repository::Action) -> Result<local::Action, BridgeError> {
     selected.validate().map_err(public)?;
     let action = match selected {
+        repository::Action::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>
+            local::Action::Upstream(upstream::Action {kind:upstream::Kind::SetUpstream,
+                expected_revision:expected_revision.clone(),expected_reference_revision:expected_reference_revision.clone(),
+                branch:branch.clone(),head:head.clone(),remote:remote.clone(),repository:repository.clone(),
+                identity:identity.as_ref().map(|i|upstream::Identity{name:i.name.clone(),email:i.email.clone()})}),
         repository::Action::Initialize {} => local::Action::Initialize(init::Action {
             kind: init::Kind::Initialize,
         }),
@@ -101,6 +106,9 @@ pub(in crate::asset_session) fn review(
     };
     let actual = action(&selected.action).ok()?;
     let (reference_revision, preview) = match (original, &actual) {
+        (local::Review::Upstream(v),local::Action::Upstream(a)) if v.matches(a)=>(Some(v.expected_reference_revision.clone()),
+            repository::Preview::SetUpstream {head:v.head.clone(),branch:v.branch.clone(),remote:v.remote.clone(),repository:v.repository.clone(),
+                config_changed:!v.additions.is_empty(),missing_directory_count:u32::try_from(v.missing_directories.len()).ok()?,unchanged:v.unchanged}),
         (local::Review::Initialize(v), local::Action::Initialize(a)) if v.matches(a) => (
             None,
             repository::Preview::Initialize {

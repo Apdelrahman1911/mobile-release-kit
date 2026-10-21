@@ -18,10 +18,10 @@ export function ServiceGitRepositoryAccess({ controller, repository, reader, loc
   }, [controller, repository, reader, local]);
   const current = controller.getContext(), action = current.project?.action, access = state.access;
   const pending = !!state.pending || state.revokePending;
-  return <ProgressiveDisclosure title="Let an AI or CLI agent make one local branch change"
+  return <ProgressiveDisclosure title="Let an AI or CLI agent make one local repository change"
     needsAttention={pending || state.uncertain || !!state.message || access?.enabled === true}>
     <section className="session-review" aria-label="Agent local repository permission">
-      <p>Choose an action for <strong>{projectName}</strong>. Use the branch names already entered above; this does not grant general Git access.</p>
+      <p>Choose an action for <strong>{projectName}</strong>. Use the branch names or upstream settings already entered above; this does not grant general Git access.</p>
       <label htmlFor={selectId}>One permitted action</label>
       <select id={selectId} value={controller.getKind()} disabled={pending} onChange={e => controller.chooseKind(e.target.value)}>
         {Object.entries(GIT_REPOSITORY_PERMISSION_LABELS).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}

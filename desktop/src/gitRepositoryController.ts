@@ -1,3 +1,5 @@
+import { emptyGitUpstreamDraft, gitUpstreamDraftFits } from './gitUpstreamProtocol.ts';
+import type { GitUpstreamDraft } from './gitUpstreamProtocol.ts';
 // One controller per original registered project/session. Root retains it across
 // panel unmounts; switching projects never retargets a pending port or operation.
 // This is UI coordination, not a native project lease or an authorization issuer.
@@ -48,7 +50,7 @@ export interface GitAttempt {
 export interface GitRepositoryView {
   readonly projectId: string; readonly active: boolean; readonly observation: GitObservation | null;
   readonly stale: boolean; readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly branchDraft: { readonly name: string };
-  readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string }; readonly fetchDraft: GitFetchDraft;
+  readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string }; readonly fetchDraft: GitFetchDraft; readonly upstreamDraft: GitUpstreamDraft;
   readonly diff: GitDiff | null; readonly review: GitReview | null; readonly attempt: GitAttempt | null;
   readonly busy: 'observe' | 'diff' | 'review' | 'discard' | 'apply' | null; readonly checkingStatus: boolean;
   readonly issue: GitIssue | null; readonly blocked: 'unknown' | 'response-invalid' | 'recovery-required' | null;
@@ -79,7 +81,7 @@ export class GitRepositoryController {
   constructor(projectId: string, port: GitRepositoryPort | null) {
     this.port = port?.projectId === projectId ? port : null;
     this.state = freeze({ projectId, active: true, observation: null, stale: true, selected: freeze([]),
-      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), switchDraft: freeze({ name: '' }), renameDraft: freeze({ name: '' }), fetchDraft: emptyGitFetchDraft(), diff: null, review: null, attempt: null,
+      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), switchDraft: freeze({ name: '' }), renameDraft: freeze({ name: '' }), fetchDraft: emptyGitFetchDraft(), upstreamDraft: emptyGitUpstreamDraft(), diff: null, review: null, attempt: null,
       busy: null, checkingStatus: false, issue: port && !this.port ? 'authorization' : null, blocked: null });
   }
   getSnapshot = (): GitRepositoryView => this.state;
@@ -107,6 +109,11 @@ export class GitRepositoryController {
     this.patch({ draft: freeze({ ...this.state.draft, [field]: value }),
       review: this.state.review?.plan.action === 'commit' ? this.staleReview() : this.state.review });
     return true;
+  }
+  editUpstreamDraft(field: keyof GitUpstreamDraft, value: string): boolean {
+    if (!gitUpstreamDraftFits(field, value)) return this.report('limit');
+    if (this.state.upstreamDraft[field] !== value) this.patch({ upstreamDraft: freeze({ ...this.state.upstreamDraft, [field]: value }) });
+    return true; // Draft only; replacement identity prevents changed-and-restored approval.
   }
   editFetchDraft(field: keyof GitFetchDraft, value: string): boolean {
     if (!gitFetchDraftFits(field, value)) return this.report('limit');

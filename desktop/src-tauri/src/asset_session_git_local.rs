@@ -290,7 +290,7 @@ fn projection(entry:&Entry)->wire::Projection {
         },
         GitLocalReceipt::Settled {outcome,was_unknown:false}=>{
             value.stage=read::Phase::Settled;match outcome {
-                Ok(terminal)=>{value.outcome=Some(terminal.status);value.reason=terminal.reason;value.result=terminal.result;},
+                Ok(terminal)=>{value.outcome=Some(terminal.status);value.reason=terminal.reason;value.result=crate::git_upstream_protocol::public_result(terminal.action,terminal.phase,terminal.result);},
                 Err(error)=>{let (reason,outcome)=reason(&error);value.reason=Some(reason.into());value.outcome=Some(outcome);},
             }
         }
@@ -483,6 +483,7 @@ impl DocumentBinding {
             // publisher reservation: it properly refuses pending publishers.
             let outcome=(|| {
                 let kind=state.git_local_review.as_ref().ok_or_else(changed)?.action.kind();
+                if state.git_local_review.as_ref().and_then(|r|r.public.review.upstream_details()).is_some_and(|r|r.unchanged) {return Err(BridgeError::invalid())}
                 self.git_local_new_gate_for(&state,kind)?;
                 if state.revision!=args.expected_document_revision {return Err(changed())}
                 let review=state.git_local_review.as_ref().ok_or_else(changed)?;

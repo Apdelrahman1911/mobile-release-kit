@@ -1,3 +1,4 @@
+import { GitUpstreamRecovery } from './GitUpstreamSetup.tsx';
 import { GitPushRecovery } from './GitPush.tsx';
 import { GitFastForwardRecovery } from './GitFastForward.tsx';
 import { useId, useSyncExternalStore } from 'react';
@@ -32,13 +33,14 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
   const result = op?.phase === 'apply' && op.result ? op.result as GitLocalMutationResult : null;
   const title = state.uncertain ? 'Git action needs attention' : state.recovery ? 'Git recovery is needed' : state.pending ? 'Waiting for the original Git request' :
     state.review ? 'Review before changing Git' : active ? 'Git action is still running' : result?.state === 'succeeded' ?
-      result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push-new-branch' ? 'New GitHub branch published' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
+      result.action === 'set-upstream' ? 'Local upstream configured' : result.action === 'fetch' ? 'Reviewed branch fetched' : result.action === 'push-new-branch' ? 'New GitHub branch published' : result.action === 'push' ? 'Reviewed commits pushed to GitHub' : result.action === 'initialize' ? 'Local repository created' : result.action === 'fast-forward' ? 'Local branch fast-forwarded to the cached tip' : result.action === 'branch-rename' ? 'Local branch renamed' : result.action === 'branch-switch' ? 'Local branch switched' : result.action === 'branch-create' ? 'Local branch created' : result.action === 'commit' ? 'Local commit created' : result.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' :
         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
     <div><h3>{title}</h3>
       {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
+      {result?.action === 'set-upstream' && <GitUpstreamRecovery result={result} />}
       {(result?.action === 'push' || result?.action === 'push-new-branch') && <GitPushRecovery result={result} />}
       {result?.action === 'fast-forward' && <GitFastForwardRecovery result={result} />}
       {result?.action === 'fetch' && <GitFetchRecovery result={result} />}

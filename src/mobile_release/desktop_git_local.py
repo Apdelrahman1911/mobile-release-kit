@@ -18,6 +18,7 @@ import time
 from . import _desktop_git_local_protocol as wire
 from . import _desktop_git_branches as branch
 from . import git_fast_forward_worker as ff
+from . import git_repository_upstream_wire as upstream
 from . import _desktop_git_switch as switch
 from . import _desktop_git_rename as rename
 from . import _desktop_git_init as initialize
@@ -70,6 +71,10 @@ class GitLocalOperation:
         if type(request.action) is initialize.Action:
             from ._desktop_git_init_sources import State
             self.init_state = State(self)
+        self.upstream_state = None
+        if type(request.action) is upstream.Action:
+            from .git_repository_upstream_sources import State
+            self.upstream_state = State(self)
         source.bind_operation(self)
 
     def _publication(self):
@@ -115,6 +120,8 @@ class GitLocalOperation:
         GitReadOperation._check(self, successor, True)
 
     def _check(self, original: _Original, hash_file: bool) -> None:
+        if self.upstream_state is not None:
+            return self.upstream_state.check(original, hash_file)
         if self.init_state is not None:
             return self.init_state.check(original, hash_file)
         if self.rename_state is not None:
@@ -154,6 +161,8 @@ class GitLocalOperation:
         self.checkpoint()
 
     def source_post(self, *, hash_files: bool) -> None:
+        if self.upstream_state is not None:
+            return self.upstream_state.post(hash_files=hash_files)
         if self.init_state is not None:
             return self.init_state.post(hash_files=hash_files)
         if self.rename_state is not None:
@@ -201,7 +210,8 @@ class GitLocalOperation:
         else:
             sessions = self.repository._active_sessions
             wire.require(len(sessions) == 1
-                         and (ff.local_session(self, sessions[0]) if type(self.request.action) is ff.Action else
+                         and (upstream.local_session(self, sessions[0]) if type(self.request.action) is upstream.Action else
+                              ff.local_session(self, sessions[0]) if type(self.request.action) is ff.Action else
                               rename.local_session(self, sessions[0]) if type(self.request.action) is rename.Action else
                               switch.local_session(self, sessions[0]) if type(self.request.action) is switch.Action else
                               branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
@@ -215,7 +225,7 @@ class GitLocalOperation:
             selected_index = environ.get("GIT_INDEX_FILE")
             index = None if selected_index in (None, str(self.request.root / ".git/index")) else Path(selected_index)
             plan = self.repository._active_plan
-            identity = (ff.command_identity(self, session, args) if type(self.request.action) is ff.Action else
+            identity = (None if type(self.request.action) is upstream.Action else ff.command_identity(self, session, args) if type(self.request.action) is ff.Action else
                         rename.command_identity(self, session, args) if type(self.request.action) is rename.Action else
                         switch.command_identity(self, session, args) if type(self.request.action) is switch.Action else
                         plan._identity if args and args[0] == "commit-tree" and plan is not None else None)
@@ -231,6 +241,8 @@ class GitLocalOperation:
             verdict = self.guard.lifetime_ledger.verdict()
             wire.require(pending.claimed and verdict.cleanup_complete and verdict.contained
                          and verdict.commands == self.calls)
+            if type(self.request.action) is upstream.Action:
+                upstream.returned_command(self, session, args, result)
             if type(self.request.action) is ff.Action:
                 ff.returned_command(self, session, args, result)
             if type(self.request.action) is rename.Action:
@@ -280,6 +292,8 @@ class GitLocalOperation:
                 initialize.prepare_or_apply(self)
             elif type(action) is ff.Action:
                 ff.prepare_or_apply(self)
+            elif type(action) is upstream.Action:
+                upstream.prepare_or_apply(self)
             elif type(action) is rename.Action:
                 rename.prepare_or_apply(self)
             elif type(action) is switch.Action:
@@ -319,6 +333,8 @@ class GitLocalOperation:
             raise
 
     def publication(self) -> str:
+        if self.upstream_state is not None:
+            return self.upstream_state.publication()
         if self.init_state is not None:
             return self.init_state.publication()
         if self.fast_forward_state is not None:
@@ -417,6 +433,8 @@ class _Engine:
                 values = {"review": operation.review, "diff": operation.diff}
             else:
                 values = {"result": operation.result, "publication": operation.publication()}
+                if operation.upstream_state is not None:
+                    values["progress"] = operation.upstream_state.progress
                 if operation.fast_forward_state is not None:
                     values["progress"] = operation.fast_forward_state.progress
                 if operation.switch_state is not None:

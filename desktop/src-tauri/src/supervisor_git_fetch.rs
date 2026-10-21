@@ -102,6 +102,7 @@ mod tests {
             request,
             candidate,
             publication: wire::Publication::FetchReturned,
+            upstream_returned: None,
             fetch_keep: Some(data::keep()),
             fetch_returned: Some(serde_json::from_value(data::returned()).unwrap()),
             push_returned: None,

@@ -1,5 +1,6 @@
 // Current-view selection only. The native shared grant and its subsequent
 // original Prepare still check the repository; this is not a Git inspection.
+import { gitUpstreamAction } from './gitUpstreamProtocol.ts';
 import type { GitRepositoryController } from './gitRepositoryController.ts';
 import type { GitReadController } from './gitReadController.ts';
 import type { GitLocalController } from './gitLocalController.ts';
@@ -15,11 +16,12 @@ export interface GitRepositoryPermissionSource {
   readonly blocked: string | null;
 }
 export const GIT_REPOSITORY_PERMISSION_LABELS: Readonly<Record<GitRepositoryPermissionKind, string>> = Object.freeze({
-  initialize: 'Start local Git tracking', 'branch-create': 'Create a local branch', 'branch-switch': 'Switch local branch',
+  'set-upstream': 'Set this branch’s local upstream', initialize: 'Start local Git tracking', 'branch-create': 'Create a local branch', 'branch-switch': 'Switch local branch',
   'branch-rename': 'Rename the current local branch', 'fast-forward': 'Update to the cached upstream commit',
 });
 export function gitRepositoryPermissionEffect(a: GitRepositoryPermissionAction): string {
   switch (a.kind) {
+    case 'set-upstream': return `Configure local ${a.remote} for https://github.com/${a.repository}.git and this branch’s upstream. Add only absent approved settings and missing local ref/log parent directories; create no tracking ref or remote branch.${a.identity ? ` If both local identity fields are absent, add ${a.identity.name} <${a.identity.email}>; never replace existing identity.` : ' Preserve existing valid repository-local identity.'} No network request.`;
     case 'initialize': return 'Create an empty local repository on main, only if the native review confirms this is safe. Project files stay in place; no files are staged or committed.';
     case 'branch-create': return `Create “${a.name}” at the reviewed current commit. Do not switch branches or change working files.`;
     case 'branch-switch': return `Switch this clean checkout to local branch “${a.name}”. The existing bounded review must show the tracked-file content changes first.`;
@@ -85,6 +87,11 @@ export function gitRepositoryPermissionContext(kind: GitRepositoryPermissionKind
       return finish('This update needs a clean branch that is strictly behind its already-cached upstream. It does not fetch or resolve diverged or incomplete history.');
     }
     return finish(null, { kind, ...base, targetRef: t.localRef, targetOid: t.head }, read.status.documentRevision, operation.operationId);
+  }
+  if (kind === 'set-upstream') {
+    const selected = gitUpstreamAction(r.upstreamDraft, o, references);
+    if (!selected || o.detached) return finish('Enter the local upstream fields above for an attached, committed branch. This does not contact GitHub.');
+    return finish(null, selected, read.status.documentRevision, operation.operationId);
   }
   const name = kind === 'branch-create' ? r.branchDraft.name : kind === 'branch-switch' ? r.switchDraft.name : r.renameDraft.name;
   if (!gitBranchName(name)) return finish(kind === 'branch-switch' ? 'Choose the target in “Switch to an existing local branch” above.' :

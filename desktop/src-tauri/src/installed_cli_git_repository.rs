@@ -128,6 +128,9 @@ pub(super) fn output(
                     review.review_id, review.source_revision, review.review_digest
                 ));
                 text.push_str(&preview_text(&review.preview));
+                if matches!(review.preview,repository::Preview::SetUpstream {unchanged:true,..}) {
+                    text.push_str("Already configured; cancel/close this review. No Apply is permitted.\n");
+                }else {
                 text.push_str(&format!(
                     "Start once: mrk git-repository-start {} {} {} {} {} --json\n",
                     q.project_id.as_str(),
@@ -136,6 +139,7 @@ pub(super) fn output(
                     op,
                     review.review_id
                 ));
+                }
             }
             text.push_str(if status.history_available {
                 "History copied this native status; it is not a cleanup receipt.\n"
@@ -158,6 +162,7 @@ pub(super) fn output(
 }
 fn selection_text(action: &repository::Action) -> String {
     match action {
+        repository::Action::SetUpstream {branch,remote,repository,..}=>format!("Set local {branch} upstream to {remote} / {repository}; no network, tracking tip or remote success.\n"),
         repository::Action::Initialize {}=>"Initialize an empty local repository on main; keep project files, no commit. Absence is checked only by native Prepare.\n".into(),
         repository::Action::BranchCreate {name,..}=>format!("Create local branch {name}; do not switch.\n"),
         repository::Action::BranchSwitch {name,..}=>format!("Switch to local branch {name}; native review checks supported tracked-file effects.\n"),
@@ -167,6 +172,7 @@ fn selection_text(action: &repository::Action) -> String {
 }
 fn preview_text(preview: &repository::Preview) -> String {
     match preview {
+        repository::Preview::SetUpstream {branch,remote,repository,config_changed,missing_directory_count,unchanged,..}=>format!("{branch} -> {remote} / {repository}; config additions: {config_changed}; {missing_directory_count} missing local parent directories; unchanged: {unchanged}.\n"),
         repository::Preview::Initialize {initial_branch,object_format}=>format!("Empty {object_format} repository on {initial_branch}; no synthetic index or existing-branch observation.\n"),
         repository::Preview::BranchCreate {head,target_ref,..}=>format!("Create {target_ref} at {head}; keep current checkout.\n"),
         repository::Preview::BranchSwitch {branch,target_ref,target_oid,changed_path_count,..}=>format!("{branch} -> {target_ref} at {target_oid}; {changed_path_count} tracked content changes.\n"),

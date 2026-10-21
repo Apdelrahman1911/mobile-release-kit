@@ -1,4 +1,6 @@
 import { gitPushNewBranchActionFor } from './gitPushNewBranchProtocol.ts';
+import { gitUpstreamAction, isGitUpstreamReview } from './gitUpstreamProtocol.ts';
+import type { GitUpstreamDraft } from './gitUpstreamProtocol.ts';
 import type { GitPushReadbackSource } from './gitPushRecovery.ts';
 import type { ActivitySelection } from './githubActivityProtocol.ts';
 import { gitPushAccount, sameGitPushAccount, gitPushLocalSource, gitPushActionFor, pushReviewMatchesAccount } from './gitPushSelection.ts';
@@ -32,7 +34,7 @@ const actionScope = (action: GitLocalAction | undefined): GitLocalAdmissionScope
 export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
   readonly reader?: GitReadController | null; readonly pushConnection?: GitHubConnectionViewState | null; readonly fetchConnection?: GitHubConnectionViewState | null }
-interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
+interface Capture { readonly upstream?: {readonly draft: GitUpstreamDraft; readonly source: GitReadObservation | GitBranches}; readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation | null; readonly initialization?: GitRepositoryView;
   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
   readonly fetch?: { readonly local: GitReadObservation; readonly account: GitFetchAccount; readonly draft: GitFetchDraft };
   readonly push?: { readonly local: GitReadObservation; readonly account: GitPushAccount };
@@ -188,7 +190,7 @@ export class GitLocalController {
     }
     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
-      (c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
+      (c.action.kind === 'set-upstream' ? !!c.upstream && r.upstreamDraft === c.upstream.draft && (this.cachedTracking(now) ?? this.branchList(now)) === c.upstream.source : c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
         c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
         c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
   }
@@ -341,6 +343,31 @@ export class GitLocalController {
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
   }
+  prepareUpstreamReason(): GitLocalIssue | null {
+    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+    const reason = this.currentReason(); if (reason) return reason;
+    const b = this.current(), r = b.repository!.getSnapshot(), source = this.cachedTracking(b) ?? this.branchList(b);
+    if (!source || !r.observation?.branch || !r.observation.head) return 'upstream-read-required';
+    return gitUpstreamAction(r.upstreamDraft, r.observation, source.referenceRevision) ? null : 'upstream-draft-required';
+  }
+  async prepareUpstream(): Promise<boolean> {
+    const reason = this.prepareUpstreamReason(); if (reason) return this.report(reason);
+    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot();
+    const source = this.cachedTracking(binding) ?? this.branchList(binding);
+    if (!source || !r.observation) return this.report('upstream-read-required');
+    const action = gitUpstreamAction(r.upstreamDraft, r.observation, source.referenceRevision);
+    if (!action) return this.report('upstream-draft-required');
+    const request: GitLocalStartRequest = Object.freeze({phase:'prepare', projectId:binding.projectId!,
+      expectedDocumentRevision:this.state.status!.documentRevision, action, reviewId:null});
+    const raw = gitLocalRequest('prepare', {projectId:request.projectId, expectedDocumentRevision:request.expectedDocumentRevision, action});
+    if (!raw) return this.report('invalid-input');
+    const capture: Capture = Object.freeze({binding, repository, observation:r.observation, selected:r.selected, draft:r.draft,
+      branchDraft:r.branchDraft, switchDraft:r.switchDraft, renameDraft:r.renameDraft, action, tracking:null, branches:null, paths:Object.freeze([]),
+      upstream:Object.freeze({draft:r.upstreamDraft, source})});
+    const attempt = this.newAttempt(binding, request, action, capture, null);
+    this.attempt = attempt; this.approved = null; this.publish({original:null, submitted:null, issue:null});
+    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+  }
   prepareBranchReason(): GitLocalIssue | null {
     if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
     const reason = this.currentReason(); if (reason) return reason;
@@ -454,6 +481,8 @@ export class GitLocalController {
     const r = prepared.review;
     if (capture.action.kind === 'initialize') return r.action === 'initialize' && capture.observation === null && !!capture.initialization;
     if (r.action === 'initialize' || !capture.observation || r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
+    if (capture.action.kind === 'set-upstream') return r.action === 'set-upstream' && !!capture.upstream &&
+      r.expectedReferenceRevision === capture.upstream.source.referenceRevision && isGitUpstreamReview(r, capture.action);
     if (capture.action.kind === 'push' || capture.action.kind === 'push-new-branch') return r.action === capture.action.kind && !!capture.push &&
       r.expectedReferenceRevision === capture.push.local.referenceRevision && pushReviewMatchesAccount(r, capture.push.account);
     if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
@@ -467,7 +496,7 @@ export class GitLocalController {
       r.expectedReferenceRevision === capture.branches.referenceRevision &&
       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
+      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'set-upstream' && r.action !== 'fetch' && r.action !== 'push' && r.action !== 'push-new-branch' && r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
   }
   reviewReason(): GitLocalIssue | null {
     const h = this.held;
@@ -479,6 +508,7 @@ export class GitLocalController {
     if (h.stale || !h.capture || !this.captureCurrent(h.capture) || !this.observed || !same(h.binding, this.observed) ||
         this.state.status?.review?.reviewId !== h.prepared.reviewId || !sameGitLocalData(this.state.status.review, h.prepared) ||
         h.prepared.context.revision !== `document-${this.state.status.documentRevision}`) return 'review-changed';
+    if (h.prepared.review.action === 'set-upstream' && h.prepared.review.unchanged) return 'upstream-unchanged';
     if (h.prepared.review.action === 'fetch' && h.prepared.review.expectedTarget === h.prepared.review.candidateRefOid) return 'fetch-up-to-date';
     return h.prepared.action.kind === 'initialize' ? this.initializationReason() : this.currentReason(actionScope(h.prepared.action));
   }

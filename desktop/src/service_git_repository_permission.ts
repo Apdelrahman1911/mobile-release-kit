@@ -1,5 +1,6 @@
 // Closed permission DATA for the existing GitLocal owner. This does not
 // inspect a repository, mint a review, start Git or establish native finality.
+import { isGitUpstreamAction, sameUpstreamAction, type GitUpstreamAction } from './gitUpstreamProtocol.ts';
 import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { isGitInitAction, type GitInitAction } from './gitInitProtocol.ts';
@@ -9,7 +10,7 @@ import { isGitRenameAction, type GitRenameAction } from './gitRenameProtocol.ts'
 import { isGitFastForwardAction, type GitFastForwardAction } from './gitFastForwardProtocol.ts';
 
 export const GIT_REPOSITORY_CONSENT = 'agent-local-git-repository-once-v1';
-export type GitRepositoryPermissionAction = GitInitAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction;
+export type GitRepositoryPermissionAction = GitUpstreamAction | GitInitAction | GitBranchAction | GitSwitchAction | GitRenameAction | GitFastForwardAction;
 export type GitRepositoryPermissionKind = GitRepositoryPermissionAction['kind'];
 export interface GitRepositoryApproval {
   readonly projectId: string; readonly expectedDocumentRevision: number; readonly readOperationId: string | null;
@@ -29,6 +30,7 @@ const hex = (v: unknown, n: number): v is string => typeof v === 'string' && v.l
 
 // Only call after the bounded descriptor-copy below: no getters are run.
 function action(value: unknown): GitRepositoryPermissionAction | null {
+  if (isGitUpstreamAction(value)) return Object.freeze({ ...value, identity: value.identity && Object.freeze({ ...value.identity }) });
   if (isGitInitAction(value)) return Object.freeze({ kind: 'initialize' });
   if (isGitBranchAction(value) || isGitSwitchAction(value) || isGitRenameAction(value)) return Object.freeze({
     kind: value.kind, expectedRevision: value.expectedRevision, expectedReferenceRevision: value.expectedReferenceRevision, name: value.name,
@@ -68,6 +70,7 @@ export function sameGitRepositoryPermissionAction(a: GitRepositoryPermissionActi
   if (a.kind !== b.kind) return false;
   if (a.kind === 'initialize') return true;
   if (b.kind === 'initialize' || a.expectedRevision !== b.expectedRevision || a.expectedReferenceRevision !== b.expectedReferenceRevision) return false;
+  if (a.kind === 'set-upstream' || b.kind === 'set-upstream') return a.kind === 'set-upstream' && b.kind === 'set-upstream' && sameUpstreamAction(a, b);
   return a.kind === 'fast-forward' ? b.kind === 'fast-forward' && a.targetRef === b.targetRef && a.targetOid === b.targetOid :
     b.kind !== 'fast-forward' && a.name === b.name;
 }
@@ -96,7 +99,7 @@ export interface GitRepositoryPermissionContext extends PermissionContext<GitRep
   readonly witness: readonly unknown[];
   readonly reason: string | null;
 }
-const KINDS: readonly GitRepositoryPermissionKind[] = ['initialize', 'branch-create', 'branch-switch', 'branch-rename', 'fast-forward'];
+const KINDS: readonly GitRepositoryPermissionKind[] = ['initialize', 'branch-create', 'branch-switch', 'branch-rename', 'fast-forward', 'set-upstream'];
 /** One small choice/projection child of the EXISTING permission request owner.
  * All Allow/Status/Revoke promises and lost-ACK rules stay in Permission. */
 export class GitRepositoryPermission extends Permission<GitRepositoryApproval, GitRepositoryAccess> {

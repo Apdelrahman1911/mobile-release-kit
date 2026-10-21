@@ -45,6 +45,10 @@ fn review(action: &Action) -> Review {
         document_revision: 1,
         registration_generation: 1,
         preview: match action {
+            Action::SetUpstream { head, branch, remote, repository, .. } => Preview::SetUpstream {
+                head: head.clone(), branch: branch.clone(), remote: remote.clone(), repository: repository.clone(),
+                config_changed: true, missing_directory_count: 2, unchanged: false,
+            },
             Action::Initialize {} => Preview::Initialize {
                 initial_branch: "main".into(),
                 object_format: "sha1".into(),

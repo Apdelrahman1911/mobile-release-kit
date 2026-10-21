@@ -14,6 +14,7 @@ import re
 from . import _desktop_git_read_protocol as source_fields
 from . import _desktop_git_branches as branch
 from . import git_fast_forward_worker as ff
+from . import git_repository_upstream_wire as upstream
 from . import _desktop_git_switch as switch
 from . import _desktop_git_rename as rename
 from . import _desktop_git_init as initialize
@@ -55,6 +56,8 @@ class Action:
 
 
 def action(value) -> Action | branch.Action | switch.Action | rename.Action | ff.Action | initialize.Action:
+    if type(value) is dict and value.get("kind") == "set-upstream":
+        return upstream.action(value)
     if type(value) is dict and value.get("kind") == "initialize":
         return initialize.action(value)
     if type(value) is dict and value.get("kind") == "fast-forward":
@@ -108,6 +111,7 @@ class Request:
     rename_sources: rename.Sources | None = None
     fast_forward_sources: ff.Sources | None = None
     init_sources: initialize.Sources | None = None
+    upstream_sources: upstream.Sources | None = None
 
 
 def parse_request(raw: bytes) -> Request:
@@ -120,8 +124,9 @@ def parse_request(raw: bytes) -> Request:
                      and decoded["action"].get("kind") == "branch-switch")
         is_rename = (type(decoded) is dict and type(decoded.get("action")) is dict
                      and decoded["action"].get("kind") == "branch-rename")
+        is_upstream = (type(decoded) is dict and type(decoded.get("action")) is dict and decoded["action"].get("kind") == "set-upstream")
         keys = ("protocol", "id", "phase", "action", "reviewDigest", "journalRevision", "context", "native", "clock")
-        row = source_fields._keys(decoded, (*keys, "fastForward") if is_ff else (*keys, "switch") if is_switch else (*keys, "rename") if is_rename else keys)
+        row = source_fields._keys(decoded, (*keys, "upstream") if is_upstream else (*keys, "fastForward") if is_ff else (*keys, "switch") if is_switch else (*keys, "rename") if is_rename else keys)
         require(row["protocol"] == PROTOCOL and row["phase"] in ("prepare", "apply"))
         if row["phase"] == "prepare":
             require(row["reviewDigest"] is None and row["journalRevision"] is None)
@@ -153,11 +158,13 @@ def parse_request(raw: bytes) -> Request:
         compared = switch.sources(row["switch"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_switch else None
         renamed = rename.sources(row["rename"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_rename else None
         forwarded = ff.sources(row["fastForward"], phase=row["phase"], root=root, uid=uid, selected=selected) if is_ff else None
+        upstream_sources = upstream.sources(row["upstream"], root=root, uid=uid, selected=selected) if is_upstream else None
+        require(not is_upstream or files["index"] is not None)
         require(not (is_ff or is_switch or is_rename) or row["phase"] != "apply" or files["index"] is not None)
         return Request(source_fields._id(row["id"]), row["phase"], selected,
             row["reviewDigest"], row["journalRevision"], source_fields._id(context["projectId"]),
             source_fields._integer(context["generation"], 0, (1 << 32) - 1), source_fields._id(context["revision"]),
-            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded, initialized)
+            uid, gid, root, directories, tool, snapshots, files["index"] is None, work, hard, hashlib.sha256(raw).hexdigest(), compared, renamed, forwarded, initialized, upstream_sources)
     except (source_fields.ProtocolError, core.GitError, UnicodeError, ValueError, TypeError, OverflowError):
         raise ProtocolError(_ERROR) from None
 
@@ -180,6 +187,8 @@ def go(request: Request) -> bytes:
 
 
 def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
+    if type(request) is Request and type(request.action) is upstream.Action:
+        return upstream.matches_review(request, review)
     if type(request) is Request and type(request.action) is initialize.Action:
         return initialize.matches_review(request, review)
     if type(request) is Request and type(request.action) is ff.Action:
@@ -210,6 +219,8 @@ class Candidate:
 
 def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
               intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
+    if type(request) is Request and type(request.action) is upstream.Action:
+        return upstream.candidate(request, review, intent)
     if type(request) is Request and type(request.action) is initialize.Action:
         return initialize.candidate(request, review, intent)
     if type(request) is Request and type(request.action) is ff.Action:
@@ -240,7 +251,7 @@ def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
 def acknowledged(request: Request, sent: Candidate, raw: bytes) -> int:
     """Exact ACK syntax. The original input's consumed latch is indispensable."""
     require(type(request) is Request and type(sent) is Candidate and sent.request is request
-            and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
+            and type(request.action) is not upstream.Action and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
     prefix = b"MRK-GIT-LOCAL-ACK/1 " + request.digest.encode("ascii") + b" " + sent.digest.encode("ascii") + b" "
     require(raw.startswith(prefix))
     number = raw[len(prefix):]
@@ -250,21 +261,34 @@ def acknowledged(request: Request, sent: Candidate, raw: bytes) -> int:
     return revision
 
 
+def upstream_acknowledged(request: Request, sent: Candidate, raw: bytes) -> tuple[int, str]:
+    require(type(request) is Request and type(request.action) is upstream.Action and type(sent) is Candidate
+            and sent.request is request and request.phase == "apply" and type(raw) is bytes and len(raw) <= READY_LIMIT)
+    prefix = b"MRK-GIT-UPSTREAM-ACK/1 " + request.digest.encode("ascii") + b" " + sent.digest.encode("ascii") + b" "
+    require(raw.startswith(prefix))
+    matched = re.fullmatch(rb"([1-9][0-9]{0,19}) ([a-f0-9]{64})\n", raw[len(prefix):])
+    require(matched is not None)
+    revision = int(matched[1])
+    require(request.journal_revision is not None and revision == request.journal_revision + 1 and revision < 1 << 64)
+    return revision, matched[2].decode("ascii")
+
+
 def terminal(request: Request, status: str, *, reason: str | None,
              review: local.LocalReview | branch.BranchReview | None = None,
              diff: core.Diff | None = None, result: core.MutationResult | None = None,
              publication: str = "not-reported", progress: switch.Progress | None = None,
              first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
+    is_upstream = type(request) is Request and type(request.action) is upstream.Action
     is_ff = type(request) is Request and type(request.action) is ff.Action
     is_init = type(request) is Request and type(request.action) is initialize.Action
     is_switch = type(request) is Request and type(request.action) is switch.Action
     is_rename = type(request) is Request and type(request.action) is rename.Action
     is_branch = type(request) is Request and type(request.action) is branch.Action
     require(type(request) is Request and status in STATUSES
-            and (reason is None or (initialize.valid_reason(reason) if is_init else ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
+            and (reason is None or (upstream.valid_reason(reason) if is_upstream else initialize.valid_reason(reason) if is_init else ff.valid_reason(reason) if is_ff else rename.valid_reason(reason) if is_rename else switch.valid_reason(reason) if is_switch else
                                   branch.valid_reason(reason) if is_branch else reason in core._REASONS))
-            and (is_ff or is_switch or is_rename or progress is None)
-            and publication in (("not-reported", "init-returned") if is_init else ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
+            and (is_upstream or is_ff or is_switch or is_rename or progress is None)
+            and publication in (upstream.PUBLICATIONS if is_upstream else ("not-reported", "init-returned") if is_init else ff.PUBLICATIONS if is_ff else rename.PUBLICATIONS if is_rename else switch.PUBLICATIONS if is_switch else ("not-reported", branch.PUBLICATION) if is_branch else
                                 ("not-reported", "index-returned", "ref-returned")))
     try:
         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
@@ -274,7 +298,10 @@ def terminal(request: Request, status: str, *, reason: str | None,
     except source_fields.ProtocolError:
         raise ProtocolError(_ERROR) from None
     data = None
-    if is_init:
+    if is_upstream:
+        data = upstream.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
+            publication=publication, progress=progress, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
+    elif is_init:
         data = initialize.terminal_data(request, status, reason=reason, review=review, diff=diff, result=result,
             publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
     elif is_ff:

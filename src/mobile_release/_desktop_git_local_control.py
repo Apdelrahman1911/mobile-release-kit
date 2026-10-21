@@ -22,6 +22,7 @@ class GitLocalInput(_SavedCommandInput):
         self.initial = self.operation = None
         self.ready_sent = self.go_returned = False
         self.candidate_claimed = self.candidate_waiting = self.candidate_returned = False
+        self.upstream_ack = None
         self.candidate = None
         self.ack_revision = None
         self.first_failure_ns = self.cleanup_end_ns = None
@@ -156,11 +157,18 @@ class GitLocalInput(_SavedCommandInput):
         self.candidate = sent
         try:
             operation.write_candidate(sent)
-            revision = wire.acknowledged(self.initial, sent, self._frame(wire.READY_LIMIT))
+            raw = self._frame(wire.READY_LIMIT)
+            is_upstream = type(self.initial.action) is wire.upstream.Action
+            if is_upstream:
+                revision, self.upstream_ack = wire.upstream_acknowledged(self.initial, sent, raw)
+            else:
+                revision = wire.acknowledged(self.initial, sent, raw)
             self.candidate_waiting = False
             # The existing input owner polls STOP again after the native CAS
             # ACK. It remains active, so any extra bytes/EOF refuse publication.
             self.guard.check()
+            if is_upstream:
+                operation.upstream_state.acknowledge(self.upstream_ack)
             operation.source_post(hash_files=True)
             self.ack_revision, self.candidate_returned = revision, True
         except BaseException:

@@ -1,4 +1,4 @@
-//! Five closed, explicitly delegated LOCAL repository actions. These are
+//! Closed, explicitly delegated LOCAL repository actions. These are
 //! comparison DATA only: no native source, Git command, review or grant can be
 //! reconstructed from a CLI request. The original GitLocal owner remains the
 //! only executor; network actions and arbitrary file selections are absent.
@@ -52,6 +52,40 @@ pub(crate) fn tracking_ref(value: &str) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamIdentity { pub name:String, pub email:String }
+// Transport-only DATA validation: the installed CLI deliberately does not
+// link GitLocal/native protocol modules. Native construction and its own
+// Action::valid check belong to service_git_repository_native::action.
+fn upstream_alias(v:&str)->bool { !v.is_empty() && v.len()<=64 && v.as_bytes()[0].is_ascii_alphanumeric()
+    && v.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)) }
+fn upstream_repository(v:&str)->bool {
+    let Some((owner,name))=v.split_once('/') else{return false};
+    !owner.is_empty() && owner.len()<=39 && owner.as_bytes()[0].is_ascii_alphanumeric()
+        && owner.as_bytes()[owner.len()-1].is_ascii_alphanumeric()
+        && owner.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')
+        && !name.is_empty() && name.len()<=100 && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name.as_bytes()[name.len()-1].is_ascii_alphanumeric()
+        && name.bytes().all(|b|b.is_ascii_alphanumeric()||b"._-".contains(&b))
+}
+impl UpstreamIdentity {
+    fn valid(&self)->bool {
+        self.name.len()<=128 && !self.name.chars().any(|c|c=='\u{7f}'||c<' ')
+            && self.name.chars().next().is_some_and(char::is_alphanumeric)
+            && self.name.chars().last().is_some_and(char::is_alphanumeric)
+            && !self.name.chars().any(|c|matches!(c,'<'|'>'|'"'|'\''|'\\'|'#'|';'))
+            && self.email.len()<=254 && self.email.split('@').count()==2
+            && self.email.split('@').all(|v|!v.is_empty())
+            && self.email.split_once('@').is_some_and(|(local,domain)|local.as_bytes()[0].is_ascii_alphanumeric()
+                && local.bytes().all(|b|b.is_ascii_alphanumeric()||b"._+%-".contains(&b))
+                && domain.len()>=2&&domain.as_bytes()[0].is_ascii_alphanumeric()
+                && domain.bytes().all(|b|b.is_ascii_alphanumeric()||b".-".contains(&b))) && self.email.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            && self.email.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+            && self.email.bytes().all(|b|b.is_ascii_alphanumeric()||b"@._+%-".contains(&b))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "kebab-case",
@@ -62,6 +96,12 @@ pub enum Action {
     // A struct variant makes Serde enforce deny_unknown_fields for this tag.
     // An internally tagged unit variant silently ignores extra object fields.
     Initialize {},
+    SetUpstream {
+        expected_revision:String, expected_reference_revision:String, branch:String, head:String,
+        remote:String, repository:String,
+        #[serde(deserialize_with="required_nullable")]
+        identity:Option<UpstreamIdentity>,
+    },
     BranchCreate {
         expected_revision: String,
         expected_reference_revision: String,
@@ -88,6 +128,11 @@ impl Action {
     pub fn validate(&self) -> Result<(), Error> {
         let valid = match self {
             Self::Initialize {} => true,
+            Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>
+                p::digest(expected_revision)&&p::digest(expected_reference_revision)&&oid(head)
+                    &&head.bytes().any(|v|v!=b'0')&&upstream_alias(remote)
+                    &&branch.strip_prefix("refs/heads/").is_some_and(name)
+                    &&upstream_repository(repository)&&identity.as_ref().is_none_or(UpstreamIdentity::valid),
             Self::BranchCreate {
                 expected_revision,
                 expected_reference_revision,
@@ -133,6 +178,11 @@ impl Action {
         }
         match self {
             Self::Initialize {} => Self::Initialize {},
+            Self::SetUpstream {expected_revision,expected_reference_revision,branch,head,remote,repository,identity}=>Self::SetUpstream {
+                expected_revision:exact(expected_revision),expected_reference_revision:exact(expected_reference_revision),
+                branch:exact(branch),head:exact(head),remote:exact(remote),repository:exact(repository),
+                identity:identity.map(|i|UpstreamIdentity{name:exact(i.name),email:exact(i.email)}),
+            },
             Self::BranchCreate {
                 expected_revision,
                 expected_reference_revision,
@@ -191,6 +241,7 @@ impl Action {
                 expected_reference_revision,
                 ..
             }
+            | Self::SetUpstream {expected_revision,expected_reference_revision,..}
             | Self::FastForward {
                 expected_revision,
                 expected_reference_revision,
@@ -205,6 +256,7 @@ impl Action {
             Self::BranchSwitch { .. } => "branch-switch",
             Self::BranchRename { .. } => "branch-rename",
             Self::FastForward { .. } => "fast-forward",
+            Self::SetUpstream {..}=>"set-upstream",
         }
     }
     pub(crate) fn history_action(&self) -> crate::service_protocol::Action {
@@ -215,6 +267,7 @@ impl Action {
             Self::BranchSwitch { .. } => H::GitBranchSwitch,
             Self::BranchRename { .. } => H::GitBranchRename,
             Self::FastForward { .. } => H::GitFastForward,
+            Self::SetUpstream {..}=>H::GitSetUpstream,
         }
     }
 }
@@ -349,6 +402,10 @@ pub struct Review {
     deny_unknown_fields
 )]
 pub enum Preview {
+    SetUpstream {
+        head:String, branch:String, remote:String, repository:String, config_changed:bool,
+        missing_directory_count:u32, unchanged:bool,
+    },
     Initialize {
         initial_branch: String,
         object_format: String,
@@ -403,6 +460,10 @@ impl Review {
             return Err(Error::InvalidRequest);
         }
         let valid = match &self.preview {
+            Preview::SetUpstream {head,branch:current,remote,repository,config_changed,missing_directory_count,unchanged}=>
+                oid(head)&&head.len()==40&&head.bytes().any(|v|v!=b'0')&&branch(current)
+                &&upstream_alias(remote)&&upstream_repository(repository)
+                &&*missing_directory_count<=64&&*unchanged==(!*config_changed&&*missing_directory_count==0),
             Preview::Initialize {
                 initial_branch,
                 object_format,
@@ -472,6 +533,8 @@ impl Review {
             return false;
         }
         match (&selected.action, &self.preview) {
+            (Action::SetUpstream {branch,head,remote,repository,..}, Preview::SetUpstream {branch:b,head:h,remote:r,repository:p,..})=>
+                branch==b&&head==h&&remote==r&&repository==p&&selected.action.revisions()==Some((self.source_revision.as_str(),self.reference_revision.as_deref().unwrap_or(""))),
             (Action::Initialize {}, Preview::Initialize { .. }) => true,
             (Action::BranchCreate { name, .. }, Preview::BranchCreate { target_ref, .. })
             | (Action::BranchSwitch { name, .. }, Preview::BranchSwitch { target_ref, .. })

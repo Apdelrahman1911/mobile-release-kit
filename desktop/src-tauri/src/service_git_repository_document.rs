@@ -69,6 +69,10 @@ fn selected(value: &read::Projection, action: &repository::Action) -> bool {
     if !successful_read(value) || value.result["referenceRevision"].as_str() != Some(refs) {
         return false;
     }
+    if let repository::Action::SetUpstream {branch,head,..}=action {
+        let actual=if value.action.kind==read::Kind::Observe {&value.result["observation"]}else{&value.result};
+        if actual["head"].as_str()!=Some(head.as_str())||actual["branch"].as_str()!=Some(branch.as_str()){return false}
+    }
     match value.action.kind {
         read::Kind::Branches => {
             !matches!(action, repository::Action::FastForward { .. })

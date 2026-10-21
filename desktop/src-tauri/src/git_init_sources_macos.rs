@@ -89,7 +89,7 @@ fn supported_names(names: &[Vec<u8>], project: bool, private: Option<&str>, move
 }
 
 impl GitLocalSources {
-    fn init_names(
+    pub(super) fn init_names(
         &self,
         index: usize,
         stop: &mut dyn FnMut() -> bool,

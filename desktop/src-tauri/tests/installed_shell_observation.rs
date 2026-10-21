@@ -16,6 +16,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
 #[path = "../src/version_reserve_protocol.rs"] mod version_reserve_protocol;
 #[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
+#[path = "../src/git_upstream_protocol.rs"] mod git_upstream_protocol;
+#[path = "../src/git_upstream_state.rs"] mod git_upstream_state;
 #[path = "../src/git_branch_protocol.rs"] mod git_branch_protocol;
 #[path = "../src/git_switch_protocol.rs"] mod git_switch_protocol;
 #[path = "../src/git_fast_forward_protocol.rs"] mod git_fast_forward_protocol;
