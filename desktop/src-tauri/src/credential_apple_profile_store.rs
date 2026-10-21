@@ -570,7 +570,8 @@ pub(in crate::asset_session) fn execute(
             return Err(Reason::Capacity);
         }
         let original = book
-            .read_record(destination.record, true, &mut || owner.interrupted())
+            .read_new_bound_record(destination.record, destination.revision, length, destination.allowance,
+                &mut || owner.interrupted())
             .map_err(problem)?;
         let (bytes, witness, complete) = original.into_parts();
         if !complete

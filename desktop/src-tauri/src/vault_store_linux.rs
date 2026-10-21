@@ -129,39 +129,53 @@ impl ReadWitness {
         Self { root, file, record, revision }
     }
 }
-// Only the fixed Apple-key readers carry this bound. It is comparison DATA,
+// Only the fixed Apple/ordinary readers carry this bound. It is comparison DATA,
 // never an authenticated key, a fresh inventory, or a native read receipt.
-enum AppleKeyRead<'a> {
+enum FixedRecordRead<'a> {
+    AppleKeyStored(&'a ReadWitness),
+    AppleKeyNew { record: Id, revision: format::Revision, length: usize },
+    AppleP12New { record: Id, revision: format::Revision, length: usize },
     Stored(&'a ReadWitness),
     New { record: Id, revision: format::Revision, length: usize },
-    P12New { record: Id, revision: format::Revision, length: usize },
 }
-struct AppleKeyBody { witness: ReadWitness, capacity_limit: usize }
+struct FixedRecordBody { witness: ReadWitness, capacity_limit: usize }
 fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
     need(allowance <= crate::vault_crypto::APPLE_KEY_CRYPTO_BYTES, Problem::Bounds)?;
     let limit = allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
     need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length <= limit, Problem::Bounds)?;
     Ok(limit)
 }
-fn apple_key_read_bound(expected: AppleKeyRead<'_>, actual: ReadWitness, length: usize,
-    allowance: usize) -> Result<AppleKeyBody> {
+fn ordinary_record_read_limit(length: usize, allowance: usize) -> Result<usize> {
+    need(allowance <= format::WORKING_BYTES, Problem::Bounds)?;
+    let limit = allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
+    need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length <= limit, Problem::Bounds)?;
+    Ok(limit)
+}
+fn fixed_record_read_bound(expected: FixedRecordRead<'_>, actual: ReadWitness, length: usize,
+    allowance: usize) -> Result<FixedRecordBody> {
     // The unauthenticated prefix never gets to choose a generic32MiB body
     // allocation. Charge the fixed codec/control partition before requesting
     // any full-body backing, even when the remaining document cap is larger.
-    let capacity_limit = if matches!(expected,AppleKeyRead::P12New {..}) {
-        need(allowance<=crate::vault_crypto::APPLE_P12_CRYPTO_BYTES,Problem::Bounds)?;
-        let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
-        need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
-    } else { apple_key_read_limit(length, allowance)? };
+    let capacity_limit = match expected {
+        FixedRecordRead::AppleP12New {..} => {
+            need(allowance<=crate::vault_crypto::APPLE_P12_CRYPTO_BYTES,Problem::Bounds)?;
+            let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
+            need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
+        },
+        FixedRecordRead::Stored(_) | FixedRecordRead::New {..} => ordinary_record_read_limit(length, allowance)?,
+        _ => apple_key_read_limit(length, allowance)?,
+    };
     need(actual.file.bytes == length as u64, Problem::Identity)?;
     match expected {
-        AppleKeyRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
-        AppleKeyRead::New { record, revision, length: known } | AppleKeyRead::P12New { record, revision, length: known } =>
+        FixedRecordRead::AppleKeyStored(witness) | FixedRecordRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
+        FixedRecordRead::AppleKeyNew { record, revision, length: known }
+        | FixedRecordRead::AppleP12New { record, revision, length: known }
+        | FixedRecordRead::New { record, revision, length: known } =>
             need(actual.record == record && actual.revision == revision && length == known, Problem::Identity)?,
     }
-    Ok(AppleKeyBody { witness: actual, capacity_limit })
+    Ok(FixedRecordBody { witness: actual, capacity_limit })
 }
-impl AppleKeyBody {
+impl FixedRecordBody {
     fn before(&self, root: Option<DirectoryKey>, file: FileKey, name: &[u8], length: usize, full: bool) -> Result<()> {
         need(full && root == Some(self.witness.root) && file == self.witness.file
             && name == self.witness.record.record_name().as_bytes()
@@ -171,11 +185,14 @@ impl AppleKeyBody {
         need(actual <= self.capacity_limit, Problem::Bounds)
     }
 }
-fn apple_key_new_read_intent(prefix: &format::IntentPrefix, record: Id, revision: format::Revision,
+fn new_record_read_intent(prefix: &format::IntentPrefix, record: Id, revision: format::Revision,
     length: usize) -> bool {
     prefix.operation == Mutation::New && prefix.record == record && prefix.expected.is_none()
         && prefix.proposed == Some(revision) && prefix.candidate_length == length
 }
+#[cfg(all(test, debug_assertions))]
+#[path = "vault_store_bound_read_tests.rs"]
+mod bound_read_tests;
 pub(crate) struct ReadOriginal { bytes: Vec<u8>, witness: ReadWitness, complete: bool }
 impl ReadOriginal {
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
@@ -461,9 +478,9 @@ impl StoreBook {
         self.check_roots(stop)?; Ok(inventory)
     }
     fn read_leaf(&mut self, name: &[u8], length: usize, full: bool, stop: &mut dyn FnMut() -> bool) -> Result<(Vec<u8>, FileKey)> {
-        self.read_leaf_with_apple_key(name, length, full, None, stop)
+        self.read_leaf_with_record_bound(name, length, full, None, stop)
     }
-    fn read_leaf_with_apple_key(&mut self, name: &[u8], length: usize, full: bool, key: Option<&AppleKeyBody>,
+    fn read_leaf_with_record_bound(&mut self, name: &[u8], length: usize, full: bool, key: Option<&FixedRecordBody>,
         stop: &mut dyn FnMut() -> bool) -> Result<(Vec<u8>, FileKey)> {
         need(self.originals.len() == self.retained, Problem::State)?;
         self.check_roots(stop)?;
@@ -472,17 +489,17 @@ impl StoreBook {
         need(length <= format::RECORD_LIMIT && if full { before.bytes == length as u64 } else { before.bytes >= length as u64 }, Problem::Bounds)?;
         if let Some(key) = key { key.before(self.originals[root].directory, before, name, length, full)?; }
         let index = self.open(Some(root), name, read_flags(false), false, stop)?;
-        let bytes = self.read_held_with_apple_key(index, name, before, length, full, key, stop)?;
+        let bytes = self.read_held_with_record_bound(index, name, before, length, full, key, stop)?;
         self.close(index)?; self.discard_closed_leaves()?; self.check_roots(stop)?;
         need(FileKey::of(&self.named(root, name, stop)?.ok_or(Problem::Identity)?, self.uid()?)? == before, Problem::Identity)?;
         Ok((bytes, before))
     }
     fn read_held(&self, index: usize, name: &[u8], before: FileKey, length: usize, full: bool,
         stop: &mut dyn FnMut() -> bool) -> Result<Vec<u8>> {
-        self.read_held_with_apple_key(index, name, before, length, full, None, stop)
+        self.read_held_with_record_bound(index, name, before, length, full, None, stop)
     }
-    fn read_held_with_apple_key(&self, index: usize, name: &[u8], before: FileKey, length: usize, full: bool,
-        key: Option<&AppleKeyBody>, stop: &mut dyn FnMut() -> bool) -> Result<Vec<u8>> {
+    fn read_held_with_record_bound(&self, index: usize, name: &[u8], before: FileKey, length: usize, full: bool,
+        key: Option<&FixedRecordBody>, stop: &mut dyn FnMut() -> bool) -> Result<Vec<u8>> {
         let root = self.root.ok_or(Problem::State)?;
         if let Some(key) = key { key.before(self.originals[root].directory, before, name, length, full)?; }
         need(length <= format::RECORD_LIMIT && if full { before.bytes == length as u64 } else { before.bytes >= length as u64 }, Problem::Bounds)?;
@@ -620,7 +637,7 @@ impl StoreBook {
     pub(crate) fn read_apple_key_record(&mut self, expected: &ReadWitness, allowance: usize,
         stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
         self.work(Work::ReadRecord, stop, |book, stop| {
-            book.read_record_inner_with_apple_key(expected.record, true, Some((AppleKeyRead::Stored(expected), allowance)), stop)
+            book.read_record_inner_with_bound(expected.record, true, Some((FixedRecordRead::AppleKeyStored(expected), allowance)), stop)
         })
     }
     /// Only THIS book's successful NEW intent supplies the reserved identity
@@ -630,9 +647,9 @@ impl StoreBook {
         length: usize, allowance: usize, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
         self.work(Work::ReadRecord, stop, |book, stop| {
             need(book.mutation.as_ref().is_some_and(MutationProgress::success)
-                && apple_key_new_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
-            book.read_record_inner_with_apple_key(record, true,
-                Some((AppleKeyRead::New { record, revision, length }, allowance)), stop)
+                && new_record_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
+            book.read_record_inner_with_bound(record, true,
+                Some((FixedRecordRead::AppleKeyNew { record, revision, length }, allowance)), stop)
         })
     }
     /// Only the fixed P12 NEW sink calls this, on this Book's actual
@@ -641,14 +658,34 @@ impl StoreBook {
         allowance:usize,stop:&mut dyn FnMut()->bool)->Result<ReadOriginal> {
         self.work(Work::ReadRecord,stop,|book,stop| {
             need(book.mutation.as_ref().is_some_and(MutationProgress::success)
-                && apple_key_new_read_intent(&book.mutation_files()?.prefix,record,revision,length),Problem::State)?;
-            book.read_record_inner_with_apple_key(record,true,Some((AppleKeyRead::P12New {record,revision,length},allowance)),stop)
+                && new_record_read_intent(&book.mutation_files()?.prefix,record,revision,length),Problem::State)?;
+            book.read_record_inner_with_bound(record,true,Some((FixedRecordRead::AppleP12New {record,revision,length},allowance)),stop)
+        })
+    }
+    /// Load/export must rematch the retained full witness before allocating
+    /// any body, not merely authenticate and compare the newly read body later.
+    pub(crate) fn read_bound_record(&mut self, expected: &ReadWitness, allowance: usize,
+        stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
+        self.work(Work::ReadRecord, stop, |book, stop| {
+            book.read_record_inner_with_bound(expected.record, true,
+                Some((FixedRecordRead::Stored(expected), allowance)), stop)
+        })
+    }
+    /// Read back only THIS book's successful NEW with its exact sealed length
+    /// and allowance after every caller-owned input has already been debited.
+    pub(crate) fn read_new_bound_record(&mut self, record: Id, revision: format::Revision,
+        length: usize, allowance: usize, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
+        self.work(Work::ReadRecord, stop, |book, stop| {
+            need(book.mutation.as_ref().is_some_and(MutationProgress::success)
+                && new_record_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
+            book.read_record_inner_with_bound(record, true,
+                Some((FixedRecordRead::New { record, revision, length }, allowance)), stop)
         })
     }
     fn read_record_inner(&mut self, record: Id, complete: bool, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
-        self.read_record_inner_with_apple_key(record, complete, None, stop)
+        self.read_record_inner_with_bound(record, complete, None, stop)
     }
-    fn read_record_inner_with_apple_key(&mut self, record: Id, complete: bool, key: Option<(AppleKeyRead<'_>, usize)>,
+    fn read_record_inner_with_bound(&mut self, record: Id, complete: bool, key: Option<(FixedRecordRead<'_>, usize)>,
         stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
         need(self.lease_held(), Problem::State)?;
         self.check_controls(stop)?;
@@ -660,9 +697,9 @@ impl StoreBook {
         let key = if let Some((expected, allowance)) = key {
             need(complete, Problem::State)?;
             let root = self.root.and_then(|index| self.originals[index].directory).ok_or(Problem::State)?;
-            Some(apple_key_read_bound(expected, ReadWitness { root, file: original, record, revision: prefix.revision }, length, allowance)?)
+            Some(fixed_record_read_bound(expected, ReadWitness { root, file: original, record, revision: prefix.revision }, length, allowance)?)
         } else { None };
-        let (bytes, current) = self.read_leaf_with_apple_key(name.as_bytes(), length, complete, key.as_ref(), stop)?;
+        let (bytes, current) = self.read_leaf_with_record_bound(name.as_bytes(), length, complete, key.as_ref(), stop)?;
         need(current == original && bytes.get(..168) == Some(prefix.bytes().as_slice()), Problem::Identity)?;
         let root = self.root.and_then(|index| self.originals[index].directory).ok_or(Problem::State)?;
         Ok(ReadOriginal { bytes, witness: ReadWitness { root, file: original, record, revision: prefix.revision }, complete })
@@ -1137,7 +1174,7 @@ mod tests {
         let revision = format::Revision::new(id(7), 1).unwrap();
         let mut witness = ReadWitness::lifecycle_data(id(8), revision);
         witness.file.bytes = length as u64;
-        let bound = apple_key_read_bound(AppleKeyRead::Stored(&witness), witness, length, allowance).unwrap();
+        let bound = fixed_record_read_bound(FixedRecordRead::AppleKeyStored(&witness), witness, length, allowance).unwrap();
         assert!(bound.before(Some(witness.root), witness.file, witness.record.record_name().as_bytes(), length, true).is_ok());
         assert!(bound.capacity(limit).is_ok());
         assert!(bound.capacity(limit + 1).is_err());
@@ -1151,7 +1188,7 @@ mod tests {
         assert!(apple_key_read_limit(limit, allowance).is_ok());
         let mut replacement = witness;
         replacement.file.common.ino += 1;
-        assert!(apple_key_read_bound(AppleKeyRead::Stored(&witness), replacement, length, allowance).is_err());
+        assert!(fixed_record_read_bound(FixedRecordRead::AppleKeyStored(&witness), replacement, length, allowance).is_err());
         assert!(bound.before(Some(witness.root), replacement.file, witness.record.record_name().as_bytes(), length, true).is_err());
         replacement = witness;
         replacement.file.ctime.1 += 1;
@@ -1161,20 +1198,20 @@ mod tests {
         assert!(bound.before(Some(other_root), witness.file, witness.record.record_name().as_bytes(), length, true).is_err());
         assert!(bound.before(Some(witness.root), witness.file, id(9).record_name().as_bytes(), length, true).is_err());
         assert!(bound.before(Some(witness.root), witness.file, witness.record.record_name().as_bytes(), length, false).is_err());
-        assert!(apple_key_read_bound(AppleKeyRead::New { record: witness.record, revision, length }, witness, length, allowance).is_ok());
-        assert!(apple_key_read_bound(AppleKeyRead::New { record: witness.record, revision, length: length + 1 }, witness, length, allowance).is_err());
-        assert!(apple_key_read_bound(AppleKeyRead::New { record: witness.record,
+        assert!(fixed_record_read_bound(FixedRecordRead::AppleKeyNew { record: witness.record, revision, length }, witness, length, allowance).is_ok());
+        assert!(fixed_record_read_bound(FixedRecordRead::AppleKeyNew { record: witness.record, revision, length: length + 1 }, witness, length, allowance).is_err());
+        assert!(fixed_record_read_bound(FixedRecordRead::AppleKeyNew { record: witness.record,
             revision: format::Revision::new(id(10), 1).unwrap(), length }, witness, length, allowance).is_err());
         let identity = format::Identity::new(id(1), id(2)).unwrap();
         let new = format::IntentPrefix::new(identity, Mutation::New, id(3), witness.record,
             None, Some(revision), [5; 32], length + 1).unwrap();
-        assert!(apple_key_new_read_intent(&new, witness.record, revision, length + 1));
-        assert!(!apple_key_new_read_intent(&new, witness.record, revision, length));
-        assert!(!apple_key_new_read_intent(&new, id(9), revision, length + 1));
+        assert!(new_record_read_intent(&new, witness.record, revision, length + 1));
+        assert!(!new_record_read_intent(&new, witness.record, revision, length));
+        assert!(!new_record_read_intent(&new, id(9), revision, length + 1));
         let replacement_revision = format::Revision::new(id(11), 2).unwrap();
         let replace = format::IntentPrefix::new(identity, Mutation::Replace, id(3), witness.record,
             Some(revision), Some(replacement_revision), [5; 32], length + 1).unwrap();
-        assert!(!apple_key_new_read_intent(&replace, witness.record, replacement_revision, length + 1));
+        assert!(!new_record_read_intent(&replace, witness.record, replacement_revision, length + 1));
     }
     #[cfg(debug_assertions)]
     #[test]

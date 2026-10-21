@@ -1517,7 +1517,8 @@ pub(in crate::asset_session) fn execute(
                 return Err(Reason::Capacity);
             }
             let actual = book
-                .read_record(context.record, true, &mut || owner.interrupted())
+                .read_new_bound_record(context.record, revision, exact_length, held.allowance,
+                    &mut || owner.interrupted())
                 .map_err(problem)?;
             let (bytes, witness, complete) = actual.into_parts();
             if !complete

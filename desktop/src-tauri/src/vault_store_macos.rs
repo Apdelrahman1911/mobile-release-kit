@@ -161,14 +161,14 @@ impl ReadWitness {
         Self { root, file, record, revision }
     }
 }
-// Only the fixed Apple/backup readers carry this bound. It is comparison DATA,
+// Only the fixed Apple/ordinary readers carry this bound. It is comparison DATA,
 // never an authenticated key, a fresh inventory, or a native read receipt.
 enum FixedRecordRead<'a> {
     AppleKeyStored(&'a ReadWitness),
     AppleKeyNew { record: Id, revision: format::Revision, length: usize },
     AppleP12New { record: Id, revision: format::Revision, length: usize },
-    BackupStored(&'a ReadWitness),
-    BackupNew { record: Id, revision: format::Revision, length: usize },
+    Stored(&'a ReadWitness),
+    New { record: Id, revision: format::Revision, length: usize },
 }
 struct FixedRecordBody { witness: ReadWitness, capacity_limit: usize }
 fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
@@ -177,7 +177,7 @@ fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
     need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length <= limit, Problem::Bounds)?;
     Ok(limit)
 }
-fn backup_record_read_limit(length: usize, allowance: usize) -> Result<usize> {
+fn ordinary_record_read_limit(length: usize, allowance: usize) -> Result<usize> {
     need(allowance <= format::WORKING_BYTES, Problem::Bounds)?;
     let limit = allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
     need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length <= limit, Problem::Bounds)?;
@@ -194,15 +194,15 @@ fn fixed_record_read_bound(expected: FixedRecordRead<'_>, actual: ReadWitness, l
             let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
             need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
         },
-        FixedRecordRead::BackupStored(_) | FixedRecordRead::BackupNew {..} => backup_record_read_limit(length, allowance)?,
+        FixedRecordRead::Stored(_) | FixedRecordRead::New {..} => ordinary_record_read_limit(length, allowance)?,
         _ => apple_key_read_limit(length, allowance)?,
     };
     need(actual.file.bytes == length as u64, Problem::Identity)?;
     match expected {
-        FixedRecordRead::AppleKeyStored(witness) | FixedRecordRead::BackupStored(witness) => need(actual == *witness, Problem::Identity)?,
+        FixedRecordRead::AppleKeyStored(witness) | FixedRecordRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
         FixedRecordRead::AppleKeyNew { record, revision, length: known }
         | FixedRecordRead::AppleP12New { record, revision, length: known }
-        | FixedRecordRead::BackupNew { record, revision, length: known } =>
+        | FixedRecordRead::New { record, revision, length: known } =>
             need(actual.record == record && actual.revision == revision && length == known, Problem::Identity)?,
     }
     Ok(FixedRecordBody { witness: actual, capacity_limit })
@@ -222,6 +222,9 @@ fn new_record_read_intent(prefix: &format::IntentPrefix, record: Id, revision: f
     prefix.operation == Mutation::New && prefix.record == record && prefix.expected.is_none()
         && prefix.proposed == Some(revision) && prefix.candidate_length == length
 }
+#[cfg(all(test, debug_assertions))]
+#[path = "vault_store_bound_read_tests.rs"]
+mod bound_read_tests;
 pub(crate) struct ReadOriginal { bytes: Vec<u8>, witness: ReadWitness, complete: bool }
 impl ReadOriginal {
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
@@ -760,24 +763,24 @@ impl StoreBook {
             book.read_record_inner_with_bound(record,true,Some((FixedRecordRead::AppleP12New {record,revision,length},allowance)),stop)
         })
     }
-    /// Backup export must rematch its original full witness before allocating
+    /// Load/export must rematch the retained full witness before allocating
     /// any body, not merely authenticate and compare the newly read body later.
-    pub(crate) fn read_backup_record(&mut self, expected: &ReadWitness, allowance: usize,
+    pub(crate) fn read_bound_record(&mut self, expected: &ReadWitness, allowance: usize,
         stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
         self.work(Work::ReadRecord, stop, |book, stop| {
             book.read_record_inner_with_bound(expected.record, true,
-                Some((FixedRecordRead::BackupStored(expected), allowance)), stop)
+                Some((FixedRecordRead::Stored(expected), allowance)), stop)
         })
     }
-    /// Backup import reads back only THIS book's successful NEW with its
-    /// exact sealed length and allowance after the restored input debit.
-    pub(crate) fn read_new_backup_record(&mut self, record: Id, revision: format::Revision,
+    /// Read back only THIS book's successful NEW with its exact sealed length
+    /// and allowance after every caller-owned input has already been debited.
+    pub(crate) fn read_new_bound_record(&mut self, record: Id, revision: format::Revision,
         length: usize, allowance: usize, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
         self.work(Work::ReadRecord, stop, |book, stop| {
             need(book.mutation.as_ref().is_some_and(MutationProgress::success)
                 && new_record_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
             book.read_record_inner_with_bound(record, true,
-                Some((FixedRecordRead::BackupNew { record, revision, length }, allowance)), stop)
+                Some((FixedRecordRead::New { record, revision, length }, allowance)), stop)
         })
     }
     fn read_record_inner(&mut self, record: Id, complete: bool, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {
@@ -1348,110 +1351,6 @@ mod tests {
         let replace = format::IntentPrefix::new(identity, Mutation::Replace, id(3), witness.record,
             Some(revision), Some(replacement_revision), [5; 32], length + 1).unwrap();
         assert!(!new_record_read_intent(&replace, witness.record, replacement_revision, length + 1));
-    }
-    #[test]
-    fn backup_full_read_checks_original_witness_and_allowance_before_body() {
-        // Inert comparison DATA: no large allocation or native file is needed
-        // to prove that a new prefix cannot enlarge the admitted read.
-        let length = 1024;
-        let control = crate::vault_crypto::CONTROL_BYTES;
-        let allowance = control + length;
-        let revision = format::Revision::new(id(7), 1).unwrap();
-        let mut witness = ReadWitness::lifecycle_data(id(8), revision);
-        witness.file.bytes = length as u64;
-        let bound = fixed_record_read_bound(FixedRecordRead::BackupStored(&witness), witness, length, allowance).unwrap();
-        assert!(bound.before(Some(witness.root), witness.file, witness.record.record_name().as_bytes(), length, true).is_ok());
-        assert!(bound.capacity(length).is_ok());
-        assert!(bound.capacity(length + 1).is_err());
-        for (requested, available) in [
-            (format::RECORD_LIMIT, allowance), (length + 1, allowance),
-            (length, allowance - 1), (length, control - 1),
-            (length, format::WORKING_BYTES + 1), (usize::MAX, format::WORKING_BYTES),
-        ] { assert!(backup_record_read_limit(requested, available).is_err()); }
-        // Backup's supported ceiling is not confused with Apple's key ceiling.
-        assert!(backup_record_read_limit(format::RECORD_LIMIT, format::WORKING_BYTES).is_ok());
-        assert!(apple_key_read_limit(length, format::WORKING_BYTES).is_err());
-        for change in 0..7 {
-            let mut changed = witness;
-            match change {
-                0 => changed.root.ino += 1,
-                1 => changed.file.common.ino += 1,
-                2 => changed.file.ctime.1 += 1,
-                3 => changed.file.mtime.1 += 1,
-                4 => changed.file.bytes += 1,
-                5 => changed.record = id(9),
-                _ => changed.revision = format::Revision::new(id(10), 2).unwrap(),
-            }
-            assert!(fixed_record_read_bound(FixedRecordRead::BackupStored(&witness), changed,
-                changed.file.bytes as usize, format::WORKING_BYTES).is_err());
-        }
-        let mut renamed = witness.file; renamed.common.ino += 1;
-        assert!(bound.before(Some(witness.root), renamed, witness.record.record_name().as_bytes(), length, true).is_err());
-        assert!(bound.before(None, witness.file, witness.record.record_name().as_bytes(), length, true).is_err());
-        assert!(bound.before(Some(witness.root), witness.file, id(9).record_name().as_bytes(), length, true).is_err());
-        assert!(bound.before(Some(witness.root), witness.file, witness.record.record_name().as_bytes(), length, false).is_err());
-    }
-    #[test]
-    fn backup_new_read_matches_reserved_intent_and_exact_sealed_length() {
-        let length = 1024;
-        let allowance = crate::vault_crypto::CONTROL_BYTES + length;
-        let revision = format::Revision::new(id(7), 1).unwrap();
-        let mut witness = ReadWitness::lifecycle_data(id(8), revision);
-        witness.file.bytes = length as u64;
-        let expected = || FixedRecordRead::BackupNew { record: witness.record, revision, length };
-        assert!(fixed_record_read_bound(expected(), witness, length, allowance).is_ok());
-        let mut grown = witness; grown.file.bytes += 1;
-        // Even abundant available memory cannot authorize a different NEW.
-        assert!(fixed_record_read_bound(expected(), grown, length + 1, format::WORKING_BYTES).is_err());
-        let mut changed = witness; changed.record = id(9);
-        assert!(fixed_record_read_bound(expected(), changed, length, allowance).is_err());
-        changed = witness; changed.revision = format::Revision::new(id(10), 2).unwrap();
-        assert!(fixed_record_read_bound(expected(), changed, length, allowance).is_err());
-        assert!(fixed_record_read_bound(expected(), witness, length, allowance - 1).is_err());
-        let identity = format::Identity::new(id(1), id(2)).unwrap();
-        let new = format::IntentPrefix::new(identity, Mutation::New, id(3), witness.record,
-            None, Some(revision), [5; 32], length).unwrap();
-        assert!(new_record_read_intent(&new, witness.record, revision, length));
-        assert!(!new_record_read_intent(&new, witness.record, revision, length + 1));
-        assert!(!new_record_read_intent(&new, id(9), revision, length));
-        assert!(!new_record_read_intent(&new, witness.record, changed.revision, length));
-        let replace = format::IntentPrefix::new(identity, Mutation::Replace, id(3), witness.record,
-            Some(revision), Some(changed.revision), [5; 32], length).unwrap();
-        assert!(!new_record_read_intent(&replace, witness.record, changed.revision, length));
-        // The actual entry refuses a book without a successful NEW before IO.
-        let mut book = StoreBook::new();
-        assert!(matches!(book.read_new_backup_record(witness.record, revision, length, allowance,
-            &mut || false), Err(Problem::State)));
-        assert!(book.originals.is_empty() && book.storage_outcome().is_none());
-    }
-    #[test]
-    fn backup_read_refusal_and_stop_never_erase_already_known_new_effect() {
-        for stopped in [false, true] {
-            // Synthetic mutation-state DATA only. No vault, key or native
-            // mutation exists; exercise the real StoreBook read finish path.
-            let mut progress = MutationProgress::new(Mutation::New);
-            progress.begin_intent().unwrap();
-            progress.intent_durable_returned().unwrap();
-            progress.enter_effect().unwrap();
-            progress.applied_returned().unwrap();
-            progress.enter_effect_sync().unwrap();
-            progress.effect_sync_returned(true).unwrap();
-            progress.enter_clear(true).unwrap();
-            progress.clear_sync_returned(true).unwrap();
-            progress.cleanup_returned(true);
-            assert!(progress.success());
-            let outcome = progress.outcome;
-            let mut book = StoreBook::new(); book.mutation = Some(progress);
-            let result = book.work(Work::ReadRecord, &mut || stopped,
-                |_, _| backup_record_read_limit(format::RECORD_LIMIT, crate::vault_crypto::CONTROL_BYTES + 1024));
-            assert_eq!(result, Err(if stopped { Problem::Stopped } else { Problem::Bounds }));
-            assert_eq!(book.storage_outcome(), Some(outcome));
-            assert_eq!(outcome, StorageOutcome { effect: Effect::KnownApplied,
-                durability: Durability::Confirmed, cleanup: Cleanup::Known });
-            assert!(book.in_flight.is_none() && book.originals.is_empty());
-            assert!(!book.mutation.as_ref().unwrap().success());
-            assert!(book.begin(Work::Mutate).is_err()); // No automatic NEW retry.
-        }
     }
     #[cfg(debug_assertions)]
     #[test]

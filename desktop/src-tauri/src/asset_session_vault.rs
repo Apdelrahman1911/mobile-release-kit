@@ -1105,7 +1105,8 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
             check_exclusions(owner, &mut book, &roster)?;
             let key = active_key(owner)?;
             if key.identity() != reference.identity { return Err(Reason::VaultCorrupt); }
-            let original = book.read_record(reference.record, true, &mut || owner.interrupted()).map_err(problem)?;
+            let original = book.read_bound_record(&reference.original, allowance,
+                &mut || owner.interrupted()).map_err(problem)?;
             let (bytes, witness, complete) = original.into_parts();
             if !complete || witness != reference.original { return Err(Reason::SourceChanged); }
             let opened = key.open_record(bytes, allowance).map_err(crypto_problem)?;
