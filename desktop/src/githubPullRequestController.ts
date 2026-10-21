@@ -1,3 +1,5 @@
+import { pullRequestMode, pullRequestModeFields } from './githubPullRequestMode.ts';
+import type { PullRequestCreationMode } from './githubPullRequestMode.ts';
 import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
 import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
 // One presentation coordinator for the original native connection operation.
@@ -39,6 +41,7 @@ function inContext(t: PullRequestTarget, c: Context): boolean {
   return t.scope.repository.toLowerCase()===c.repository.toLowerCase() && t.scope.accountId===c.accountId && t.scope.repositoryId===c.repositoryId;
 }
 function sameBranches(t:PullRequestTarget,d:PullRequestDraft):boolean { return t.intent?.base===d.base && t.intent.head===d.head; }
+function sameDraft(t:PullRequestTarget,d:PullRequestDraft):boolean {return sameBranches(t,d)&&!!t.intent&&pullRequestMode(t.intent)===pullRequestMode(d);}
 function advances(a: PullRequestStatus, b: PullRequestStatus): boolean {
   if (a.revision === b.revision) return same(a, b);
   if (a.revision > b.revision || a.reason === 'cleanup-unknown' || a.operation?.phase === 'cleanup-unknown') return false;
@@ -92,7 +95,13 @@ export class GitHubPullRequestController {
     const c = context(this.connection());
     if (!same(c, this.current)) { this.current = c; this.invalidate(); }
   };
-  setDraft(field:keyof PullRequestDraft,value:string):void {
+  setCreationMode(mode:PullRequestCreationMode):void {
+    if(this.disposed || !['draft','ready-for-review'].includes(mode) || pullRequestMode(this.state.draft)===mode)return;
+    const {creationMode:_old,...draft}=this.state.draft;
+    this.state=immutable({...this.state,draft:{...draft,...pullRequestModeFields(mode)}});
+    this.invalidate();
+  }
+  setDraft(field:'base'|'head'|'title'|'body',value:string):void {
     if(this.disposed || !['base','head','title','body'].includes(field) || typeof value!=='string' || value.length>8192 || this.state.draft[field]===value)return;
     // Keep even invalid user text for repair, but never a prior review/approval.
     this.state=immutable({...this.state,draft:{...this.state.draft,[field]:value}});
@@ -138,7 +147,7 @@ export class GitHubPullRequestController {
     const o = s.operation;
     return a.sent && s.revision > a.revision && s.sessionId === a.context.sessionId && !!o && o.id !== a.previousId &&
       (!a.operationId || o.id === a.operationId) && o.projectId === a.context.projectId && o.kind === a.kind && inContext(o.target, a.context) &&
-      (a.kind !== 'prepare' && a.kind !== 'create' || sameBranches(o.target,a.draft)) && (a.target===null || same(o.target,a.target)) &&
+      (a.kind !== 'prepare' && a.kind !== 'create' || sameDraft(o.target,a.draft)) && (a.target===null || same(o.target,a.target)) &&
       (a.marker === null || a.marker === o.target.intent?.marker) && (a.consent === null || same(o.target, a.consent.prepared.target));
   }
   private receive(o: Original, raw: unknown): PullRequestStatus | null {
@@ -177,7 +186,7 @@ export class GitHubPullRequestController {
     if (!a || !s || !a.work.ended || !this.origin(a, s) || s.operation?.phase !== 'settled' || this.unknown) return;
     this.attempt = null;
     if (a.kind === 'prepare' && a.replyOk && s.consent && a.epoch === this.epoch && a.owner.port === this.desired && !this.disposed &&
-      same(a.context, context(this.connection())) && a.draft === this.state.draft && sameBranches(s.consent.prepared.target,a.draft)) {
+      same(a.context, context(this.connection())) && a.draft === this.state.draft && sameDraft(s.consent.prepared.target,a.draft)) {
       this.review = { owner: a.owner, epoch: a.epoch, context: a.context, consent: s.consent, draft:a.draft };
     }
     if(a.replyOk&&(a.kind==='create'||a.kind==='reconcile')&&(s.acknowledged||s.observed)&&a.epoch===this.epoch&&a.owner.port===this.desired&&!this.disposed&&same(a.context,context(this.connection())))
@@ -211,7 +220,7 @@ export class GitHubPullRequestController {
   currentConsent(): PullRequestConsent | null {
     const r = this.review, o = this.original, c = context(this.connection());
     return r && !this.unknown && !this.disposed && r.owner === o && o.port === this.desired && o.fresh && r.epoch === this.epoch &&
-      same(c, r.context) && same(o.status?.consent, r.consent) && r.draft===this.state.draft && sameBranches(r.consent.prepared.target,r.draft) ? r.consent : null;
+      same(c, r.context) && same(o.status?.consent, r.consent) && r.draft===this.state.draft && sameDraft(r.consent.prepared.target,r.draft) ? r.consent : null;
   }
   currentCompletion():PullRequestCompletion|null {
     const r=this.completion,o=this.original,s=o?.status;
@@ -260,9 +269,9 @@ export class GitHubPullRequestController {
     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
     if([...this.work].some(w=>w.kind==='browser'))return 'The original browser request is still returning. Other tasks wait for that same call.';
     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
-      return 'The original draft pull request task is still active. Check status or Stop it before starting another task.';
+      return 'The original pull request task is still active. Check status or Stop it before starting another task.';
     if (this.original?.closeCheck) return 'Check task status to refresh the original review. Your draft is kept; Close has not been repeated.';
-    if (this.original?.status?.consent) return 'Create or close the original draft pull request review before starting another task.';
+    if (this.original?.status?.consent) return 'Create or close the original pull request review before starting another task.';
     return null;
   }
   private startReason(): string | null {
@@ -272,7 +281,7 @@ export class GitHubPullRequestController {
     if (this.unknown) return PULL_REQUEST_HELP['cleanup-unknown'];
     if (this.attempt || this.work.size || s?.operation && s.operation.phase !== 'settled') return 'Wait for the original request to finish; status and Stop stay available.';
     if (!c || this.connection().observing) return PULL_REQUEST_HELP['not-connected'];
-    if (!s || !o.fresh || s.sessionId !== c.sessionId) return 'Check the current draft pull request task status first.';
+    if (!s || !o.fresh || s.sessionId !== c.sessionId) return 'Check the current pull request task status first.';
     if (s.consent && !this.currentConsent()) return 'Close the previous review before preparing a new one. Your choices are kept.';
     if (!s.available) return PULL_REQUEST_HELP[s.reason];
     return this.peer();
@@ -287,7 +296,7 @@ export class GitHubPullRequestController {
       return 'Check the previous attempt for these branches below. A new review cannot authorize a duplicate Create.';
     return null;
   }
-  createReason():string|null { return this.startReason() ?? (!this.currentConsent()?'Review these exact branches and text first.':!this.state.confirmed?'Confirm the draft pull request and CI-trigger warning below.':null); }
+  createReason():string|null { return this.startReason() ?? (!this.currentConsent()?'Review these exact branches and text first.':!this.state.confirmed?'Confirm the selected pull request mode and CI-trigger warning below.':null); }
   pendingReason(): string | null { return this.startReason() ?? (this.currentConsent() ? 'Close this review before checking previous attempts.' : null); }
   reconcileReason(marker: string): string | null {
     return this.pendingReason() ?? (this.original?.status?.pending.filter((p) => p.prepared.target.intent?.marker === marker &&
@@ -389,7 +398,7 @@ export class GitHubPullRequestController {
   agentSelection():GithubActionSelection|null {
     const r=this.review,s=this.original?.status;
     return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
-      Object.freeze({kind:'draft-pr-create',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
+      Object.freeze({kind:pullRequestMode(r.consent.prepared.target.intent!)==='draft'?'draft-pr-create':'pr-create',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
   }
   agentSelected(selection:GithubActionSelection):boolean {
     const d=this.delegated;

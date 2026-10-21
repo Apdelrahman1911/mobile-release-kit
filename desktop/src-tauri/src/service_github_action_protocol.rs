@@ -22,6 +22,7 @@ pub(crate) fn hex(s: &str, n: usize) -> bool {
 pub(crate) enum Kind {
     RepositoryCreate,
     DraftPrCreate,
+    PrCreate,
     FailedJobsRetry,
     SetupPublish,
     SetupReconcile,
@@ -30,7 +31,7 @@ impl Kind {
     pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::RepositoryCreate => "repository-create-",
-            Self::DraftPrCreate => "github-pull-request-",
+            Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
             Self::FailedJobsRetry => "github-actions-retry-",
             Self::SetupPublish | Self::SetupReconcile => "github-publication-",
         }
@@ -39,6 +40,7 @@ impl Kind {
         match self {
             Self::RepositoryCreate => "agent-repository-create-once-v1",
             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
+            Self::PrCreate => "agent-pr-create-once-v1",
             Self::FailedJobsRetry => "agent-failed-jobs-retry-once-v1",
             Self::SetupPublish => "agent-setup-publish-once-v1",
             Self::SetupReconcile => "agent-setup-reconcile-once-v1",
@@ -48,6 +50,7 @@ impl Kind {
         match self {
             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
+            Self::PrCreate => crate::service_protocol::Action::GitHubPrCreate,
             Self::FailedJobsRetry => crate::service_protocol::Action::GitHubFailedJobsRetry,
             Self::SetupPublish => crate::service_protocol::Action::GitHubSetupPublish,
             Self::SetupReconcile => crate::service_protocol::Action::GitHubSetupReconcile,
@@ -94,6 +97,7 @@ pub(crate) struct PendingReference {
 pub(crate) enum Review {
     RepositoryCreate(PreparedReference),
     DraftPrCreate(PreparedReference),
+    PrCreate(PreparedReference),
     FailedJobsRetry(PreparedReference),
     SetupPublish(PreparedReference),
     SetupReconcile(PendingReference),
@@ -108,6 +112,7 @@ impl Review {
         Some(match kind {
             Kind::RepositoryCreate => Self::RepositoryCreate(value),
             Kind::DraftPrCreate => Self::DraftPrCreate(value),
+            Kind::PrCreate => Self::PrCreate(value),
             Kind::FailedJobsRetry => Self::FailedJobsRetry(value),
             Kind::SetupPublish => Self::SetupPublish(value),
             Kind::SetupReconcile => return None,
@@ -117,6 +122,7 @@ impl Review {
         match self {
             Self::RepositoryCreate(_) => Kind::RepositoryCreate,
             Self::DraftPrCreate(_) => Kind::DraftPrCreate,
+            Self::PrCreate(_) => Kind::PrCreate,
             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
             Self::SetupPublish(_) => Kind::SetupPublish,
             Self::SetupReconcile(_) => Kind::SetupReconcile,
@@ -124,14 +130,14 @@ impl Review {
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
             Self::SetupReconcile(_) => None,
         }
     }
     #[cfg(test)]
     pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
             Self::SetupReconcile(_) => None,
         }
     }
@@ -168,6 +174,7 @@ pub(crate) struct PendingSelection {
 pub(crate) enum Selection {
     RepositoryCreate(PreparedSelection),
     DraftPrCreate(PreparedSelection),
+    PrCreate(PreparedSelection),
     FailedJobsRetry(PreparedSelection),
     SetupPublish(PreparedSelection),
     SetupReconcile(PendingSelection),
@@ -177,6 +184,7 @@ impl Selection {
         match self {
             Self::RepositoryCreate(_) => Kind::RepositoryCreate,
             Self::DraftPrCreate(_) => Kind::DraftPrCreate,
+            Self::PrCreate(_) => Kind::PrCreate,
             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
             Self::SetupPublish(_) => Kind::SetupPublish,
             Self::SetupReconcile(_) => Kind::SetupReconcile,
@@ -184,7 +192,7 @@ impl Selection {
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedSelection> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
             Self::SetupReconcile(_) => None,
         }
     }
@@ -243,12 +251,12 @@ impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
         match self {
             Self::None => k == Kind::SetupReconcile,
-            Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
-            Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
-            Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate),
+            Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
+            Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
+            Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate),
             Self::BranchObserved => k == Kind::SetupReconcile,
             Self::DraftPrObserved => matches!(k, Kind::SetupPublish | Kind::SetupReconcile),
-            Self::AcknowledgedUnconfirmed => k == Kind::DraftPrCreate,
+            Self::AcknowledgedUnconfirmed => matches!(k, Kind::DraftPrCreate | Kind::PrCreate),
             Self::AcceptedUnconfirmed | Self::Accepted | Self::AdvancedUnattributed => {
                 k == Kind::FailedJobsRetry
             }

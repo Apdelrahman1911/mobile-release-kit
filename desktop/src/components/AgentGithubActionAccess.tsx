@@ -2,10 +2,11 @@ import { useSyncExternalStore } from 'react';
 import type { AgentGithubActionAccessController } from '../agentGithubActionAccessController.ts';
 import { GITHUB_ACTION_KINDS, githubActionCommands } from '../agentGithubActionAccess.ts';
 import type { GithubActionKind } from '../agentGithubActionAccess.ts';
-const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent'};
+const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','pr-create':'Create the reviewed ready-for-review pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent'};
 const effects:Readonly<Record<GithubActionKind,string>>={
   'repository-create':'Creates only the exact reviewed empty GitHub repository with its displayed owner and visibility. No local initialization, files, commit or push.',
   'draft-pr-create':'Creates the exact same-repository draft PR shown in the original review. Creating even a draft PR can trigger that repository’s CI and existing workflow privileges.',
+  'pr-create':'Creates the exact same-repository READY-FOR-REVIEW PR shown in the original review. Reviewers may be notified and repository workflows can run. This does not approve, merge, convert a draft or authorize a release.',
   'setup-publish':'Creates only the five reviewed setup files on the reviewed NEW branch and opens a draft PR. Existing push/PR workflows can run. No merge, existing-branch update, version-counter setup, release or local Git change.',
   'setup-reconcile':'GET-only comparison of one original intent loaded in this same session. No resend, new branch/PR, missing-step completion, counter setup or attribution of an earlier uncertain write.',
   'failed-jobs-retry':'Retries failed AND dependent jobs for the reviewed run, attempt and source. Jobs may publish or change external services using existing workflow privileges. Accepted does not mean jobs passed.',

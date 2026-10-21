@@ -35,10 +35,11 @@ def validate_body(role: _ResponseRole, raw: object) -> None:
         p.require(raw is None); return
     p.require(type(raw) is bytes and 0 < len(raw) <= 32 * 1024)
     r = p.obj(_decode_json(raw, limit=32 * 1024, nodes=16, depth=2, exact=True), {"base", "head", "title", "body", "draft"})
-    p.require(r["draft"] is True and type(r["body"]) is str and p.canonical(r) == raw)
+    p.require(type(r["draft"]) is bool and type(r["body"]) is str and p.canonical(r) == raw)
     m = re.search(r"\n\n<!-- mrk-draft-pr:([0-9a-f]{32}) -->\Z", r["body"])
     p.require(m is not None)
-    p.Draft.parse({"base": r["base"], "head": r["head"], "title": r["title"], "body": r["body"][:m.start()]})
+    p.Draft.parse({"base": r["base"], "head": r["head"], "title": r["title"], "body": r["body"][:m.start()],
+                   **({"creationMode": "ready-for-review"} if not r["draft"] else {})})
 
 
 def request_role(target: p.Target, draft: p.Draft | None, request) -> _ResponseRole:

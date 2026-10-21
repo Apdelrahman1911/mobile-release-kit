@@ -90,7 +90,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
       <ProgressiveDisclosure title="Help: access, limits and separate write actions">
         <p>The connected account needs read access to this repository’s Pull requests, Actions, Checks and commit statuses. Organization SSO and token restrictions still apply. Missing access is not an empty or successful result.</p>
         <p>Each explicit read uses one bounded page per section. GitHub can change between reads; the selected head or attempt is checked again at the end. Provider links, raw bodies, patches, logs and artifact contents are not shown here.</p>
-        <p>Draft pull request creation and run-specific failed/dependent job retry have separate explicit reviews below when native support is available. Marking a PR ready for review remains unsupported here. Reading Activity does not authorize any of these actions. Existing toolkit publication and release tasks remain separate below.</p>
+        <p>Draft or ready-for-review PR creation and run-specific failed/dependent job retry have separate explicit reviews below when native support is available. Converting an existing draft to ready-for-review remains unsupported here. Reading Activity does not authorize any of these actions. Existing toolkit publication and release tasks remain separate below.</p>
       </ProgressiveDisclosure>
     </>}
   </section>;

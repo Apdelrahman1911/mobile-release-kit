@@ -1,6 +1,6 @@
-"""One explicitly approved same-repository draft PR, on the original HTTP owner.
+"""One explicitly approved same-repository PR, on the original HTTP owner.
 
-No Git push, merge, ready-for-review or release operation. Text is private input;
+No Git push, merge, existing-draft conversion or release operation. Text is private input;
 public/journal projections contain hashes only. A matching marker is observation,
 not proof that this original POST created it and never permission to send again.
 """
@@ -17,6 +17,7 @@ from ._github_connection_transport import ReadFailure, ReadResult, _control
 from .api._github_connection import _id
 from .github_preflight import HttpRequest, branch, _quote
 from .github_repository_create import coordinate, hex_text, obj, require
+from .github_pull_request_mode import Mode, parse as mode_of, fields as mode_fields
 
 PROTOCOL = "mrk-github-pull-request/1"
 MAX_REQUESTS = 12
@@ -42,7 +43,7 @@ class Refused(ValueError):
     def __init__(self, reason: str):
         require(reason in REASONS and reason != "none")
         self.reason = reason
-        super().__init__("The draft pull request operation was refused")
+        super().__init__("The pull request operation was refused")
 
 
 def need(value: bool, reason: str = "response-invalid") -> None:
@@ -67,27 +68,28 @@ class Draft:
     head: str
     title: str
     body: str
+    mode: Mode = Mode.DRAFT
 
     @classmethod
     def parse(cls, value: object) -> Draft:
-        r = obj(value, {"base", "head", "title", "body"})
+        r = obj(value, {"base", "head", "title", "body"} | ({"creationMode"} if type(value) is dict and "creationMode" in value else set()))
         result = cls(branch(r["base"]), branch(r["head"]), user_text(r["title"], 256),
-                     user_text(r["body"], 4096, multiline=True, empty=True))
+                     user_text(r["body"], 4096, multiline=True, empty=True), mode_of(r))
         require(result.base != result.head)
         return result
 
     def value(self) -> dict:
-        return {"base": self.base, "head": self.head, "title": self.title, "body": self.body}
+        return {"base": self.base, "head": self.head, "title": self.title, "body": self.body, **mode_fields(self.mode)}
 
     def matches(self, target: Target) -> bool:
         i = target.intent
         return i is not None and (self.base, self.head, sha_text(self.title), sha_text(self.body)) == (
-            i["base"], i["head"], i["titleSha256"], i["bodySha256"])
+            i["base"], i["head"], i["titleSha256"], i["bodySha256"]) and self.mode is mode_of(i)
 
     def post_body(self, target: Target) -> dict:
         require(self.matches(target))
         return {"base": self.base, "head": self.head, "title": self.title,
-                "body": self.body + marker_suffix(target), "draft": True}
+                "body": self.body + marker_suffix(target), "draft": self.mode is Mode.DRAFT}
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +104,8 @@ class Target:
         hex_text(s["projectBinding"], 64); coordinate(s["repository"]); _id(s["accountId"]); _id(s["repositoryId"])
         i = r["intent"]
         if i is not None:
-            i = obj(i, {"base", "head", "marker", "titleSha256", "bodySha256"})
+            i = obj(i, {"base", "head", "marker", "titleSha256", "bodySha256"} | ({"creationMode"} if type(i) is dict and "creationMode" in i else set()))
+            mode_of(i)
             branch(i["base"]); branch(i["head"]); require(i["base"] != i["head"])
             hex_text(i["marker"], 32); hex_text(i["titleSha256"], 64); hex_text(i["bodySha256"], 64)
         return cls(dict(s), None if i is None else dict(i))
@@ -113,6 +116,11 @@ class Target:
     @property
     def repository(self) -> str:
         return self.scope["repository"]
+
+    @property
+    def creation_mode(self) -> Mode:
+        require(self.intent is not None)
+        return mode_of(self.intent)
 
     def same_scope(self, other: Target) -> bool:
         return all(self.scope[k] == other.scope[k] for k in ("projectBinding", "accountId", "repositoryId")) \
@@ -126,6 +134,10 @@ def marker_suffix(target: Target) -> str:
 
 def confirmation(target: Target) -> str:
     require(target.intent is not None)
+    if target.creation_mode is Mode.READY:
+        return ("Create a ready-for-review pull request in " + target.repository + " from " + target.intent["head"]
+                + " into " + target.intent["base"] + " with the text you reviewed? Reviewers may be notified and existing GitHub workflows may run. "
+                "No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.")
     return ("Create a draft pull request in " + target.repository + " from " + target.intent["head"]
             + " into " + target.intent["base"] + " with the text you reviewed? Existing GitHub workflows may run. "
             "No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.")
@@ -145,7 +157,7 @@ class Prepared:
 
     def value(self) -> dict:
         return {"target": self.target.value(), "baseSha": self.base_sha, "headSha": self.head_sha,
-                "comparison": self.comparison, "draft": True, "creationPermission": "not-proven",
+                "comparison": self.comparison, "draft": self.target.creation_mode is Mode.DRAFT, "creationPermission": "not-proven",
                 "confirmation": confirmation(self.target)}
 
     @classmethod
@@ -161,7 +173,7 @@ class Prepared:
             f = obj(file, {"path", "change"}); user_text(f["path"], 192)
             require(f["change"] in CHANGES and f["path"] not in paths); paths.add(f["path"])
         result = cls(t, hex_text(r["baseSha"], 40), hex_text(r["headSha"], 40), c)
-        require(result.base_sha != result.head_sha and r["draft"] is True and r == result.value()
+        require(result.base_sha != result.head_sha and r["draft"] is (t.creation_mode is Mode.DRAFT) and r == result.value()
                 and len(canonical(r)) <= MAX_RECORD_BYTES - 64)
         return result
 
@@ -199,7 +211,7 @@ def _ack(value: object, prepared: Prepared) -> dict:
 def _observed(value: object, prepared: Prepared) -> dict:
     ack = _ack(value, prepared)
     suffix = marker_suffix(prepared.target)
-    need(value.get("state") == "open" and value.get("draft") is True
+    need(value.get("state") == "open" and value.get("draft") is (prepared.target.creation_mode is Mode.DRAFT)
          and value["base"].get("sha") == prepared.base_sha and value["head"].get("sha") == prepared.head_sha, "branches-changed")
     title, body = value.get("title"), value.get("body")
     need(type(title) is str and type(body) is str and len(title.encode("utf-8")) <= 256
@@ -313,6 +325,8 @@ def create(prepared: Prepared, draft: Draft, exchange: Exchange, journal: Journa
         # Preserve actual 201 evidence even when its durable recording fails.
         result.update(effect="acknowledged-unconfirmed", acknowledged=ack)
         journal.record(ack)
+        # Preserve the genuine 201 and spent claim even when its mode is wrong.
+        need(raw.get("draft") is (prepared.target.creation_mode is Mode.DRAFT), "target-changed")
         observed = _observed(op.take("readback", op.base + "/pulls/" + ack["number"]), prepared)
         need(observed == ack, "target-changed")
         op.repository("final-repository")

@@ -96,7 +96,7 @@ impl CredentialReference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
-    ObserveProject, EditConfiguration, EditMetadataText, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
+    ObserveProject, EditConfiguration, EditMetadataText, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
 

@@ -3,9 +3,9 @@ import { parseGithubPublicationSelection, parseGithubPublicationReference, sameG
 import type { GithubPublicationSelection, GithubPublicationReference } from './githubPublicationDelegation.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, sameConnectionData as same } from './githubConnectionProtocol.ts';
-export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','failed-jobs-retry','setup-publish','setup-reconcile'] as const;
+export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile'] as const;
 export type GithubActionKind = typeof GITHUB_ACTION_KINDS[number];
-interface PreparedSelection { readonly kind:'repository-create'|'draft-pr-create'|'failed-jobs-retry'; readonly sessionId:string; readonly consentId:string; readonly expectedRevision:number }
+interface PreparedSelection { readonly kind:'repository-create'|'draft-pr-create'|'pr-create'|'failed-jobs-retry'; readonly sessionId:string; readonly consentId:string; readonly expectedRevision:number }
 export type GithubActionSelection = PreparedSelection | GithubPublicationSelection;
 export type GithubActionReview = (PreparedSelection & { readonly preparedSha256:string }) | GithubPublicationReference;
 export interface GithubActionQuery { readonly projectId:string; readonly serviceInstance:string; readonly requestId:string }
@@ -33,7 +33,7 @@ const hex=(v:unknown,n:number):v is string=>typeof v==='string'&&v.length===n&&!
 const number=(v:unknown,a:number,b:number):v is number=>typeof v==='number'&&Number.isSafeInteger(v)&&!Object.is(v,-0)&&v>=a&&v<=b;
 function selection(v:unknown,review=false):v is GithubActionSelection {
   if(v&&typeof v==='object'&&('kind' in v)&&(v.kind==='setup-publish'||v.kind==='setup-reconcile'))return !!(review?parseGithubPublicationReference(v):parseGithubPublicationSelection(v));
-  return keys(v,['kind','sessionId','consentId','expectedRevision',...(review?['preparedSha256']:[])])&&one(v.kind,['repository-create','draft-pr-create','failed-jobs-retry'])&&
+  return keys(v,['kind','sessionId','consentId','expectedRevision',...(review?['preparedSha256']:[])])&&one(v.kind,['repository-create','draft-pr-create','pr-create','failed-jobs-retry'])&&
     typeof v.sessionId==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(v.sessionId)&&hex(v.consentId,32)&&number(v.expectedRevision,1,0xffff_fffe)&&(!review||hex(v.preparedSha256,64));
 }
 function query(v:unknown):v is GithubActionQuery {return keys(v,['projectId','serviceInstance','requestId'])&&Object.values(v).every(githubActionId);}
@@ -47,7 +47,7 @@ export const sameGithubActionReview=(a:GithubActionReview|null,b:GithubActionRev
   if(a?.kind==='setup-reconcile'||a?.kind==='setup-publish')return b?.kind==='setup-reconcile'||b?.kind==='setup-publish'?sameGithubPublicationReference(a,b):false;
   return sameGithubActionSelection(a,b)&&!!a&&!!b&&b.kind!=='setup-reconcile'&&a.preparedSha256===b.preparedSha256;
 };
-const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-'};
+const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-'};
 function operation(v:unknown,k:GithubActionKind):v is string {
   if(typeof v!=='string'||!v.startsWith(prefixes[k]))return false;const n=v.slice(prefixes[k].length);
   return /^[1-9][0-9]{0,19}$/.test(n)&&BigInt(n)<=18446744073709551615n;
@@ -59,7 +59,7 @@ function status(v:unknown):v is GithubActionStatus {
     !one(v.state,['queued','starting','running','stopping','finishing','complete','refused','cancelled','unknown'])||!one(v.settlement,['pending','settled','unknown'])||
     v.operationId!==null&&!operation(v.operationId,v.review.kind))return false;
   const initial=v.review.kind==='setup-reconcile'?'none':'not-sent';
-  const effects=['not-sent','potentially-applied','unresolved',...(v.review.kind==='failed-jobs-retry'?['accepted-unconfirmed','accepted','advanced-unattributed']:['created-observed','found-unattributed']),...(v.review.kind==='draft-pr-create'?['acknowledged-unconfirmed']:[])];
+  const effects=['not-sent','potentially-applied','unresolved',...(v.review.kind==='failed-jobs-retry'?['accepted-unconfirmed','accepted','advanced-unattributed']:['created-observed','found-unattributed']),...((v.review.kind==='draft-pr-create'||v.review.kind==='pr-create')?['acknowledged-unconfirmed']:[])];
   const effectValid=v.review.kind==='setup-publish'||v.review.kind==='setup-reconcile'?githubPublicationEffect(v.review.kind,v.effect):one(v.effect,effects);
   if(!effectValid||v.effect!==initial&&v.operationId===null)return false;
   const terminal=one(v.state,['complete','refused','cancelled']);
@@ -82,7 +82,7 @@ export function parseAgentGithubActionAccess(raw:unknown):AgentGithubActionAcces
     return freeze(v) as unknown as AgentGithubActionAccess;
   }catch{return null;}
 }
-const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1'};
+const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1'};
 export function createAgentGithubActionPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentGithubActionPort {
   const send=(name:string,body:object)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));if(bytes.length>1024)throw new Error('Invalid GitHub delegation DATA');return invoke(name,bytes);};
   return Object.freeze({access:()=>send('agent_github_action_access',{}),revoke:()=>send('revoke_agent_github_action',{}),allow:(raw:GithubActionSelection)=>{

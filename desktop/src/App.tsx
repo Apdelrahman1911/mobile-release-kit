@@ -624,7 +624,7 @@ export function App() {
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
     syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
-    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:r.kind==='draft-pr-create'?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
+    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
     current:()=>{const service=pathService.current;return {
       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
@@ -921,7 +921,7 @@ export function App() {
       savedOwnersPrerequisiteReason(false, false, undefined, false, true);
     if (blocked) return blocked;
     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
-      return 'Finish the prepared GitHub review before reviewing a draft pull request.';
+      return 'Finish the prepared GitHub review before reviewing a pull request.';
     const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
     return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
       current.account.state === 'observed' && current.repository.state === 'observed'
@@ -943,7 +943,7 @@ export function App() {
   agentGithubActionAdmission.current=()=>{
     const selected=agentGithubActionRef.current?.peerSelection()??null;
     const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
-    const pr=!!selected&&selected.kind==='draft-pr-create'&&pullRequestRef.current?.agentSelected(selected)===true;
+    const pr=!!selected&&(selected.kind==='draft-pr-create'||selected.kind==='pr-create')&&pullRequestRef.current?.agentSelected(selected)===true;
     const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
     const publication=!!selected&&(selected.kind==='setup-publish'||selected.kind==='setup-reconcile')&&githubPublicationControllerRef.current?.agentSelected(selected)===true;
     const blocked=savedCommandBusy(false,false,false,false,false,false,false,publication,repository,false,pr,retry,false,true)??

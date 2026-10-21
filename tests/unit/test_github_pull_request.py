@@ -162,7 +162,7 @@ class DraftPullRequestTests(unittest.TestCase):
             r = p.create(prepared(), draft(), Exchange(change), MemoryJournal())
             self.assertEqual(r["effect"], "acknowledged-unconfirmed"); self.assertIsNone(r["observed"])
 
-    def test_closed_input_and_body_no_fork_path_token_or_ready_for_review(self):
+    def test_closed_input_and_body_no_fork_path_token_or_unreviewed_mode(self):
         for change in ({"base": "refs/heads/main"}, {"head": "fork:branch"}, {"head": "main"}, {"title": "bad\nTitle"},
                        {"body": "bidi\u202e"}, {"body": "<!-- mrk-draft-pr:fake -->"}, {"title": "x" * 257}):
             with self.assertRaises(ValueError): draft(**change)
@@ -171,7 +171,7 @@ class DraftPullRequestTests(unittest.TestCase):
         self.assertIs(role, _ResponseRole.PULL_REQUEST_WRITE)
         for key, value in (("draft", False), ("maintainer_can_modify", True), ("token", "not-a-token")):
             bad = {**body, key: value}
-            with self.assertRaises(ValueError): transport.validate_body(role, p.canonical(bad))
+            with self.assertRaises(ValueError): transport.request_role(t, draft(), HttpRequest("POST", "/repos/owner/app/pulls", p.canonical(bad)))
         for path in ("/repos/other/app/pulls", "/repos/owner/app/pulls/3/merge", "/repos/owner/app/actions/runs/1/rerun", "https://evil.invalid/pulls"):
             with self.assertRaises(ValueError): transport.request_role(t, draft(), HttpRequest("POST", path, p.canonical(body)))
 

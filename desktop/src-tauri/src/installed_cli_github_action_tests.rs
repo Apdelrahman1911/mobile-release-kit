@@ -90,10 +90,11 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
     assert_eq!(
         v["kinds"],
-        serde_json::json!(["repository-create", "draft-pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile"])
+        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile"])
     );
     assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile"]));
     assert_eq!(v["counterSetup"], false);
+    assert_eq!(v["normalPrCreation"], true);
     assert_eq!(v["cliPendingLoad"], false);
     for key in ["oneUse", "mutating", "requiresExactDesktopConsent"] {
         assert_eq!(v[key], true);
@@ -102,7 +103,7 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
         "cliPrepare",
         "privateArguments",
         "readGrantAuthorizesWrites",
-        "normalPrCreation",
+
         "merge",
         "workflowDispatch",
         "automaticRetry",

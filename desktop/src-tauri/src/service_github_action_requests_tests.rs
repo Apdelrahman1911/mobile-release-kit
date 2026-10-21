@@ -75,6 +75,7 @@ fn three_kinds_require_caller_native_and_same_history_in_either_order() {
     for kind in [
         p::Kind::RepositoryCreate,
         p::Kind::DraftPrCreate,
+        p::Kind::PrCreate,
         p::Kind::FailedJobsRetry,
     ] {
         for native_first in [false, true] {
@@ -367,8 +368,9 @@ fn one_32_row_pool_retains_old_three_kind_tombstones_and_refuses_the_33rd() {
             let kind = [
                 p::Kind::RepositoryCreate,
                 p::Kind::DraftPrCreate,
+                p::Kind::PrCreate,
                 p::Kind::FailedJobsRetry,
-            ][n % 3];
+             ][n % 4];
             f.inbox
                 .allow(retained_scope(&f, kind), grant.clone())
                 .unwrap();
@@ -393,7 +395,7 @@ fn one_32_row_pool_retains_old_three_kind_tombstones_and_refuses_the_33rd() {
     assert!(old.iter().all(|e| e.status().unwrap().never_admitted));
     assert_eq!(
         f.inbox
-            .allow(retained_scope(&f, p::Kind::DraftPrCreate), id('5'))
+            .allow(retained_scope(&f, p::Kind::PrCreate), id('5'))
             .err(),
         Some(Error::Busy)
     );

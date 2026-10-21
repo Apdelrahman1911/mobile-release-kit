@@ -373,6 +373,8 @@ impl ConnectionState {
             return Err(refused(p::Reason::Unqualified));
         }
         if !request.valid()
+            || gate.agent().is_some_and(|e| request.kind != p::Kind::Create
+                || !request.prepared.as_ref().is_some_and(|p| p.agent_kind_matches(e.scope().review.kind())))
             || !self.pull_request.view.fits()
             || !crate::github_preflight_protocol::hex(&consent_id, 32)
             || (request.kind == p::Kind::Create) != consent_end.is_some()
@@ -590,6 +592,8 @@ impl ConnectionState {
                     && edit.matches(&c.stamp)
                     && now < c.end
                     && c.prepared.target == target
+                    && c.prepared.valid() && c.draft.matches(&target)
+                    && gate.agent().is_none_or(|e| c.prepared.agent_kind_matches(e.scope().review.kind()))
             })
         {
             return Err(refused(p::Reason::ConsentExpired));
@@ -1100,12 +1104,12 @@ impl ConnectionState {
         let kind = a.kind();
         let a = a.prepared().ok_or_else(|| refused(p::Reason::ConsentExpired))?;
         let c=self.pull_request.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
-        if kind!=crate::service_github_action_protocol::Kind::DraftPrCreate || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.pull_request.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.pull_request.active.is_some() || self.pull_request.exhausted {return Err(refused(p::Reason::ConsentExpired))}
+        if !c.prepared.agent_kind_matches(kind) || !c.draft.matches(&c.prepared.target) || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.pull_request.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.pull_request.active.is_some() || self.pull_request.exhausted {return Err(refused(p::Reason::ConsentExpired))}
         action_delegation::review(kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
     }
     pub(crate) fn pull_request_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
         let c=self.pull_request.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
-        if !Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
+        if !c.prepared.agent_kind_matches(review.data.kind())||!c.draft.matches(&c.prepared.target)||!Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
     }
     pub(crate) fn pull_request_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
         if self.pull_request.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.pull_request.view.clone();self.pull_request.revoke_consent();self.pull_request.finish(before);}

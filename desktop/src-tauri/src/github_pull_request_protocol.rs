@@ -1,4 +1,4 @@
-//! Closed same-repository draft-PR operation DATA. No token getter, source or permission grant.
+//! Closed same-repository PR creation DATA. No token getter, source or permission grant.
 use crate::{
     error::BridgeError,
     github_connection_protocol::{bounds, nullable, numeric_id, GitHubReadControl},
@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 #[path="github_pull_request_management.rs"]
 mod management;
+#[path="github_pull_request_mode.rs"]
+mod mode;
 
 pub(crate) const PROTOCOL: &str = "mrk-github-pull-request/1";
 pub(crate) const EVENT: &str = "github-pull-request-status";
@@ -125,6 +127,8 @@ pub(crate) struct Intent {
     pub(crate) marker: String,
     pub(crate) title_sha256: String,
     pub(crate) body_sha256: String,
+    #[serde(default, skip_serializing_if="mode::CreationMode::is_draft", deserialize_with="mode::present")]
+    pub(crate) creation_mode: mode::CreationMode,
 }
 impl Intent {
     fn valid(&self) -> bool {
@@ -174,6 +178,9 @@ impl Target {
         let Some(i) = &self.intent else {
             return String::new();
         };
+        if i.creation_mode == mode::CreationMode::ReadyForReview {
+            return format!("Create a ready-for-review pull request in {} from {} into {} with the text you reviewed? Reviewers may be notified and existing GitHub workflows may run. No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.", self.scope.repository,i.head,i.base);
+        }
         format!("Create a draft pull request in {} from {} into {} with the text you reviewed? Existing GitHub workflows may run. No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.", self.scope.repository,i.head,i.base)
     }
     pub(crate) fn marker(&self) -> Option<&str> {
@@ -199,6 +206,8 @@ pub(crate) struct Draft {
     pub(crate) head: String,
     pub(crate) title: String,
     pub(crate) body: String,
+    #[serde(default, rename="creationMode", skip_serializing_if="mode::CreationMode::is_draft", deserialize_with="mode::present")]
+    pub(crate) creation_mode: mode::CreationMode,
 }
 impl Drop for Draft {
     fn drop(&mut self) {
@@ -222,6 +231,7 @@ impl Draft {
             marker,
             title_sha256: format!("{:x}", Sha256::digest(self.title.as_bytes())),
             body_sha256: format!("{:x}", Sha256::digest(self.body.as_bytes())),
+            creation_mode: self.creation_mode,
         }
     }
     pub(crate) fn matches(&self, t: &Target) -> bool {
@@ -309,7 +319,7 @@ impl Prepared {
             && hex(&self.head_sha, 40)
             && self.base_sha != self.head_sha
             && self.comparison.valid()
-            && self.draft
+            && self.target.intent.as_ref().is_some_and(|i| self.draft == i.creation_mode.is_draft())
             && self.creation_permission == "not-proven"
             && self.confirmation == self.target.confirmation()
             && canonical(self).is_ok_and(|v| v.len() <= 4096 - 64)
@@ -919,6 +929,7 @@ mod pull_request_data_tests {
     use super::*;
     fn draft() -> Draft {
         Draft {
+            creation_mode: mode::CreationMode::Draft,
             base: "main".into(),
             head: "feature/login".into(),
             title: "Review login".into(),

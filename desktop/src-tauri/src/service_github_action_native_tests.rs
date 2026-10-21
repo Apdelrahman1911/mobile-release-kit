@@ -6,6 +6,7 @@ fn fixed_main_decoder_accepts_only_the_original_closed_three_selections() {
     for kind in [
         p::Kind::RepositoryCreate,
         p::Kind::DraftPrCreate,
+        p::Kind::PrCreate,
         p::Kind::FailedJobsRetry,
     ] {
         let value = serde_json::json!({"selection": {

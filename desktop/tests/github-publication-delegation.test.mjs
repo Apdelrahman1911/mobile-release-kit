@@ -39,7 +39,7 @@ test('publication reference grammar rejects line endings, oversized fields, acce
       for (const suffix of ['\n', '\r\n', '\u2028', '\u2029', ' ', '\0']) assert.equal(parseGithubPublicationSelection({ ...base, [field]: base[field] + suffix }), null);
     }
     for (const revision of [0, -0, -1, 3.1, NaN, Infinity, 0xffff_ffff]) assert.equal(parseGithubPublicationSelection({ ...base, expectedRevision: revision }), null);
-    for (const kind of ['version-counter', 'repository-create', 'draft-pr-create', 'failed-jobs-retry', null]) assert.equal(parseGithubPublicationSelection({ ...base, kind }), null);
+    for (const kind of ['version-counter', 'repository-create', 'draft-pr-create', 'pr-create', 'failed-jobs-retry', null]) assert.equal(parseGithubPublicationSelection({ ...base, kind }), null);
     assert.equal(parseGithubPublicationSelection({ ...base, sessionId: 'a'.repeat(65) }), null);
   }
   let getters = 0; const v = publish(); Object.defineProperty(v, 'consentId', { enumerable: true, get() { getters++; return consentId; } });
@@ -212,7 +212,7 @@ async function grant(h,p,kind) {const selection=h.controller.agentSelection(kind
 async function sharedFinal(p,selection,status=cliStatus(selection)) {const work=p.controller.check();p.last('access').resolve(cliAccess(selection,status));await flush();if(status.settlement!=='unknown')p.last('request').resolve(status);await work;}
 
 test('shared publication codec keeps both strict shapes and GET-only effects without inheriting old mutation fallbacks',async()=>{
-  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','failed-jobs-retry','setup-publish','setup-reconcile']);
+  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile']);
   const calls=[],port=createAgentGithubActionPort(async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;});
   for(const selection of [publish(),reconcile()]) {
     assert.ok(parseGithubActionSelection(selection));assert.ok(parseGithubActionStatus(cliStatus(selection)));assert.ok(parseAgentGithubActionAccess(cliAccess(selection)));

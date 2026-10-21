@@ -1,5 +1,7 @@
-// One closed draft-PR route on the existing native connection. No token, push,
-// merge, ready-for-review, workflow dispatch or provider URL crosses this port.
+// One closed PR creation route on the existing native connection. No token, push,
+// merge, draft conversion, workflow dispatch or provider URL crosses this port.
+import { validPullRequestMode, pullRequestMode } from './githubPullRequestMode.ts';
+import type { PullRequestModeFields } from './githubPullRequestMode.ts';
 import { encodeGitHubBrowserRequest, pullRequestClosed } from './githubPullRequestManagement.ts';
 import type { GitHubBrowserRequest, PullRequestClosed } from './githubPullRequestManagement.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
@@ -15,11 +17,11 @@ export const PULL_REQUEST_REASONS = ['none','invalid-input','target-changed','br
 export type PullRequestReason = typeof PULL_REQUEST_REASONS[number];
 export type PullRequestKind = 'prepare'|'create'|'pending'|'reconcile';
 export type PullRequestEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'closed-confirmed'|'unresolved'|'found-unattributed';
-export interface PullRequestDraft {base:string;head:string;title:string;body:string}
+export interface PullRequestDraft extends PullRequestModeFields {base:string;head:string;title:string;body:string}
 export interface PullRequestScope {projectBinding:string;repository:string;accountId:string;repositoryId:string}
-export interface PullRequestIntent {base:string;head:string;marker:string;titleSha256:string;bodySha256:string}
+export interface PullRequestIntent extends PullRequestModeFields {base:string;head:string;marker:string;titleSha256:string;bodySha256:string}
 export interface PullRequestTarget {scope:PullRequestScope;intent:PullRequestIntent|null}
-export interface PullRequestPrepared {target:PullRequestTarget;baseSha:string;headSha:string;comparison:{aheadBy:number;behindBy:number;totalCommits:number;reportedFiles:number;coverage:'windowed';files:{path:string;change:string}[]};draft:true;creationPermission:'not-proven';confirmation:string}
+export interface PullRequestPrepared {target:PullRequestTarget;baseSha:string;headSha:string;comparison:{aheadBy:number;behindBy:number;totalCommits:number;reportedFiles:number;coverage:'windowed';files:{path:string;change:string}[]};draft:boolean;creationPermission:'not-proven';confirmation:string}
 export interface PullRequestAcknowledgement {id:string;number:string;url:string}
 export interface PullRequestPending {prepared:PullRequestPrepared;claimed:boolean;acknowledged:PullRequestAcknowledgement|null;closed?:PullRequestClosed}
 export interface PullRequestConsent {id:string;expiresAt:string;prepared:PullRequestPrepared}
@@ -34,15 +36,16 @@ const rev=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>0
 const count=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>=0&&v<=0x7fff_ffff;
 const hex=(v:unknown,n:number):v is string=>typeof v==='string'&&v.length===n&&!/[^0-9a-f]/.test(v);
 const text=(v:unknown,n:number,multiline=false,empty=false):v is string=>typeof v==='string'&&(empty||!!v.trim())&&new TextEncoder().encode(v).length<=n&&!/[\p{Cc}\p{Cf}\p{Cs}]/u.test(multiline?v.replaceAll('\n',''):v)&&!v.includes('mrk-draft-pr:');
-function draft(v:unknown):v is PullRequestDraft{return keys(v,['base','head','title','body'])&&branch(v.base)&&branch(v.head)&&v.base!==v.head&&text(v.title,256)&&text(v.body,4096,true,true);}
+function modeKeys(v:unknown,fields:string[]):v is Record<string,unknown> {return keys(v,fields)||keys(v,[...fields,'creationMode'])&&validPullRequestMode(v);}
+function draft(v:unknown):v is PullRequestDraft{return modeKeys(v,['base','head','title','body'])&&branch(v.base)&&branch(v.head)&&v.base!==v.head&&text(v.title,256)&&text(v.body,4096,true,true);}
 export function parsePullRequestDraft(raw:unknown):PullRequestDraft|null{try{const v=copyBoundedComparisonData(raw,16*1024,16);return draft(v)?v:null;}catch{return null;}}
 function target(v:unknown):v is PullRequestTarget{
   if(!keys(v,['scope','intent'])||!keys(v.scope,['projectBinding','repository','accountId','repositoryId'])||!hex(v.scope.projectBinding,64)||!coordinate(v.scope.repository)||!numeric(v.scope.accountId)||!numeric(v.scope.repositoryId))return false;
-  const i=v.intent;return i===null||keys(i,['base','head','marker','titleSha256','bodySha256'])&&branch(i.base)&&branch(i.head)&&i.base!==i.head&&hex(i.marker,32)&&hex(i.titleSha256,64)&&hex(i.bodySha256,64);
+  const i=v.intent;return i===null||modeKeys(i,['base','head','marker','titleSha256','bodySha256'])&&branch(i.base)&&branch(i.head)&&i.base!==i.head&&hex(i.marker,32)&&hex(i.titleSha256,64)&&hex(i.bodySha256,64);
 }
-export function pullRequestConfirmation(t:PullRequestTarget):string{return t.intent?`Create a draft pull request in ${t.scope.repository} from ${t.intent.head} into ${t.intent.base} with the text you reviewed? Existing GitHub workflows may run. No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.`:'';}
+export function pullRequestConfirmation(t:PullRequestTarget):string{if(t.intent&&pullRequestMode(t.intent)==='ready-for-review')return `Create a ready-for-review pull request in ${t.scope.repository} from ${t.intent.head} into ${t.intent.base} with the text you reviewed? Reviewers may be notified and existing GitHub workflows may run. No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.`;return t.intent?`Create a draft pull request in ${t.scope.repository} from ${t.intent.head} into ${t.intent.base} with the text you reviewed? Existing GitHub workflows may run. No code is pushed or merged. This does not authorize a release. Stopping cannot undo a sent request.`:'';}
 function prepared(v:unknown):v is PullRequestPrepared{
-  if(!keys(v,['target','baseSha','headSha','comparison','draft','creationPermission','confirmation'])||!target(v.target)||!v.target.intent||!hex(v.baseSha,40)||!hex(v.headSha,40)||v.baseSha===v.headSha||v.draft!==true||v.creationPermission!=='not-proven'||v.confirmation!==pullRequestConfirmation(v.target))return false;
+  if(!keys(v,['target','baseSha','headSha','comparison','draft','creationPermission','confirmation'])||!target(v.target)||!v.target.intent||!hex(v.baseSha,40)||!hex(v.headSha,40)||v.baseSha===v.headSha||v.draft!==(pullRequestMode(v.target.intent)==='draft')||v.creationPermission!=='not-proven'||v.confirmation!==pullRequestConfirmation(v.target))return false;
   const c=v.comparison;if(!keys(c,['aheadBy','behindBy','totalCommits','reportedFiles','coverage','files'])||!count(c.aheadBy)||c.aheadBy<1||!count(c.behindBy)||!count(c.totalCommits)||!count(c.reportedFiles)||c.coverage!=='windowed'||!Array.isArray(c.files)||c.files.length>4||c.reportedFiles<c.files.length)return false;
   const paths=new Set<string>();return c.files.every(f=>{if(!keys(f,['path','change'])||!text(f.path,192)||!one(f.change,['added','removed','modified','renamed','copied','changed','unchanged'])||paths.has(f.path))return false;paths.add(f.path);return true;})&&new TextEncoder().encode(JSON.stringify(v)).length<=4096-64;
 }
@@ -86,7 +89,7 @@ export function pullRequestError(raw:unknown):{reason:PullRequestReason;notAdmit
   }catch{/* Do not call getters or display private exception text. */}return {reason:'response-invalid',notAdmitted:false};
 }
 export const PULL_REQUEST_HELP:Readonly<Record<PullRequestReason,string>>=Object.freeze({
-  none:'Review two existing branches, then explicitly create a draft pull request.',
+  none:'Review two existing branches and the selected mode, then explicitly create the pull request.',
   'invalid-input':'Choose two different branch names, not URLs or refs/ paths. Add a short title and optionally a description; do not include secrets.',
   'target-changed':'The selected project, GitHub account or repository changed. Your text is kept; finish the original task before reviewing again.',
   'branches-changed':'A branch or the pull-request details changed. Do not repeat a sent request. Check previous attempts, then review the actual GitHub page.',
@@ -106,10 +109,10 @@ export const PULL_REQUEST_HELP:Readonly<Record<PullRequestReason,string>>=Object
   'journal-unavailable':'The original attempt could not be safely recorded or read. Keep the app’s files; do not start another Create to bypass it.',
   'previous-attempt':'A saved attempt already protects this repository and branch pair from a duplicate. Use its original GitHub account to load and check it below; a new review or account cannot authorize another Create.',
   unresolved:'No exact acknowledged result was confirmed. Missing or inaccessible results do not authorize another Create.',
-  unattributed:'A matching draft was found, but the original creation acknowledgement was not retained. This is not proof this app created it; no repeat is authorized.',
+  unattributed:'A matching pull request was found, but the original creation acknowledgement was not retained. This is not proof this app created it; no repeat is authorized.',
   'resources-unavailable':'The original task could not be safely retained. No replacement was started.',
-  'runtime-unavailable':'Draft pull requests are unavailable in this application runtime.',
-  unqualified:'This installed runtime has not admitted draft-PR creation. Preview never contacts GitHub.',
+  'runtime-unavailable':'Pull request creation is unavailable in this application runtime.',
+  unqualified:'This installed runtime has not admitted PR creation. Preview never contacts GitHub.',
   'not-connected':'Connect and verify this existing repository and GitHub account first.',
   busy:'An original task is still active or closing. Check status and Stop remain available.',
   'cleanup-unknown':'Original cleanup is unconfirmed. Keep the app and its files; do not reconnect or repeat Create to dismiss this warning.',

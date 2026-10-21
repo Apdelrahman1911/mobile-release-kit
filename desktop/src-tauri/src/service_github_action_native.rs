@@ -74,7 +74,7 @@ impl DocumentBinding {
                     )
                     .available
             }
-            p::Kind::DraftPrCreate => {
+            p::Kind::DraftPrCreate | p::Kind::PrCreate => {
                 s.github
                     .pull_request_status(supervisor.pull_request_profile_available(), now, gate)
                     .available
@@ -110,7 +110,7 @@ impl DocumentBinding {
             p::Kind::RepositoryCreate => s
                 .github
                 .repository_create_agent_review(a, generation, &root, &edit, now),
-            p::Kind::DraftPrCreate => s
+            p::Kind::DraftPrCreate | p::Kind::PrCreate => s
                 .github
                 .pull_request_agent_review(a, generation, &root, &edit, now),
             p::Kind::FailedJobsRetry => s
@@ -244,7 +244,7 @@ impl DocumentBinding {
             .map_err(public)?;
         let installed = match review.data.kind() {
             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
-            p::Kind::DraftPrCreate => s.github.pull_request_agent_allow(&review, &scope),
+            p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_allow(&review, &scope),
             p::Kind::FailedJobsRetry => s.github.actions_retry_agent_allow(&review, &scope),
             p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_allow(&review, &scope),
         };
@@ -273,7 +273,7 @@ impl DocumentBinding {
             scope.revoke(p::Reason::PermissionRevoked, Instant::now());
             match scope.review.kind() {
                 p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(&scope),
-                p::Kind::DraftPrCreate => s.github.pull_request_agent_revoke(&scope),
+                p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(&scope),
                 p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(&scope),
                 p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(&scope),
             }
@@ -337,7 +337,7 @@ impl DocumentBinding {
                     Some(entry.clone()),
                 )?;
             }
-            p::Kind::DraftPrCreate => {
+            p::Kind::DraftPrCreate | p::Kind::PrCreate => {
                 let v = v.prepared().ok_or_else(BridgeError::invalid)?;
                 let a = crate::github_pull_request_protocol::CreateArgs {
                     session_id: v.session_id.clone(),
