@@ -708,4 +708,135 @@ class PreparedPackageData(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt): P.finish_staging(Op())
 
 
+class PackageRoleWorkflowData(unittest.TestCase):
+    """Actual shell path selection and helper input opens; no Mac tools or signing."""
+
+    def package_segment(self):
+        workflow = (ROOT / P.WORKFLOW).read_text()
+        marker = '      - name: Build the fixed one-shot root Installer and scripts-only package\n'
+        self.assertEqual(workflow.count(marker), 1)
+        step = workflow.split(marker, 1)[1].split('\n      - name:', 1)[0]
+        script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        start = '# xar is not a streaming/O_EXCL tool: reserve its private output parent.\n'
+        end = 'unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD'
+        self.assertEqual(script.count(start), 1)
+        self.assertEqual(script.count(end), 1)
+        script = start + script.split(start, 1)[1].split(end, 1)[0]
+        native = '/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \\\n    /usr/bin/xar'
+        self.assertEqual(script.count(native), 1)
+        # Intercept only XAR. Real fixed mkdir/no-clobber/cwd/status logic runs.
+        return '''set -euo pipefail
+set -o noclobber
+umask 077
+inert_xar() {
+  [[ $# == 6 && "$1" == -c && "$2" == -f && "$4" == --compression=none && "$5" == PackageInfo && "$6" == Scripts ]] || exit 97
+  printf 'INERT XAR input, never installed\\n' > "$3"
+  printf '%s\\n' "$3"
+}
+''' + script.replace(native, 'inert_xar', 1)
+
+    def produce(self, work, role):
+        (work / 'package-parts').mkdir(mode=0o700)
+        environment = dict(PATH='/usr/bin:/bin', LC_ALL='C', TZ='UTC', MRK_MACOS_WORK=str(work))
+        if role is not None:
+            environment['MRK_MACOS_PACKAGE_ROLE'] = role
+        return subprocess.run(['/bin/bash', '-c', self.package_segment()], env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+
+    def consume_input(self, helper, tool, work, role):
+        # Stub only earlier source/audit/clock prerequisites. Exercise actual
+        # role dispatch, directory/original opens and held input-byte reads,
+        # stopping BEFORE productbuild, signing or any native command.
+        environment = dict(GITHUB_SHA='1'*40, GITHUB_WORKFLOW_SHA='1'*40,
+            GITHUB_WORKFLOW_REF='inert/source@'+'1'*40, GITHUB_RUN_ID='1',
+            GITHUB_RUN_ATTEMPT='1', MRK_MACOS_PACKAGE_ROLE=role)
+        native = mock.Mock(side_effect=AssertionError('no native call is permitted'))
+        operation = helper.Operation(SimpleNamespace(run_owned=native), work / 'unused-source',
+            work, 'finalize-package', environment, tool)
+        self.assertEqual(operation.install_product, role == 'ordinary-image')
+        operation.signing = object()
+        operation.install_presentation_sources = [None, None]
+        (work / 'scripts').mkdir(mode=0o700)
+        original = work / operation.packager_filename
+        original.write_bytes(b'INERT original package\n'); original.chmod(0o600)
+        operation.work_entry = operation.register(os.open(work, helper.READ_FLAGS | os.O_DIRECTORY), 'work', 'directory')
+        operation.work_entry['identity'] = helper.directory_identity(os.fstat(operation.work_entry['fd']))
+        captured = []
+        class InputRead(Exception): pass
+        def audit(entry, path):
+            captured.append(entry)
+            raise InputRead()
+        def component_audit(label, *args):
+            self.assertEqual(label, 'install-product-component-audit')
+            captured.append(operation.install_component_inputs[1])
+            raise InputRead()
+        try:
+            with contextlib.ExitStack() as stack:
+                for name in ('notary_space', 'installer_sources', 'notary_clock', 'selected_package_store', 'notary_snapshot'):
+                    stack.enter_context(mock.patch.object(operation, name, return_value=None))
+                stack.enter_context(mock.patch.object(operation, 'source_original', return_value=None))
+                stack.enter_context(mock.patch.object(operation, 'read', return_value=b'inert source'))
+                stack.enter_context(mock.patch.object(helper, 'notary_service', return_value=None))
+                stack.enter_context(mock.patch.object(operation, 'final_package_audit', side_effect=audit))
+                stack.enter_context(mock.patch.object(operation, 'final_package_io', side_effect=component_audit))
+                with self.assertRaises(InputRead):
+                    operation.finalize_package()
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(os.pread(captured[0]['fd'], 128, 0), b'INERT XAR input, never installed\n')
+            self.assertEqual(captured[0]['role'], 'install-product-component' if operation.install_product else 'final-package-unsigned-original')
+            native.assert_not_called()
+            self.assertEqual((operation.calls, operation.credential_calls, operation.credential_contexts), ([], [], []))
+            self.assertFalse(operation.final_package_complete or operation.receipt['passed'])
+        finally:
+            for entry in reversed(operation.entries):
+                operation.close(entry)
+        self.assertEqual(operation.errors, [])
+        self.assertTrue(all(entry['closed'] and entry['fd'] is None for entry in operation.entries))
+
+    def test_workflow_package_input_matches_both_actual_helper_roles(self):
+        _, tool, helper = real_modules()
+        for role, directory in (('ordinary-image', 'package-component'), ('installed-shell-observation', 'package-unsigned')):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                result = self.produce(work, role)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.consume_input(helper, tool, work, role)
+                self.assertEqual(result.stdout, str(work / directory / 'MobileReleaseKit.pkg') + '\n')
+                self.assertEqual((work / 'package-xar.status').read_bytes(), b'0\n')
+                self.assertEqual(stat.S_IMODE((work / directory).stat().st_mode), 0o700)
+                self.assertFalse((work / ('package-unsigned' if directory == 'package-component' else 'package-component')).exists())
+
+    def test_workflow_unknown_or_missing_role_refuses_before_create_or_xar(self):
+        for role in (None, '', 'other', 'ordinary-image/../package-unsigned'):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                result = self.produce(work, role)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(sorted(path.name for path in work.iterdir()), ['package-parts'])
+
+    def test_workflow_existing_package_parent_or_output_is_never_replaced(self):
+        for role, directory in (('ordinary-image', 'package-component'), ('installed-shell-observation', 'package-unsigned')):
+            for occupied in ('directory', 'output', 'symlink'):
+                with self.subTest(role=role, occupied=occupied), tempfile.TemporaryDirectory() as temporary:
+                    work = Path(temporary); parent = work / directory
+                    if occupied == 'symlink':
+                        parent.symlink_to('missing-owned-test-target', target_is_directory=True)
+                    else:
+                        parent.mkdir(mode=0o700)
+                        if occupied == 'output':
+                            (parent / 'MobileReleaseKit.pkg').write_bytes(b'preserve existing package')
+                    before = parent.lstat()
+                    result = self.produce(work, role)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, '')
+                    self.assertFalse((work / 'package-xar.status').exists())
+                    after = parent.lstat()
+                    self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
+                    if occupied == 'output':
+                        self.assertEqual((parent / 'MobileReleaseKit.pkg').read_bytes(), b'preserve existing package')
+                    elif occupied == 'symlink':
+                        self.assertEqual(os.readlink(parent), 'missing-owned-test-target')
+
+
 if __name__=='__main__': unittest.main()

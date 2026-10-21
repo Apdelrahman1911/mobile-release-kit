@@ -1819,21 +1819,26 @@ jobs:
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
           [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
-          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-component"
-          [[ ! -e "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" ]] || exit 1
+          case "${MRK_MACOS_PACKAGE_ROLE-}" in
+            ordinary-image) package_output="$MRK_MACOS_WORK/package-component" ;;
+            installed-shell-observation) package_output="$MRK_MACOS_WORK/package-unsigned" ;;
+            *) exit 1 ;;
+          esac
+          /bin/mkdir -m 700 "$package_output"
+          [[ ! -e "$package_output/MobileReleaseKit.pkg" && ! -L "$package_output/MobileReleaseKit.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-parts" || exit
             /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
-              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg" \
+              /usr/bin/xar -c -f "$package_output/MobileReleaseKit.pkg" \
               --compression=none PackageInfo Scripts
           )
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
           [[ $xar_status == 0 ]] || exit "$xar_status"
-          # This root-owned Scripts component is not final P. The next fixed owner
-          # first productbuilds the SOURCE ReadMe envelope, then signs the outer package.
+          # Neither output is final P. The same next owner productbuilds only the
+          # ordinary component; the observer keeps its completed flat package.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Sign and notarize the same completed observer package before final P' || 'Build fixed Installer presentation then sign and notarize the completed outer package before final P' }}
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
