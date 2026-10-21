@@ -236,6 +236,7 @@ pub enum RequestBody {
     #[serde(rename="store.cancel")] StoreCancel(crate::service_store_protocol::Query),
     #[serde(rename="apple-provisioning.cancel")] AppleProvisioningCancel(crate::service_apple_provisioning_protocol::Query),
     #[serde(rename="version-edit.submit")] VersionEditSubmit(crate::service_version_edit_protocol::Submit),
+    #[serde(rename="version-edit.prepare")] VersionEditPrepare(crate::service_version_edit_prepare_protocol::Prepare),
     #[serde(rename="version-edit.status")] VersionEditStatus(crate::service_version_edit_protocol::Query),
     #[serde(rename="version-edit.cancel")] VersionEditCancel(crate::service_version_edit_protocol::Query),
     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
@@ -311,6 +312,7 @@ pub enum ResponseBody {
     UploadKeyRequest(crate::service_upload_key_protocol::Status),
     ConfigurationRequest(crate::service_configuration_protocol::Status),
     VersionEditRequest(crate::service_version_edit_protocol::Status),
+    VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
     StoreRequest(crate::service_store_protocol::Status),
     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
@@ -370,9 +372,10 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
-    if matches!(&request.request,RequestBody::VersionEditSubmit(_)|RequestBody::VersionEditStatus(_)|RequestBody::VersionEditCancel(_))
+    if matches!(&request.request,RequestBody::VersionEditPrepare(_)|RequestBody::VersionEditSubmit(_)|RequestBody::VersionEditStatus(_)|RequestBody::VersionEditCancel(_))
         && bytes.len()>crate::service_version_edit_protocol::REQUEST_BYTES {return Err(Error::InvalidRequest)}
     if let RequestBody::VersionEditSubmit(v)=&request.request{v.validate()?;}
+    if let RequestBody::VersionEditPrepare(v)=&request.request{v.validate()?;}
     if matches!(&request.request,RequestBody::GitHubActionSubmit(_)|RequestBody::GitHubActionStatus(_)|RequestBody::GitHubActionCancel(_)) && bytes.len()>crate::service_github_action_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     match &request.request {
         RequestBody::MetadataTextPrepare(_)=>return crate::service_metadata_text_protocol::decode_prepare_request(bytes),
@@ -461,6 +464,11 @@ fn validate_response(response: &Response) -> Result<(), Error> {
     }
     if response.version != VERSION { return Err(Error::InvalidRequest); }
     match &response.response {
+        ResponseBody::VersionEditPreparation(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+            crate::service_version_edit_protocol::bounded(response,crate::service_version_edit_prepare_protocol::STATUS_BYTES)?;
+        },
         ResponseBody::VersionEditRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}

@@ -86,6 +86,7 @@ Usage:\n\
   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n\
   mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n\
   mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -302,9 +303,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
-            "versionEdit": {"scope":"already-desktop-prepared-version-save","commands":version_edit::COMMANDS,"defaultEnabled":false,"oneUse":true,
+            "versionEdit": {"scope":"existing-source-version-prepare-and-separately-approved-save","commands":version_edit::COMMANDS,"defaultEnabled":false,"oneUse":true,
                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
-                "cliOpenPrepare":false,"readGrantAuthorizesEdits":false,"reservedHandoffReconstructed":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+                "cliOpenPrepare":true,"readGrantAuthorizesEdits":false,"reservedHandoffReconstructed":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
             "versionTag": {"scope":"desktop-reviewed-future-tag-binding","commands":play_cleanup::TAG_COMMANDS,
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
@@ -392,7 +393,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
         text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
-        text.push_str("\nVersion editing delegates only one existing Desktop-prepared review. No CLI Open/Prepare or automatic allocation.\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR, failed-job retry, five-file setup Publish or GET-only original-intent Reconcile. Load/Prepare remain explicit Desktop actions; Counter setup is excluded. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
@@ -497,6 +498,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
+        p::ResponseBody::VersionEditPreparation(_) => "Use version-edit-status with the same original request ID. Review and allow Save separately in Desktop.\n".into(),
         p::ResponseBody::GitHubActionRequest(_) => "Use github-status with the retained original IDs; never replay an unconfirmed GitHub action.\n".into(),
         p::ResponseBody::PlayCleanupRequest(value) => match value.origin.purpose {
             crate::service_play_cleanup_protocol::Purpose::PlayCleanup => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),

@@ -485,6 +485,7 @@ const VERSION_FUTURE:usize = 2*crate::protocol::NODE_LIMIT*512
 impl EditOwner {
     pub(crate) fn version_agent_edit_backing(&self)->Result<usize,BridgeError>{
         let r=self.inner.registry.try_lock().map_err(|_|invalid_owner())?;
+        if r.active.as_ref().is_some_and(|a|a.session.agent_version_prepare.is_some()){drop(r);return self.version_prepare_edit_backing()}
         if self.inner.poisoned.load(Ordering::SeqCst)||r.exhausted{return Err(edit_unknown())}
         let mut n=Usage{bytes:size_of::<Registry>(),nodes:0};
         r.generation.heap(&mut n)?;r.loss_generation.heap(&mut n)?;r.window.heap(&mut n)?;
@@ -504,6 +505,44 @@ impl EditOwner {
         }
         n.add(VERSION_FUTURE)?;Ok(n.bytes)
     }
+}
+
+// Unlike the already-Prepared allowance above, this quote precedes Open.
+// Three TOTAL frames + transient Seed clone + two whole-active Status clones.
+pub(in crate::edit_owner) const VERSION_PREPARE_REPRESENTATION:usize=crate::service_version_edit_prepare_protocol::FRAME_NODES*512+2*crate::service_version_edit_prepare_protocol::FRAME_BYTES;
+pub(in crate::edit_owner) const VERSION_PREPARE_FUTURE:usize=6*VERSION_PREPARE_REPRESENTATION
+    +2*v::REQUEST_LIMIT+2*v::STATUS_LIMIT+2*crate::service_version_edit_prepare_protocol::FRAME_BYTES
+    +1024*1024+size_of::<Session>()+size_of::<crate::edit_owner::agent_version_prepare::Link>()
+    +4*(size_of::<tokio::sync::oneshot::Sender<Result<(),BridgeError>>>()+size_of::<tokio::sync::oneshot::Receiver<Result<(),BridgeError>>>()+256)
+    +2*size_of::<crate::service_version_edit_prepare_requests::Call>();
+impl EditOwner {
+    pub(crate) fn version_prepare_edit_backing(&self)->Result<usize,BridgeError>{
+        let r=self.inner.registry.try_lock().map_err(|_|invalid_owner())?;
+        if self.inner.poisoned.load(Ordering::SeqCst)||r.exhausted{return Err(edit_unknown())}
+        let mut n=Usage{bytes:size_of::<Registry>(),nodes:0};
+        r.generation.heap(&mut n)?;r.loss_generation.heap(&mut n)?;r.window.heap(&mut n)?;
+        for keys in [&r.blocked_projects,&r.image_recovery_projects,&r.workflow_recovery_projects]{n.add(keys.len().checked_mul(1024).ok_or_else(invalid_owner)?)?;for key in keys{key.heap(&mut n)?;}}
+        n.add(r.domain_blocks.0.len().checked_mul(4096).ok_or_else(invalid_owner)?)?;for key in r.domain_blocks.0.keys(){key.heap(&mut n)?;}
+        if let Some(p)=&r.last{n.add(projection(p)?.checked_mul(if p.domain==EditDomain::ReleaseVersion{3}else{1}).ok_or_else(invalid_owner)?)?;}
+        if let Some(a)=&r.active{if a.session.agent_version_prepare.is_none()||projection(&a.projection)?>VERSION_PREPARE_REPRESENTATION{return Err(invalid_owner())}}
+        // Prospective actual reserved Sources/custody are charged even before
+        // the optional handoff is taken; manual receives no discard credit.
+        n.add(NativeReservedVersionHandoff::backing_bytes().ok_or_else(invalid_owner)?)?;
+        n.add(VERSION_PREPARE_FUTURE)?;Ok(n.bytes)
+    }
+}
+pub(in crate::edit_owner) fn version_prepare_prospective(p:&EditProjection,frame:&ChildFrame)->Result<(),BridgeError>{
+    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};p.heap(&mut n)?;
+    match frame{
+        ChildFrame::ReleaseVersionOpened(o)=>{o.revision.heap(&mut n)?;o.source.heap(&mut n)?;o.name_key.heap(&mut n)?;o.build_key.heap(&mut n)?;o.values.heap(&mut n)?;o.baseline.heap(&mut n)?;},
+        ChildFrame::ReleaseVersionPrepared(v)=>{v.revision.heap(&mut n)?;v.plan_token.heap(&mut n)?;v.view.heap(&mut n)?;},
+        ChildFrame::ReleaseVersionTerminal(_,_)=>(),_=>return Err(invalid_owner()),
+    }
+    if n.bytes>VERSION_PREPARE_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
+}
+pub(in crate::edit_owner) fn version_prepare_submission(p:&EditProjection,submission:&v::Submission)->Result<(),BridgeError>{
+    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};p.heap(&mut n)?;submission.heap(&mut n)?;
+    if n.bytes>VERSION_PREPARE_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
 }
 
 #[cfg(test)]
@@ -653,6 +692,61 @@ mod tests {
             FUTURE,
             6 * REPRESENTATION + 2 * c::REQUEST_LIMIT + 2 * c::STATUS_LIMIT + 1024 * 1024
         );
+    }
+    #[test]
+    fn version_preparation_retains_original_last_backing_without_snapshot_credit() {
+        let owner=EditOwner::new(RuntimeConfig::packaged(PathBuf::from("/never-opened-version-prepare-memory")));
+        let initial=owner.version_prepare_edit_backing().unwrap();
+        let mut p=data();p.domain=EditDomain::ReleaseVersion;
+        let mut name=String::with_capacity(1024*1024);name.push_str("1.2");
+        let capacity=name.capacity();let pointer=name.as_ptr();
+        p.release_version=Some(v::Details{checkout:None,prepared:None,recovery:None,
+            submission:Some(v::Submission{intent:v::Intent::Edit,values:v::Values{name,build:"8".into()},
+                expected_baseline:v::Baseline{saved_config:v::ContentDigest{bytes:2,sha256:"a".repeat(64)},
+                    saved_version:v::BaselineFile::Present{bytes:20,sha256:"b".repeat(64)}}})});
+        owner.inner.lock().last=Some(p);
+        assert!(owner.version_prepare_edit_backing().unwrap()>=initial+3*capacity);
+        assert_eq!(owner.inner.lock().last.as_ref().unwrap().release_version.as_ref().unwrap()
+            .submission.as_ref().unwrap().values.name.as_ptr(),pointer);
+        // Refusing an overbound original does not erase it to make the next Open fit.
+        owner.inner.lock().last.as_mut().unwrap().release_version.as_mut().unwrap()
+            .submission.as_mut().unwrap().values.name.reserve_exact(24*1024*1024);
+        assert!(owner.version_prepare_edit_backing().is_err());
+        assert!(owner.inner.lock().last.is_some());
+        let mut n=Usage{bytes:1,nodes:0};
+        assert!(n.add(usize::MAX).is_err());
+    }
+    #[test]
+    fn version_preparation_whole_active_plus_incoming_frame_is_bounded_before_adoption() {
+        let mut p=data();p.domain=EditDomain::ReleaseVersion;
+        let baseline=v::Baseline{saved_config:v::ContentDigest{bytes:2,sha256:"a".repeat(64)},
+            saved_version:v::BaselineFile::Present{bytes:20,sha256:"b".repeat(64)}};
+        p.release_version=Some(v::Details{checkout:Some(v::Checkout{revision:"b".repeat(32),
+            source:"public/version.properties".into(),name_key:"VERSION_NAME".into(),build_key:"BUILD_NUMBER".into(),
+            ios_enabled:false,values:Some(v::Values{name:String::new(),build:"7".into()}),baseline}),
+            prepared:None,submission:None,recovery:None});
+        let half=(VERSION_PREPARE_REPRESENTATION-projection(&p).unwrap())/2;
+        p.release_version.as_mut().unwrap().checkout.as_mut().unwrap().values.as_mut().unwrap().name=String::with_capacity(half);
+        let held=projection(&p).unwrap();
+        let incoming=VERSION_PREPARE_REPRESENTATION-held+1;
+        let mut view:v::PreparedView=serde_json::from_value(json!({
+            "schemaVersion":1,"source":"public/version.properties","nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER",
+            "iosEnabled":false,"intent":"edit","values":{"name":"1.2","build":"8"},
+            "file":{"path":"public/version.properties","action":"replace","before":{"state":"present","text":"x","bytes":1,"sha256":"a".repeat(64)},
+                "after":{"text":"y","bytes":1,"sha256":"b".repeat(64)},"requestedMode":420,"preserveMode":true},
+            "createDirectories":[],"lineEndings":{"before":[],"after":[],"finalNewlineBefore":false,"finalNewlineAfter":false,"preserved":true},
+            "validation":{"valid":true,"state":"format-valid","issues":[]}
+        })).unwrap();
+        // Capacity-only DATA exercises the real borrowed quote; not a valid
+        // native Prepared receipt or a substitute for its content parser.
+        view.file.after.text=String::with_capacity(incoming);
+        let frame=ChildFrame::ReleaseVersionPrepared(v::PreparedReply{revision:"b".repeat(32),
+            plan_token:"c".repeat(32),scope_resources:ResourceState::Settled,view});
+        assert!(version_prepare_prospective(&data(),&frame).is_ok());
+        assert!(version_prepare_prospective(&p,&frame).is_err());
+        assert_eq!(projection(&p).unwrap(),held);
+        assert!(p.release_version.as_ref().unwrap().prepared.is_none());
+        assert!(VERSION_PREPARE_FUTURE>=6*VERSION_PREPARE_REPRESENTATION+2*v::REQUEST_LIMIT+2*v::STATUS_LIMIT);
     }
 }
 

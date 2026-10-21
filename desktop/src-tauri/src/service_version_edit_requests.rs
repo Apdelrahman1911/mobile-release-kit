@@ -19,7 +19,8 @@ pub(crate) const DOCUMENT_BACKING: usize = 32
     * (2 * p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>())
     + 32 * 128
     + 8 * (crate::service_protocol::REQUEST_BYTES + p::REQUEST_BYTES + 4 * p::STATUS_BYTES)
-    + 2 * p::STATUS_BYTES;
+    + 2 * p::STATUS_BYTES
+    + crate::service_version_edit_prepare_requests::DOCUMENT_BACKING;
 
 pub(crate) struct Scope {
     pub saved: SavedPoint,
@@ -40,6 +41,7 @@ pub(crate) struct Lease {
     wake: Weak<Notify>,
     state: Mutex<LeaseState>,
     failed: AtomicBool,
+    preparation: std::sync::OnceLock<Weak<crate::service_version_edit_prepare_requests::Entry>>,
 }
 impl Lease {
     pub(crate) fn new(
@@ -71,6 +73,7 @@ impl Lease {
                 entry: Weak::new(),
             }),
             failed: AtomicBool::new(false),
+            preparation: std::sync::OnceLock::new(),
         }))
     }
     fn lock(&self) -> Result<MutexGuard<'_, LeaseState>, Error> {
@@ -110,6 +113,7 @@ impl Lease {
         if s.claimed || s.spent {
             return Err(Error::Busy);
         }
+        if let Some(p) = self.preparation()? { p.gui_claim(&self.review)?; }
         s.spent = true;
         drop(s);
         self.wake();
@@ -168,6 +172,13 @@ impl Lease {
             _ => end.min(now + std::time::Duration::from_millis(100)),
         }
     }
+    pub(crate) fn associate(&self, entry:&Arc<crate::service_version_edit_prepare_requests::Entry>)->Result<(),Error>{
+        if !entry.accepts_lease(self)?{return Err(Error::Conflict)}
+        self.preparation.set(Arc::downgrade(entry)).map_err(|_|Error::Conflict)
+    }
+    pub(crate) fn preparation(&self)->Result<Option<Arc<crate::service_version_edit_prepare_requests::Entry>>,Error>{
+        self.preparation.get().map(|w|w.upgrade().ok_or(Error::StateUnknown)).transpose()
+    }
     fn submit(self: &Arc<Self>, input: p::Submit) -> Result<Arc<Entry>, Error> {
         let mut s = self.lock()?;
         if !self.live_locked(&s, Instant::now())?
@@ -192,6 +203,7 @@ impl Lease {
             }),
             failed: AtomicBool::new(false),
         });
+        if let Some(p)=self.preparation()?{p.submitted(self,&entry.input.origin)?;}
         s.claimed = true;
         s.entry = Arc::downgrade(&entry);
         drop(s);
@@ -356,9 +368,22 @@ impl Entry {
         self.change(&mut r)
     }
 }
+enum Retained {
+    Apply(Arc<Entry>),
+    Preparation(Arc<crate::service_version_edit_prepare_requests::Entry>),
+}
+impl Retained {
+    fn origin(&self)->&p::Query{match self{Self::Apply(e)=>&e.input.origin,Self::Preparation(e)=>&e.input.origin}}
+    fn occupied(&self)->Result<bool,Error>{match self{Self::Apply(e)=>e.occupied(),Self::Preparation(e)=>e.occupied()}}
+    fn excludes(&self,lease:&Lease)->bool{
+        if !self.occupied().unwrap_or(true){return false}
+        match self{Self::Preparation(e)=>!lease.preparation().ok().flatten().is_some_and(|p|Arc::ptr_eq(e,&p)&&e.accepts_lease(lease).unwrap_or(false)),Self::Apply(_)=>true}
+    }
+    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Apply(e)=>e.cancel(at),Self::Preparation(e)=>e.cancel(at)}}
+}
 struct Book {
     lease: Option<Arc<Lease>>,
-    rows: Vec<Arc<Entry>>,
+    rows: Vec<Retained>,
     revoked: Vec<Id>,
     closed: bool,
 }
@@ -401,7 +426,7 @@ impl Inbox {
         if b.closed || b.revoked.contains(&lease.nonce) || b.revoked.len() >= p::REQUEST_LIMIT {
             return Err(Error::Conflict);
         }
-        if b.rows.iter().any(|e| e.occupied().unwrap_or(true))
+        if b.rows.iter().any(|e| e.excludes(&lease))
             || b.lease
                 .as_ref()
                 .is_some_and(|l| l.live(Instant::now()).unwrap_or(true))
@@ -410,10 +435,13 @@ impl Inbox {
         }
         install()?;
         b.revoked.push(lease.nonce.clone());
+        // Once the native install succeeded, retain that same lease even if
+        // an original READ/revoke race refuses its metadata association.
+        let association=lease.preparation().and_then(|p|p.map_or(Ok(()),|p|p.installed(&lease).map_err(|e|{p.unknown();e})));
         b.lease = Some(lease);
         drop(b);
         self.notify();
-        Ok(())
+        association
     }
     pub(crate) fn revoke(&self, nonce: &Id, at: Instant) -> Result<(), Error> {
         let mut b = self.lock()?;
@@ -439,8 +467,9 @@ impl Inbox {
         if let Some(old) = b
             .rows
             .iter()
-            .find(|e| e.input.origin.request_id == input.origin.request_id)
+            .find(|e| e.origin().request_id == input.origin.request_id)
         {
+            let Retained::Apply(old)=old else{return Err(Error::Conflict)};
             if old.input != input {
                 return Err(Error::Conflict);
             }
@@ -448,13 +477,13 @@ impl Inbox {
         }
         if b.closed
             || b.rows.len() >= p::REQUEST_LIMIT
-            || b.rows.iter().any(|e| e.occupied().unwrap_or(true))
         {
             return Err(Error::Busy);
         }
         let lease = b.lease.as_ref().ok_or(Error::AccessDenied)?;
+        if b.rows.iter().any(|e|e.excludes(lease)){return Err(Error::Busy)}
         let e = lease.submit(input)?;
-        b.rows.push(e.clone());
+        b.rows.push(Retained::Apply(e.clone()));
         drop(b);
         self.notify();
         e.status()
@@ -466,8 +495,7 @@ impl Inbox {
         self.lock()?
             .rows
             .iter()
-            .find(|e| e.input.origin == *q)
-            .cloned()
+            .find_map(|e|match e{Retained::Apply(e) if e.input.origin==*q=>Some(e.clone()),_=>None})
             .ok_or(Error::Conflict)
     }
     pub(crate) fn query(&self, q: &p::Query, cancel: bool) -> Result<p::Status, Error> {
@@ -528,8 +556,8 @@ impl Inbox {
             .lock()?
             .rows
             .iter()
-            .filter(|e| e.input.origin.project_id == *project)
-            .map(|e| e.input.origin.request_id.clone())
+            .filter(|e| e.origin().project_id == *project)
+            .map(|e| e.origin().request_id.clone())
             .collect())
     }
     pub(crate) fn close(&self, at: Instant) {
@@ -543,6 +571,29 @@ impl Inbox {
             }
         }
         self.notify();
+    }
+    pub(crate) fn prepare(&self,input:crate::service_version_edit_prepare_protocol::Prepare,scope:Scope)->Result<crate::service_version_edit_prepare_protocol::Status,Error>{
+        input.validate()?;if input.origin.service_instance!=self.instance{return Err(Error::Conflict)}
+        let mut b=self.lock()?;
+        if let Some(old)=b.rows.iter().find(|r|r.origin().request_id==input.origin.request_id){
+            return match old{Retained::Preparation(e) if e.input==input=>e.status(),_=>Err(Error::Conflict)};
+        }
+        if b.closed||b.rows.len()>=p::REQUEST_LIMIT||b.rows.iter().any(|e|e.occupied().unwrap_or(true))
+            ||b.lease.as_ref().is_some_and(|l|l.live(Instant::now()).unwrap_or(true)){return Err(Error::Busy)}
+        let e=crate::service_version_edit_prepare_requests::Entry::new(input,scope)?;
+        b.rows.push(Retained::Preparation(e.clone()));drop(b);self.notify();e.status()
+    }
+    pub(crate) fn preparation(&self,q:&p::Query)->Result<Arc<crate::service_version_edit_prepare_requests::Entry>,Error>{
+        if q.service_instance!=self.instance{return Err(Error::Conflict)}
+        self.lock()?.rows.iter().find_map(|e|match e{Retained::Preparation(e) if e.input.origin==*q=>Some(e.clone()),_=>None}).ok_or(Error::Conflict)
+    }
+    pub(crate) fn is_preparation(&self,q:&p::Query)->Result<bool,Error>{
+        if q.service_instance!=self.instance{return Err(Error::Conflict)}
+        self.lock()?.rows.iter().find(|e|e.origin()==q).map(|e|matches!(e,Retained::Preparation(_))).ok_or(Error::Conflict)
+    }
+    pub(crate) fn preparation_status(&self,q:Option<&p::Query>)->Result<Option<crate::service_version_edit_prepare_protocol::Status>,Error>{
+        let e=if let Some(q)=q{Some(self.preparation(q)?)}else{self.lock()?.rows.iter().rev().find_map(|e|match e{Retained::Preparation(e)=>Some(e.clone()),_=>None})};
+        e.map(|e|e.status()).transpose()
     }
 }
 

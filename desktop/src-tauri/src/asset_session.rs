@@ -1182,6 +1182,12 @@ mod agent_metadata_text;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_metadata_text::MetadataTextAgentGate;
 
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_version_prepare.rs"]
+pub(crate) mod agent_version_prepare;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_version_prepare::VersionPrepareGate;
+
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
     session_identity: Arc<()>,

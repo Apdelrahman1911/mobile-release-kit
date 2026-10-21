@@ -1,5 +1,8 @@
 // App-retained two-string draft and observer. The SAME native EditOwner owns
 // all leases, one-use plans, processes, journals, cancellation and finality.
+import { parseVersionPreparation, sameVersionPrepareOrigin, versionPreparationCheckoutMatches } from './serviceVersionPrepareProtocol.ts';
+import type { VersionPreparation, VersionPrepareApi } from './serviceVersionPrepareProtocol.ts';
+import { sameVersionEditReview } from './serviceVersionEditProtocol.ts';
 import { ServiceVersionEditController } from './serviceVersionEditController.ts';
 import type { VersionEditCandidate } from './serviceVersionEditController.ts';
 import type { VersionEditOrigin, VersionEditReview } from './serviceVersionEditProtocol.ts';
@@ -30,6 +33,7 @@ interface ContextBinding {
   startStatusRevision: number; previousTerminalId: string | null; reload: boolean;
   expectedOriginal: VersionCheckout | null;
   reserved?: ReservedVersion; // Display/input binding only; native owns the consume-once handoff.
+  preparation?: {origin:VersionEditOrigin; reserved:boolean};
   proposal?: HostedVersionProposal; // Unverified pasted DATA; ordinary native Open only.
 }
 interface Submission {
@@ -50,6 +54,7 @@ export interface VersionEditState {
   mode: BridgeMode; projectId: string | null; visible: boolean; selectionPending: boolean; contextGeneration: number; connectionGeneration: number;
   entries: Readonly<Record<string, VersionDraft>>; help: VersionEditGuide | null; error: ApiError | null; edit: OwnerState;
   hostedImportIssue?: string | null;
+  agentPreparation?:VersionPreparation|null; agentPreparationIssue?:string|null;
 }
 export interface VersionApplyBinding { sessionId: string; planToken: string; draftRevision: number; baselineGeneration: number }
 export interface VersionResetBinding { projectId: string; revision: number; baselineGeneration: number; contextGeneration: number }
@@ -65,6 +70,14 @@ interface Context {
   hostedGit?: () => HostedImportGitSource;
   onSaveBoundary: (projectId: string) => void;
   now?: () => number;
+}
+// This is the existing controller's original caller bookkeeping, not an editor.
+interface PreparationCall {
+  status:VersionPreparation; port:VersionPrepareApi; api:DesktopApi;
+  binding:ContextBinding|null; project:ProjectSession|null; draft:VersionDraft|null; previous:VersionAttempt|null;
+  started:boolean; openReturned:boolean; prepareStarted:boolean; prepareReturned:boolean;
+  openWork:Promise<void>|null; prepareWork:Promise<void>|null; cancelWork:Promise<void>|null;
+  cancelled:boolean; guiInvoked:boolean;
 }
 function freeze<T>(value: T): T {
   if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
@@ -132,9 +145,10 @@ export class ReleaseVersionEditController {
   // One private, context-bound completion; never an owner-generation ordering.
   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
   private proposal: { binding: ContextBinding; git: HostedImportGitCapture; draft: VersionDraft | null; retired: boolean; copied: boolean } | null = null;
+  private preparation:PreparationCall|null = null;
   private readonly context: Context;
   readonly agent: ServiceVersionEditController;
-  constructor(context: Context) { this.context = context; this.agent = new ServiceVersionEditController(() => this.agentCandidate()); }
+  constructor(context: Context) { this.context = context; this.agent = new ServiceVersionEditController(() => this.agentCandidate(),{observe:raw=>this.observePreparation(raw),origin:()=>this.preparation?.status.origin,released:origin=>this.preparationReleased(origin)}); }
   getSnapshot = (): VersionEditState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(next: VersionEditState): void {
@@ -169,6 +183,8 @@ export class ReleaseVersionEditController {
     this.publish({ ...this.state, contextGeneration: Math.min(U32_MAX, this.state.contextGeneration + 1),
       edit: { ...this.state.edit, attempt: attempt && !attempt.applyClaimed && !attempt.handled && !settled(attempt) ?
         { ...attempt, invalidated: true, closeRequested: true } : attempt } });
+    const preparation=this.preparation;
+    if (preparation?.binding===attempt?.binding && preparation && !attempt?.applyClaimed) this.stopPreparation(preparation,'The original version preparation no longer matches this view or draft.');
     this.retireRecovery(true); this.process();
   }
   // These calls precede reducer/effect early returns, including failed refresh,
@@ -212,7 +228,7 @@ export class ReleaseVersionEditController {
       return 'An original binding counter is exhausted; no generation will be reused.';
     return null; // Unsaved settings are permitted but never applied or inherited.
   }
-  private operationReason(reserved = !!this.state.edit.attempt?.binding.reserved): string | null {
+  private operationReason(reserved = !!(this.state.edit.attempt?.binding.reserved || this.state.edit.attempt?.binding.preparation?.reserved)): string | null {
     return reserved && this.context.reservedOperationReason ? this.context.reservedOperationReason() : this.context.otherOperationReason();
   }
   private configuredOwnerReason(reserved = false): string | null {
@@ -228,7 +244,7 @@ export class ReleaseVersionEditController {
     return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.operationReason(reserved);
   }
   openReason(): string | null {
-    return (this.agent.retains() ? 'Wait for the original delegated Save call AND native retirement. Do not resend Apply.' : null) ?? this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+    return (this.preparationRetains() ? 'Wait for the original version Open/Prepare callers and native retirement.' : null) ?? (this.agent.retains() ? 'Wait for the original delegated Save call AND native retirement. Do not resend Apply.' : null) ?? this.configuredOwnerReason() ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
       (!this.selectedEntry() && Object.keys(this.state.entries).length >= 16 ? 'Sixteen in-memory version drafts are already retained. No draft will be evicted automatically.' : null);
   }
   private sameContext(binding: ContextBinding, selected = true): boolean {
@@ -313,7 +329,7 @@ export class ReleaseVersionEditController {
   }
   reservedOpenReason(): string | null {
     const entry = this.selectedEntry();
-    return (this.agent.retains() ? 'Wait for the original delegated Save call and native retirement.' : null) ?? this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
+    return (this.preparationRetains() ? 'Wait for the original version preparation and native retirement.' : null) ?? (this.agent.retains() ? 'Wait for the original delegated Save call and native retirement.' : null) ?? this.configuredOwnerReason(true) ?? versionOwnerReason(this.state, this.state.projectId ?? '') ??
       (!entry && Object.keys(this.state.entries).length >= 16 ? 'Existing version drafts are retained; no draft will be evicted.' : null) ??
       (entry && (entry.stale || versionDraftDirty(entry)) ?
       'Keep or explicitly discard the existing version draft before opening a reservation. It will not be overwritten.' : null);
@@ -323,8 +339,151 @@ export class ReleaseVersionEditController {
     if (!reserved || this.reservedOpenReason()) return false;
     return this.start(false, false, reserved);
   }
+  private preparationRetains():boolean {
+    const h=this.preparation;if(!h)return false;
+    if(h.status.settlement==='unknown')return true;
+    if(h.openWork || h.prepareWork || h.cancelWork || h.started&&!h.openReturned || h.prepareStarted&&!h.prepareReturned)return true;
+    if(!h.started)return false; // Unknown was retained above.
+    if(h.status.original===null)return h.status.settlement!=='settled';
+    const a=this.state.edit.attempt;
+    return a?.binding!==h.binding || !a.handled || !settled(a) || this.state.edit.integrityFailed || this.state.edit.nativeBlocked;
+  }
+  private preparationReleased(origin:VersionEditOrigin):boolean {
+    const h=this.preparation;
+    return !!h && sameVersionPrepareOrigin(h.status.origin,origin) && h.status.settlement==='settled' && !this.preparationRetains();
+  }
+  private preparationLive(h:PreparationCall,draft=true):boolean {
+    const b=h.binding;
+    return !!b && !h.cancelled && !this.disposed && this.api===h.api && this.api.agentVersionEdit?.preparation===h.port &&
+      this.preparation===h && this.state.edit.attempt?.binding===b && !this.state.edit.attempt.invalidated && !this.state.edit.attempt.closeRequested &&
+      this.context.selectedProject()===h.project && this.sameContext(b) && (!draft || this.selectedEntry()===h.draft) &&
+      !this.configReason() && !this.context.otherEditReason(b.projectId) && !this.operationReason(b.preparation?.reserved) &&
+      !h.status.cancelRequested && h.status.settlement==='pending' && !h.status.guiOwned;
+  }
+  private observePreparation(raw:unknown):void {
+    if(this.disposed || !this.api?.agentVersionEdit?.preparation || raw===null)return;
+    const data=parseVersionPreparation(raw), old=this.preparation;
+    if(!data){if(old)this.stopPreparation(old,'Invalid preparation comparison. Keep the same original request; no Save was sent.');return;}
+    if(old && sameVersionPrepareOrigin(old.status.origin,data.origin)) {
+      if(data.revision<old.status.revision)return;
+      const before=old.status;
+      if(!same(before.selection,data.selection) || before.runtimeProjectId!==data.runtimeProjectId ||
+        data.revision===before.revision&&!same(before,data) || before.original!==null&&!same(before.original,data.original) ||
+        before.checkout!==null&&!same(before.checkout,data.checkout) || before.proposed!==null&&!same(before.proposed,data.proposed) ||
+        before.review!==null&&!same(before.review,data.review) || before.applyRequest!==null&&!same(before.applyRequest,data.applyRequest) ||
+        before.guiOwned&&!data.guiOwned || before.settlement==='unknown'&&data.settlement!=='unknown' || before.settlement==='settled'&&!same({...before,revision:0},{...data,revision:0})) {
+        this.stopPreparation(old,'The original preparation comparison changed. Observe or cancel that request only.');return;
+      }
+      old.status=data;
+      this.publish({...this.state,agentPreparation:data});
+      if(data.cancelRequested || data.settlement==='unknown') {
+        if(old.binding===this.state.edit.attempt?.binding && !this.state.edit.attempt?.applyClaimed) this.invalidate();
+      }
+      // Only a native known-unentered result can release an unsent local Open.
+      if(old.started && old.openReturned && !old.openWork && data.original===null && data.settlement==='settled' &&
+        data.result?.effect==='not-started' && !data.result.applySubmitted && this.state.edit.attempt?.binding===old.binding && !this.state.edit.attempt.sessionId)
+        this.edit({...this.state.edit,attempt:old.previous});
+      this.process();return;
+    }
+    if(old && !this.preparationReleased(old.status.origin)){void this.agent.checkPreparation();return;}
+    const h:PreparationCall={status:data,port:this.api.agentVersionEdit.preparation,api:this.api,binding:null,project:null,draft:null,previous:null,
+      started:false,openReturned:false,prepareStarted:false,prepareReturned:false,openWork:null,prepareWork:null,cancelWork:null,cancelled:false,guiInvoked:false};
+    this.preparation=h;
+    this.publish({...this.state,agentPreparation:data,agentPreparationIssue:data.phase==='queued'?null:'This is an existing preparation, not permission to reopen it. Inspect or cancel its original request.'});
+    this.process();
+  }
+  private stopPreparation(h:PreparationCall,message:string):void {
+    if(h.guiInvoked || h.status.guiOwned || h.cancelled)return;
+    h.cancelled=true; // BEFORE subscriber notifications and the original cancel call.
+    const work=Promise.resolve().then(async()=>{try {const data=await h.port.cancel(h.status.origin);if(this.preparation===h&&this.api===h.api)this.observePreparation(data);}
+      catch {if(this.preparation===h)this.publish({...this.state,agentPreparationIssue:'Original cancellation is unconfirmed. Its native READ/STOP clock still applies; do not retry.'});}});
+    h.cancelWork=work;
+    this.publish({...this.state,agentPreparationIssue:message});
+    void work.finally(()=>{if(h.cancelWork===work)h.cancelWork=null;this.process();});
+  }
+  cancelPreparation():void {
+    const h=this.preparation;if(!h)return;
+    this.stopPreparation(h,'The original CLI preparation is stopped. No values or request IDs will be replayed.');
+    if(h.binding===this.state.edit.attempt?.binding && !this.state.edit.attempt?.applyClaimed)this.invalidate();
+  }
+  private processPreparation():void {
+    const h=this.preparation;
+    if(!h || h.started || h.cancelled || h.status.phase!=='queued' || h.status.cancelRequested || !this.api ||
+      !this.state.edit.initialized || !this.state.edit.listening || !this.state.help)return;
+    const project=this.context.selectedProject(), entry=this.selectedEntry(), status=this.state.edit.status, reserved=h.status.selection.kind==='reserved';
+    const reason=this.configuredOwnerReason(reserved) ?? versionOwnerReason(this.state,this.state.projectId??'') ??
+      (this.agent.retains()?'The original delegated Save has not returned.':null) ??
+      (entry && (entry.stale || versionDraftDirty(entry))?'Keep or explicitly discard the existing version draft first. CLI input never replaces it.':null) ??
+      (!entry && Object.keys(this.state.entries).length>=16?'All retained version draft slots are occupied.':null);
+    if(!project || !status || project.project.id!==h.status.runtimeProjectId || this.api!==h.api || this.api.agentVersionEdit?.preparation!==h.port || reason) {
+      this.stopPreparation(h,reason??'Select the same native project and Desktop connection before requesting version preparation.');return;
+    }
+    const binding=freeze<ContextBinding>({projectId:project.project.id,configRevision:project.revision,configBaselineGeneration:project.baselineGeneration,
+      configObservationGeneration:project.observationGeneration,contextGeneration:this.state.contextGeneration,connectionGeneration:this.state.connectionGeneration,
+      windowGeneration:status.windowGeneration,startStatusRevision:status.statusRevision,previousTerminalId:status.lastTerminal?.sessionId??null,
+      reload:false,expectedOriginal:entry?.original??null,preparation:{origin:h.status.origin,reserved}});
+    h.started=true;h.binding=binding;h.project=project;h.draft=entry;h.previous=this.state.edit.attempt;
+    this.agent.newOriginal();
+    if(this.disposed || this.api!==h.api || this.context.selectedProject()!==project || this.selectedEntry()!==entry || !this.sameContext(binding) || this.agent.retains()) {
+      h.openReturned=true;this.stopPreparation(h,'The original view changed before Open. No values were adopted.');return;
+    }
+    // Retain the scheduled caller before the first synchronous publication.
+    const work=Promise.resolve().then(async()=>{
+      if(!this.preparationLive(h)){this.stopPreparation(h,'The original Open was refused before invocation.');return;}
+      try{this.receive(await h.port.open(h.status.origin),'reply');}
+      catch{this.stopPreparation(h,'The original Open response is unconfirmed. Check or cancel that request; do not reopen it.');if(this.state.edit.attempt?.binding===binding)this.invalidate();void this.checkStatus();}
+    });
+    h.openWork=work;
+    this.proposal=null;
+    this.publish({...this.state,error:null,hostedImportIssue:null,agentPreparationIssue:null,edit:{...this.state.edit,attempt:{binding,submission:null,sessionId:null,projection:null,
+      projectionRevision:status.statusRevision,openAdopted:false,prepareClaimed:false,applyClaimed:false,submittedPlanToken:null,closeRequested:false,closeClaimed:false,
+      invalidated:false,handled:false,outcomeNotified:false,outcomeFingerprint:null}}});
+    if(reserved)this.context.onSaveBoundary(project.project.id);
+    void work.finally(()=>{h.openReturned=true;if(h.openWork===work)h.openWork=null;void this.agent.checkPreparation();this.process();});
+  }
+  private acceptPreparedOpen(attempt:VersionAttempt):void {
+    const h=this.preparation, c=attempt.projection?.checkout;
+    if(!h || h.binding!==attempt.binding || !h.openReturned || !c || !h.status.checkout || !h.status.proposed || !h.status.original)return;
+    if(!this.preparationLive(h) || h.status.original.sessionId!==attempt.sessionId || h.status.original.ownerGeneration!==attempt.binding.windowGeneration ||
+      !versionPreparationCheckoutMatches(h.status.checkout,c) || c.baseline.savedVersion.state!=='present' ||
+      attempt.binding.expectedOriginal && !same({...attempt.binding.expectedOriginal,revision:''},{...c,revision:''})) {
+      this.stopPreparation(h,'The actual saved version or original draft differs from this preparation. No proposed values were adopted.');this.invalidate();return;
+    }
+    const entry=this.selectedEntry();
+    if(entry && (entry.revision>=U32_MAX-1 || entry.baselineGeneration>=U32_MAX-1)){this.stopPreparation(h,'The original draft counters are exhausted.');this.invalidate();return;}
+    const next:VersionDraft={projectId:attempt.binding.projectId,projectName:h.project!.project.name,revision:(entry?.revision??-1)+1,
+      baselineGeneration:entry?.baselineGeneration??0,original:structuredClone(c),values:structuredClone(h.status.proposed),stale:false,error:null,outcome:entry?.outcome??null};
+    const adopted=freeze(next);h.draft=adopted;
+    // BOTH values, original checkout and submission are one immutable publish.
+    this.publish({...this.state,entries:{...this.state.entries,[next.projectId]:adopted},edit:{...this.state.edit,
+      attempt:{...attempt,openAdopted:true,submission:this.submission(adopted)}}});
+    this.context.onSaveBoundary(next.projectId);
+  }
+  private prepareFromAgent(attempt:VersionAttempt):void {
+    const h=this.preparation,binding=attempt.binding,input=attempt.submission;
+    if(!h || h.binding!==binding || !input || h.prepareStarted || !h.openReturned)return;
+    h.prepareStarted=true;
+    const work=Promise.resolve().then(async()=>{
+      if(!this.preparationLive(h) || !this.matchesSubmission(this.state.edit.attempt!) || this.state.edit.attempt?.projection?.phase!=='editing') {
+        this.stopPreparation(h,'The original prepared draft changed before invocation. No Save was sent.');this.requestClose();return;
+      }
+      try{this.receive(await h.port.prepare(h.status.origin,input.draftRevision,input.baselineGeneration),'reply');}
+      catch{this.stopPreparation(h,'The original Prepare response is unconfirmed. Keep that request and its preview; do not re-prepare.');if(this.state.edit.attempt?.binding===binding)this.invalidate();void this.checkStatus();}
+    });
+    h.prepareWork=work;this.attempt({prepareClaimed:true});
+    void work.finally(()=>{h.prepareReturned=true;if(h.prepareWork===work)h.prepareWork=null;void this.agent.checkPreparation();this.process();});
+  }
+  private preparationApplyReady(attempt:VersionAttempt):boolean {
+    const h=this.preparation,o=attempt.projection,r=h?.status.review;
+    if(!h || h.binding!==attempt.binding || !h.openReturned || !h.prepareReturned || h.openWork || h.prepareWork || !r ||
+      !this.preparationLive(h) || !o?.checkout || !o.prepared || o.prepared.view.file.before.state!=='present' || !(h.status.phase==='reviewing' || h.status.phase==='applying'&&h.status.applyRequest!==null))return false;
+    const v=o.prepared.view, before=v.file.before;if(before.state!=='present')return false;
+    return sameVersionEditReview(r,{original:{sessionId:o.sessionId,ownerGeneration:o.ownerGeneration,revision:o.checkout.revision,planToken:o.prepared.planToken},
+      nativeStatusRevision:this.state.edit.status!.statusRevision,name:v.values.name,build:v.values.build,source:v.source,
+      beforeBytes:before.bytes,beforeSha256:before.sha256,afterBytes:v.file.after.bytes,afterSha256:v.file.after.sha256,candidateId:r.candidateId});
+  }
   private start(review: boolean, reload: boolean, reserved?: ReservedVersion, proposal?: HostedVersionProposal): boolean {
-    if (this.disposed || this.agent.retains() || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
+    if (this.disposed || this.preparationRetains() || this.agent.retains() || !this.api || (proposal ? this.hostedOpenReason() : reserved ? this.reservedOpenReason() : this.openReason())) return false;
     const project = this.context.selectedProject(), status = this.state.edit.status, entry = this.selectedEntry();
     if (!project || !status || review && (!entry || entry.stale || !versionValuesBounded(entry.values))) return false;
     const git = proposal ? captureHostedImportGit(this.hostedGit(), proposal, 'before-open') : null;
@@ -363,23 +522,26 @@ export class ReleaseVersionEditController {
     }
     if (entry.values[id] === value) return false;
     const attempt = this.state.edit.attempt;
+    const delegated = !!attempt?.binding.preparation && !attempt.handled && !attempt.applyClaimed;
+    if (delegated && this.preparation) { this.stopPreparation(this.preparation,'Your changed draft is kept. The original CLI preparation is stopped, not re-prepared.'); this.invalidate(); }
     const imported = !!attempt?.binding.proposal && !attempt.handled && !attempt.applyClaimed;
     if (imported) this.refuseProposal('Changed values are kept as a manual draft. Close this original edit before reviewing them again; no imported commit message will be prepared.');
     // Reload consent covers the confirmed draft, never edits made while its Open is pending.
     if (attempt && !attempt.applyClaimed && (attempt.submission || attempt.binding.reload && !attempt.openAdopted)) this.invalidate();
     // Refusal/Close notifications may edit or restore the draft synchronously.
     // Keep that newer immutable entry; never publish a captured older revision.
-    if (imported && (this.disposed || this.selectedEntry() !== entry || this.state.edit.attempt?.binding !== attempt?.binding)) return false;
+    if ((imported || delegated) && (this.disposed || this.selectedEntry() !== entry || this.state.edit.attempt?.binding !== attempt?.binding)) return false;
     this.put({ ...entry, revision: entry.revision + 1, values: { ...entry.values, [id]: value }, error: null });
     this.process(); return true;
   }
   reviewReason(): string | null {
-    const reason = this.configuredOwnerReason(!!this.state.edit.attempt?.binding.reserved && !this.state.edit.attempt.handled); if (reason) return reason;
+    const reason = this.configuredOwnerReason(!!(this.state.edit.attempt?.binding.reserved || this.state.edit.attempt?.binding.preparation?.reserved) && !this.state.edit.attempt.handled); if (reason) return reason;
     const entry = this.selectedEntry(), attempt = this.state.edit.attempt;
     if (!entry) return 'Open the saved version first. Only real observed absence permits Create.';
     if (entry.stale) return 'The baseline is stale. Close, then explicitly reload saved values and discard the earlier draft.';
     if (!versionValuesBounded(entry.values)) return 'Enter a marketing-version string (up to 64 ASCII characters) and a build string (up to 10 digits). Core validates their actual format.';
     if (attempt && !settled(attempt)) {
+      if (attempt.binding.preparation) return 'This original CLI request owns Open and Prepare. Review its returned preview, or close it; do not re-prepare.';
       if (!attempt.openAdopted || attempt.projection?.phase !== 'editing' || attempt.submission || attempt.closeRequested || attempt.invalidated || !this.sameContext(attempt.binding))
         return 'Finish or close the original version operation before another review.';
       return null;
@@ -398,7 +560,7 @@ export class ReleaseVersionEditController {
     const current = currentVersionApplyBinding(this.state), attempt = this.state.edit.attempt;
     return !!current && !!attempt && this.remainingReviewMs() > 0 && this.sameContext(attempt.binding) && this.matchesSubmission(attempt) &&
       !this.configReason() && !this.context.otherEditReason(attempt.binding.projectId) && !this.operationReason() &&
-      (!attempt.binding.proposal || this.proposalServiceMatches(attempt.binding)) && (!binding || same(current, binding));
+      (!attempt.binding.proposal || this.proposalServiceMatches(attempt.binding)) && (!attempt.binding.preparation || this.preparationApplyReady(attempt)) && (!binding || same(current, binding));
   }
   apply(binding: VersionApplyBinding): boolean {
     if (!this.api || this.agent.delegated() || !this.canApply(binding)) return false;
@@ -406,10 +568,12 @@ export class ReleaseVersionEditController {
     this.attempt({ applyClaimed: true, submittedPlanToken: binding.planToken });
     this.context.onSaveBoundary(original.projectId);
     if (this.state.edit.attempt?.binding === original && !this.state.edit.attempt.closeRequested &&
-        (!(original.reserved || original.proposal) || this.api === api && this.sameContext(original) && !this.configReason() &&
-          !this.context.otherEditReason(original.projectId) && !this.operationReason(!!original.reserved) &&
+        (!(original.reserved || original.proposal || original.preparation) || this.api === api && this.sameContext(original) && !this.configReason() &&
+          !this.context.otherEditReason(original.projectId) && !this.operationReason(!!(original.reserved || original.preparation?.reserved)) &&
           (!original.proposal || this.proposalServiceMatches(original))))
-      void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken));
+      { if (original.preparation && this.preparation?.binding===original) this.preparation.guiInvoked=true;
+        void this.command('apply', original, () => api.applyReleaseVersionEdit(binding.sessionId, binding.planToken)); }
+    else if (original.preparation && this.preparation) { this.stopPreparation(this.preparation,'The original Save was refused before invocation.'); this.requestClose(); }
     return true;
   }
   private agentCandidate(): VersionEditCandidate | null {
@@ -422,11 +586,11 @@ export class ReleaseVersionEditController {
     const review: VersionEditReview = freeze({original:{sessionId:binding.sessionId,ownerGeneration:owner.ownerGeneration,
       revision:owner.checkout.revision,planToken:binding.planToken},nativeStatusRevision:status.statusRevision,
       name:view.values.name,build:view.values.build,source:view.source,beforeBytes:view.file.before.bytes,beforeSha256:view.file.before.sha256,
-      afterBytes:view.file.after.bytes,afterSha256:view.file.after.sha256,candidateId:original.reserved?.candidateId ?? null});
+      afterBytes:view.file.after.bytes,afterSha256:view.file.after.sha256,candidateId:original.reserved?.candidateId ?? (original.preparation && this.preparation?.binding===original ? this.preparation.status.review?.candidateId ?? null : null)});
     const live = () => !this.disposed && this.api === api && this.api.agentVersionEdit === port &&
       this.state.edit.attempt?.binding === original && this.context.selectedProject() === project && this.sameContext(original) &&
       !this.state.edit.integrityFailed && !this.state.edit.generationLost && !this.state.edit.nativeBlocked && !this.state.edit.observationIssue &&
-      !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(!!original.reserved);
+      !this.configReason() && !this.context.otherEditReason(original.projectId) && !this.operationReason(!!(original.reserved || original.preparation?.reserved));
     const current = () => live() && this.selectedEntry() === entry && this.state.edit.status?.statusRevision === review.nativeStatusRevision && this.canApply(binding);
     return {projectId:project.project.id,api:port,review,current,live,apply:async (origin: VersionEditOrigin) => {
       if (!current()) throw new Error('Version edit source or approval changed.');
@@ -444,6 +608,7 @@ export class ReleaseVersionEditController {
   requestClose(): void {
     const attempt = this.state.edit.attempt;
     if (!attempt || settled(attempt) || attempt.handled || attempt.closeRequested) return;
+    if (attempt.binding.preparation && this.preparation) this.stopPreparation(this.preparation,'The original version preparation was closed.');
     this.attempt({ closeRequested: true }); this.process();
   }
   resetBinding(): VersionResetBinding | null {
@@ -463,7 +628,7 @@ export class ReleaseVersionEditController {
   beginConnection(): void {
     if (this.disposed) return;
     this.invalidate();
-    const held = this.agent.retains() || !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
+    const held = this.preparationRetains() || this.agent.retains() || !settled(this.state.edit.attempt) || !savedTextRecoverySettled(this.state.edit.recovery) || !!this.state.edit.status?.active || this.state.edit.nativeBlocked || this.state.edit.integrityFailed;
     this.publish({ ...this.state, mode: 'unavailable', help: null, connectionGeneration: Math.min(U32_MAX, this.state.connectionGeneration + 1),
       edit: { ...this.state.edit, nativeBlocked: this.state.edit.nativeBlocked || held } });
     if (held) return; // Retain the ORIGINAL API/subscription for its own finality.
@@ -594,6 +759,7 @@ export class ReleaseVersionEditController {
   private acceptOpened(attempt: VersionAttempt): void {
     const opened = attempt.projection?.checkout;
     if (!opened || attempt.openAdopted || attempt.invalidated || attempt.closeRequested || !this.sameContext(attempt.binding)) return;
+    if (attempt.binding.preparation) { this.acceptPreparedOpen(attempt); return; }
     const expected = attempt.binding.expectedOriginal, entry = this.state.entries[attempt.binding.projectId];
     const proposal = attempt.binding.proposal;
     if (proposal && (!this.proposalOpenMatches(attempt.binding) || !hostedProposalCheckoutMatches(proposal, opened))) {
@@ -663,7 +829,7 @@ export class ReleaseVersionEditController {
   }
   inspectRecoveryReason(): string | null {
     const edit = this.state.edit, project = this.context.selectedProject();
-    if (this.agent.retains()) return 'Wait for the original delegated Save call and native retirement.';
+    if (this.preparationRetains() || this.agent.retains()) return 'Wait for the original delegated version calls and native retirement.';
     if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native saved-version service; browser preview cannot inspect files.';
     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
       return 'Original native ownership or cleanup is unverified. Keep the original operation; recovery cannot reset that block.';
@@ -795,6 +961,7 @@ export class ReleaseVersionEditController {
       do {
         this.processAgain = false;
         this.processRecovery();
+        this.processPreparation();
         let attempt = this.state.edit.attempt; if (!attempt) continue;
         if (!attempt.applyClaimed && !attempt.handled && !attempt.invalidated && !settled(attempt) &&
             (this.state.edit.generationLost || !this.sameContext(attempt.binding) || this.configReason() || !this.state.help ||
@@ -803,7 +970,9 @@ export class ReleaseVersionEditController {
         if (attempt.projection?.phase === 'editing' && !attempt.openAdopted) this.acceptOpened(attempt);
         attempt = this.state.edit.attempt; if (!attempt) continue;
         const owner = attempt.projection;
-        if (owner?.prepared && !versionPreparedMatches(attempt) && !this.state.edit.integrityFailed) { this.observationFailed(true); continue; }
+        if (owner?.prepared && !versionPreparedMatches(attempt) && !this.state.edit.integrityFailed && !attempt.invalidated) {
+          if (attempt.binding.preparation && this.preparation) { this.stopPreparation(this.preparation,'The original native preview does not match this proposed draft. No Save was sent.'); this.invalidate(); }
+          else this.observationFailed(true); continue; }
         if (owner?.prepared && attempt.binding.proposal && !attempt.applyClaimed && !attempt.invalidated && !attempt.handled &&
           !hostedProposalViewMatches(attempt.binding.proposal, owner.prepared.view)) {
           this.refuseProposal('The native review does not match the pasted result’s expected file and values. No Save was sent; keep the original draft and correct or discard the proposal.'); continue;
@@ -821,7 +990,12 @@ export class ReleaseVersionEditController {
         attempt = this.state.edit.attempt; if (!attempt) continue;
         if (attempt.projection?.phase === 'final' && attempt.projection.nativeFinality === 'settled' && !attempt.projection.lateSettled)
           this.agent.nativeFinal(attempt.projection.sessionId,attempt.projection.ownerGeneration,!this.state.edit.integrityFailed && !this.state.edit.unknownEvidence);
-        if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled) this.attempt({ handled: true });
+        if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled) {
+          this.attempt({ handled: true });
+          // Native final can arrive after the actual Open/Prepare caller. Check
+          // that old request first; a coalesced next row cannot supply its join.
+          if(attempt.binding.preparation)void this.agent.checkPreparation();
+        }
         attempt = this.state.edit.attempt;
         if (!attempt || attempt.handled || !attempt.sessionId || !attempt.projection || this.state.edit.generationLost ||
             attempt.projection.ownerGeneration !== this.state.edit.status?.windowGeneration || ['final', 'unknown'].includes(attempt.projection.phase)) continue;
@@ -832,6 +1006,7 @@ export class ReleaseVersionEditController {
         }
         if (attempt.projection.phase === 'editing' && attempt.projection.checkout && attempt.openAdopted && attempt.submission &&
             !attempt.prepareClaimed && !attempt.applyClaimed && !attempt.invalidated && !attempt.closeRequested && usable(this.state.edit)) {
+          if (binding.preparation) { this.prepareFromAgent(attempt); continue; }
           const request = { sessionId, revision: attempt.projection.checkout.revision, ...attempt.submission };
           if (!versionEditRequestFits('release_version_edit_prepare', request)) { this.observationFailed(true); continue; }
           const api: DesktopApi = this.api;

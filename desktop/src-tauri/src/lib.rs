@@ -127,6 +127,8 @@ mod service_upload_key_protocol;
 mod service_upload_key_requests;
 mod service_version_edit_protocol;
 mod service_version_edit_requests;
+mod service_version_edit_prepare_protocol;
+mod service_version_edit_prepare_requests;
 mod service_configuration_protocol;
 mod bounded_json_seed;
 mod service_metadata_text_protocol;

@@ -303,6 +303,7 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
         p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::VersionEditPreparation(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::ToolSetupRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,

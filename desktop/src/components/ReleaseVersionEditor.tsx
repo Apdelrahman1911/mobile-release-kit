@@ -161,6 +161,12 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
       <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>
       <button type="button" className="button primary" disabled={!current || !controller.canApply(current)} onClick={() => { if (current) setConfirmation(current); }}>
         {versionNoOp(prepared.view) ? 'Confirm unchanged values…' : prepared.view.intent === 'create' ? 'Create version file…' : 'Save version values…'}</button></>}
+    <details className="advanced-settings"><summary>Advanced: CLI version preparation</summary>
+      <p>Use <code>mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE --manual NAME BUILD</code> or <code>--reserved RESERVATION_ID</code> for an existing saved version. Keep this project selected; missing or conflicting drafts are never discarded.</p>
+      {state.agentPreparation && <p>Original request <code>{state.agentPreparation.origin.requestId}</code>: {state.agentPreparation.phase}; {state.agentPreparation.settlement}. Preparation does not authorize Save.</p>}
+      {state.agentPreparationIssue && <p role="alert">{state.agentPreparationIssue}</p>}
+      <button type="button" disabled={!state.agentPreparation || state.agentPreparation.settlement==='settled'} onClick={()=>controller.cancelPreparation()}>Cancel this preparation</button>
+    </details>
     <AgentVersionEditAccess controller={controller.agent} />
     {confirmation && prepared && <Confirmation view={prepared.view} allowed={controller.canApply(confirmation)} onCancel={() => setConfirmation(null)}
       onConfirm={() => { if (controller.apply(confirmation)) setConfirmation(null); }} />}

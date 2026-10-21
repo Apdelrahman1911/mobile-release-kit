@@ -265,8 +265,12 @@ impl DocumentBinding {
         let decision = {
             let state = self.lock();
             self.version_edit_peers(&state, session)?;
-            let link = self.inner.bridge.edits.version_edit_link(window, session)?;
-            self.version_edit_same(&state, &link.project)?;
+            if let Some(link)=self.inner.bridge.edits.version_prepare_for_session(window,session)?{
+                self.version_prepare_current_locked(&state,&link)?;
+            }else{
+                let link = self.inner.bridge.edits.version_edit_link(window, session)?;
+                self.version_edit_same(&state, &link.project)?;
+            }
             self.inner
                 .bridge
                 .edits

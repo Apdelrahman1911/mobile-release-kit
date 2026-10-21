@@ -1080,3 +1080,172 @@ test('GUI winner before Submit remains ordinary Apply; unused allowance revokes 
  h.publish(h.owner('applying'));const final=h.publish(h.owner('final'));h.last('apply').resolve(final);await flush();
  assert.equal(h.state.edit.attempt.handled,true);assert.equal(h.controller.agent.retains(),false);assert.equal(h.count('close'),0);
 });
+
+// Combined preparation fixtures drive the actual controller and actual native
+// status decoder. They do not mint native source access, loans or finality.
+const VP = {projectId:'1'.repeat(32),serviceInstance:'2'.repeat(32),requestId:'3'.repeat(32)};
+function queuedPreparation(selection={kind:'manual',values:{name:'1.2',build:'8'}},origin=VP) {
+  return {schemaVersion:1,origin:clone(origin),runtimeProjectId:'p',selection:clone(selection),revision:1,phase:'queued',settlement:'pending',
+    original:null,checkout:null,proposed:null,review:null,applyRequest:null,guiOwned:false,cancelRequested:false,result:null,doNotReplay:true};
+}
+function preparationHarness(options={}) {
+  const h=harness(options), records=new Map();let listener, latest=null;
+  let access={schemaVersion:1,serviceInstance:null,projectId:null,grantId:null,nonce:null,review:null,live:false,remainingMs:0,request:null};
+  const call=(kind,args)=>{const d=deferred();h.calls.push({kind,args:clone(args),...d});return d.promise;};
+  const prep={status:async q=>{h.calls.push({kind:'preparation-status',args:clone(q)});return clone(q?records.get(q.requestId)??null:latest);},
+    open:q=>call('agent-open',q),prepare:(origin,draftRevision,baselineGeneration)=>call('agent-prepare',{origin,draftRevision,baselineGeneration}),
+    cancel:async q=>{h.calls.push({kind:'agent-cancel',args:clone(q)});const old=records.get(q.requestId);if(!old)return null;
+      const v={...clone(old),revision:old.revision+1,cancelRequested:true,phase:old.original?'stopping':'final',settlement:old.original?'pending':'settled',
+        result:old.original?null:{effect:'not-started',journal:'not-created',cancelled:true,applySubmitted:false}};records.set(q.requestId,v);latest=v;return clone(v);}};
+  const port={preparation:prep,subscribe:async fn=>{listener=fn;return()=>{listener=null;};},status:async()=>clone(access),
+    allow:async input=>{h.calls.push({kind:'agent-allow',args:clone(input)});const r=clone(latest.review);access={schemaVersion:1,serviceInstance:VP.serviceInstance,projectId:VP.projectId,
+      grantId:'4'.repeat(32),nonce:input.nonce,review:r,live:true,remainingMs:60000,request:null};return clone(access);},
+    revoke:async nonce=>{h.calls.push({kind:'agent-revoke',args:{nonce}});access={...access,live:false,remainingMs:0};return clone(access);},
+    apply:q=>call('agent-apply',q)};
+  h.api.agentVersionEdit=port;
+  h.prepareEvent=data=>{records.set(data.origin.requestId,clone(data));latest=clone(data);assert.ok(listener);listener({kind:'preparation',request:clone(data)});};
+  h.prepareCurrent=()=>clone(latest);
+  h.prepareOpened=(proposed,changes={})=>{const c=h.state.edit.attempt.projection.checkout, old=h.prepareCurrent();const data={...old,revision:old.revision+1,phase:'opened',
+    original:{sessionId:h.state.edit.attempt.sessionId,ownerGeneration:ID.window},checkout:{revision:c.revision,source:c.source,iosEnabled:c.iosEnabled,values:clone(c.values),
+      configBytes:c.baseline.savedConfig.bytes,configSha256:c.baseline.savedConfig.sha256,versionBytes:c.baseline.savedVersion.bytes,versionSha256:c.baseline.savedVersion.sha256},
+    proposed:proposed??clone(old.selection.values),...changes};h.prepareEvent(data);return data;};
+  h.prepareReview=()=>{const a=h.state.edit.attempt,p=a.projection,v=p.prepared.view,old=h.prepareCurrent();const data={...old,phase:'reviewing',revision:old.revision+1,
+    review:{original:{sessionId:p.sessionId,ownerGeneration:p.ownerGeneration,revision:p.checkout.revision,planToken:p.prepared.planToken},nativeStatusRevision:h.frame.statusRevision,
+      name:v.values.name,build:v.values.build,source:v.source,beforeBytes:v.file.before.bytes,beforeSha256:v.file.before.sha256,afterBytes:v.file.after.bytes,afterSha256:v.file.after.sha256,
+      candidateId:old.selection.kind==='reserved'?'11111111-2222-3333-4444-555555555555':null}};h.prepareEvent(data);return data;};
+  h.submitPrepared=()=>{const old=h.prepareCurrent(),origin={...VP,requestId:'5'.repeat(32)};h.prepareEvent({...old,revision:old.revision+1,phase:'applying',applyRequest:origin});
+    access={...access,live:false,remainingMs:0,request:{schemaVersion:1,origin,grantId:access.grantId,revision:1,phase:'queued',settlement:'pending',review:clone(access.review),cancelRequested:false,result:null,doNotReplay:true}};
+    listener(clone(access));};
+  h.preparationFinal=()=>{const old=h.prepareCurrent();h.prepareEvent({...old,revision:old.revision+1,phase:'final',settlement:'settled',result:{effect:'not-started',journal:'not-created',cancelled:true,applySubmitted:false}});};
+  return h;
+}
+async function preparedFromCli(h,selection={kind:'manual',values:{name:'1.2',build:'8'}},proposed=selection.values) {
+  await h.controller.connect(h.api);h.prepareEvent(queuedPreparation(selection));await flush();assert.equal(h.count('agent-open'),1);
+  const opening=h.last('agent-open');h.publish(h.owner('editing'));h.prepareOpened(proposed);opening.resolve(clone(h.frame));await flush();
+  assert.equal(h.count('agent-prepare'),1);h.publish(h.owner('reviewing'));h.prepareReview();h.last('agent-prepare').resolve(clone(h.frame));await flush();
+  return currentVersionApplyBinding(h.state);
+}
+
+test('CLI combined Open/Prepare retains both real callers; manual build-only then explicit one-use delegated Apply',async()=>{
+  const raw=ORIGINAL.replace("'1.2.3'","'1.2'"),h=preparationHarness({raw,opened:checkout(raw,{name:'1.2',build:'7'})});
+  await h.controller.connect(h.api);const selected=h.selected();h.prepareEvent(queuedPreparation());await flush();
+  assert.equal(h.count('agent-open'),1);assert.deepEqual(h.last('agent-open').args,VP);assert.equal(h.count('open'),0);
+  h.publish(h.owner('editing'));h.prepareOpened();await flush();assert.equal(h.controller.selectedEntry(),null);assert.equal(h.count('agent-prepare'),0);
+  h.last('agent-open').resolve(clone(h.frame));await flush();
+  assert.deepEqual(h.controller.selectedEntry().values,{name:'1.2',build:'8'});assert.equal(h.selected(),selected);
+  assert.equal(h.count('agent-prepare'),1);assert.deepEqual(Object.keys(h.last('agent-prepare').args),['origin','draftRevision','baselineGeneration']);assert.equal(h.count('prepare'),0);
+  h.publish(h.owner('reviewing'));h.prepareReview();assert.equal(h.controller.canApply(),false);assert.equal(h.controller.agent.canAllow(),false);
+  h.last('agent-prepare').resolve(clone(h.frame));await flush();assert.equal(h.controller.canApply(),true);assert.equal(h.count('agent-apply'),0);
+  await h.controller.agent.allow();assert.equal(h.count('agent-allow'),1);h.submitPrepared();await flush();assert.equal(h.count('agent-apply'),1);
+  h.publish(h.owner('final'));assert.equal(h.controller.agent.retains(),true);assert.equal(h.controller.open(),false);
+  h.last('agent-apply').resolve(clone(h.frame));await flush();assert.equal(h.controller.agent.retains(),false);
+  assert.deepEqual(h.controller.selectedEntry().original.values,{name:'1.2',build:'8'});assert.equal(h.state.edit.integrityFailed,false);
+});
+
+test('CLI reserved preparation uses only original ID and native-selected values for Android/iOS/paired',async t=>{
+  for(const mode of ['android','ios','paired'])await t.test(mode,async()=>{
+    const ios=mode!=='android',values={name:'1.2',build:ios?'8':'10000'},raw=ORIGINAL.replace("'1.2.3'","'1.2'"),h=preparationHarness({raw,opened:checkout(raw,{name:'1.2',build:'7'},{iosEnabled:ios})});
+    const selection={kind:'reserved',reservationId:'6'.repeat(32)};const binding=await preparedFromCli(h,selection,values);
+    assert.ok(binding);assert.equal(h.controller.canApply(binding),true);assert.equal(h.count('open'),0);assert.equal(h.count('prepare'),0);
+    assert.deepEqual(h.last('agent-open').args,VP);assert.deepEqual(h.controller.selectedEntry().values,values);
+    // Explicit ordinary Save remains a real independent GUI winner, never auto-Apply.
+    assert.equal(h.count('apply'),0);assert.equal(h.controller.apply(binding),true);assert.equal(h.count('apply'),1);
+    h.controller.cancelPreparation();assert.equal(h.count('agent-cancel'),0);h.publish(h.owner('final'));h.last('apply').resolve(clone(h.frame));await flush();
+    assert.equal(h.state.edit.integrityFailed,false);assert.equal(normalVersionEditResult(h.state.edit.attempt.projection),'saved');
+  });
+});
+
+test('CLI preparation preserves existing dirty drafts and pending-Open edits including value ABA',async t=>{
+  for(const stage of ['dirty','pending-edit','pending-aba'])await t.test(stage,async()=>{
+    const h=preparationHarness();await h.controller.connect(h.api);await openSaved(h);h.last('open').resolve(clone(h.frame));
+    h.controller.requestClose();h.closeFinal();h.last('close').resolve(clone(h.frame));await flush();
+    if(stage==='dirty')h.controller.editField('build','9');
+    else h.original(ORIGINAL,checkout(),'e'.repeat(32)); // A NEW real owner never reuses the prior terminal Session ID.
+    h.prepareEvent(queuedPreparation());await flush();
+    if(stage==='dirty'){assert.equal(h.count('agent-open'),0);assert.equal(h.controller.selectedEntry().values.build,'9');return;}
+    assert.equal(h.count('agent-open'),1);
+    h.prepareEvent({...h.prepareCurrent(),revision:2,phase:'opening',original:{sessionId:'e'.repeat(32),ownerGeneration:ID.window}});
+    h.controller.editField('build','9');if(stage==='pending-aba')h.controller.editField('build','7');const newer=h.controller.selectedEntry();
+    h.publish(h.owner('editing')); // real original can return late after STOP
+    const c=checkout(),old=h.prepareCurrent();h.prepareEvent({...old,revision:old.revision+1,phase:'stopping',original:{sessionId:'e'.repeat(32),ownerGeneration:ID.window},
+      checkout:{revision:c.revision,source:c.source,iosEnabled:c.iosEnabled,values:c.values,configBytes:c.baseline.savedConfig.bytes,configSha256:c.baseline.savedConfig.sha256,
+        versionBytes:c.baseline.savedVersion.bytes,versionSha256:c.baseline.savedVersion.sha256},proposed:{name:'1.2',build:'8'}});
+    h.last('agent-open').resolve(clone(h.frame));await flush();assert.equal(h.controller.selectedEntry(),newer);assert.equal(h.count('agent-prepare'),0);assert.equal(h.state.edit.integrityFailed,false);
+  });
+});
+
+test('each new preparation publication rechecks original view/draft before invoking',async t=>{
+  for(const cut of ['open','adopt','prepare'])await t.test(cut,async()=>{
+    const h=preparationHarness();await h.controller.connect(h.api);let fired=false;
+    h.controller.subscribe(()=>{const a=h.state.edit.attempt;if(fired||!a?.binding.preparation)return;
+      if(cut==='open' || cut==='adopt'&&a.openAdopted || cut==='prepare'&&a.prepareClaimed){fired=true;h.controller.setVisible(false);}});
+    h.prepareEvent(queuedPreparation());await flush();
+    if(cut==='open'){assert.equal(h.count('agent-open'),0);assert.equal(h.count('agent-cancel'),1);return;}
+    h.publish(h.owner('editing'));h.prepareOpened();h.last('agent-open').resolve(clone(h.frame));await flush();
+    assert.equal(fired,true);assert.equal(h.count('agent-prepare'),0);assert.equal(h.count('agent-cancel'),1);assert.equal(h.count('apply'),0);
+  });
+});
+
+test('wrong preparation source or hash refuses proposed DATA without poisoning the native editor',async t=>{
+  for(const field of ['source','configSha256','versionSha256'])await t.test(field,async()=>{
+    const h=preparationHarness();await h.controller.connect(h.api);h.prepareEvent(queuedPreparation());await flush();h.publish(h.owner('editing'));
+    const c=checkout();const comparison={revision:c.revision,source:c.source,iosEnabled:c.iosEnabled,values:c.values,configBytes:c.baseline.savedConfig.bytes,
+      configSha256:c.baseline.savedConfig.sha256,versionBytes:c.baseline.savedVersion.bytes,versionSha256:c.baseline.savedVersion.sha256};comparison[field]=field==='source'?'other/version.properties':'f'.repeat(64);
+    h.prepareOpened(undefined,{checkout:comparison});h.last('agent-open').resolve(clone(h.frame));await flush();
+    assert.equal(h.controller.selectedEntry(),null);assert.equal(h.count('agent-prepare'),0);assert.equal(h.state.edit.integrityFailed,false);assert.equal(h.count('agent-cancel'),1);
+  });
+});
+
+test('native final/coalesced next request waits for the original and then discovers one fresh Open',async t=>{
+  for(const last of ['prepare-caller','native-final'])await t.test(last,async()=>{
+    const h=preparationHarness();await h.controller.connect(h.api);
+    // Closing this no-change review leaves no unsaved draft to overwrite.
+    h.prepareEvent(queuedPreparation({kind:'manual',values:{name:'1.2.3',build:'7'}}));await flush();
+    h.publish(h.owner('editing'));h.prepareOpened();h.last('agent-open').resolve(clone(h.frame));await flush();
+    h.publish(h.owner('reviewing'));h.prepareReview();const original=h.last('agent-prepare');
+    if(last==='native-final'){original.resolve(clone(h.frame));await flush();}
+    h.controller.requestClose();await flush(); // Original Cancel returns before the later final/next records.
+    if(last==='prepare-caller'){h.closeFinal();h.last('close').resolve(clone(h.frame));}
+    h.preparationFinal();
+    const next=queuedPreparation(undefined,{...VP,requestId:'9'.repeat(32)});h.prepareEvent(next);await flush();
+    assert.equal(h.count('agent-open'),1);assert.equal(h.controller.open(),false);
+    const reads=h.calls.filter(c=>c.kind==='preparation-status').length;
+    if(last==='prepare-caller')original.resolve(clone(h.frame));
+    else {h.closeFinal();h.last('close').resolve(clone(h.frame));}
+    await flush();
+    const after=h.calls.filter(c=>c.kind==='preparation-status').slice(reads);
+    assert.deepEqual(after.map(c=>c.args),[VP,undefined]); // Exact old first, one genuine latest read.
+    assert.equal(h.count('agent-open'),2);assert.deepEqual(h.last('agent-open').args,next.origin);
+    assert.equal(h.state.edit.integrityFailed,false);assert.equal(h.count('agent-prepare'),1);assert.equal(h.count('agent-apply'),0);
+    // No relay re-emission was necessary; repeated reads cannot replay Open.
+    h.prepareEvent(next);await h.controller.agent.checkPreparation();await flush();assert.equal(h.count('agent-open'),2);
+  });
+});
+
+test('coalesced next preparation cannot replace unknown or an unavailable exact-old lookup',async t=>{
+  for(const missing of ['unknown','null','error'])await t.test(missing,async()=>{
+    const h=preparationHarness();await h.controller.connect(h.api);
+    h.prepareEvent(queuedPreparation({kind:'manual',values:{name:'1.2.3',build:'7'}}));await flush();
+    h.publish(h.owner('editing'));h.prepareOpened();h.last('agent-open').resolve(clone(h.frame));await flush();
+    h.publish(h.owner('reviewing'));h.prepareReview();const original=h.last('agent-prepare');h.controller.requestClose();await flush();
+    if(missing==='unknown')h.prepareEvent({...h.prepareCurrent(),revision:h.prepareCurrent().revision+1,phase:'unknown',settlement:'unknown',result:null});
+    else h.preparationFinal();
+    const next=queuedPreparation(undefined,{...VP,requestId:'9'.repeat(32)});h.prepareEvent(next);await flush();
+    if(missing!=='unknown')h.api.agentVersionEdit.preparation.status=async q=>{
+      h.calls.push({kind:'preparation-status',args:clone(q)});
+      if(missing==='error')throw new Error('original status unavailable');return null;
+    };
+    const reads=h.calls.filter(c=>c.kind==='preparation-status').length;
+    h.closeFinal();h.last('close').resolve(clone(h.frame));original.resolve(clone(h.frame));await flush();
+    await h.controller.agent.checkPreparation();await flush();
+    const after=h.calls.filter(c=>c.kind==='preparation-status').slice(reads);
+    assert.ok(after.length>0);assert.ok(after.every(c=>c.args?.requestId===VP.requestId));
+    assert.equal(h.count('agent-open'),1);assert.equal(h.count('agent-prepare'),1);assert.equal(h.count('agent-apply'),0);
+  });
+});
+
+test('lost Open response keeps original metadata/STOP and never sends Prepare or another Open',async()=>{
+  const h=preparationHarness();await h.controller.connect(h.api);h.prepareEvent(queuedPreparation());await flush();h.publish(h.owner('editing'));h.prepareOpened();
+  h.last('agent-open').reject(new Error('lost response'));await flush();assert.equal(h.count('agent-open'),1);assert.equal(h.count('agent-prepare'),0);assert.equal(h.count('agent-cancel'),1);
+  h.prepareEvent(h.prepareCurrent());await h.controller.agent.check();await flush();assert.equal(h.count('agent-open'),1);assert.equal(h.controller.canApply(),false);assert.equal(h.state.edit.integrityFailed,false);
+});

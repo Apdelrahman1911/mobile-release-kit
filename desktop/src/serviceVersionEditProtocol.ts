@@ -1,4 +1,6 @@
 // Bounded comparison DATA only. The original native Prepared/lease owns Apply.
+import { createVersionPrepareApi } from './serviceVersionPrepareProtocol.ts';
+import type { VersionPrepareApi } from './serviceVersionPrepareProtocol.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { parseVersionEditStatus } from './releaseVersionEdit.ts';
 import type { VersionEditStatus } from './releaseVersionEdit.ts';
@@ -21,6 +23,7 @@ export interface VersionEditAccess {
 }
 export interface VersionEditAllow { projectId: string; original: VersionEditOriginal; statusRevision: number; nonce: string; consent: typeof VERSION_EDIT_CONSENT }
 export interface VersionEditAgentApi {
+  preparation?: VersionPrepareApi;
   status(origin?: VersionEditOrigin): Promise<VersionEditAccess>;
   allow(input: VersionEditAllow): Promise<VersionEditAccess>;
   revoke(nonce: string): Promise<VersionEditAccess>;
@@ -39,7 +42,7 @@ export function sameVersionEditReview(a: VersionEditReview, b: VersionEditReview
     a.original.planToken === b.original.planToken && a.nativeStatusRevision === b.nativeStatusRevision && a.name === b.name && a.build === b.build && a.source === b.source &&
     a.beforeBytes === b.beforeBytes && a.beforeSha256 === b.beforeSha256 && a.afterBytes === b.afterBytes && a.afterSha256 === b.afterSha256 && a.candidateId === b.candidateId;
 }
-function review(v: unknown): v is VersionEditReview {
+export function validVersionEditReview(v: unknown): v is VersionEditReview {
   return keys(v, ['original','nativeStatusRevision','name','build','source','beforeBytes','beforeSha256','afterBytes','afterSha256','candidateId']) &&
     keys(v.original, ['sessionId','ownerGeneration','revision','planToken']) && Object.values(v.original).every(id) && uint(v.nativeStatusRevision) && text(v.name,64) &&
     typeof v.build === 'string' && /^[0-9]{1,10}(?![\s\S])/.test(v.build) && text(v.source,512) && !v.source.startsWith('/') && !/[\\:]/.test(v.source) && v.source.split('/').every(p => p !== '' && p !== '.' && p !== '..') &&
@@ -51,7 +54,7 @@ function request(v: unknown): v is VersionEditRequest {
     v.schemaVersion !== 1 || !keys(v.origin,['projectId','serviceInstance','requestId']) || !Object.values(v.origin).every(id) || !id(v.grantId) || !uint(v.revision,0xfffffffe,1) ||
     !['queued','admitting','applying','stopping','final','unknown'].includes(String(v.phase)) || !['pending','settled','unknown'].includes(String(v.settlement)) ||
     (v.phase === 'final') !== (v.settlement === 'settled') || (v.phase === 'unknown') !== (v.settlement === 'unknown') || (v.phase === 'final') !== (v.result !== null) ||
-    !review(v.review) || typeof v.cancelRequested !== 'boolean' || v.doNotReplay !== true) return false;
+    !validVersionEditReview(v.review) || typeof v.cancelRequested !== 'boolean' || v.doNotReplay !== true) return false;
   return v.result === null || keys(v.result,['effect','journal','cancelled','applySubmitted']) && ['not-started','unchanged','rolled-back','committed'].includes(String(v.result.effect)) &&
     ['not-created','clean','recovery-required'].includes(String(v.result.journal)) && typeof v.result.cancelled === 'boolean' && typeof v.result.applySubmitted === 'boolean';
 }
@@ -59,7 +62,7 @@ export function parseVersionEditAccess(raw: unknown): VersionEditAccess | null {
   try {
     const v = copyBoundedComparisonData(raw,16384,256);
     if (!keys(v,['schemaVersion','serviceInstance','projectId','grantId','nonce','review','live','remainingMs','request']) || v.schemaVersion !== 1 ||
-      !nullable(v.serviceInstance,id) || !nullable(v.projectId,id) || !nullable(v.grantId,id) || !nullable(v.nonce,id) || !nullable(v.review,review) || !nullable(v.request,request) ||
+      !nullable(v.serviceInstance,id) || !nullable(v.projectId,id) || !nullable(v.grantId,id) || !nullable(v.nonce,id) || !nullable(v.review,validVersionEditReview) || !nullable(v.request,request) ||
       typeof v.live !== 'boolean' || !uint(v.remainingMs,900000) || v.live !== (v.remainingMs > 0) || v.live && (!v.serviceInstance || !v.projectId || !v.grantId || !v.nonce || !v.review || v.request !== null)) return null;
     const all = [v.serviceInstance,v.projectId,v.grantId,v.nonce,v.review];
     if (!(all.every(x=>x === null) || all.every(x=>x !== null)) || v.request && (v.request.origin.serviceInstance !== v.serviceInstance ||
@@ -75,7 +78,7 @@ export function createVersionEditAgentApi(mode: string, invoke: Invoke, listen?:
   const error = () => ({code:'agent_version_edit_unconfirmed',message:'Keep and inspect the same version edit request. Do not resend Apply.',retryable:false});
   const raw = (v: unknown) => { const bytes = new TextEncoder().encode(JSON.stringify(v)); if (bytes.length > 1024) throw error(); return bytes; };
   const status = async (command: string, v: unknown) => { const parsed = parseVersionEditAccess(await invoke(command,raw(v))); if (!parsed) throw error(); return parsed; };
-  return Object.freeze({status:(q?: VersionEditOrigin) => status('agent_version_edit_status',q ?? {}), allow:(v: VersionEditAllow) => status('allow_agent_version_edit_apply',v),
+  return Object.freeze({preparation:createVersionPrepareApi(invoke),status:(q?: VersionEditOrigin) => status('agent_version_edit_status',q ?? {}), allow:(v: VersionEditAllow) => status('allow_agent_version_edit_apply',v),
     revoke:(nonce: string) => status('revoke_agent_version_edit',{nonce}), apply:async (q: VersionEditOrigin) => {
       const v = parseVersionEditStatus(await invoke('release_version_edit_apply',raw({intent:'agent-version-edit',origin:q}))); if (!v) throw error(); return v;
     }, subscribe:(fn: (v: unknown) => void) => listen('mrk:agent-version-edit',fn)});

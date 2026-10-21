@@ -15,12 +15,14 @@ export class ServiceVersionEditController {
   private permission: Permission | null = null;
   private run: Run | null = null;
   private allowWork: Promise<void> | null = null;
+  private preparationWork: Promise<void> | null = null;
   private statusWork: Promise<void> | null = null;
   private unlisten: (() => void) | null = null;
   private disposed = false;
   private readonly candidate: () => VersionEditCandidate | null;
   private finalOriginal: {session: string; generation: string} | null = null;
-  constructor(candidate: () => VersionEditCandidate | null) { this.candidate = candidate; }
+  private readonly preparation?: { observe(raw:unknown):void; origin():VersionEditOrigin|undefined; released(origin:VersionEditOrigin):boolean };
+  constructor(candidate: () => VersionEditCandidate | null, preparation?: { observe(raw:unknown):void; origin():VersionEditOrigin|undefined; released(origin:VersionEditOrigin):boolean }) { this.candidate = candidate; this.preparation=preparation; }
   getSnapshot = () => this.state;
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   private publish(issue = this.state.issue): void { this.state = {...this.state,busy:this.retains(),issue}; for (const fn of this.listeners) fn(); }
@@ -34,6 +36,7 @@ export class ServiceVersionEditController {
     this.api = api;
     try { const off = await api.subscribe(v => { if (this.api === api) this.observe(v); }); if (this.disposed || this.api !== api) off(); else this.unlisten = off; }
     catch { this.publish('Permission observation is unavailable. Keep the original review.'); }
+    await this.checkPreparation();
   }
   allow(): Promise<void> {
     const c = this.candidate();
@@ -66,13 +69,32 @@ export class ServiceVersionEditController {
     catch { this.publish('Revocation is unconfirmed; keep the original operation.'); }
   }
   sourceChanged(): void { const p = this.permission; if (p && !(this.run ? p.candidate.live() : p.candidate.current())) this.revoke(); }
+  async checkPreparation(): Promise<void> {
+    if (this.preparationWork || !this.api?.preparation || !this.preparation || this.disposed) return this.preparationWork ?? Promise.resolve();
+    const api=this.api, port=api.preparation!, preparation=this.preparation, origin=preparation.origin();
+    const work=Promise.resolve().then(async()=>{try {
+      const value=await port.status(origin);if(this.api!==api||this.disposed)return;
+      preparation.observe(value);
+      // A coalesced next event is only a hint. Reconcile the exact old original
+      // before ONE fresh latest read, retaining both reads in this same promise.
+      if(origin && value!==null && this.api===api && !this.disposed && preparation.released(origin)) {
+        const latest=await port.status();
+        if(this.api===api&&!this.disposed&&preparation.released(origin))preparation.observe(latest);
+      }
+    }
+      catch { this.publish('Version preparation is unconfirmed. Keep or cancel its original request; do not resend.'); }});
+    this.preparationWork=work;try{await work;}finally{if(this.preparationWork===work)this.preparationWork=null;}
+  }
   async check(): Promise<void> {
+    await this.checkPreparation();
     if (this.statusWork || !this.api || this.disposed) return this.statusWork ?? Promise.resolve();
     const api = this.permission?.candidate.api ?? this.api, origin = this.run?.origin;
     const work = Promise.resolve().then(async () => { try { this.observe(await api.status(origin)); } catch { this.publish('Request status is unconfirmed; never resend Apply.'); } });
     this.statusWork = work; try { await work; } finally { if (this.statusWork === work) this.statusWork = null; }
   }
   observe(raw: unknown): void {
+    if (raw && typeof raw==='object' && !Array.isArray(raw) && Object.keys(raw).length===2 && Object.hasOwn(raw,'kind') && Object.hasOwn(raw,'request') &&
+        (raw as {kind:unknown}).kind==='preparation') { this.preparation?.observe((raw as {request:unknown}).request);return; }
     const a = parseVersionEditAccess(raw), p = this.permission;
     if (!a) { this.revoke(); this.publish('Invalid version delegation observation. Keep the original request.'); return; }
     if (!p || a.nonce !== p.nonce || !a.review || !sameVersionEditReview(a.review,p.candidate.review)) return;

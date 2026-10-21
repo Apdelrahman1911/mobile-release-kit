@@ -1177,13 +1177,18 @@ impl DocumentBinding {
         project: &str,
         reservation: &str,
     ) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        self.edit_reserved_version_with_preparation(project,reservation,None)
+    }
+    pub(crate) fn edit_reserved_version_with_preparation(
+        &self,project:&str,reservation:&str,preparation:Option<Arc<crate::edit_owner::VersionPrepareLink>>,
+    )->Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus,BridgeError>{
         #[cfg(not(all(
             target_os = "macos",
             target_pointer_width = "64",
             any(target_arch = "aarch64", target_arch = "x86_64")
         )))]
         {
-            let _ = (project, reservation);
+            let _ = (project, reservation, preparation);
             return Err(p::unavailable());
         }
         #[cfg(all(
@@ -1240,6 +1245,13 @@ impl DocumentBinding {
                 state
                     .github
                     .reserved_version_edit_current(&lane.pins, Instant::now())?;
+                if let Some(link)=&preparation{
+                    if !link.reserved()||link.project.runtime_id!=project{return Err(p::refused())}
+                    self.version_prepare_open_locked(&state,link,&publisher)?;
+                    // Permanently claim this exact continuation BEFORE consuming
+                    // the real reserve lane; a later failure cannot be 'unentered'.
+                    link.claim_open()?;
+                }
                 let epoch = publisher.tool_source_epoch()?;
                 let registration = crate::edit_owner::RegisteredEditRoot {
                     generation: lane.pins.generation,
@@ -1281,6 +1293,7 @@ impl DocumentBinding {
                     .gate()
                     .locked(self, &state, &handoff, Some(&publisher))?;
                 ticket.reserved_version(handoff)?;
+                if let Some(link)=preparation{ticket.version_preparation(link)?;}
                 self.inner.bridge.edits.open_release_version_published(
                     &publisher,
                     MAIN,
@@ -1316,6 +1329,11 @@ impl DocumentBinding {
             .edits
             .reserved_version_access(MAIN, session)?;
         let Some(access) = access else {
+            if let Some(link)=self.inner.bridge.edits.version_prepare_for_session(MAIN,session)?{
+                let step=match step{crate::edit_owner::ReservedVersionStep::Prepare=>crate::edit_owner::VersionPrepareStep::Prepare,
+                    crate::edit_owner::ReservedVersionStep::Apply=>crate::edit_owner::VersionPrepareStep::Apply,_=>return Err(p::refused())};
+                return self.version_prepare_phase_admit(link,step,enqueue);
+            }
             return self.release_version_edit_admit_published(
                 |b| b.edits.release_version_project(MAIN, session),
                 enqueue,

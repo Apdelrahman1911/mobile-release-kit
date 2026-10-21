@@ -28,7 +28,7 @@ pub(crate) enum Decision {
 fn id(v: &str) -> Result<Id, BridgeError> {
     Id::parse(v).map_err(|_| invalid_owner())
 }
-fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
+pub(super) fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
     if a.session.domain != EditDomain::ReleaseVersion
         || a.session.saved_text_recovery
         || a.projection.phase != Phase::Reviewing
@@ -105,7 +105,7 @@ fn window(r: &Registry, window: &str) -> Result<(), BridgeError> {
 impl EditOwner {
     pub(crate) fn version_edit_has_lease(&self, session: &str) -> bool {
         self.inner.lock().active.as_ref().is_some_and(|a| {
-            a.session.id == session && a.session.agent_version_edit.get().is_some()
+            a.session.id == session && (a.session.agent_version_edit.get().is_some()||a.session.agent_version_prepare.is_some())
         })
     }
     pub(crate) fn version_edit_prepared(
@@ -123,6 +123,9 @@ impl EditOwner {
             || a.session.agent_version_edit.get().is_some()
         {
             return Err(invalid_owner());
+        }
+        if let Some(link)=&a.session.agent_version_prepare{
+            if !link.entry.ready(&review).map_err(public)?{return Err(invalid_owner())}
         }
         Ok(PreparedOriginal {
             session: a.session.clone(),
@@ -152,6 +155,7 @@ impl EditOwner {
             Arc::downgrade(&original.session.wake),
         )
         .map_err(public)?;
+        if let Some(link)=&original.session.agent_version_prepare{lease.associate(&link.entry).map_err(public)?;}
         service
             .version_edit_requests()
             .install(lease.clone(), || {
@@ -210,11 +214,13 @@ impl EditOwner {
             .as_ref()
             .filter(|a| a.session.id == session)
             .ok_or_else(invalid_owner)?;
-        let link = a
-            .session
-            .agent_version_edit
-            .get()
-            .ok_or_else(invalid_owner)?;
+        let Some(link)=a.session.agent_version_edit.get() else {
+            let preparation=a.session.agent_version_prepare.as_ref().ok_or_else(invalid_owner)?;
+            let actual=review(a,r.revision)?;
+            if entry.is_some()||actual.original.plan_token.as_str()!=plan||!preparation.entry.ready(&actual).map_err(public)?{return Err(invalid_owner())}
+            preparation.entry.gui_claim(&actual).map_err(public)?;
+            return Ok(Decision::Apply(Claim{session:a.session.clone(),entry:None}));
+        };
         if link.lease.review.original.plan_token.as_str() != plan {
             return Err(invalid_owner());
         }
@@ -280,6 +286,7 @@ impl EditOwner {
     }
     pub(crate) fn version_edit_relay_lost(&self) {
         let r = self.inner.lock();
+        if let Some(l)=r.active.as_ref().and_then(|a|a.session.agent_version_prepare.as_ref()){let _=l.entry.cancel(Instant::now());}
         if let Some(l) = r
             .active
             .as_ref()
@@ -294,7 +301,9 @@ fn public(e: crate::service_protocol::Error) -> BridgeError {
 }
 pub(super) fn consume(a: &ActiveOwner, claim: Option<&Claim>) -> bool {
     let Some(link) = a.session.agent_version_edit.get() else {
-        return claim.is_none();
+        return if let Some(preparation)=&a.session.agent_version_prepare{
+            claim.is_some_and(|c|Arc::ptr_eq(&c.session,&a.session)&&c.entry.is_none())&&preparation.entry.gui_owned()
+        }else{claim.is_none()};
     };
     let Some(claim) = claim.filter(|c| Arc::ptr_eq(&c.session, &a.session)) else {
         return false;
@@ -349,7 +358,11 @@ pub(super) fn retired(r: &Registry, session: &Session, unknown: bool) {
         .service
         .upgrade()
         .is_some_and(|s| s.native_history_current().is_ok());
-    let result = r
+    let result = final_data(r,session,unknown,service_current);
+    if e.retired(result).is_err() { e.unknown(); }
+}
+pub(super) fn final_data(r:&Registry,session:&Session,unknown:bool,service_current:bool)->Option<p::Final>{
+    r
         .last
         .as_ref()
         .filter(|p| {
@@ -392,10 +405,7 @@ pub(super) fn retired(r: &Registry, session: &Session, unknown: bool) {
                 ),
                 apply_submitted: p.apply_submitted,
             })
-        });
-    if e.retired(result).is_err() {
-        e.unknown();
-    }
+        })
 }
 
 #[cfg(test)]

@@ -466,6 +466,7 @@ impl ApplicationService {
                 p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
                 p::RequestBody::AppleProvisioningCancel(q)=>return self.service_apple_provisioning_query(client,q,true),
                 p::RequestBody::VersionEditSubmit(v)=>return self.service_version_edit_submit(client,v.clone()),
+                p::RequestBody::VersionEditPrepare(v)=>return self.service_version_edit_prepare(client,v.clone()),
                 p::RequestBody::VersionEditStatus(q)=>return self.service_version_edit_query(client,q,false),
                 p::RequestBody::VersionEditCancel(q)=>return self.service_version_edit_query(client,q,true),
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
@@ -539,7 +540,7 @@ impl ApplicationService {
                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
-                p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
+                p::RequestBody::VersionEditPrepare(_) | p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |
                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |

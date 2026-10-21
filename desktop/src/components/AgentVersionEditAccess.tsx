@@ -5,7 +5,7 @@ export function AgentVersionEditAccess({controller}:{controller:ServiceVersionEd
   const state = useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
   const [reviewed,setReviewed] = useState<string | null>(null), a = state.access, key = controller.approvalKey();
   return <details className="advanced-settings"><summary>Advanced: allow installed CLI to save this review</summary>
-    <p>Desktop must first Open and review these exact version values. This allows one CLI Save only—not allocation, enrollment, Git commit, upload, or CLI Open/Prepare.</p>
+    <p>The CLI can request Open and Prepare in this current Desktop with <code>version-edit-prepare</code>. Review the complete returned preview here; this separate allowance permits one Save only—not allocation, enrollment, Git commit, or upload.</p>
     <label><input type="checkbox" checked={key !== null && reviewed === key} onChange={e => setReviewed(e.target.checked ? key : null)} /> I reviewed the complete original/after file, exact values, destination and mode above, and allow this one Save.</label>
     <div className="button-row"><button type="button" disabled={key === null || reviewed !== key || !controller.canAllow()} onClick={() => { const same = key !== null && reviewed === controller.approvalKey(); setReviewed(null); if (same) void controller.allow(); }}>Allow this version Save once</button>
       <button type="button" disabled={!a && !state.busy} onClick={() => controller.revoke()}>Revoke this allowance</button>

@@ -270,10 +270,21 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
     decode_with_intent(bytes, session, false)
 }
 pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovering: bool) -> Result<ChildFrame, BridgeError> {
+    decode_entry(bytes,session,recovering,false)
+}
+pub(crate) fn decode_agent_version(bytes:&[u8],session:&str)->Result<ChildFrame,BridgeError>{decode_entry(bytes,session,false,true)}
+fn decode_entry(bytes:&[u8],session:&str,recovering:bool,agent:bool)->Result<ChildFrame,BridgeError>{
     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+    if agent&&bytes.len()>crate::service_version_edit_prepare_protocol::FRAME_BYTES{return Err(BridgeError::protocol())}
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
-    let value = strict_json(body)?;
+    let value = if agent{
+        use serde::de::DeserializeSeed;
+        let mut nodes=0;let mut reader=serde_json::Deserializer::from_slice(body);
+        let value=crate::bounded_json_seed::Seed{nodes:&mut nodes,depth:0,node_limit:crate::service_version_edit_prepare_protocol::FRAME_NODES,depth_limit:16}
+            .deserialize(&mut reader).map_err(|_|BridgeError::protocol())?;
+        reader.end().map_err(|_|BridgeError::protocol())?;value
+    }else{strict_json(body)?};
     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session { return Err(BridgeError::protocol()); }
     let seq = value["seq"].as_u64().filter(|seq| *seq <= 2).ok_or_else(BridgeError::protocol)? as u32;
     let raw = &value["result"];
@@ -366,6 +377,28 @@ mod tests {
     }
     fn prepared(view: Value) -> Vec<u8> {
         frame(1,"prepared",json!({"revision":REVISION,"planToken":PLAN,"view":view,"scopeResources":"settled"}))
+    }
+    #[test]
+    fn agent_prepare_frame_bound_precedes_same_closed_version_decoder() {
+        let raw=frame(0,"opened",opened(true));
+        assert!(matches!(decode_agent_version(&raw,SESSION),Ok(ChildFrame::ReleaseVersionOpened(_))));
+        assert!(matches!(decode_agent_version(&prepared(view("replace")),SESSION),Ok(ChildFrame::ReleaseVersionPrepared(_))));
+        let limit=crate::service_version_edit_prepare_protocol::FRAME_BYTES;
+        let mut exact=raw[..raw.len()-2].to_vec();
+        exact.resize(limit-2,b' ');exact.extend_from_slice(b"}\n");
+        assert_eq!(exact.len(),limit);
+        assert!(decode_agent_version(&exact,SESSION).is_ok());
+        exact.insert(exact.len()-2,b' ');
+        assert!(decode_agent_version(&exact,SESSION).is_err());
+        assert!(decode(&exact,SESSION).is_ok()); // ordinary decoder's independent old bound unchanged
+        let mut duplicate=String::from_utf8(raw).unwrap();
+        duplicate.insert_str(1,"\"seq\":0,");
+        assert!(decode_agent_version(duplicate.as_bytes(),SESSION).is_err());
+        let mut wrong=opened(true);wrong["scopeResources"]=json!("unknown");
+        assert!(decode_agent_version(&frame(0,"opened",wrong),SESSION).is_err());
+        let mut oversized=prepared(view("replace"));
+        oversized[0]=b'[';
+        assert!(decode_agent_version(&oversized,SESSION).is_err());
     }
     #[test]
     fn original_policy_invalid_atoms_are_correctable_and_absence_requires_explicit_null() {

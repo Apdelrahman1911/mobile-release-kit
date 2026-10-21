@@ -341,6 +341,15 @@ impl NativeReservedVersionHandoff {
                     .unwrap_or(u64::MAX)
                     .to_string()
     }
+    // Only this actual consumed handoff supplies the proposed scalar values.
+    // A public reservation/status never constructs a new handoff or Session.
+    pub(super) fn proposed_values(&self) -> Result<version_wire::Values, BridgeError> {
+        let values=version_wire::Values {
+            name:self.data["reservation"]["version"]["name"].as_str().ok_or_else(invalid_owner)?.to_owned(),
+            build:self.data["reservation"]["version"]["build"].as_u64().ok_or_else(invalid_owner)?.to_string(),
+        };
+        if !values.proposed()||!self.values(&values){return Err(invalid_owner())}Ok(values)
+    }
     pub(super) fn publication(
         &self,
         publication: &mut EditPublication<'_>,
