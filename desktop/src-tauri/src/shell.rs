@@ -2617,6 +2617,54 @@ async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Requ
     actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
 }
 
+fn play_cleanup_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_play_cleanup_protocol::raw_input(name, bytes)?;
+    state.document.play_cleanup_command(name, &value)
+}
+#[tauri::command]
+async fn github_play_cleanup_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_prepare", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_start", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_pending", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_observe", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_discard", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_play_cleanup_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_cancel", &webview, &request, &state)
+}
+
+#[tauri::command]
+async fn github_play_cleanup_allow_agent(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_play_cleanup_protocol::Status,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
+    play_cleanup_command("github_play_cleanup_allow_agent",&webview,&request,&state)
+}
+
 // Non-async: Tauri executes this original command on the main thread. The
 // native shim checks that again; no dispatch queue can outlive the Doc gate.
 #[tauri::command]
@@ -3163,11 +3211,18 @@ struct VersionReserveRelayGuard { document:DocumentBinding, slot:Arc<crate::asse
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl Drop for VersionReserveRelayGuard {fn drop(&mut self){if !self.closed {self.slot.lost(&self.document);}}}
 
+#[cfg(any(target_os="linux",target_os="macos"))]
+struct PlayCleanupRelayGuard {document:DocumentBinding,closed:bool}
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
+
 #[deny(unused_variables, unused_assignments)]
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     #[cfg(any(target_os="linux",target_os="macos"))]
     let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let play_cleanup_guard=PlayCleanupRelayGuard{document:document.clone(),closed:false};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -3209,6 +3264,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut identity_actions_guard = identity_actions_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut reserve_guard=reserve_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut play_cleanup_guard=play_cleanup_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut git_index_guard = git_index_guard;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3254,6 +3311,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut repository_create_revision = None;
         let mut pull_request_revision = None;
         let mut actions_retry_revision = None;
+        let mut play_cleanup_revision=None;
         let mut github_activity_revision = None;
         let mut github_history_revision = None;
         let mut preflight_revision = None;
@@ -3277,6 +3335,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         loop {
             if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                 }
                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
@@ -3293,6 +3352,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             document.service_repository_summary_tick();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             document.service_identity_actions_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            document.play_cleanup_agent_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             match app.path().app_local_data_dir() {
                 Ok(location)=>reserve.tick(&document,&location).await,
@@ -3418,6 +3479,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if actions_retry_revision!=Some(status.revision){
                 actions_retry_revision=Some(status.revision);
                 let _=app.emit_to(MAIN_WINDOW,crate::github_actions_retry_protocol::EVENT,&status);
+            }
+            let status=document.play_cleanup_status();
+            if play_cleanup_revision!=Some(status.revision){
+                play_cleanup_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_play_cleanup_protocol::EVENT,&status);
             }
             let status=document.github_activity_status();
             if github_activity_revision!=Some(status.revision){
@@ -3646,6 +3712,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 biased;
                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                 }
                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
@@ -5269,6 +5336,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
             github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
+            github_play_cleanup_status, github_play_cleanup_prepare, github_play_cleanup_start, github_play_cleanup_pending, github_play_cleanup_observe, github_play_cleanup_discard, github_play_cleanup_cancel, github_play_cleanup_allow_agent,
             github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,

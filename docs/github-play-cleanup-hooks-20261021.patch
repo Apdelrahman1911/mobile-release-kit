@@ -1,0 +1,1509 @@
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -346,6 +346,7 @@
+             "github_activity_status", "github_activity_read", "github_activity_cancel", "github_browser_open",
+             "github_pull_request_status", "github_pull_request_prepare", "github_pull_request_create", "github_pull_request_pending", "github_pull_request_reconcile", "github_pull_request_discard", "github_pull_request_cancel",
+             "github_actions_retry_status", "github_actions_retry_prepare", "github_actions_retry_start", "github_actions_retry_pending", "github_actions_retry_reconcile", "github_actions_retry_discard", "github_actions_retry_cancel",
++            "github_play_cleanup_status", "github_play_cleanup_prepare", "github_play_cleanup_start", "github_play_cleanup_pending", "github_play_cleanup_observe", "github_play_cleanup_discard", "github_play_cleanup_cancel", "github_play_cleanup_allow_agent",
+             "github_repository_create_status", "github_repository_create_prepare", "github_repository_create_create", "github_repository_create_pending", "github_repository_create_reconcile", "github_repository_create_discard", "github_repository_create_cancel",
+             "github_setup_publication_status", "github_setup_publication_prepare", "github_setup_publication_publish", "github_setup_publication_pending", "github_setup_publication_reconcile", "github_setup_publication_discard", "github_setup_publication_cancel",
+             "github_history_status", "github_history_start", "github_history_cancel",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -81,10 +81,13 @@
+ mod git_index;
+ #[path="service_version_reserve_application.rs"]
+ mod agent_version_reserve;
++#[path="service_play_cleanup_application.rs"]
++mod agent_play_cleanup;
+ 
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
++    play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+@@ -118,11 +121,12 @@
+         for operation in &mut saved.operations { operation.stale = true; }
+         let instance = Id::random()?;
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
++        let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -175,7 +179,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.version_reserve_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -390,6 +394,9 @@
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
++                p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
++                p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
++                p::RequestBody::PlayCleanupCancel(q)=>return self.service_play_cleanup_query(client,q,true),
+                 p::RequestBody::VersionReserveStatus(q) => return self.service_version_reserve_query(client,q,false),
+                 p::RequestBody::VersionReserveCancel(q) => return self.service_version_reserve_query(client,q,true),
+                 p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
+@@ -439,6 +446,7 @@
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
++                p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
+                 | p::RequestBody::GitRepositoryScope(_) | p::RequestBody::GitRepositoryPrepare(_)
+@@ -486,7 +494,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -162,6 +162,12 @@
+ #[path = "asset_session_github_actions_retry.rs"]
+ mod actions_retry;
+ pub(crate) use actions_retry::GitHubActionsRetryGoGate;
++#[path="asset_session_github_play_cleanup.rs"]
++mod play_cleanup;
++pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="service_play_cleanup_native.rs"]
++mod agent_play_cleanup;
+ pub(crate) use github_variable::GitHubVariableMaterial;
+ 
+ #[path = "asset_session_android_signing.rs"]
+@@ -2150,6 +2156,8 @@
+             self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+@@ -2688,7 +2696,7 @@
+     // lock/loss and reconciliation intentionally do not call this predicate.
+     allocation_conflict_gate(
+         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
++        state.github.setup_secret_work_pending() || state.github.history_work_pending() || state.github.play_cleanup_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
+ }
+ fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+@@ -4163,6 +4171,7 @@
+         self.github_activity_observe_locked(state, now, gate);
+         self.pull_request_observe_locked(state, now, gate);
+         self.actions_retry_observe_locked(state, now, gate);
++        self.play_cleanup_observe_locked(state, now, gate);
+         self.github_history_observe_locked(state, now, gate);
+     }
+     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
+diff --git a/desktop/src-tauri/src/git_fetch_connection.rs b/desktop/src-tauri/src/git_fetch_connection.rs
+--- a/desktop/src-tauri/src/git_fetch_connection.rs
++++ b/desktop/src-tauri/src/git_fetch_connection.rs
+@@ -133,7 +133,7 @@
+             || self.repository_create.exhausted
+             || self.activity.exhausted
+             || self.pull_request.exhausted
+-            || self.actions_retry.exhausted
++            || (self.actions_retry.exhausted || self.play_cleanup.exhausted)
+         {
+             return Err(refused(Reason::CleanupUnknown));
+         }
+@@ -242,7 +242,7 @@
+         self.publication.revoke_consent();
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         Ok(())
+     }
+     pub(crate) fn git_fetch_current(
+@@ -269,7 +269,7 @@
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+             || self.pull_request.native_work_pending()
+-            || self.actions_retry.native_work_pending()
++            || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+             || self.push.is_some()
+diff --git a/desktop/src-tauri/src/git_push_connection.rs b/desktop/src-tauri/src/git_push_connection.rs
+--- a/desktop/src-tauri/src/git_push_connection.rs
++++ b/desktop/src-tauri/src/git_push_connection.rs
+@@ -140,7 +140,7 @@
+             || self.repository_create.exhausted
+             || self.activity.exhausted
+             || self.pull_request.exhausted
+-            || self.actions_retry.exhausted
++            || (self.actions_retry.exhausted || self.play_cleanup.exhausted)
+         {
+             return Err(refused(Reason::CleanupUnknown));
+         }
+@@ -246,7 +246,7 @@
+         self.publication.revoke_consent();
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         Ok(())
+     }
+     pub(crate) fn git_push_current(
+@@ -273,7 +273,7 @@
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+             || self.pull_request.native_work_pending()
+-            || self.actions_retry.native_work_pending()
++            || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+             || self.fetch.is_some()
+diff --git a/desktop/src-tauri/src/github_actions_retry_session.rs b/desktop/src-tauri/src/github_actions_retry_session.rs
+--- a/desktop/src-tauri/src/github_actions_retry_session.rs
++++ b/desktop/src-tauri/src/github_actions_retry_session.rs
+@@ -250,7 +250,7 @@
+             self.actions_retry.revoke_consent();
+         }
+         self.actions_retry.observe_go();
+-        let reason = if self.unknown || self.exhausted || self.actions_retry.exhausted {
++        let reason = if self.unknown || self.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted) {
+             p::Reason::CleanupUnknown
+         } else if !qualified {
+             p::Reason::Unqualified
+@@ -471,7 +471,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+-        self.pull_request.context_changed();
++        self.pull_request.context_changed();self.play_cleanup.context_changed();
+         self.actions_retry.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -739,7 +739,7 @@
+         {
+             return Err(refused(p::Reason::InvalidInput));
+         }
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         Ok(self.actions_retry.view.clone())
+     }
+     pub(crate) fn actions_retry_discard(
+@@ -786,7 +786,7 @@
+                     && edit.matches(&a.stamp)
+             })
+             .ok_or_else(|| refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.actions_retry.exhausted {
++        if self.unknown || self.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted) {
+             return Err(refused(p::Reason::CleanupUnknown));
+         }
+         if self.preflight.native_work_pending()
+@@ -796,7 +796,7 @@
+             || self.publication.native_work_pending()
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+-            || self.pull_request.native_work_pending()
++            || self.pull_request.native_work_pending() || self.play_cleanup.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+diff --git a/desktop/src-tauri/src/github_activity_session.rs b/desktop/src-tauri/src/github_activity_session.rs
+--- a/desktop/src-tauri/src/github_activity_session.rs
++++ b/desktop/src-tauri/src/github_activity_session.rs
+@@ -356,7 +356,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         self.activity.view.result = None;
+         self.activity.view.operation = Some(p::Operation {
+             id: ticket.operation_id().into(),
+@@ -442,7 +442,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.repository_create.native_work_pending()
++            || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())) || self.repository_create.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+diff --git a/desktop/src-tauri/src/github_connection_session.rs b/desktop/src-tauri/src/github_connection_session.rs
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -23,6 +23,8 @@
+ pub(crate) mod pull_request;
+ #[path = "github_actions_retry_session.rs"]
+ pub(crate) mod actions_retry;
++#[path="github_play_cleanup_session.rs"]
++pub(crate) mod play_cleanup;
+ #[path = "github_version_enrollment_session.rs"]
+ pub(crate) mod enrollment;
+ #[path="git_fetch_connection.rs"]
+@@ -555,6 +557,7 @@
+     activity: activity::State,
+     pull_request: pull_request::State,
+     actions_retry: actions_retry::State,
++    play_cleanup: play_cleanup::State,
+     enrollment: Option<enrollment::Hold>,
+     fetch:Option<fetch::Hold>,
+     push:Option<push::Hold>,
+@@ -571,7 +574,7 @@
+     pub(crate) fn new() -> Self {
+         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
+             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
+-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(),actions_retry:actions_retry::State::new(), enrollment:None,fetch:None,push:None,
++            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(),actions_retry:actions_retry::State::new(),play_cleanup:play_cleanup::State::new(), enrollment:None,fetch:None,push:None,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             reserve:None, history: crate::github_history_session::State::new() }
+     }
+@@ -605,7 +608,7 @@
+         if self.unknown || self.exhausted || self.native_work_pending()
+             || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted
+             || self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted
+-            || self.pull_request.exhausted || self.actions_retry.exhausted
++            || self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted)
+             || self.status.operation.as_ref().is_some_and(|o| o.phase != Phase::Settled || o.reason == Reason::CleanupUnknown) {
+             return None;
+         }
+@@ -638,13 +641,13 @@
+         !self.unknown && !self.exhausted && self.fetch.is_none() && self.push.is_none()
+     }
+     pub(crate) fn material_settled(&self) -> bool {
+-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending()
++        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending()
+     }
+     fn version_reserve_pending(&self)->bool {
+         #[cfg(any(target_os="linux",target_os="macos"))] {self.reserve.is_some()}
+         #[cfg(not(any(target_os="linux",target_os="macos")))] {false}
+     }
+-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() }
++    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() }
+     fn fact_retirement(&mut self, reason: Reason) {
+         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
+     }
+@@ -656,7 +659,7 @@
+         }
+     }
+     fn room(&mut self) -> Result<(), BridgeError> {
+-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
++        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
+     }
+     pub(crate) fn exhaust(&mut self) {
+@@ -676,7 +679,7 @@
+         self.repository_create.retired(Reason::CleanupUnknown);
+         self.activity.retired(Reason::CleanupUnknown);
+         self.pull_request.retired(Reason::CleanupUnknown);
+-        self.actions_retry.retired(Reason::CleanupUnknown);
++        self.actions_retry.retired(Reason::CleanupUnknown);self.play_cleanup.retired(Reason::CleanupUnknown);
+         self.unknown_operation();
+         self.retire_inner(Reason::CleanupUnknown, false);
+         if let Some(session) = &mut self.status.session {
+@@ -708,7 +711,7 @@
+         if let Some(hold)=&self.reserve {hold.stop(reason==Reason::CleanupUnknown);}
+         self.activity.retired(reason);
+         self.pull_request.retired(reason);
+-        self.actions_retry.retired(reason);
++        self.actions_retry.retired(reason);self.play_cleanup.retired(reason);
+         if let Some(hold)=&self.enrollment { hold.stop(reason==Reason::CleanupUnknown); }
+         if let Some(hold)=&self.fetch {hold.stop(reason==Reason::CleanupUnknown);}
+         if let Some(hold)=&self.push {hold.stop(reason==Reason::CleanupUnknown);}
+@@ -731,12 +734,12 @@
+         let reason = private.retirement.unwrap_or(reason);
+         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
+         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
+-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
++        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) && self.enrollment.is_none() && self.fetch.is_none() && self.push.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
+     }
+     fn complete_retirement(&mut self) {
+         let version_reserve_pending = self.version_reserve_pending();
+         let Some(private) = &mut self.private else { return; };
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || version_reserve_pending { return; }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || version_reserve_pending { return; }
+         private.token = None;
+         if self.unknown {
+             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
+@@ -933,14 +936,14 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent();
+         self.setup.view.operation = None; self.setup.view.session_id = None; self.setup.view.observed = None;
+         self.publication.reset();
+         self.repository_create.reset();
+         self.activity.reset();
+         self.pull_request.reset();
+-        self.actions_retry.reset();
++        self.actions_retry.reset();self.play_cleanup.reset();
+         self.setup.finish(setup_before);
+         let before = self.status.clone();
+         self.status.session = Some(session); self.status.operation = Some(operation);
+@@ -951,7 +954,7 @@
+         self.room()?;
+         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
+         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
+         if let Some(reason) = private.retirement { return Err(refused(reason)); }
+         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
+@@ -967,7 +970,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         operation.id.push_str(ticket.operation_id());
+         // There is no await or callback between the recheck and storing the
+@@ -992,7 +995,7 @@
+     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
+         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
+         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -1051,7 +1054,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
+         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
+@@ -1118,8 +1121,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1233,7 +1236,7 @@
+     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
+         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
+         let before = self.release.snapshot(); self.release.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -1297,7 +1300,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
+@@ -1365,8 +1368,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1480,7 +1483,7 @@
+     pub(crate) fn setup_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_setup_protocol::Status {
+         use crate::{github_setup_protocol::Reason as R, github_setup_session::connection_reason};
+         let before = self.setup.snapshot(); self.setup.expire_consent(now); self.setup.observe_go();
+-        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !qualified { R::Unqualified }
+             else if self.native_work_pending() { R::Busy }
+@@ -1503,11 +1506,11 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+     }
+     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+-        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
++        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+         Ok(())
+     }
+     pub(crate) fn setup_secret_work_pending(&self)->bool{
+@@ -1605,7 +1608,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
+         self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
+@@ -1710,8 +1713,8 @@
+         let active = self.setup.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request
+             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted))) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending()))) || self.enrollment.is_some() || self.fetch.is_some() || self.push.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+@@ -1930,7 +1933,7 @@
+         let other=self.release.snapshot();self.release.revoke_consent();self.release.finish(other);
+         let other=self.setup.snapshot();self.setup.revoke_consent();self.setup.finish(other);
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         self.history.start(s::Active{ticket,nomination},before);
+         let before=self.status.clone();self.capability(now,Reason::None);self.finish(before);Ok(self.history.snapshot())
+     }
+@@ -2048,7 +2051,7 @@
+             .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?
+             .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?
+             .checked_add(self.publication.heap()?)?
+-            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?.checked_add(self.actions_retry.heap()?)?;
++            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?.checked_add(self.actions_retry.heap()?)?.checked_add(self.play_cleanup.heap()?)?;
+         if let Some(private) = &self.private {
+             if private.ticket.is_some() || private.gh_hold.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
+             // Borrow the private original. Never clone its token or print bytes.
+diff --git a/desktop/src-tauri/src/github_publication_session.rs b/desktop/src-tauri/src/github_publication_session.rs
+--- a/desktop/src-tauri/src/github_publication_session.rs
++++ b/desktop/src-tauri/src/github_publication_session.rs
+@@ -412,7 +412,7 @@
+         self.setup.revoke_consent();
+         self.setup.finish(old);
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         self.publication.revoke_consent();
+         self.publication.view.pending.clear();
+         self.publication.view.pull = None;
+@@ -665,7 +665,7 @@
+         }
+         self.publication.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         Ok(self.publication.view.clone())
+     }
+     pub(crate) fn publication_discard(
+@@ -718,7 +718,7 @@
+         if self.preflight.native_work_pending()
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+-            || (self.history.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || (self.history.native_work_pending() || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+             || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+diff --git a/desktop/src-tauri/src/github_pull_request_session.rs b/desktop/src-tauri/src/github_pull_request_session.rs
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -429,7 +429,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         self.pull_request.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -737,7 +737,7 @@
+             || self.publication.native_work_pending()
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+-            || self.actions_retry.native_work_pending()
++            || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+diff --git a/desktop/src-tauri/src/github_repository_create_session.rs b/desktop/src-tauri/src/github_repository_create_session.rs
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -410,7 +410,7 @@
+         self.setup.finish(b);
+         self.publication.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         self.repository_create.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -673,7 +673,7 @@
+         }
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
+-        self.actions_retry.context_changed();
++        self.actions_retry.context_changed();self.play_cleanup.context_changed();
+         Ok(self.repository_create.view.clone())
+     }
+     pub(crate) fn repository_create_discard(
+@@ -728,7 +728,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending()
++            || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())) || self.activity.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+diff --git a/desktop/src-tauri/src/github_version_enrollment_session.rs b/desktop/src-tauri/src/github_version_enrollment_session.rs
+--- a/desktop/src-tauri/src/github_version_enrollment_session.rs
++++ b/desktop/src-tauri/src/github_version_enrollment_session.rs
+@@ -145,7 +145,7 @@
+         self.setup.revoke_consent();
+         self.setup.finish(before);
+         self.publication.revoke_consent();self.repository_create.context_changed();
+-        self.pull_request.context_changed();
++        self.pull_request.context_changed();self.play_cleanup.context_changed();
+         Ok(pins)
+     }
+     pub(crate) fn version_enrollment_current(
+@@ -164,7 +164,7 @@
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+-            || (self.publication.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || (self.publication.native_work_pending() || (self.pull_request.native_work_pending() || self.play_cleanup.native_work_pending()) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+         {
+             return Err(p::refused(p::Reason::TargetChanged));
+         }
+diff --git a/desktop/src-tauri/src/github_version_reserve_session.rs b/desktop/src-tauri/src/github_version_reserve_session.rs
+--- a/desktop/src-tauri/src/github_version_reserve_session.rs
++++ b/desktop/src-tauri/src/github_version_reserve_session.rs
+@@ -57,7 +57,7 @@
+         self.setup.finish(before);
+         self.publication.revoke_consent();
+         self.repository_create.context_changed();
+-        self.pull_request.context_changed();
++        self.pull_request.context_changed();self.play_cleanup.context_changed();
+         Ok(pins)
+     }
+     pub(crate) fn version_reserve_current(
+@@ -79,7 +79,7 @@
+             || self.publication.native_work_pending()
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
+-            || self.pull_request.native_work_pending()
++            || (self.pull_request.native_work_pending() || self.play_cleanup.native_work_pending())
+             || self.enrollment_pins(
+                 &pins.project_id,
+                 pins.generation,
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -26,10 +26,15 @@
+ mod git_remote;
+ #[path="installed_cli_version_reserve.rs"]
+ mod version_reserve;
++#[path="installed_cli_play_cleanup.rs"]
++mod play_cleanup;
+ 
+ const HELP: &str = "Mobile Release Kit agent CLI\n\n\
+ Usage:\n\
+   mrk capabilities [--json]\n\
++  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
++  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -232,6 +237,10 @@
+                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
++            "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
++                "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
++                "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
++                "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+@@ -281,6 +290,7 @@
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
++        text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
+         text.into_bytes()
+@@ -372,6 +382,7 @@
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
++        p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
+             "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
+         p::ResponseBody::GitRepositoryScope(_) | p::ResponseBody::GitRepositoryRequest(_) =>
+@@ -404,6 +415,7 @@
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
++    if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+     if git_repository::recognizes(&args) { return git_repository::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -255,6 +255,7 @@
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+         p::ResponseBody::GitCommitScope(view) => service.android_tools_client_current(&client, &view.0.project_id)?,
+         p::ResponseBody::GitIndexRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -7,6 +7,10 @@
+ mod service_version_reserve_protocol;
+ #[path="service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
++#[path="service_play_cleanup_protocol.rs"]
++mod service_play_cleanup_protocol;
++#[path="service_play_cleanup_requests.rs"]
++mod service_play_cleanup_requests;
+ mod service_git_protocol;
+ mod service_git_commit_protocol;
+ mod service_git_repository_protocol;
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -323,6 +323,9 @@
+ mod github_browser_protocol;
+ mod github_pull_request_protocol;
+ mod github_actions_retry_protocol;
++mod github_play_cleanup_protocol;
++mod service_play_cleanup_protocol;
++mod service_play_cleanup_requests;
+ mod github_setup_session;
+ mod github_history_protocol;
+ mod github_history_session;
+diff --git a/desktop/src-tauri/src/passive_management_tests.rs b/desktop/src-tauri/src/passive_management_tests.rs
+--- a/desktop/src-tauri/src/passive_management_tests.rs
++++ b/desktop/src-tauri/src/passive_management_tests.rs
+@@ -28,7 +28,7 @@
+         publication_receipt: None, publication_request: None, publication_gate: None,
+         repository_create_receipt: None, repository_create_request: None, repository_create_gate: None,
+         pull_request_receipt: None, pull_request_request: None, pull_request_gate: None,
+-        actions_retry_receipt: None, actions_retry_request: None, actions_retry_gate: None,
++        actions_retry_receipt: None, actions_retry_request: None, actions_retry_gate: None,play_cleanup_receipt:None,play_cleanup_request:None,play_cleanup_gate:None,
+         github_activity_receipt: None, github_activity_request: None, github_activity_gate: None,
+         setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
+         history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None, gh_auth: None, gh_auth_endpoints: None,
+@@ -75,7 +75,7 @@
+     let outcome = match rig.owner.profile {
+         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
+         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+-        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
++        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
+     };
+     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
+         driver.await.unwrap();
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -206,6 +206,9 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params", deny_unknown_fields)]
+ pub enum RequestBody {
++    #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
++    #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
++    #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -272,6 +275,7 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
++    PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+@@ -325,6 +329,8 @@
+     nesting(bytes)?;
+     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
++    if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
++        && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+@@ -386,6 +392,12 @@
+     }
+     if response.version != VERSION { return Err(Error::InvalidRequest); }
+     match &response.response {
++        ResponseBody::PlayCleanupRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_play_cleanup_protocol::STATUS_LIMIT {
++                return Err(Error::InvalidRequest);
++            }
++        },
+         ResponseBody::Info(info) if info.read_only || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || !info.requires_running_desktop || info.cached_observations_are_authority
+             || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
+         ResponseBody::Projects(rows) => {
+diff --git a/desktop/src-tauri/src/service_version_reserve_requests.rs b/desktop/src-tauri/src/service_version_reserve_requests.rs
+--- a/desktop/src-tauri/src/service_version_reserve_requests.rs
++++ b/desktop/src-tauri/src/service_version_reserve_requests.rs
+@@ -42,7 +42,8 @@
+             }
+         }
+     }
+-    fn stop(&self, now: Instant) -> Result<Option<(p::Reason, Instant)>, Error> {
++    pub(crate) fn end(&self) -> Instant { self.end }
++    pub(crate) fn stop(&self, now: Instant) -> Result<Option<(p::Reason, Instant)>, Error> {
+         let at = *self.revoked.lock().map_err(|_| Error::StateUnknown)?;
+         Ok(match at {
+             Some(at) if at <= self.end => Some((p::Reason::PermissionRevoked, at)),
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2615,6 +2615,54 @@
+ async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+     actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
++}
++
++fn play_cleanup_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
++    let value = crate::github_play_cleanup_protocol::raw_input(name, bytes)?;
++    state.document.play_cleanup_command(name, &value)
++}
++#[tauri::command]
++async fn github_play_cleanup_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_status", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_prepare", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_start", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_pending", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_observe", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_discard", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_play_cleanup_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_play_cleanup_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_cancel", &webview, &request, &state)
++}
++
++#[tauri::command]
++async fn github_play_cleanup_allow_agent(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_play_cleanup_protocol::Status,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Hosted Play cleanup has no fixture admission."));
++    play_cleanup_command("github_play_cleanup_allow_agent",&webview,&request,&state)
+ }
+ 
+ // Non-async: Tauri executes this original command on the main thread. The
+@@ -3163,11 +3211,18 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl Drop for VersionReserveRelayGuard {fn drop(&mut self){if !self.closed {self.slot.lost(&self.document);}}}
+ 
++#[cfg(any(target_os="linux",target_os="macos"))]
++struct PlayCleanupRelayGuard {document:DocumentBinding,closed:bool}
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
++
+ #[deny(unused_variables, unused_assignments)]
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let play_cleanup_guard=PlayCleanupRelayGuard{document:document.clone(),closed:false};
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+     #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3209,6 +3264,8 @@
+         let mut identity_actions_guard = identity_actions_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut reserve_guard=reserve_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut play_cleanup_guard=play_cleanup_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut git_index_guard = git_index_guard;
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3254,6 +3311,7 @@
+         let mut repository_create_revision = None;
+         let mut pull_request_revision = None;
+         let mut actions_retry_revision = None;
++        let mut play_cleanup_revision=None;
+         let mut github_activity_revision = None;
+         let mut github_history_revision = None;
+         let mut preflight_revision = None;
+@@ -3277,6 +3335,7 @@
+         loop {
+             if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+@@ -3294,6 +3353,8 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             document.service_identity_actions_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            document.play_cleanup_agent_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             match app.path().app_local_data_dir() {
+                 Ok(location)=>reserve.tick(&document,&location).await,
+                 Err(_)=>reserve.lost(&document),
+@@ -3418,6 +3479,11 @@
+             if actions_retry_revision!=Some(status.revision){
+                 actions_retry_revision=Some(status.revision);
+                 let _=app.emit_to(MAIN_WINDOW,crate::github_actions_retry_protocol::EVENT,&status);
++            }
++            let status=document.play_cleanup_status();
++            if play_cleanup_revision!=Some(status.revision){
++                play_cleanup_revision=Some(status.revision);
++                let _=app.emit_to(MAIN_WINDOW,crate::github_play_cleanup_protocol::EVENT,&status);
+             }
+             let status=document.github_activity_status();
+             if github_activity_revision!=Some(status.revision){
+@@ -3646,6 +3712,7 @@
+                 biased;
+                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+@@ -5269,6 +5336,7 @@
+             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
+             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
+             github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
++            github_play_cleanup_status, github_play_cleanup_prepare, github_play_cleanup_start, github_play_cleanup_pending, github_play_cleanup_observe, github_play_cleanup_discard, github_play_cleanup_cancel, github_play_cleanup_allow_agent,
+             github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
+             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
+             github_history_status, github_history_start, github_history_cancel,
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -70,6 +70,10 @@
+ #[path = "supervisor_github_actions_retry.rs"]
+ mod actions_retry;
+ pub(crate) use actions_retry::{GitHubActionsRetryReceipt, GitHubActionsRetryTicket};
++use crate::github_play_cleanup_protocol as play_cleanup_protocol;
++#[path="supervisor_github_play_cleanup.rs"]
++mod play_cleanup;
++pub(crate) use play_cleanup::{GitHubPlayCleanupReceipt,GitHubPlayCleanupTicket};
+ use crate::github_activity_protocol;
+ #[path = "supervisor_github_activity.rs"]
+ mod activity;
+@@ -261,8 +265,11 @@
+     pull_request_request: Option<pull_request_protocol::Request>,
+     pull_request_gate: Option<crate::asset_session::GitHubPullRequestGoGate>,
+     actions_retry_receipt: Option<Arc<Mutex<GitHubActionsRetryReceipt>>>,
++    play_cleanup_receipt: Option<Arc<Mutex<GitHubPlayCleanupReceipt>>>,
+     actions_retry_request: Option<actions_retry_protocol::Request>,
++    play_cleanup_request: Option<play_cleanup_protocol::Request>,
+     actions_retry_gate: Option<crate::asset_session::GitHubActionsRetryGoGate>,
++    play_cleanup_gate: Option<crate::asset_session::GitHubPlayCleanupGoGate>,
+     github_activity_receipt: Option<Arc<Mutex<GitHubActivityReceipt>>>,
+     github_activity_request: Option<github_activity_protocol::Request>,
+     github_activity_gate: Option<crate::asset_session::GitHubActivityGoGate>,
+@@ -328,11 +335,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActionsRetry(actions_retry_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActionsRetry(actions_retry_protocol::Reply), GitHubPlayCleanup(play_cleanup_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+ 
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubPlayCleanup, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -346,6 +353,7 @@
+             Self::RepositoryCreate => repository_create_protocol::RESPONSE_LIMIT,
+             Self::GitHubPullRequest => pull_request_protocol::RESPONSE_LIMIT,
+             Self::GitHubActionsRetry => actions_retry_protocol::RESPONSE_LIMIT,
++            Self::GitHubPlayCleanup => play_cleanup_protocol::RESPONSE_LIMIT,
+             Self::GitHubActivity => github_activity_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
+@@ -370,7 +378,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActionsRetry | Self::GitHubActivity => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActionsRetry | Self::GitHubPlayCleanup | Self::GitHubActivity => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -387,6 +395,7 @@
+     RepositoryCreate { request: repository_create_protocol::Request, gate: crate::asset_session::RepositoryCreateGoGate, end: Instant },
+     GitHubPullRequest { request: pull_request_protocol::Request, gate: crate::asset_session::GitHubPullRequestGoGate, end: Instant },
+     GitHubActionsRetry { request: actions_retry_protocol::Request, gate: crate::asset_session::GitHubActionsRetryGoGate, end: Instant },
++    GitHubPlayCleanup { request: play_cleanup_protocol::Request, gate: crate::asset_session::GitHubPlayCleanupGoGate, end: Instant },
+     GitHubActivity { request: github_activity_protocol::Request, gate: crate::asset_session::GitHubActivityGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
+@@ -398,13 +407,13 @@
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActionsRetry { .. } => Profile::GitHubActionsRetry, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActionsRetry { .. } => Profile::GitHubActionsRetry, Self::GitHubPlayCleanup { .. } => Profile::GitHubPlayCleanup, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActionsRetry { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActionsRetry { .. } | Self::GitHubPlayCleanup { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -480,6 +489,7 @@
+     RepositoryCreate(Arc<Mutex<RepositoryCreateReceipt>>),
+     GitHubPullRequest(Arc<Mutex<GitHubPullRequestReceipt>>),
+     GitHubActionsRetry(Arc<Mutex<GitHubActionsRetryReceipt>>),
++    GitHubPlayCleanup(Arc<Mutex<GitHubPlayCleanupReceipt>>),
+     GitHubActivity(Arc<Mutex<GitHubActivityReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
+@@ -979,6 +989,11 @@
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubActionsRetryReceipt::Pending) { *receipt = GitHubActionsRetryReceipt::RetainedUnknown; }
+         }
++        if let Some(receipt) = &self.play_cleanup_receipt {
++            let mut receipt = lock(receipt);
++            if matches!(&*receipt, GitHubPlayCleanupReceipt::Pending) { *receipt = GitHubPlayCleanupReceipt::RetainedUnknown; }
++        }
++        play_cleanup::native_unknown(self); // Original state/receipt locks are released above.
+         if let Some(receipt) = &self.github_activity_receipt {
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubActivityReceipt::Pending) { *receipt = GitHubActivityReceipt::RetainedUnknown; }
+@@ -1003,6 +1018,7 @@
+         self.changed.notify_waiters();
+     }
+     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
++        play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
+         let mut state = lock(&self.state);
+         if state.terminal { return None; }
+         let timed_out = now >= state.endpoint && state.error.is_none();
+@@ -1017,7 +1033,7 @@
+         drop(state);
+         if timed_out { self.stop.send_replace(true); self.changed.notify_waiters(); }
+         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
+-        if expired { None } else { Some(endpoint) }
++        if expired { None } else { Some(play_cleanup::check_deadline(self,now,endpoint)) }
+     }
+     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+         // The same original management observer must join final journal CAS,
+@@ -1183,6 +1199,21 @@
+                     }
+                 }
+             }
++            Profile::GitHubPlayCleanup => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::GitHubPlayCleanup(value) => Ok(value), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(receipt) = &self.play_cleanup_receipt {
++                    let mut receipt = lock(receipt);
++                    let was_unknown = was_unknown || matches!(&*receipt, GitHubPlayCleanupReceipt::RetainedUnknown);
++                    if !matches!(&*receipt, GitHubPlayCleanupReceipt::Settled { .. }) {
++                        *receipt = GitHubPlayCleanupReceipt::Settled {
++                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
++                        };
++                    }
++                }
++            }
+             Profile::GitHubActivity => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1423,7 +1454,7 @@
+         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+-        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActionsRetry{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
++        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActionsRetry{end,..}|AdmissionRequest::GitHubPlayCleanup{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
+             AdmissionRequest::VersionEnrollment(admission)=>Some(admission.work_end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+@@ -1432,6 +1463,7 @@
+         let repository_create_receipt = match &completion { CompletionTarget::RepositoryCreate(value) => Some(value.clone()), _ => None };
+         let pull_request_receipt = match &completion { CompletionTarget::GitHubPullRequest(value) => Some(value.clone()), _ => None };
+         let actions_retry_receipt = match &completion { CompletionTarget::GitHubActionsRetry(value) => Some(value.clone()), _ => None };
++        let play_cleanup_receipt = match &completion { CompletionTarget::GitHubPlayCleanup(value) => Some(value.clone()), _ => None };
+         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1447,6 +1479,7 @@
+             (Profile::RepositoryCreate,CompletionTarget::RepositoryCreate(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubPullRequest,CompletionTarget::GitHubPullRequest(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubActionsRetry,CompletionTarget::GitHubActionsRetry(_))=>(None,None,None,None,None,None,None),
++            (Profile::GitHubPlayCleanup,CompletionTarget::GitHubPlayCleanup(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubActivity,CompletionTarget::GitHubActivity(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+@@ -1460,7 +1493,7 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActionsRetry=>format!("github-actions-retry-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActionsRetry=>format!("github-actions-retry-{key}"),Profile::GitHubPlayCleanup=>format!("github-play-cleanup-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
+         let (version_enrollment,request)=match request {
+             AdmissionRequest::VersionEnrollment(admission)=>(Some(admission.invocation),None),
+             other=>(None,Some(other)),
+@@ -1475,6 +1508,10 @@
+         };
+         let (actions_retry,request)=match request {
+             Some(AdmissionRequest::GitHubActionsRetry{request,gate,..})=>(Some((request,gate)),None),
++            other=>(None,other),
++        };
++        let (play_cleanup,request)=match request {
++            Some(AdmissionRequest::GitHubPlayCleanup{request,gate,..})=>(Some((request,gate)),None),
+             other=>(None,other),
+         };
+         let (github_activity,request)=match request {
+@@ -1503,6 +1540,10 @@
+         };
+         let (actions_retry_request,actions_retry_gate)=match actions_retry {
+             Some((request,gate))=>{bytes=actions_retry_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
++            None=>(None,None),
++        };
++        let (play_cleanup_request,play_cleanup_gate)=match play_cleanup {
++            Some((request,gate))=>{bytes=play_cleanup_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
+             None=>(None,None),
+         };
+         let (github_activity_request,github_activity_gate)=match github_activity {
+@@ -1553,6 +1594,7 @@
+             repository_create_receipt,repository_create_request,repository_create_gate,
+             pull_request_receipt,pull_request_request,pull_request_gate,
+             actions_retry_receipt,actions_retry_request,actions_retry_gate,
++            play_cleanup_receipt,play_cleanup_request,play_cleanup_gate,
+             github_activity_receipt,github_activity_request,github_activity_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+             history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
+@@ -1618,6 +1660,7 @@
+             if let Some(enrollment) = &owner.version_enrollment { enrollment.arm(&owner)?; }
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if let Some(local) = &owner.git_local { local.gate.agent_arm(&owner.id)?; }
++            if let Some(gate)=&owner.play_cleanup_gate { gate.agent_arm(&owner.id)?; }
+             owners.insert(key, owner.clone());
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+@@ -1892,7 +1935,7 @@
+ }
+ 
+ #[derive(Clone, Copy)]
+-enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubActivity, History, VersionEnrollment }
++enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubPlayCleanup, GitHubActivity, History, VersionEnrollment }
+ 
+ async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
+     kind: ReadyKind, profile: Profile, ready: oneshot::Sender<Result<(), BridgeError>>,
+@@ -1920,6 +1963,7 @@
+                         (Profile::RepositoryCreate,ReadyKind::RepositoryCreate)=>repository_create_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubPullRequest,ReadyKind::GitHubPullRequest)=>pull_request_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubActionsRetry,ReadyKind::GitHubActionsRetry)=>actions_retry_protocol::decode_ready(&header,&id,&digest),
++                        (Profile::GitHubPlayCleanup,ReadyKind::GitHubPlayCleanup)=>play_cleanup_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubActivity,ReadyKind::GitHubActivity)=>github_activity_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::VersionEnrollment,ReadyKind::VersionEnrollment)=>crate::version_enrollment_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubHistory, ReadyKind::History) => history_protocol::decode_ready(&header, &id, &digest),
+@@ -2035,6 +2079,13 @@
+                 => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubActionsRetry)),
+             _=>Err(BridgeError::cleanup_unknown()),
+         },
++        Profile::GitHubPlayCleanup => match (&owner.play_cleanup_gate,&owner.play_cleanup_request) {
++            (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
++                && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
++                && owner.setup_request.is_none() && owner.publication_gate.is_none() && owner.publication_request.is_none()
++                => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubPlayCleanup)),
++            _=>Err(BridgeError::cleanup_unknown()),
++        },
+         Profile::GitHubActivity => match (&owner.github_activity_gate,&owner.github_activity_request) {
+             (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
+                 && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
+@@ -2138,14 +2189,14 @@
+ }
+ fn github_setup_selected(profile: Profile) -> bool {
+     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
+-        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment)
++        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment)
+ }
+ 
+ fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
+     stopping: bool, disabled: bool, stop: bool) -> bool {
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+-        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActionsRetry,Profile::GitHubActionsRetry) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
++        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActionsRetry,Profile::GitHubActionsRetry) | (Profile::GitHubPlayCleanup,Profile::GitHubPlayCleanup) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
+         | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+@@ -2639,7 +2690,7 @@
+             let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+-                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2842,7 +2893,7 @@
+     // no environment/native call is added between claim and child creation.
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
+-    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActionsRetry=>Profile::GitHubActionsRetry,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
++    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActionsRetry=>Profile::GitHubActionsRetry,Profile::GitHubPlayCleanup=>Profile::GitHubPlayCleanup,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
+         _=>return Err(AcquisitionError::unsupported("Unexpected Setup runtime profile"))};
+     let owners = lock(&inner.owners); let state = lock(&owner.state);
+     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+@@ -3259,7 +3310,7 @@
+                 }
+                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
+             },
+-            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment => {
++            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_setup_selected(profile) {
+                     let native = inspection_setup.ok_or_else(|| {
+@@ -3381,7 +3432,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -3457,7 +3508,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3687,10 +3738,10 @@
+             Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+         }
+     }else{(None,None)};
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+-    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
++    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+@@ -3780,6 +3831,7 @@
+                 Profile::RepositoryCreate=>owner.repository_create_request.as_ref().map(|_|ReadyKind::RepositoryCreate),
+                 Profile::GitHubPullRequest=>owner.pull_request_request.as_ref().map(|_|ReadyKind::GitHubPullRequest),
+                 Profile::GitHubActionsRetry=>owner.actions_retry_request.as_ref().map(|_|ReadyKind::GitHubActionsRetry),
++                Profile::GitHubPlayCleanup=>owner.play_cleanup_request.as_ref().map(|_|ReadyKind::GitHubPlayCleanup),
+                 Profile::GitHubActivity=>owner.github_activity_request.as_ref().map(|_|ReadyKind::GitHubActivity),
+                 Profile::VersionEnrollment=>owner.version_enrollment.as_ref().map(|_|ReadyKind::VersionEnrollment),
+                 Profile::GitHubHistory => owner.history_nomination.as_ref().map(|_| ReadyKind::History), _ => None,
+@@ -4196,6 +4248,9 @@
+         Some(output) if matches!(profile,Profile::GitHubActionsRetry)=>owner.actions_retry_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|actions_retry_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::GitHubActionsRetry),
++        Some(output) if matches!(profile,Profile::GitHubPlayCleanup)=>owner.play_cleanup_request.as_ref().ok_or_else(BridgeError::protocol)
++            .and_then(|request|play_cleanup_protocol::decode_reply(&owner.id,&output.bytes,request))
++            .map(ReadOutcome::GitHubPlayCleanup),
+         Some(output) if matches!(profile,Profile::GitHubActivity)=>owner.github_activity_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|github_activity_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::GitHubActivity),
+@@ -6484,6 +6539,7 @@
+             repository_create_receipt:None,repository_create_request:None,repository_create_gate:None,
+             pull_request_receipt:None,pull_request_request:None,pull_request_gate:None,
+             actions_retry_receipt:None,actions_retry_request:None,actions_retry_gate:None,
++            play_cleanup_receipt:None,play_cleanup_request:None,play_cleanup_gate:None,
+             github_activity_receipt:None,github_activity_request:None,github_activity_gate:None,
+             history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+diff --git a/src/mobile_release/_desktop_github_setup_engine.py b/src/mobile_release/_desktop_github_setup_engine.py
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -76,6 +76,11 @@
+         header = policy._frame(initial, policy.MAX_INITIAL_BYTES, nodes=256, depth=8)
+         if type(header) is dict and header.get("protocol") == "mrk-github-setup-publication/1":
+             from ._github_setup_publication_runtime import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-github-play-cleanup/1":
++            from ._desktop_github_play_cleanup import run_owned
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
+diff --git a/src/mobile_release/_github_connection_transport.py b/src/mobile_release/_github_connection_transport.py
+--- a/src/mobile_release/_github_connection_transport.py
++++ b/src/mobile_release/_github_connection_transport.py
+@@ -59,6 +59,7 @@
+     ACTIVITY = "activity"
+     PULL_REQUEST = "pull-request"
+     ACTIONS_RETRY = "actions-retry"
++    PLAY_CLEANUP = "play-cleanup"
+     GIT_REMOTE = "git-remote"
+     GIT_PUSH = "git-push"
+ 
+@@ -78,6 +79,9 @@
+     GIT_REMOTE_ADVERTISEMENT = "git-remote-advertisement"
+     GIT_REMOTE_LS_REFS = "git-remote-ls-refs"
+     GIT_REMOTE_FETCH = "git-remote-fetch"
++    PLAY_CLEANUP_READ = "play-cleanup-read"
++    PLAY_CLEANUP_CONFIG = "play-cleanup-config"
++    PLAY_CLEANUP_WRITE = "play-cleanup-write"
+     ACTIONS_RETRY_READ = "actions-retry-read"
+     ACTIONS_RETRY_WRITE = "actions-retry-write"
+     PULL_REQUEST_OBJECT = "pull-request-object"
+@@ -173,6 +177,10 @@
+         if profile is not _ExchangeProfile.GIT_REMOTE:
+             raise ValueError("Fixed Git remote role belongs to another action")
+         return (32 * 1024 * 1024 if role is _ResponseRole.GIT_REMOTE_FETCH else MAX_BODY_BYTES, 256)
++    if role in {_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE}:
++        if profile is not _ExchangeProfile.PLAY_CLEANUP:
++            raise ValueError("Fixed Play cleanup role belongs to another action")
++        return (768 * 1024 if role is _ResponseRole.PLAY_CLEANUP_CONFIG else MAX_BODY_BYTES, 2048)
+     if role in {_ResponseRole.ACTIONS_RETRY_READ, _ResponseRole.ACTIONS_RETRY_WRITE}:
+         if profile is not _ExchangeProfile.ACTIONS_RETRY:
+             raise ValueError("Fixed Actions retry role belongs to another action")
+@@ -223,6 +231,10 @@
+     if profile is _ExchangeProfile.GIT_REMOTE:
+         from .git_remote_transport import validate_endpoint
+         validate_endpoint(role.value, method, path)
++        return limits
++    if profile is _ExchangeProfile.PLAY_CLEANUP:
++        from ._github_play_cleanup_transport import validate_endpoint
++        validate_endpoint(role, method, path)
+         return limits
+     if profile is _ExchangeProfile.ACTIONS_RETRY:
+         from ._github_actions_retry_transport import validate_endpoint
+@@ -413,7 +425,7 @@
+         if type(started) not in (int, float):
+             raise ReadFailure("network-unavailable")
+         self.started = started
+-        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
++        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS)
+         self.monotonic = monotonic
+         self.wall = wall
+         self.body_bytes = 0
+@@ -424,16 +436,16 @@
+                                  2 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_PUSH else
+                                  34 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else
+                                  4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
+-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else MAX_BODY_TOTAL)
++                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else MAX_BODY_TOTAL)
+         if not math.isfinite(started) or not math.isfinite(self.end):
+             raise ReadFailure("network-unavailable")
+ 
+     def claim_request(self) -> None:
+         # Other existing profiles retain their own original finite schedules.
+         # Allocation adds a second private bound, never a logical retry owner.
+-        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
++        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}:
+             self.remaining()
+-            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
++            if self.requests >= (19 if self.profile is _ExchangeProfile.PLAY_CLEANUP else 44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+                 raise ReadFailure("response-limit")
+             self.requests += 1
+ 
+@@ -841,6 +853,7 @@
+     if (head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE
+             or head.status in {409, 422} and _role is _ResponseRole.HOSTED_VERSION_LEDGER_WRITE
+             or head.status == 404 and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_READ
++            or head.status == 204 and _role is _ResponseRole.PLAY_CLEANUP_WRITE
+             or head.status in {201, 409, 422} and _role is _ResponseRole.ACTIONS_RETRY_WRITE
+             or head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
+             or head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
+@@ -905,7 +918,7 @@
+         if head.status != 200:
+             return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
+         return stream_response(response, budget, _remote_delivery, failure=_remote_failure)
+-    if head.status == 204 and response.role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
++    if head.status == 204 and response.role in {_ResponseRole.PLAY_CLEANUP_WRITE, _ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
+         try:
+             # No body/chunk stream is allowed by this exact successful role.
+             # Even CL0 must observe the same original's clean TLS EOF once.
+@@ -997,7 +1010,14 @@
+             if not block:
+                 break
+             chunks.append(block)
+-        body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
++        raw = b"".join(chunks)
++        if budget.profile is _ExchangeProfile.PLAY_CLEANUP:
++            from .github_setup_secret_inputs import _json_prelude_checked, SecretConfigurationError
++            try:
++                _json_prelude_checked(raw, budget.remaining)
++            except SecretConfigurationError as error:
++                raise ReadFailure("response-limit" if error.reason == "resources-unavailable" else "response-invalid") from None
++        body = _decode_json(raw, limit=response.maximum, nodes=20_000, depth=24)
+         expected = list if response.role in {_ResponseRole.HOSTED_VERSION_HISTORY, _ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST, _ResponseRole.PULL_REQUEST_LIST} else dict
+         maximum_rows = 1 if response.role is _ResponseRole.HOSTED_VERSION_HISTORY else 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
+         if type(body) is not expected or expected is list and len(body) > maximum_rows:
+@@ -1256,7 +1276,7 @@
+             raise ValueError("Pinned hosted GitHub trust is unavailable")
+     elif _hosted_ca_sha256 is not None:
+         raise ValueError("Hosted trust belongs to another profile")
+-    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} and api_version != "2026-03-10":
++    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} and api_version != "2026-03-10":
+         raise ValueError("Fixed Setup API version differs")
+     if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
+         from .git_remote_transport import _LOGIN
+@@ -1268,11 +1288,11 @@
+     elif _git_remote_login is not None or _git_remote_current is not None or _git_remote_failure is not None or _git_remote_control is not None:
+         raise ValueError("Git remote inputs belong to another action")
+     if _setup_budget is not None:
+-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
++        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}
+                 or _setup_budget.profile is not _profile
+                 or _setup_budget.started != started
+                 or (_profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and not started < _setup_budget.end <= started + 45.0
+-                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS))
++                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS))
+                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
+             raise ValueError("Invalid same-original Setup budget")
+         _setup_budget._secret_exchange_claimed = True
+@@ -1340,6 +1360,9 @@
+             _setup_body(_profile, _role, body, path=path)
+         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
+             _allocation_body(_profile, _role, body, path=path)
++        elif _profile is _ExchangeProfile.PLAY_CLEANUP:
++            from ._github_play_cleanup_transport import validate_body
++            validate_body(_role, body)
+         elif _profile is _ExchangeProfile.ACTIONS_RETRY:
+             from ._github_actions_retry_transport import validate_body
+             validate_body(_role, body)
+diff --git a/src/mobile_release/github_setup_secret_inputs.py b/src/mobile_release/github_setup_secret_inputs.py
+--- a/src/mobile_release/github_setup_secret_inputs.py
++++ b/src/mobile_release/github_setup_secret_inputs.py
+@@ -128,13 +128,13 @@
+     return root, (*numbers, identity["mode"], identity["uid"], identity["gid"])
+ 
+ 
+-def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
++def _json_prelude_checked(raw: bytes, check) -> None:
+     """Prospective token/depth guard, not a second semantic JSON decoder."""
+     tokens = depth = 0
+     index = 0
+     while index < len(raw):
+         if index % 4096 == 0:
+-            budget.check()
++            check()
+         c = raw[index]
+         if c in b" \t\r\n,:":
+             index += 1
+@@ -154,7 +154,7 @@
+             index += 1
+             while index < len(raw):
+                 if index % 4096 == 0:
+-                    budget.check()
++                    check()
+                 c = raw[index]
+                 index += 1
+                 if c == 34:
+@@ -164,24 +164,27 @@
+         else:
+             while index < len(raw) and raw[index] not in b" \t\r\n,:[]{}\"":
+                 if index % 4096 == 0:
+-                    budget.check()
++                    check()
+                 index += 1
+     _need(depth == 0)
+-    budget.check()
+-
++    check()
++
++
++def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
++    _json_prelude_checked(raw, budget.check)
+ 
+ class _SecretConfigurationBudget:
+     """One finite filesystem loan of the exact existing transport Budget."""
+     def __init__(self, owner: transport._Budget, root: str):
+         _need(type(owner) is transport._Budget and owner.profile in (
+-            transport._ExchangeProfile.SETUP, transport._ExchangeProfile.PUBLICATION))
++            transport._ExchangeProfile.SETUP, transport._ExchangeProfile.PUBLICATION, transport._ExchangeProfile.PLAY_CLEANUP))
+         _need(not hasattr(owner, "_secret_configuration_claimed"), "resources-unavailable")
+         owner.remaining()
+         # Monotone one-use reservation on the SAME owner, never renewed on exit.
+         owner._secret_configuration_claimed = CONFIGURATION_WORK_BYTES
+         self.owner = owner
+         self.profile = owner.profile
+-        self.max_checkpoints = 64 if self.profile is transport._ExchangeProfile.PUBLICATION else _MAX_CHECKPOINTS
++        self.max_checkpoints = 64 if self.profile in (transport._ExchangeProfile.PUBLICATION, transport._ExchangeProfile.PLAY_CLEANUP) else _MAX_CHECKPOINTS
+         self.end = owner.end
+         self.root = Path(root)
+         self.root_fd: int | None = None
+@@ -401,11 +404,17 @@
+     return _observe_configuration(source, None, budget=budget, kind="publication")
+ 
+ 
++def observe_play_cleanup_configuration(source: dict, *, budget: transport._Budget):
++    """Same fixed saved-config loan; no credential selection or new reader."""
++    return _observe_configuration(source, None, budget=budget, kind="play-cleanup")
++
++
+ @contextmanager
+ def _observe_configuration(source: dict, selection: dict | None, *, budget: transport._Budget, kind: str):
+     try:
+-        publication = kind == "publication"
+-        expected_profile = transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP
++        publication = kind in ("publication", "play-cleanup")
++        expected_profile = (transport._ExchangeProfile.PLAY_CLEANUP if kind == "play-cleanup" else
++                            transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP)
+         _need(type(budget) is transport._Budget and budget.profile is expected_profile)
+         root, expected = publication_source(source) if publication else _source(source, selection, kind=kind)
+     except SecretConfigurationError:

@@ -10,7 +10,7 @@ import { Icon } from '../components/Icon.tsx';
 import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
 
 interface GitHubTaskSection {
-  id: 'publication' | 'settings' | 'checks' | 'history' | 'counter';
+  id: 'publication' | 'settings' | 'checks' | 'history' | 'counter' | 'play-cleanup';
   title: string;
   description: string;
   needsAttention: boolean;

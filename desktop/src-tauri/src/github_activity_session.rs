@@ -356,7 +356,7 @@ impl ConnectionState {
         self.publication.context_changed();
         self.repository_create.context_changed();
         self.pull_request.context_changed();
-        self.actions_retry.context_changed();
+        self.actions_retry.context_changed();self.play_cleanup.context_changed();
         self.activity.view.result = None;
         self.activity.view.operation = Some(p::Operation {
             id: ticket.operation_id().into(),
@@ -442,7 +442,7 @@ impl ConnectionState {
             || self.setup.native_work_pending()
             || self.history.native_work_pending()
             || self.publication.native_work_pending()
-            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.repository_create.native_work_pending()
+            || (self.pull_request.native_work_pending() || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())) || self.repository_create.native_work_pending()
             || self.enrollment.is_some()
             || self.version_reserve_pending()
         {

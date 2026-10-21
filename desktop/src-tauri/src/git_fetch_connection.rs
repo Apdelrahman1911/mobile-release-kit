@@ -133,7 +133,7 @@ impl ConnectionState {
             || self.repository_create.exhausted
             || self.activity.exhausted
             || self.pull_request.exhausted
-            || self.actions_retry.exhausted
+            || (self.actions_retry.exhausted || self.play_cleanup.exhausted)
         {
             return Err(refused(Reason::CleanupUnknown));
         }
@@ -242,7 +242,7 @@ impl ConnectionState {
         self.publication.revoke_consent();
         self.repository_create.context_changed();
         self.pull_request.context_changed();
-        self.actions_retry.context_changed();
+        self.actions_retry.context_changed();self.play_cleanup.context_changed();
         Ok(())
     }
     pub(crate) fn git_fetch_current(
@@ -269,7 +269,7 @@ impl ConnectionState {
             || self.repository_create.native_work_pending()
             || self.activity.native_work_pending()
             || self.pull_request.native_work_pending()
-            || self.actions_retry.native_work_pending()
+            || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())
             || self.enrollment.is_some()
             || self.version_reserve_pending()
             || self.push.is_some()

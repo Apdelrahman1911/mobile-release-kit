@@ -250,7 +250,7 @@ impl ConnectionState {
             self.actions_retry.revoke_consent();
         }
         self.actions_retry.observe_go();
-        let reason = if self.unknown || self.exhausted || self.actions_retry.exhausted {
+        let reason = if self.unknown || self.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted) {
             p::Reason::CleanupUnknown
         } else if !qualified {
             p::Reason::Unqualified
@@ -471,7 +471,7 @@ impl ConnectionState {
         self.publication.context_changed();
         self.repository_create.context_changed();
         self.activity.context_changed();
-        self.pull_request.context_changed();
+        self.pull_request.context_changed();self.play_cleanup.context_changed();
         self.actions_retry.revoke_consent();
         // Pending records are retained for explanation across a readback. They
         // never substitute for the private prepared consent or authorize POST.
@@ -739,7 +739,7 @@ impl ConnectionState {
         {
             return Err(refused(p::Reason::InvalidInput));
         }
-        self.actions_retry.context_changed();
+        self.actions_retry.context_changed();self.play_cleanup.context_changed();
         Ok(self.actions_retry.view.clone())
     }
     pub(crate) fn actions_retry_discard(
@@ -786,7 +786,7 @@ impl ConnectionState {
                     && edit.matches(&a.stamp)
             })
             .ok_or_else(|| refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.actions_retry.exhausted {
+        if self.unknown || self.exhausted || (self.actions_retry.exhausted || self.play_cleanup.exhausted) {
             return Err(refused(p::Reason::CleanupUnknown));
         }
         if self.preflight.native_work_pending()
@@ -796,7 +796,7 @@ impl ConnectionState {
             || self.publication.native_work_pending()
             || self.repository_create.native_work_pending()
             || self.activity.native_work_pending()
-            || self.pull_request.native_work_pending()
+            || self.pull_request.native_work_pending() || self.play_cleanup.native_work_pending()
             || self.enrollment.is_some()
             || self.version_reserve_pending()
         {

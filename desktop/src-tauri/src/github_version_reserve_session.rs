@@ -57,7 +57,7 @@ impl ConnectionState {
         self.setup.finish(before);
         self.publication.revoke_consent();
         self.repository_create.context_changed();
-        self.pull_request.context_changed();
+        self.pull_request.context_changed();self.play_cleanup.context_changed();
         Ok(pins)
     }
     pub(crate) fn version_reserve_current(
@@ -79,7 +79,7 @@ impl ConnectionState {
             || self.publication.native_work_pending()
             || self.repository_create.native_work_pending()
             || self.activity.native_work_pending()
-            || self.pull_request.native_work_pending()
+            || (self.pull_request.native_work_pending() || self.play_cleanup.native_work_pending())
             || self.enrollment_pins(
                 &pins.project_id,
                 pins.generation,

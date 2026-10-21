@@ -7,6 +7,10 @@ mod service_protocol;
 mod service_version_reserve_protocol;
 #[path="service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
+#[path="service_play_cleanup_protocol.rs"]
+mod service_play_cleanup_protocol;
+#[path="service_play_cleanup_requests.rs"]
+mod service_play_cleanup_requests;
 mod service_git_protocol;
 mod service_git_commit_protocol;
 mod service_git_repository_protocol;

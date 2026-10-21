@@ -81,10 +81,13 @@ mod request_catalogue;
 mod git_index;
 #[path="service_version_reserve_application.rs"]
 mod agent_version_reserve;
+#[path="service_play_cleanup_application.rs"]
+mod agent_play_cleanup;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
     git_index_requests: Arc<crate::service_git_requests::Inbox>,
     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+    play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
@@ -118,11 +121,12 @@ impl ApplicationService {
         for operation in &mut saved.operations { operation.stale = true; }
         let instance = Id::random()?;
         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+        let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -175,7 +179,7 @@ impl ApplicationService {
     /// Permanent original-service read fence. Native observation callbacks must
     /// not wait for the state mutex, which real store IO can hold. No Allow or
     /// later successful write clears this flag; original cleanup still runs.
-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.version_reserve_requests.fence(); }
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
         // Nonblocking: an old facet must not survive an unobserved state
         // poison while another caller still has not attempted lock().
@@ -390,6 +394,9 @@ impl ApplicationService {
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+                p::RequestBody::PlayCleanupCancel(q)=>return self.service_play_cleanup_query(client,q,true),
                 p::RequestBody::VersionReserveStatus(q) => return self.service_version_reserve_query(client,q,false),
                 p::RequestBody::VersionReserveCancel(q) => return self.service_version_reserve_query(client,q,true),
                 p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
@@ -439,6 +446,7 @@ impl ApplicationService {
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
                 | p::RequestBody::GitRepositoryScope(_) | p::RequestBody::GitRepositoryPrepare(_)
@@ -486,7 +494,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

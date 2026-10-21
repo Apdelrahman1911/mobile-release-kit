@@ -59,6 +59,7 @@ class _ExchangeProfile(Enum):
     ACTIVITY = "activity"
     PULL_REQUEST = "pull-request"
     ACTIONS_RETRY = "actions-retry"
+    PLAY_CLEANUP = "play-cleanup"
     GIT_REMOTE = "git-remote"
     GIT_PUSH = "git-push"
 
@@ -78,6 +79,9 @@ class _ResponseRole(Enum):
     GIT_REMOTE_ADVERTISEMENT = "git-remote-advertisement"
     GIT_REMOTE_LS_REFS = "git-remote-ls-refs"
     GIT_REMOTE_FETCH = "git-remote-fetch"
+    PLAY_CLEANUP_READ = "play-cleanup-read"
+    PLAY_CLEANUP_CONFIG = "play-cleanup-config"
+    PLAY_CLEANUP_WRITE = "play-cleanup-write"
     ACTIONS_RETRY_READ = "actions-retry-read"
     ACTIONS_RETRY_WRITE = "actions-retry-write"
     PULL_REQUEST_OBJECT = "pull-request-object"
@@ -173,6 +177,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         if profile is not _ExchangeProfile.GIT_REMOTE:
             raise ValueError("Fixed Git remote role belongs to another action")
         return (32 * 1024 * 1024 if role is _ResponseRole.GIT_REMOTE_FETCH else MAX_BODY_BYTES, 256)
+    if role in {_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE}:
+        if profile is not _ExchangeProfile.PLAY_CLEANUP:
+            raise ValueError("Fixed Play cleanup role belongs to another action")
+        return (768 * 1024 if role is _ResponseRole.PLAY_CLEANUP_CONFIG else MAX_BODY_BYTES, 2048)
     if role in {_ResponseRole.ACTIONS_RETRY_READ, _ResponseRole.ACTIONS_RETRY_WRITE}:
         if profile is not _ExchangeProfile.ACTIONS_RETRY:
             raise ValueError("Fixed Actions retry role belongs to another action")
@@ -223,6 +231,10 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
     if profile is _ExchangeProfile.GIT_REMOTE:
         from .git_remote_transport import validate_endpoint
         validate_endpoint(role.value, method, path)
+        return limits
+    if profile is _ExchangeProfile.PLAY_CLEANUP:
+        from ._github_play_cleanup_transport import validate_endpoint
+        validate_endpoint(role, method, path)
         return limits
     if profile is _ExchangeProfile.ACTIONS_RETRY:
         from ._github_actions_retry_transport import validate_endpoint
@@ -413,7 +425,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
+        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -424,16 +436,16 @@ class _Budget:
                                  2 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_PUSH else
                                  34 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else
                                  4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else MAX_BODY_TOTAL)
+                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else MAX_BODY_TOTAL)
         if not math.isfinite(started) or not math.isfinite(self.end):
             raise ReadFailure("network-unavailable")
 
     def claim_request(self) -> None:
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
+        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}:
             self.remaining()
-            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+            if self.requests >= (19 if self.profile is _ExchangeProfile.PLAY_CLEANUP else 44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 
@@ -841,6 +853,7 @@ def _header_control(head: _Head, budget: _Budget, *,
     if (head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE
             or head.status in {409, 422} and _role is _ResponseRole.HOSTED_VERSION_LEDGER_WRITE
             or head.status == 404 and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_READ
+            or head.status == 204 and _role is _ResponseRole.PLAY_CLEANUP_WRITE
             or head.status in {201, 409, 422} and _role is _ResponseRole.ACTIONS_RETRY_WRITE
             or head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
             or head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
@@ -905,7 +918,7 @@ def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delive
         if head.status != 200:
             return ReadResult({"status": head.status, "body": None, "failure": "none"}, control)
         return stream_response(response, budget, _remote_delivery, failure=_remote_failure)
-    if head.status == 204 and response.role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
+    if head.status == 204 and response.role in {_ResponseRole.PLAY_CLEANUP_WRITE, _ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
         try:
             # No body/chunk stream is allowed by this exact successful role.
             # Even CL0 must observe the same original's clean TLS EOF once.
@@ -997,7 +1010,14 @@ def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delive
             if not block:
                 break
             chunks.append(block)
-        body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
+        raw = b"".join(chunks)
+        if budget.profile is _ExchangeProfile.PLAY_CLEANUP:
+            from .github_setup_secret_inputs import _json_prelude_checked, SecretConfigurationError
+            try:
+                _json_prelude_checked(raw, budget.remaining)
+            except SecretConfigurationError as error:
+                raise ReadFailure("response-limit" if error.reason == "resources-unavailable" else "response-invalid") from None
+        body = _decode_json(raw, limit=response.maximum, nodes=20_000, depth=24)
         expected = list if response.role in {_ResponseRole.HOSTED_VERSION_HISTORY, _ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST, _ResponseRole.PULL_REQUEST_LIST} else dict
         maximum_rows = 1 if response.role is _ResponseRole.HOSTED_VERSION_HISTORY else 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
         if type(body) is not expected or expected is list and len(body) > maximum_rows:
@@ -1256,7 +1276,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             raise ValueError("Pinned hosted GitHub trust is unavailable")
     elif _hosted_ca_sha256 is not None:
         raise ValueError("Hosted trust belongs to another profile")
-    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
         from .git_remote_transport import _LOGIN
@@ -1268,11 +1288,11 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     elif _git_remote_login is not None or _git_remote_current is not None or _git_remote_failure is not None or _git_remote_control is not None:
         raise ValueError("Git remote inputs belong to another action")
     if _setup_budget is not None:
-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
+        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}
                 or _setup_budget.profile is not _profile
                 or _setup_budget.started != started
                 or (_profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and not started < _setup_budget.end <= started + 45.0
-                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS))
+                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS))
                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
             raise ValueError("Invalid same-original Setup budget")
         _setup_budget._secret_exchange_claimed = True
@@ -1340,6 +1360,9 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             _setup_body(_profile, _role, body, path=path)
         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
             _allocation_body(_profile, _role, body, path=path)
+        elif _profile is _ExchangeProfile.PLAY_CLEANUP:
+            from ._github_play_cleanup_transport import validate_body
+            validate_body(_role, body)
         elif _profile is _ExchangeProfile.ACTIONS_RETRY:
             from ._github_actions_retry_transport import validate_body
             validate_body(_role, body)

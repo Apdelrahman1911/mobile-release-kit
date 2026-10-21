@@ -26,10 +26,15 @@ mod git_repository;
 mod git_remote;
 #[path="installed_cli_version_reserve.rs"]
 mod version_reserve;
+#[path="installed_cli_play_cleanup.rs"]
+mod play_cleanup;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
   mrk capabilities [--json]\n\
+  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -232,6 +237,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
+            "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
+                "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+                "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
@@ -281,6 +290,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+        text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
@@ -372,6 +382,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+        p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
             "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
         p::ResponseBody::GitRepositoryScope(_) | p::ResponseBody::GitRepositoryRequest(_) =>
@@ -404,6 +415,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+    if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
     if git_index::recognizes(&args) { return git_index::run(args); }
     if git_commit::recognizes(&args) { return git_commit::run(args); }
     if git_repository::recognizes(&args) { return git_repository::run(args); }

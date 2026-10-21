@@ -25,9 +25,11 @@ import type { ActivitySelection } from './githubActivityProtocol.ts';
 import { GitHubActivity } from './components/GitHubActivity.tsx';
 import { GitHubPullRequestController } from './githubPullRequestController.ts';
 import { GitHubActionsRetryController } from './githubActionsRetryController.ts';
+import { GitHubPlayCleanupController } from './githubPlayCleanupController.ts';
 import { GitHubPullRequest } from './components/GitHubPullRequest.tsx';
 import { PullRequestFollowup } from './components/PullRequestManagement.tsx';
 import { GitHubActionsRetry } from './components/GitHubActionsRetry.tsx';
+import { GitHubPlayCleanup } from './components/GitHubPlayCleanup.tsx';
 import { GitHubRepositoryCreate } from './components/GitHubRepositoryCreate.tsx';
 import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
 import { artifactInspectionError } from './artifactInspectionProtocol.ts';
@@ -276,6 +278,9 @@ export function App() {
   const actionsRetryRef = useRef<GitHubActionsRetryController | null>(null);
   const actionsRetryAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const actionsRetryBusy = useCallback(() => actionsRetryRef.current?.ownerReason() ?? null, []);
+  const playCleanupRef = useRef<GitHubPlayCleanupController | null>(null);
+  const playCleanupAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+  const playCleanupBusy = useCallback(() => playCleanupRef.current?.ownerReason() ?? null, []);
   // One read coordinator owns the original promises across all pages. Local
   // commit drafts belong to immutable native-service/project ports, not rows.
   const gitLocalRef = useRef<GitLocalController | null>(null);
@@ -319,6 +324,7 @@ export function App() {
     activityRef.current?.beforeWorkspaceAction();
     pullRequestRef.current?.beforeWorkspaceAction();
     actionsRetryRef.current?.beforeWorkspaceAction();
+    playCleanupRef.current?.beforeWorkspaceAction();
     retireGitRead();
     identityRef.current?.actions?.beforeContextIntent();
     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
@@ -374,19 +380,20 @@ export function App() {
   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
     (excludeHistory ? null : historyBusy()) ??
     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
     (excludeActivity ? null : activityBusy()) ??
     (excludePullRequest ? null : pullRequestBusy()) ??
     (excludeActionsRetry ? null : actionsRetryBusy()) ??
+    (excludePlayCleanup ? null : playCleanupBusy()) ??
     (!excludePublication && githubPublicationControllerRef.current ? githubPublicationOwnerReason(githubPublicationControllerRef.current.getSnapshot()) : null) ??
     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy]);
+    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy]);
   // Tools excludes only itself. Existing peers, passive observation and every
   // ordinary mutation admission include the original tool operation below.
   const savedOwnersBusy = useCallback((...args: Parameters<typeof savedOwnersWithoutToolsBusy>) =>
@@ -412,6 +419,7 @@ export function App() {
     activityRef.current?.syncContext();
     pullRequestRef.current?.syncContext();
     actionsRetryRef.current?.syncContext();
+    playCleanupRef.current?.syncContext();
   }, [connectionDocumentId]);
   const advanceConnectionContext = () => {
     if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
@@ -492,7 +500,7 @@ export function App() {
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
-    recoveryUnavailable: () => actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+    recoveryUnavailable: () => playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
@@ -574,6 +582,13 @@ export function App() {
     }, () => actionsRetryAdmission.current()));
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
+  const [githubPlayCleanup] = useState(() => new GitHubPlayCleanupController(
+    githubConnection.getSnapshot, () => {
+      const current = workspaceRef.current, id = current.selectedId;
+      return id && Object.hasOwn(current.projects, id) ? current.projects[id] ?? null : null;
+    }, () => playCleanupAdmission.current()));
+  playCleanupRef.current = githubPlayCleanup;
+  const playCleanupState = useSyncExternalStore(githubPlayCleanup.subscribe, githubPlayCleanup.getSnapshot, githubPlayCleanup.getSnapshot);
   const [versionEnrollment] = useState(() => new VersionEnrollmentController({ current: () => {
     const service = pathService.current;
     return { port: service.api?.mode === 'native' ? service.api.versionEnrollment ?? null : null,
@@ -822,7 +837,7 @@ export function App() {
   // Reserve reads the SAME connected account and retains a real native Store
   // receipt. UI data only explains prerequisites; it cannot supply a floor.
   versionReserveAdmission.current = () => {
-    const blocked = actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+    const blocked = playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
       savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason();
     if (blocked) return blocked;
     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
@@ -861,6 +876,19 @@ export function App() {
       current.account.state === 'observed' && current.repository.state === 'observed'
       ? null : 'Connect the intended GitHub repository and account first.';
   };
+  // The fixed cleanup review shares this selected Connection and excludes
+  // only its own original calls. No release/candidate/Store grant comes from UI.
+  playCleanupAdmission.current = () => {
+    const blocked = savedCommandBusy(false, false, false, false, false, false, false, false, false, false, false, false, true) ??
+      savedOwnersPrerequisiteReason(false, false, undefined, false, true);
+    if (blocked) return blocked;
+    if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
+      return 'Finish the prepared GitHub release review before reviewing cleanup.';
+    const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
+    return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
+      current.account.state === 'observed' && current.repository.state === 'observed'
+      ? null : 'Connect the intended GitHub repository and account first.';
+  };
   // Identity excludes ONLY itself; all original passive/private/build owners
   // and retained GitHub reviews still block a new source edit.
   identityAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
@@ -876,7 +904,7 @@ export function App() {
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before connecting another account.' : null);
   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
-    actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+    playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
   const [artifactInspection] = useState(() => new ArtifactInspectionController({
     selectedProject: () => {
       const current=workspaceRef.current;
@@ -1069,7 +1097,7 @@ export function App() {
     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
     const project = workspaceRef.current.selectedId;
-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || actionsRetryBusy() || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
+    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || playCleanupBusy() || actionsRetryBusy() || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
     // Bound normal+revoke slots; revoke remains available during first Allow.
@@ -1094,7 +1122,7 @@ export function App() {
       if (book[slot] === work) book[slot] = null;
       setAgentRequestPending(book.normal !== null || book.revoke !== null);
     }
-  }, [actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
+  }, [playCleanupBusy, actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
   identityInvalidation.current = (projectId) => {
     snapshotIntentBatch(projectId);
     dispatch({ type: 'project-identity-intent', projectId });
@@ -1326,6 +1354,8 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
+    const originalPlayCleanup = playCleanupBusy();
+    if (originalPlayCleanup) { setBootError({ code: 'github_play_cleanup_busy', message: originalPlayCleanup, retryable: false }); return; }
     const originalActionsRetry = actionsRetryBusy();
     if (originalActionsRetry) { setBootError({ code: 'github_actions_retry_busy', message: originalActionsRetry, retryable: false }); return; }
     const originalPullRequest = pullRequestBusy();
@@ -1381,7 +1411,7 @@ export function App() {
     connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
     githubGhEntry.attach(null, null); // Refuses replacement if an original read intervened.
     void githubConnection.attach(null);
-    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null);
+    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null);
     void githubPreflight.connect(null);
     void githubRelease.connect(null);
     void githubHistory.connect(null);
@@ -1428,7 +1458,7 @@ export function App() {
       void githubRemoteSetup.connect(connection); void githubPublication.connect(connection);
       repositoryCreate.connect(connection.githubRepositoryCreate ?? null);
       githubActivity.connect(connection.githubActivity ?? null);
-      githubPullRequest.connect(connection.githubPullRequest ?? null); githubActionsRetry.connect(connection.githubActionsRetry ?? null);
+      githubPullRequest.connect(connection.githubPullRequest ?? null); githubActionsRetry.connect(connection.githubActionsRetry ?? null); githubPlayCleanup.connect(connection.githubPlayCleanup ?? null);
       void githubPreflight.connect(connection);
       void githubRelease.connect(connection);
       void githubHistory.connect(connection);
@@ -1477,14 +1507,14 @@ export function App() {
         githubGhEntry.beforeContextIntent();
         connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
         githubGhEntry.attach(null, null);
-        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
+        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
     }
-  }, [githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
 
   // Before bootstrap: retire consent on the actual saved/key projection, and
   // keep the view responsive to peer-owner changes without renewing an intent.
@@ -1532,6 +1562,7 @@ export function App() {
   useEffect(() => githubConnection.subscribe(githubActivity.syncContext), [githubConnection, githubActivity]);
   useEffect(() => githubConnection.subscribe(githubPullRequest.syncContext), [githubConnection, githubPullRequest]);
   useEffect(() => githubConnection.subscribe(githubActionsRetry.syncContext), [githubConnection, githubActionsRetry]);
+  useEffect(() => githubConnection.subscribe(githubPlayCleanup.syncContext), [githubConnection, githubPlayCleanup]);
   useEffect(() => githubConnection.subscribe(githubPublication.syncContext), [githubConnection, githubPublication]);
   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
@@ -1611,6 +1642,7 @@ export function App() {
   useEffect(() => () => githubActivity.dispose(), [githubActivity]);
   useEffect(() => () => githubPullRequest.dispose(), [githubPullRequest]);
   useEffect(() => () => githubActionsRetry.dispose(), [githubActionsRetry]);
+  useEffect(() => () => githubPlayCleanup.dispose(), [githubPlayCleanup]);
   useEffect(() => () => githubRemoteSetup.dispose(), [githubRemoteSetup]);
   useEffect(() => () => githubPreflight.dispose(), [githubPreflight]);
   useEffect(() => () => githubRelease.dispose(), [githubRelease]);
@@ -2127,6 +2159,7 @@ export function App() {
         {page !== 'github' && <GitHubActivity controller={githubActivity} state={activityState} compact onShow={() => navigate('github')} />}
         {page !== 'github' && <GitHubPullRequest controller={githubPullRequest} state={pullRequestState} compact onShow={() => navigate('github')} />}
         {page !== 'github' && <GitHubActionsRetry controller={githubActionsRetry} state={actionsRetryState} compact onShow={() => navigate('github')} />}
+        {page !== 'github' && <GitHubPlayCleanup controller={githubPlayCleanup} state={playCleanupState} compact onShow={() => navigate('github')} />}
         {page !== 'github' && <VersionEnrollmentPanel controller={versionEnrollment} compact />}
         <VersionReservePanel controller={versionReserve} compact />
         {page !== 'github' && <GitHubPublication state={githubPublicationState} controller={githubPublication} compact onShow={() => navigate('github')} />}
@@ -2266,6 +2299,12 @@ export function App() {
             headSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
               ? gitReadState.observation?.observation.branch ?? null : null} />}
           remoteTasks={[
+            { id: 'play-cleanup', title: 'Clean up a previous Google Play draft',
+              description: 'Review the retained draft from a hosted candidate run, then explicitly request cleanup. This does not publish a release.',
+              needsAttention: playCleanupBusy() !== null || playCleanupState.error !== null || playCleanupState.uncertain ||
+                !!playCleanupState.status?.pending.length || !!playCleanupState.status?.operation &&
+                  ['potentially-applied', 'acknowledged-unconfirmed', 'unresolved', 'observed-unconfirmed'].includes(playCleanupState.status.operation.effect),
+              content: <GitHubPlayCleanup controller={githubPlayCleanup} state={playCleanupState} /> },
             { id: 'publication', title: 'Publish setup as a draft pull request',
               description: 'Review the five supported setup files before publishing them. This does not upload your application source.',
               needsAttention: githubPublicationOwnerReason(githubPublicationState) !== null || githubPublicationState.observing || githubPublicationState.error !== null ||

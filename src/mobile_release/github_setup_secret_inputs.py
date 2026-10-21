@@ -128,13 +128,13 @@ def _root_source(source: dict) -> tuple[str, tuple[int, ...]]:
     return root, (*numbers, identity["mode"], identity["uid"], identity["gid"])
 
 
-def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
+def _json_prelude_checked(raw: bytes, check) -> None:
     """Prospective token/depth guard, not a second semantic JSON decoder."""
     tokens = depth = 0
     index = 0
     while index < len(raw):
         if index % 4096 == 0:
-            budget.check()
+            check()
         c = raw[index]
         if c in b" \t\r\n,:":
             index += 1
@@ -154,7 +154,7 @@ def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
             index += 1
             while index < len(raw):
                 if index % 4096 == 0:
-                    budget.check()
+                    check()
                 c = raw[index]
                 index += 1
                 if c == 34:
@@ -164,24 +164,27 @@ def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
         else:
             while index < len(raw) and raw[index] not in b" \t\r\n,:[]{}\"":
                 if index % 4096 == 0:
-                    budget.check()
+                    check()
                 index += 1
     _need(depth == 0)
-    budget.check()
+    check()
 
+
+def _json_prelude(raw: bytes, budget: _SecretConfigurationBudget) -> None:
+    _json_prelude_checked(raw, budget.check)
 
 class _SecretConfigurationBudget:
     """One finite filesystem loan of the exact existing transport Budget."""
     def __init__(self, owner: transport._Budget, root: str):
         _need(type(owner) is transport._Budget and owner.profile in (
-            transport._ExchangeProfile.SETUP, transport._ExchangeProfile.PUBLICATION))
+            transport._ExchangeProfile.SETUP, transport._ExchangeProfile.PUBLICATION, transport._ExchangeProfile.PLAY_CLEANUP))
         _need(not hasattr(owner, "_secret_configuration_claimed"), "resources-unavailable")
         owner.remaining()
         # Monotone one-use reservation on the SAME owner, never renewed on exit.
         owner._secret_configuration_claimed = CONFIGURATION_WORK_BYTES
         self.owner = owner
         self.profile = owner.profile
-        self.max_checkpoints = 64 if self.profile is transport._ExchangeProfile.PUBLICATION else _MAX_CHECKPOINTS
+        self.max_checkpoints = 64 if self.profile in (transport._ExchangeProfile.PUBLICATION, transport._ExchangeProfile.PLAY_CLEANUP) else _MAX_CHECKPOINTS
         self.end = owner.end
         self.root = Path(root)
         self.root_fd: int | None = None
@@ -401,11 +404,17 @@ def observe_publication_configuration(source: dict, *, budget: transport._Budget
     return _observe_configuration(source, None, budget=budget, kind="publication")
 
 
+def observe_play_cleanup_configuration(source: dict, *, budget: transport._Budget):
+    """Same fixed saved-config loan; no credential selection or new reader."""
+    return _observe_configuration(source, None, budget=budget, kind="play-cleanup")
+
+
 @contextmanager
 def _observe_configuration(source: dict, selection: dict | None, *, budget: transport._Budget, kind: str):
     try:
-        publication = kind == "publication"
-        expected_profile = transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP
+        publication = kind in ("publication", "play-cleanup")
+        expected_profile = (transport._ExchangeProfile.PLAY_CLEANUP if kind == "play-cleanup" else
+                            transport._ExchangeProfile.PUBLICATION if publication else transport._ExchangeProfile.SETUP)
         _need(type(budget) is transport._Budget and budget.profile is expected_profile)
         root, expected = publication_source(source) if publication else _source(source, selection, kind=kind)
     except SecretConfigurationError:

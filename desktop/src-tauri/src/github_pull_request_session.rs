@@ -429,7 +429,7 @@ impl ConnectionState {
         self.publication.context_changed();
         self.repository_create.context_changed();
         self.activity.context_changed();
-        self.actions_retry.context_changed();
+        self.actions_retry.context_changed();self.play_cleanup.context_changed();
         self.pull_request.revoke_consent();
         // Pending records are retained for explanation across a readback. They
         // never substitute for the private prepared consent or authorize POST.
@@ -737,7 +737,7 @@ impl ConnectionState {
             || self.publication.native_work_pending()
             || self.repository_create.native_work_pending()
             || self.activity.native_work_pending()
-            || self.actions_retry.native_work_pending()
+            || (self.actions_retry.native_work_pending() || self.play_cleanup.native_work_pending())
             || self.enrollment.is_some()
             || self.version_reserve_pending()
         {

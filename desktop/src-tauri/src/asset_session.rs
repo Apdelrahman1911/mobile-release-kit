@@ -162,6 +162,12 @@ pub(crate) use pull_request::GitHubPullRequestGoGate;
 #[path = "asset_session_github_actions_retry.rs"]
 mod actions_retry;
 pub(crate) use actions_retry::GitHubActionsRetryGoGate;
+#[path="asset_session_github_play_cleanup.rs"]
+mod play_cleanup;
+pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_play_cleanup_native.rs"]
+mod agent_play_cleanup;
 pub(crate) use github_variable::GitHubVariableMaterial;
 
 #[path = "asset_session_android_signing.rs"]
@@ -2150,6 +2156,8 @@ mod lookup_memory {
             self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
@@ -2688,7 +2696,7 @@ fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
     // lock/loss and reconciliation intentionally do not call this predicate.
     allocation_conflict_gate(
         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
+        state.github.setup_secret_work_pending() || state.github.history_work_pending() || state.github.play_cleanup_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
 }
 fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
@@ -4163,6 +4171,7 @@ impl DocumentBinding {
         self.github_activity_observe_locked(state, now, gate);
         self.pull_request_observe_locked(state, now, gate);
         self.actions_retry_observe_locked(state, now, gate);
+        self.play_cleanup_observe_locked(state, now, gate);
         self.github_history_observe_locked(state, now, gate);
     }
     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {

@@ -206,6 +206,9 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+    #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+    #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
@@ -272,6 +275,7 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
     GitIndexScope(crate::service_git_protocol::Scope),
     GitIndexRequest(crate::service_git_protocol::Status),
@@ -325,6 +329,8 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
+    if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+        && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
@@ -386,6 +392,12 @@ fn validate_response(response: &Response) -> Result<(), Error> {
     }
     if response.version != VERSION { return Err(Error::InvalidRequest); }
     match &response.response {
+        ResponseBody::PlayCleanupRequest(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_play_cleanup_protocol::STATUS_LIMIT {
+                return Err(Error::InvalidRequest);
+            }
+        },
         ResponseBody::Info(info) if info.read_only || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || !info.requires_running_desktop || info.cached_observations_are_authority
             || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
         ResponseBody::Projects(rows) => {

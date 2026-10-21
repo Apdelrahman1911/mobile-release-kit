@@ -42,7 +42,8 @@ impl ReadPermission {
             }
         }
     }
-    fn stop(&self, now: Instant) -> Result<Option<(p::Reason, Instant)>, Error> {
+    pub(crate) fn end(&self) -> Instant { self.end }
+    pub(crate) fn stop(&self, now: Instant) -> Result<Option<(p::Reason, Instant)>, Error> {
         let at = *self.revoked.lock().map_err(|_| Error::StateUnknown)?;
         Ok(match at {
             Some(at) if at <= self.end => Some((p::Reason::PermissionRevoked, at)),
