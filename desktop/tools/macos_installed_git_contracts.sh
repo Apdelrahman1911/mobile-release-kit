@@ -1,68 +1,55 @@
 set -euo pipefail
 set -o noclobber
 umask 077
-[[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+[[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_NATIVE_SCOPE" == tool-setup && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
 [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$RUSTUP_TOOLCHAIN" == 1.98.1 && "$(/usr/bin/id -u)" != 0 ]] || exit 1
 [[ "$CARGO_TARGET_DIR" == "$MRK_MACOS_WORK/cargo-target" ]] || exit 1
 # The canonical harness=false observer build/JSON remains untouched.
 # This ONE ordinary libtest links against the same debug feature graph
 # and same original source/release environment. No release/profile switch.
-# 45 DATA cases plus one existing private Service/Store fixture; that
-# fixture stops/closes/drops its own directory. No native Git or account.
-# The 11 Android backup/restore cases exercise the newly integrated permission,
-# original-return and strict output contracts in this same libtest compilation.
+# Activate this 31-only next roster only after Root verifies the preceding
+# Git46 gate actually passed; otherwise the new backup11 remain due.
+# 18 Store + 5 paired-version + 1 P12-parent + 7 request-discovery cases.
+# Six methods use existing disposable private Store/Service fixtures with
+# their original close/drop paths; the rest are memory/codec/constructor DATA.
+# No provider access, live credentials, tool download or product execution.
 rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
 export PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc"
 export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTUP_AUTO_INSTALL=0
 selected_tests=(
-  service_git_remote_protocol::tests::new_branch_is_explicit_required_null_and_never_an_ordinary_grant
-  service_git_remote_protocol::tests::adding_new_kind_preserves_old_selection_bytes_and_digest_domain
-  service_git_remote_protocol::tests::create_only_review_and_result_cannot_launder_kind_basis_or_effect
-  service_git_remote_protocol::tests::create_only_escaped_summary_keeps_existing_encoded_bound
-  asset_session::agent_git_index::remote::tests::first_publication_needs_current_born_attached_unconfigured_observe_not_an_alias
-  asset_session::agent_git_index::remote::tests::new_branch_allow_cannot_borrow_old_consent_or_missing_remote_field
-  asset_session::agent_git_index::remote::native::tests::fixed_native_adapter_preserves_new_kind_and_exact_review_not_ordinary_push
-  asset_session::agent_git_index::remote::native::tests::new_branch_effect_conversion_checks_original_kind_intent_and_id
-  service_git_requests::remote_requests::tests::new_branch_prepare_and_apply_keep_same_three_returns_and_single_consumed_kind
-  service_git_requests::remote_requests::tests::new_branch_lost_finish_caller_or_expired_review_never_rearms_from_status
-  service_git_requests::remote_requests::tests::an_existing_fetch_or_push_grant_cannot_be_upgraded_to_new_branch_review
-  application_service::git_index::remote::tests::actual_service_new_branch_grant_reconnect_keeps_ids_kind_and_no_replay
-  installed_cli::git_index::remote_tests::new_branch_scope_uses_existing_id_only_commands_and_explains_no_upstream
-  installed_cli::git_index::remote_tests::new_branch_ready_and_returned_failure_keep_exact_kind_without_retry_command
-  shell::installed_observation::git_push::create::tests::create_case_kind_never_qualifies_an_ordinary_push_control
-  shell::installed_observation::git_push::create::tests::prepare_only_requires_actual_refusal_without_review_or_apply_claim
-  shell::installed_observation::git_push::create::tests::create_review_keeps_both_reachable_commits_and_absent_upstream
-  shell::installed_observation::git_push::create::tests::rejected_zero_precondition_is_not_success_or_pre_send_refusal
-  shell::installed_observation::git_push::create::tests::fresh_apply_refusal_keeps_recovery_paths_and_held_stop_is_not_returned
-  git_upstream_protocol::tests::exact_local_action_keeps_initialize_and_other_wire_shapes_closed
-  git_upstream_protocol::tests::source_absence_requires_exact_parent_entries_not_none_as_an_observation
-  git_upstream_protocol::tests::additions_preserve_original_prefix_identity_and_existing_config_limit
-  git_upstream_protocol::tests::directory_ack_is_candidate_bound_under_original_512_bytes
-  git_upstream_protocol::tests::public_result_omits_working_paths_and_stats_but_retains_uncertain_custody
-  git_upstream_protocol::tests::local_cli_selection_uses_same_closed_action_not_remote_permission
-  git_upstream_protocol::tests::unchanged_upstream_is_close_only_at_actual_shared_cli_start_predicate
-  git_local_state::upstream_tests::schema_nine_is_only_explicit_upstream_write_and_preserves_old_rows
-  git_local_state::upstream_tests::upstream_candidate_and_partial_directories_never_allow_no_effect_or_retry
-  asset_source::macos::git_local_sources::upstream_sources::tests::attempted_or_ambiguous_directory_creation_is_not_retirement_or_retry
-  asset_source::macos::git_local_sources::upstream_sources::tests::upstream_roster_charges_both_full_chains_and_working_originals_without_close_credit
-  apple_provisioning_protocol::certificate_recovery::tests::restored_key_history_compares_both_hashes_without_rewriting_old_rows_or_key_saved
-  apple_provisioning_protocol::certificate_recovery::tests::restored_key_hashes_cannot_disclose_foreign_project_root_or_target
-  apple_provisioning_protocol::certificate_recovery::tests::restored_prior_stays_reconcile_only_and_both_key_hashes_are_rechecked
-  saved_command_owner::apple_provisioning::tests::certificate_history_requires_original_entered_returned_key_ack_not_completed_data
-  shell::installed_observation::git_upstream::tests::configured_without_tracking_is_not_remote_or_commit_publication
-  service_upload_key_requests::tests::backup::backup_selections_are_distinct_closed_consents_without_file_or_password_inputs
-  service_upload_key_requests::tests::backup::delivery_and_restored_reference_cannot_cross_kind_or_settlement
-  service_upload_key_requests::tests::backup::both_backup_kinds_keep_the_same_three_original_return_barriers_in_all_orders
-  service_upload_key_requests::tests::backup::lost_caller_or_continuation_and_wrong_native_kind_are_absorbing_unknown
-  service_upload_key_requests::tests::backup::late_original_stop_suppresses_delivery_and_new_reference_without_replaying
-  asset_session::vault::backup_delegation::tests::authenticated_kind_policy_has_no_wrong_link_fallback_before_new
-  asset_session::vault::backup_delegation::tests::full_reference_comparison_keeps_random_revision_and_original_read_witness
-  asset_session::vault::backup_delegation::tests::untouched_original_cannot_supply_backup_retirement_or_an_import_stamp
-  installed_cli::upload_key::tests::backup_and_restore_output_keep_delivery_new_reference_and_assignment_distinct
-  installed_cli::upload_key::tests::backup_cli_still_accepts_only_ids_not_a_file_pair_or_restore_override
-  asset_session::agent_upload_key::tests::main_requests_are_small_explicit_action_and_consent_pairs_not_status_authority
+  service_store_protocol::release::tests::store_release_exact_ten_pairs_have_distinct_non_upgrading_consent
+  service_store_protocol::release::tests::store_release_old_eight_fields_stay_exact_without_nullable_upgrade
+  service_store_protocol::release::tests::store_release_review_requires_exact_candidate_intent_and_lineage
+  service_store_protocol::release::tests::store_release_receipts_preserve_mode_state_and_non_finality_limitations
+  service_store_protocol::release::tests::store_release_ios_review_states_never_become_tester_or_public_readiness
+  service_store_protocol::release::tests::store_release_worst_valid_metadata_fits_unchanged_retained_copy_quotes
+  service_store_requests::tests::release_tests::store_release_all_modes_need_same_caller_native_and_history_returns
+  service_store_requests::tests::release_tests::store_release_same_request_reconnect_never_consumes_second_grant_or_mode
+  service_store_requests::tests::release_tests::store_release_cross_mode_result_or_lost_history_keeps_unknown_fence
+  service_store_requests::tests::release_tests::store_release_earliest_read_revocation_is_not_renewed_by_mode_or_status
+  saved_command_owner::agent_store::tests::release_tests::store_release_saved_reviews_bind_all_actual_native_modes_and_private_contexts
+  saved_command_owner::agent_store::tests::release_tests::store_release_native_consent_is_distinct_from_every_agent_token
+  saved_command_owner::agent_store::tests::release_tests::store_release_validated_native_results_redact_private_receipt_and_preserve_real_mode
+  saved_command_owner::agent_store::tests::release_tests::store_release_decoded_terminal_is_not_positive_native_retirement
+  saved_command_owner::agent_store::tests::release_tests::store_release_old_link_or_missing_execute_budget_refuses_before_take
+  installed_cli::store::tests::release_tests::store_release_cli_all_modes_report_only_exact_sanitized_original
+  installed_cli::store::tests::release_tests::store_release_cli_permission_metadata_does_not_add_material_or_mode_arguments
+  installed_cli::store::tests::store_cli_lost_ack_has_only_original_status_cancel_and_no_replay
+  edit_owner::version_reserve::tests::reserved_handoff_data_admits_only_exact_current_inventory_platform_policies
+  edit_owner::version_reserve::tests::paired_handoff_retains_original_envelope_provider_and_byte_bound
+  version_allocation_state_native::dialogue::tests::native_source_admits_paired_v4_without_changing_original_v2_v3_selection
+  version_allocation_state_native::dialogue::tests::paired_native_source_refuses_foreign_source_provider_or_partial_observations
+  version_allocation_state_native::dialogue::tests::paired_native_selection_rejects_mixed_policy_platforms_without_replacing_candidate
+  saved_command_owner::apple_provisioning::tests::apple_start_parent_dispatch_matches_actual_initialized_modes
+  service_play_cleanup_requests::tests::retained_ids_are_project_bound_and_never_expire_claim_or_forget_an_original
+  service_request_catalogue::tests::combined_build_capacity_and_id_namespace_are_not_per_family
+  service_request_catalogue::tests::additional_ids_have_strict_schema_presence_privacy_and_original_commands
+  application_service::request_catalogue::tests::lost_ack_reconnect_discovers_git_identity_and_reservation_without_private_data_or_replay
+  application_service::request_catalogue::tests::unavailable_additional_inbox_is_not_successful_empty_discovery
+  application_service::request_catalogue::tests::project_filter_alias_and_pre_send_revoke_do_not_leak_other_requests
+  installed_cli::tests::requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance
 )
-[[ "${#selected_tests[@]}" == 46 ]] || exit 1
+[[ "${#selected_tests[@]}" == 31 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -72,9 +59,9 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '46 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '31 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 46 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 31 passed; 0 failed; 0 ignored;' "$run_log"
