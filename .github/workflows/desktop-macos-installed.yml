@@ -2167,11 +2167,10 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # One explicit RequestRegistration, then a fresh Check on that same
-          # original Document. AlreadyRegistered reuses the fixed service.
-          # RequiresApproval is manual/unexecuted (exit78), never a pass or a
-          # second request. No settings, launchctl or unregister operation.
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+          # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+          # Same image: one local check, seven CLI calls, eight IPC joins.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
       - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
         id: tool_inputs
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && steps.tool_service.outcome == 'success'

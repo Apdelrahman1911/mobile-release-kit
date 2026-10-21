@@ -3735,6 +3735,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
                     document.drain_ios_archives_for_exit();
                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
                     let report = app.state::<ShellState>().bridge.application_service.shutdown().await;
+                    #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+                    if let Some(q)=app.try_state::<Arc<installed_observation::Observation>>(){
+                        if !q.cli_host_shutdown(&report){return;}
+                    }
                     if !report.settled() || !document.can_exit() {
                         diagnostic(b"MRK_CLI_HOST_EXIT=cleanup-unconfirmed\n");
                         return;

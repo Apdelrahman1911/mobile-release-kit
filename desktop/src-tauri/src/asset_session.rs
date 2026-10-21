@@ -2136,6 +2136,8 @@ mod lookup_memory {
             self.add(crate::agent_identity_requests::document_backing_bytes())?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::agent_local_checks::DOCUMENT_BACKING)?;
+            #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),target_os="macos",target_pointer_width="64",target_arch="aarch64"))]
+            self.add(crate::shell::installed_observation::installed_cli_observation_bytes())?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
             #[cfg(any(target_os = "linux", target_os = "macos"))]

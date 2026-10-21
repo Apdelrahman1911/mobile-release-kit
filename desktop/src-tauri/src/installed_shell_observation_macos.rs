@@ -41,15 +41,20 @@ pub(crate) mod tool_setup;
 pub(crate) mod git_fetch;
 #[path="installed_shell_observation_macos_git_push.rs"]
 pub(crate) mod git_push;
+#[path="installed_shell_observation_macos_cli.rs"]
+mod cli;
 #[path="installed_shell_observation_macos_git_upstream.rs"]
 pub(crate) mod git_upstream;
 pub(crate) use session::Command as SessionCommand;
+// Fixed conservative DATA reservation for the nonshipping tool image only.
+// No observer lock, IO, retired credit or change to ordinary/Git admission.
+pub(crate) fn installed_cli_observation_bytes()->usize{if cli::admitted(){cli::BACKING}else{0}}
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
 const FAILURE_REASONS: &[&str] = &[
     "git-push-original-contract", "git-fetch-original-contract", "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
-    "identity-original-contract", "tool-setup-original-contract",
+    "identity-original-contract", "tool-setup-original-contract", "installed-cli-original-contract",
     "local-edits-original-contract", "local-edits-dom-contract", "local-edits-fixture-contract",
     "local-checks-original-contract", "local-checks-dom-contract", "local-checks-fixture-contract",
     "local-checks-unexpected-cancel", "local-checks-start-arrival",
@@ -264,10 +269,11 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case), GitPush(git_push::Case), GitUpstream }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case), GitPush(git_push::Case), GitUpstream, Cli }
 impl Case {
     fn name(self) -> &'static str { match self {
         Self::GitUpstream => git_upstream::NAME,
+        Self::Cli => cli::NAME,
         Self::GitPush(case) => case.name(),
         Self::GitFetch(case) => case.name(),
         Self::ToolSetup(case) => case.name(),
@@ -309,10 +315,11 @@ impl Case {
     } }
     fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) | Self::GitFetch(_) | Self::GitPush(_) | Self::GitUpstream => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) | Self::GitFetch(_) | Self::GitPush(_) | Self::GitUpstream | Self::Cli => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
+    Cli(cli::Step),
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, CancelProject, CancelSettled, ReadCancelled,
     ChooseProject, OpenProject, ProjectSettled, Snapshot, Settings, Suggest, Suggestion, Adopt, Draft,
     Validate, Validation, Preview, Previewed, RequirementsPage, LoadRequirements, Requirements,
@@ -899,7 +906,8 @@ impl Fixture {
                 ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
                 ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),tools:None,git_fetch:None,git_push:None,git_upstream:None,written:false,mutated:false});
         }
-        if let Case::Checks(case)=case {
+        if matches!(case,Case::Checks(_)|Case::Cli) {
+            let case=if let Case::Checks(c)=case{c}else{checks::Case::Offline};
             let fixture=checks::Fixture::capture(&root,uid,case)?;
             return Ok(Self {root,uid,root_identity:fixture.dir(".").ok_or(())?,app_identity:fixture.dir("app"),
                 untouched:None,ignore:fixture.file(".gitignore").ok_or(())?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
@@ -1059,7 +1067,7 @@ struct Record {
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
     ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
-    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>, git_fetch:Option<git_fetch::Record>, git_push:Option<git_push::Record>, git_upstream:Option<git_upstream::Record>,
+    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>, git_fetch:Option<git_fetch::Record>, git_push:Option<git_push::Record>, cli:Option<cli::Record>, git_upstream:Option<git_upstream::Record>,
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
@@ -1379,7 +1387,8 @@ impl Observation {
         let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let started = Instant::now();
-        let end = started + Duration::from_secs(if case==Case::GitUpstream{git_upstream::SECONDS}else if matches!(case,Case::GitPush(_)){git_push::SECONDS}else if matches!(case,Case::GitFetch(_)){git_fetch::SECONDS}else if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let cli=if case==Case::Cli{Some(cli::Record::new(&fixture.root,fixture.uid)?)}else{None};
+        let end = started + Duration::from_secs(if case==Case::Cli{cli::SECONDS}else if case==Case::GitUpstream{git_upstream::SECONDS}else if matches!(case,Case::GitPush(_)){git_push::SECONDS}else if matches!(case,Case::GitFetch(_)){git_fetch::SECONDS}else if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -1423,7 +1432,7 @@ impl Observation {
                 identity: if let Case::Identity(c)=case{Some(identity::Record::new(c))}else{None},
                 tool_setup: tool_setup.as_ref().map(|_|tool_setup::Record::default()),
                 git_fetch:git_fetch.as_ref().map(|_|git_fetch::Record::default()),
-                git_push:git_push.as_ref().map(|_|git_push::Record::default()),
+                git_push:git_push.as_ref().map(|_|git_push::Record::default()), cli,
                 git_upstream:git_upstream.as_ref().map(|_|git_upstream::Record::default()),
                 panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
                 field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
@@ -2077,6 +2086,10 @@ impl Observation {
                 Step::Snapshot if matches!(self.case,Case::GitPush(_)) => {
                     if r.snapshot_pending||r.snapshots!=1{return;}
                     r.step=Step::GitPush(git_push::Step::Connect);return;
+                },
+                Step::Snapshot if self.case==Case::Cli => {
+                    if r.snapshot_pending||r.snapshots!=1{return;}
+                    r.step=Step::Cli(cli::Step::Allow);return;
                 },
                 Step::Snapshot if matches!(self.case,Case::GitFetch(_)) => {
                     if r.snapshot_pending||r.snapshots!=1{return;}
@@ -3294,6 +3307,9 @@ impl Observation {
             && (self.case == Case::FirstSave || r.panel_attached == (if self.case == Case::Installation { [false,true,false,false] } else { [true,true,false,false] }))
             && r.project_calls == (if self.case == Case::Installation { 0 } else if self.case == Case::FirstSave { 2 } else { 1 });
         let specific = match self.case {
+            Case::Cli => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
+                &&r.native_actions_returned==[false,true,false,true]&&r.sessions.is_empty()
+                &&r.cli.as_ref().is_some_and(|c|c.report().is_some()),
             Case::GitUpstream => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
                 &&r.native_actions_returned==[false,true,false,true]&&r.sessions.is_empty()
                 &&r.git_upstream.as_ref().zip(self.git_upstream.as_ref()).is_some_and(|(v,c)|v.report(c).is_some())
@@ -3406,6 +3422,7 @@ impl Observation {
         if let Some(control) = self.recovery.as_ref() { report["projectRecovery"] = r.recovery_record.as_ref()?.report(control)?; }
         if let Some(control) = self.vault.as_ref() { report["vaultHelper"] = r.vault_record.as_ref()?.report(control)?; }
         if self.case == Case::Installation { report["installationInspection"] = r.installation_record.as_ref()?.report()?; }
+        if self.case==Case::Cli{report["installedCli"]=r.cli.as_ref()?.report()?;}
         if let Case::Ios(case) = self.case {
             if case.operation().is_some() { report["iosArchive"] = r.ios_record.as_ref()?.report(case)?; }
             if case.inputs() {
@@ -3985,7 +4002,7 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let upload_suffix;
-    let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+    let suffix = if case==Case::Cli{"-installed-cli-local-check"}else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
     let root = if case==Case::GitUpstream {
         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
@@ -4001,7 +4018,10 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         if user.uid.as_raw() != uid { return None; }
         tool_setup::fixture_root(&user.dir, tool_case)?
     } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
-    if case==Case::GitUpstream {
+    if case==Case::Cli{
+        if !cli::admitted(){return None;}
+        directory(&root,uid,0o700,&[cli::NAME,"state"]).ok()?;
+    } else if case==Case::GitUpstream {
         directory(&root,uid,0o700,&[git_upstream::NAME,"state"]).ok()?;
     } else if let Case::GitPush(c)=case{
         directory(&root,uid,0o700,c.namespace()).ok()?;
@@ -4754,6 +4774,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         },
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
         Some(v) if v == OsStr::new("picker-loss") => Case::PickerLoss, Some(v) if v == OsStr::new("save-loss") => Case::SaveLoss,
+        Some(v) if v == OsStr::new(cli::NAME) && cli::admitted() => Case::Cli,
         Some(v) if v == OsStr::new(project_fields::NAME) => Case::ProjectFields,
         Some(v) if v == OsStr::new(installation_check::NAME) => Case::Installation,
         Some(v) if v == OsStr::new(recovery::NAME) => Case::PendingRecovery,
