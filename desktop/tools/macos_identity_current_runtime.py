@@ -14,6 +14,7 @@ import sys
 SCOPE = "project-identity-native"
 PUSH_SCOPE = "git-push-native"
 FETCH_SCOPE = "git-fetch-native"
+GIT_SCOPE = "git-native"
 TOOLS_SCOPE = "tool-setup"
 SERVICE_SCOPE = "tool-service-prerequisite"
 UPLOAD_SCOPES = ("upload-key-roundtrip", "upload-key-stop-before-go", "upload-key-stop-after-new")
@@ -50,7 +51,7 @@ def package_role(environment, phase, target):
     scope = environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled")
     if scope == "disabled":
         return None  # Preserve every original ordinary/prepared role decision.
-    need(scope in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE, PUSH_SCOPE) and target == TARGET
+    need(scope in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE, PUSH_SCOPE, GIT_SCOPE) and target == TARGET
          and environment.get("GITHUB_REF") == REF
          and environment.get("MRK_MACOS_PACKAGE_ROLE") == ROLE
          and phase in PACKAGE_PHASES + DATA_PHASES, "identity-native-package-scope")
@@ -59,7 +60,7 @@ def package_role(environment, phase, target):
 
 def current_context(environment, target):
     """Fixed current-job DATA. No caller-selected source, work root or case."""
-    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE, PUSH_SCOPE)
+    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE, PUSH_SCOPE, GIT_SCOPE)
          and package_role(environment, "package-install", target) == ROLE,
          "identity-native-entry-scope")
     source = environment.get("GITHUB_SHA", "")
@@ -101,6 +102,7 @@ def observation_scope(environment, scope):
     """
     native = environment.get("MRK_MACOS_NATIVE_SCOPE")
     need(type(scope) is str and ((native == SCOPE and scope == SCOPE) or (native == PUSH_SCOPE and scope == PUSH_SCOPE) or (native == FETCH_SCOPE and scope == FETCH_SCOPE)
+         or (native == GIT_SCOPE and scope in (FETCH_SCOPE, PUSH_SCOPE))
          or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE))),
          "current-native-observation-scope")
     return scope
@@ -185,7 +187,31 @@ def _admit_runtime(aqua, fixtures, binding, work, environment):
     record = {"parent": parent, "name": name, "fd": fd, "full9": before,
               "sha256": composed["runtimeManifestSha256"]}
     fixtures.gate_files.append(record)
-    aqua.need(aqua._gate_file_read(record)[1] == record["sha256"], "identity-native-current-manifest")
+    native = environment.get("MRK_MACOS_NATIVE_SCOPE")
+    git = native in (FETCH_SCOPE, PUSH_SCOPE, GIT_SCOPE)
+    aqua.need(not git or 0 < before[6] <= stage.MANIFEST_BYTES, "current-git-manifest-bound")
+    manifest, actual = aqua._gate_file_read(record, capture=git)
+    aqua.need(actual == record["sha256"], "identity-native-current-manifest")
+    if git:
+        # Source-selected singleton/combined images cannot stand in for each
+        # other. This parses the SAME held bytes; Fixtures and the native Book
+        # retain every entry, including the other pair, through original POST.
+        _, rows = stage.manifest_files(manifest, actual, current=True, target=binding.target)
+        expected = (stage.GIT_OBSERVATION_BOOTSTRAPS if native == GIT_SCOPE else
+                    stage.FETCH_OBSERVATION_BOOTSTRAPS if native == FETCH_SCOPE else stage.PUSH_OBSERVATION_BOOTSTRAPS)
+        aqua.need(set(rows) & stage.GIT_OBSERVATION_BOOTSTRAPS == expected, "current-git-observation-roster")
+        if native == GIT_SCOPE:
+            # The existing normal observer holds M/core/Python. Retain these
+            # four additional fixed originals in that SAME book so an unused
+            # peer is also checked after each original producer returns.
+            for entry in sorted(stage.GIT_OBSERVATION_BOOTSTRAPS):
+                original, hashed, _ = fixtures._recovery_read(parent, entry, 0, 64 * 1024, 0o444, retain=True)
+                entry_parent, entry_name, entry_fd, entry_before = fixtures.recovery_runtime_originals[-1]
+                fixtures.normal_runtime_policy[entry_fd] = original[2]
+                fixtures.gate_files.append({"parent": entry_parent, "name": entry_name, "fd": entry_fd,
+                    "full9": entry_before, "sha256": rows[entry]["sha256"]})
+                aqua.need(original[6] == rows[entry]["size"] and hashed == rows[entry]["sha256"],
+                          "current-git-entry-correspondence")
     _current(aqua, fixtures)
 
 

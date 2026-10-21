@@ -145,6 +145,8 @@ PUSH_OBSERVATION_BOOTSTRAPS = set(("github_push_connection_observation_bootstrap
 
 FETCH_OBSERVATION_BOOTSTRAPS = set(("github_fetch_connection_observation_bootstrap.py", "git_fetch_observation_bootstrap.py"))
 
+GIT_OBSERVATION_BOOTSTRAPS = FETCH_OBSERVATION_BOOTSTRAPS | PUSH_OBSERVATION_BOOTSTRAPS
+
 CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
@@ -1711,7 +1713,7 @@ def fetch_observation_inputs(role=None, scope=None):
     # SAME exact role/scope. No live runtime or production nomination is made.
     if role is None and scope is None:
         return False
-    if role == "installed-shell-observation" and scope == "git-push-native":
+    if role == "installed-shell-observation" and scope in ("git-push-native", "git-native"):
         return False
     need(role == "installed-shell-observation" and scope == "git-fetch-native",
          "fetch-observation-package-role")
@@ -1721,26 +1723,48 @@ def fetch_observation_inputs(role=None, scope=None):
 def push_observation_inputs(role=None, scope=None):
     if role is None and scope is None:
         return False
-    if role == "installed-shell-observation" and scope == "git-fetch-native":
+    if role == "installed-shell-observation" and scope in ("git-fetch-native", "git-native"):
         return False
     need(role == "installed-shell-observation" and scope == "git-push-native",
          "push-observation-package-role")
     return True
 
 
-def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False):
+def git_observation_inputs(role=None, scope=None):
+    if role is None and scope is None:
+        return False
+    if role == "installed-shell-observation" and scope in ("git-fetch-native", "git-push-native"):
+        return False
+    need(role == "installed-shell-observation" and scope == "git-native",
+         "git-observation-package-role")
+    return True
+
+
+def _git_observation_bootstraps(fetch_observation=False, push_observation=False, git_observation=False):
+    # Three closed choices, not arbitrary mixed provider inputs. In particular,
+    # the old two booleans together remain refused before original source IO.
+    need(type(fetch_observation) is bool, "fetch-observation-roster")
+    need(type(push_observation) is bool and not (push_observation and fetch_observation), "push-observation-roster")
+    need(type(git_observation) is bool and not (git_observation and (fetch_observation or push_observation)),
+         "git-observation-roster")
+    return (GIT_OBSERVATION_BOOTSTRAPS if git_observation else
+            FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else
+            PUSH_OBSERVATION_BOOTSTRAPS if push_observation else set())
+
+
+def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
+                   git_observation=False):
     """Capture DATA, including the committed CA's one explicit projection map."""
     need(type(history_provider) is bool, "current-history-provider-profile")
     need(type(store_runtime) is bool, "current-store-runtime-profile")
+    observation_bootstraps = _git_observation_bootstraps(fetch_observation, push_observation, git_observation)
     source = DESKTOP.parent
     core = tree(source / "src/mobile_release", max_bytes=CURRENT_CORE_BYTES)
     need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
     need({"__init__.py", "_desktop_engine.py"} <= set(core), "current-core-required-inputs")
     need(digest(core["_desktop_engine.py"][0]) == CURRENT_PROTOCOL, "current-protocol-source")
     captured = {"src/mobile_release/" + name: value for name, value in core.items()}
-    need(type(fetch_observation) is bool, "fetch-observation-roster")
-    need(type(push_observation) is bool and not (push_observation and fetch_observation), "push-observation-roster")
-    fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set()) | (PUSH_OBSERVATION_BOOTSTRAPS if push_observation else set())}
+    fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS | observation_bootstraps}
     if store_runtime:
         fixed["desktop/local_store_preflight_bootstrap.py"] = 64 * 1024
         fixed["desktop/apple_provisioning_bootstrap.py"] = 64 * 1024
@@ -1890,8 +1914,10 @@ def current_core_matches(body, projection):
 
 
 def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None,
-                          store_rows=(), fetch_observation=False, push_observation=False):
+                          store_rows=(), fetch_observation=False, push_observation=False, git_observation=False):
     target = mac_target(target)
+    observation_bootstraps = _git_observation_bootstraps(fetch_observation, push_observation, git_observation)
+    need(not git_observation or target == ARM_TARGET, "git-observation-arm-only")
     files = tree(runtime, current_root_mode=0o700, mac_store_prefix="store" if store_rows else None)
     preadmitted = supplier
     if history_provider is not None:
@@ -1901,9 +1927,7 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
     expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
     need(len(expected_store) == len(store_rows) and not set(expected_store) & set(preadmitted),
          "current-store-input-collision")
-    need(type(fetch_observation) is bool, "fetch-observation-roster")
-    need(type(push_observation) is bool and not (push_observation and fetch_observation), "push-observation-roster")
-    bootstraps = CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set()) | (PUSH_OBSERVATION_BOOTSTRAPS if push_observation else set()) | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
+    bootstraps = CURRENT_BOOTSTRAPS | observation_bootstraps | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
     required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
     for name, value in preadmitted.items():
@@ -1935,6 +1959,9 @@ def current_runtime_command(args):
     need(not fetch_observation or target == ARM_TARGET, "fetch-observation-arm-only")
     push_observation = push_observation_inputs(getattr(args, "package_role", None), getattr(args, "native_scope", None))
     need(not push_observation or target == ARM_TARGET, "push-observation-arm-only")
+    git_observation = git_observation_inputs(getattr(args, "package_role", None), getattr(args, "native_scope", None))
+    need(not git_observation or target == ARM_TARGET, "git-observation-arm-only")
+    observation_bootstraps = _git_observation_bootstraps(fetch_observation, push_observation, git_observation)
     configured = composing or getattr(args, "configured_signing", False)
     if composing:
         need(getattr(args, "store_component", None) is None and args.signed_store_root is not None
@@ -1957,7 +1984,8 @@ def current_runtime_command(args):
     if final and not composing:
         need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
     parents = current_paths(args)
-    captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation, push_observation=push_observation)
+    captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled,
+        fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation)
     if provider_enabled:
         need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
     if final and not composing:
@@ -1990,8 +2018,8 @@ def current_runtime_command(args):
     provider_scope = contextlib.nullcontext(None)
     if provider_enabled:
         capacity = history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
-            supplier_files=len(supplier) + (len(FETCH_OBSERVATION_BOOTSTRAPS) if fetch_observation else 0) + (len(PUSH_OBSERVATION_BOOTSTRAPS) if push_observation else 0), fixed_bytes=sum(len(projection["desktop/" + name][0])
-                for name in CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set()) | (PUSH_OBSERVATION_BOOTSTRAPS if push_observation else set()) | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
+            supplier_files=len(supplier) + len(observation_bootstraps), fixed_bytes=sum(len(projection["desktop/" + name][0])
+                for name in CURRENT_BOOTSTRAPS | observation_bootstraps | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
         provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
     with provider_scope as provider:
         provider_body, provider_post = (None, None) if provider is None else provider
@@ -2013,20 +2041,24 @@ def current_runtime_command(args):
                     options["fetch_observation"] = True
                 if push_observation:
                     options["push_observation"] = True
+                if git_observation:
+                    options["git_observation"] = True
                 if store_enabled:
                     options["store_component"] = store_component
                 prepared = preparer.prepare_current(source, runtime, target, **options)
             finally:
                 os.umask(old_mask)
             files, manifest = current_runtime_files(runtime, projection, supplier, target=target,
-                history_provider=provider_body, store_rows=store_rows, fetch_observation=fetch_observation, push_observation=push_observation)
+                history_provider=provider_body, store_rows=store_rows, fetch_observation=fetch_observation,
+                push_observation=push_observation, git_observation=git_observation)
             if store_enabled:
                 preparer._store_recheck(store)
             manifest_digest = digest(files["manifest.json"][0])
             need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
                               "qualification": "prepared-not-native-verified"}, "current-preparer-result")
             need(tree(source, current_root_mode=0o555) == projection
-                 and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation, push_observation=push_observation) == (captured, projection, source_digest),
+                 and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation,
+                                    push_observation=push_observation, git_observation=git_observation) == (captured, projection, source_digest),
                  "current-source-post-changed")
             if fresh_inputs is not None:
                 need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
@@ -3614,7 +3646,11 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET, observatio
     need(not push_present or current and observation_role and target == ARM_TARGET and push_present == PUSH_OBSERVATION_BOOTSTRAPS,
          "nonshipping-push-runtime-roster")
     present = set(files) & FETCH_OBSERVATION_BOOTSTRAPS
-    need(not (present and push_present), "single-git-observation-runtime")
+    # The only added mixed image is the complete closed four-entry observer.
+    # Actual use is separately joined to its explicit git-native source scope
+    # by the current driver against the SAME held installed manifest.
+    need(not (present and push_present) or current and observation_role and target == ARM_TARGET
+         and present | push_present == GIT_OBSERVATION_BOOTSTRAPS, "combined-git-observation-runtime")
     need(not present or current and observation_role and present == FETCH_OBSERVATION_BOOTSTRAPS,
          "nonshipping-fetch-runtime-roster")
     need("manifest.json" in files, "runtime-manifest-missing")
@@ -7437,7 +7473,7 @@ def main(argv=None):
             command.add_argument("--binding-output", required=True, type=Path)
             command.add_argument("--output", required=True, type=Path)
         command.add_argument("--package-role", choices=("installed-shell-observation",))
-        command.add_argument("--native-scope", choices=("git-fetch-native", "git-push-native"))
+        command.add_argument("--native-scope", choices=("git-fetch-native", "git-push-native", "git-native"))
         if name == "current-runtime":
             command.add_argument("--configured-signing", action="store_true",
                                  help="Require the fixed SOURCE capsule/S/M nomination, never a CLI replacement")

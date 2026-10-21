@@ -207,7 +207,7 @@ class PushRouteTests(unittest.TestCase):
             self.assertIs(caught.exception, sentinel)
             self.assertEqual(manifest.call_count, 1)
             for files, role in ((pair, False), ({next(iter(pair)): (b"DATA", 0o444)}, True),
-                                ({**pair, **{name: (b"DATA", 0o444) for name in s.FETCH_OBSERVATION_BOOTSTRAPS}}, True)):
+                                ({**pair, next(iter(s.FETCH_OBSERVATION_BOOTSTRAPS)): (b"DATA", 0o444)}, True)):
                 tree.return_value = {"manifest.json": (b"DATA", 0o444), **files}
                 with self.assertRaises(s.Refused):
                     s.runtime_tree(Path("/inert-runtime"), "0" * 64, current=True, observation_role=role)

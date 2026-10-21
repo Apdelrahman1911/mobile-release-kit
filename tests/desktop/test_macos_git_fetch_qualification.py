@@ -200,7 +200,7 @@ class PackagingTests(Inert):
 
 
 class OriginalLoopTests(Inert):
-    def run_loop(self, *, unknown=None, late=False):
+    def run_loop(self, *, unknown=None, late=False, native_scope=Q.SCOPE):
         events, errors = [], []
         f = SimpleNamespace(cases=Q.CASES, path=Path("/inert/fixture"), inflight=False, last_returned=False, case=None)
         f.prepare = lambda: events.append("prepare")
@@ -236,7 +236,7 @@ class OriginalLoopTests(Inert):
             out, err = io.StringIO(), io.StringIO()
             stack.enter_context(redirect_stdout(out)); stack.enter_context(redirect_stderr(err))
             status = M._run(A, BINDING, 501, 20, "runner", Path("/inert/work"),
-                            {"MRK_MACOS_NATIVE_SCOPE": Q.SCOPE}, scope=Q.SCOPE)
+                            {"MRK_MACOS_NATIVE_SCOPE": native_scope}, scope=Q.SCOPE)
         return status, f, events, errors, [json.loads(v) for v in out.getvalue().splitlines()]
 
     def test_real_loop_orders_setup_original_call_readback_runtime_post_and_close(self):
