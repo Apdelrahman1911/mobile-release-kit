@@ -67,6 +67,12 @@ fn apple_cli_all_fifteen_modes_are_closed_and_key_recover_still_refuses() {
             c.key_record_revision = Some(1)
         }
         assert!(c.valid(), "{m:?}");
+        let start = apple_wire::start(&serde_json::json!({
+            "operationId": id('a').as_str(),
+            "ownerGeneration": id('b').as_str(),
+            "consentVersion": m.consent(),
+        })).unwrap();
+        assert!(start.matches_context(&c));
         let r = review(
             &Context::AppleProvisioning(c),
             id('a').as_str(),
@@ -220,6 +226,10 @@ fn apple_cli_original_validated_result_is_redacted_not_signing_readiness() {
         "limitations":["bundle-id-only","no-release-or-signing-readiness","no-certificate-or-profile-changes","no-team-verification","no-global-availability-claim","one-write-no-retry","parent-journal-and-native-joins-required"]},
         "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":7,"profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}});
     let t: apple_wire::Terminal = serde_json::from_value(value).unwrap();
+    assert_eq!(t.mode(), apple_wire::Mode::Review);
+    let mut other_mode = r.clone();
+    other_mode.mode = p::Mode::ProfileReview;
+    assert!(report(&Terminal::AppleProvisioning(t.clone()), &other_mode).is_err());
     let result = report(&Terminal::AppleProvisioning(t), &r).unwrap();
     assert_eq!(result.decision, "review-required");
     assert!(!result.credential_ready);

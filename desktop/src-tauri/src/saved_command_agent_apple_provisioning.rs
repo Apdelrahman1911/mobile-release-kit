@@ -271,7 +271,7 @@ fn report(t: &Terminal, r: &p::Review) -> Result<p::Report, BridgeError> {
     let Terminal::AppleProvisioning(t) = t else {
         return Err(refused());
     };
-    if !t.settled() || mode(t.context.mode)? != r.mode {
+    if !t.settled() || mode(t.mode())? != r.mode {
         return Err(refused());
     }
     // Serialize only the original already-validated bounded public result.

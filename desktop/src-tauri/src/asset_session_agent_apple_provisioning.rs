@@ -426,11 +426,11 @@ impl DocumentBinding {
             .consume_apple_provisioning_observation(&grant.scope)
             .map_err(public)?;
         let input = grant.approval.input()?;
-        let start = crate::apple_provisioning_protocol::Start {
-            operation_id: grant.scope.review.operation_id.as_str().into(),
-            owner_generation: grant.scope.review.owner_generation.as_str().into(),
-            consent_version: input.context().mode.consent().into(),
-        };
+        let start = crate::apple_provisioning_protocol::start(&serde_json::json!({
+            "operationId": grant.scope.review.operation_id.as_str(),
+            "ownerGeneration": grant.scope.review.owner_generation.as_str(),
+            "consentVersion": input.context().mode.consent(),
+        }))?;
         self.start_apple_provisioning_delegated(start, Some((&grant, entry)))
             .map(|_| ())
     }

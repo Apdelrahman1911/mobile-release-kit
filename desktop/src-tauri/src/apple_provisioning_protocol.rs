@@ -1008,6 +1008,11 @@ pub(crate) struct Terminal {
     pub(crate) lifetime: Lifetime,
 }
 impl Terminal {
+    /// The retained operation mode is public protocol data; keep the full
+    /// context private and do not treat this accessor as native finality.
+    pub(crate) fn mode(&self) -> Mode {
+        self.context.mode
+    }
     /// Original owner dispatch must use this retained mode, not the Bundle-only
     /// default. This is protocol settlement DATA, never native join authority.
     pub(crate) fn settled(&self) -> bool {
