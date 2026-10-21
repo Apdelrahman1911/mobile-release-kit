@@ -24,7 +24,8 @@ from .api.contracts import ApiError, GitHubTemplateSet, GitHubToolingReference
 from .config_edit import ConfigEditFailure, CoreEditOutcome
 from .errors import ConfigurationError
 from .init_transaction import TypedEditProfile
-from .workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference
+from .workflow_payloads import GITHUB_WORKFLOWS
+from .github_workflow_candidate_compat import before_workflow_reference
 
 if TYPE_CHECKING:
     from .init_workspace_custody import InitRootLease, RootedRevision
@@ -324,7 +325,7 @@ def _derive(checkout: WorkflowCheckout, draft: object, repository: object, sha: 
                             and row["sha256"] == hashlib.sha256(content).hexdigest())
             observed = _observed(original)
             differs = original.data is not None and original.data != content
-            if differs and canonical_workflow_reference(templates[identity], original.data) is None:
+            if differs and before_workflow_reference(identity, templates[identity], original.data) is None:
                 conflicts.append({"id": cast(WorkflowId, identity),
                                   "observed": cast(PresentWorkflowObservation, observed)})
                 continue

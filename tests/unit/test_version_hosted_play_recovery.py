@@ -310,6 +310,80 @@ class HostedPlayRecoveryTests(unittest.TestCase):
                 self.assertEqual(c.repo.journal, before)
                 self.assertEqual(c.recovery_calls, [])
 
+    def test_advanced_branch_head_keeps_original_source_and_missing_history_refuses_before_claim(self):
+        for schema in (3, 4):
+            for missing in (False, True):
+                with self.subTest(schema=schema, missing=missing), self.case(schema) as c:
+                    retained = self.retain(c)
+                    original = retained.state.candidates[-1].request.source
+                    advanced = c.fixture.final
+                    self.assertNotEqual(advanced, original.commit)
+                    c.context = replace(c.context, authority={**c.context.authority, "headSha": advanced, "runId": "51"})
+                    c.repo.source_commit = advanced
+                    self.restart_cleanup(c, retained)
+                    before = c.repo.journal; writes = c.repo.journal_puts
+                    c.events.clear()
+
+                    def git(argv, **kwargs):
+                        # Only the explicitly fake Git boundary changes. The
+                        # actual source decoder verifies original object hashes.
+                        args = argv[argv.index("-C") + 2:]
+                        result = c.git(argv, **kwargs)
+                        if args == ["rev-parse", "--verify", "HEAD"] and kwargs["cwd"] == c.root:
+                            return subprocess.CompletedProcess(argv, 0, (advanced + "\n").encode(), b"")
+                        if args[:2] == ["cat-file", "commit"]:
+                            self.assertEqual(args[2], original.commit)
+                            if missing:
+                                return subprocess.CompletedProcess(argv, 1, b"", b"INERT unavailable original object")
+                        if args[:3] == ["ls-tree", "-z", "--full-tree"]:
+                            self.assertEqual(args[3], original.commit)
+                        return result
+
+                    with patch.object(ci, "run_owned", git):
+                        if missing:
+                            with self.assertRaises(ci.Refused): self.recover(c, retained)
+                        else:
+                            result = self.recover(c, retained)
+                            self.assertEqual(result["allocation"], "not-performed")
+                    self.assertEqual(c.source.context.authority["headSha"], advanced)
+                    self.assertEqual(c.repo.ledger_puts, 0)
+                    if missing:
+                        self.assertEqual(c.repo.journal, before)
+                        self.assertEqual(c.repo.journal_puts, writes)
+                        self.assertEqual(c.recovery_calls, [])
+                    else:
+                        self.assertEqual(c.source.binding, original)
+                        self.assertEqual(c.source.enabled, c.fixture.platforms)
+                        self.assertEqual(c.recovery_calls, ["verify", "delete"])
+                        self.assertEqual(h.Envelope.parse(c.repo.journal).state, retained.state)
+                        self.assertIsNone(h.Envelope.parse(c.repo.journal).play_query)
+                    self.assertFalse(any(event[0] == "git" and event[1][0] in {"fetch", "checkout", "reset"}
+                                         for event in c.events))
+
+    def test_actual_cleanup_context_requires_current_branch_not_sha_tag_or_rebound_head(self):
+        with self.case() as c:
+            retained = self.retain(c); self.restart_cleanup(c, retained)
+            authority = c.context.authority
+            env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": c.context.repository["fullName"],
+                "GITHUB_REPOSITORY_ID": c.context.repository["id"], "GITHUB_SHA": authority["headSha"],
+                "GITHUB_REF": authority["ref"], "GITHUB_JOB": "version_reserve", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_WORKFLOW": authority["workflow"], "GITHUB_RUN_ID": authority["runId"],
+                "GITHUB_RUN_ATTEMPT": str(authority["attempt"]), "MOBILE_RELEASE_SELECTED_PLATFORM": c.platform,
+                "MOBILE_RELEASE_CONFIRMATION": c.context.confirmation,
+                "MOBILE_RELEASE_CALLER_WORKFLOW_PATH": authority["callerPath"],
+                "MOBILE_RELEASE_REUSABLE_WORKFLOW_PATH": authority["reusablePath"],
+                "MOBILE_RELEASE_REUSABLE_WORKFLOW_REPOSITORY": authority["reusableRepository"],
+                "MOBILE_RELEASE_TOOLING_SHA": authority["reusableCommit"],
+                "MOBILE_RELEASE_DISPATCH_SHA": authority["headSha"], "MOBILE_RELEASE_DISPATCH_REF": authority["ref"]}
+            with patch.dict(os.environ, env):
+                self.assertEqual(h.workflow.Context.current("candidate", c.platform), c.context)
+                for ref in (authority["headSha"], "refs/tags/recovery"):
+                    with patch.dict(os.environ, {"GITHUB_REF": ref, "MOBILE_RELEASE_DISPATCH_REF": ref}), self.assertRaises(Exception):
+                        h.workflow.Context.current("candidate", c.platform)
+                with patch.dict(os.environ, {"GITHUB_SHA": c.fixture.final}), self.assertRaises(h.workflow.WorkflowError):
+                    h.workflow.Context.current("candidate", c.platform)
+            self.assertEqual(c.recovery_calls, [])
+
     def test_ios_progress_preserves_full_v3_capsule_and_claim_without_rewriting_default_versions(self):
         for spent in (False, True):
             with self.subTest(spent=spent), self.case(2, opt_in=False) as c:

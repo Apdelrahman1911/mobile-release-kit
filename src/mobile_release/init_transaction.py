@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 from .errors import ValidationError
 from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS, canonical_workflow_reference
+from .github_workflow_candidate_compat import before_workflow_reference
 
 PREPARING = ".mobile-release-init-prepare"
 READY = ".mobile-release-init"
@@ -2032,9 +2033,9 @@ class InitWorkspace:
         for identity, item, payload in updates:
             template = resource["workflows"][identity].encode("utf-8")
             _require(item.data != payload
-                     and canonical_workflow_reference(template, item.data) is not None
+                     and before_workflow_reference(identity, template, item.data) is not None
                      and canonical_workflow_reference(template, payload) is not None,
-                     "workflow update is not an exact current canonical caller")
+                     "workflow update lacks an exact supported before-image or current canonical after-image")
         # Derivative finite paths only. Original captured bytes, rooted facts
         # and later original controls remain the authority for the transaction.
         self._workflow_updates = frozenset(item.path for _, item, _ in updates)

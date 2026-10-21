@@ -19,10 +19,10 @@ impl Case {
 pub(super) const NAMES: [&str;3] = ["local-metadata-text","local-release-version","local-github-apply"];
 const REPOSITORY: &str = "example/toolkit";
 const PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const RESOURCE: &str = "6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a";
+const RESOURCE: &str = "b0c2b54af743bafd1296cda605fb77d5437c3cfd8a2ba0fe37bae9e84c0717f6";
 const WORKFLOWS: [(&str,&str,usize);4] = [
     ("preflight",".github/workflows/mobile-preflight.yml",1479),
-    ("candidate",".github/workflows/mobile-candidate.yml",2303),
+    ("candidate",".github/workflows/mobile-candidate.yml",3796),
     ("external-testing",".github/workflows/mobile-external-testing.yml",3079),
     ("production-submit",".github/workflows/mobile-production-submit.yml",3816)];
 const STALE: &[u8] = b"# MRK local workflow original changed\n";
@@ -860,7 +860,7 @@ fn workflow_script(step:Step)->Option<String>{
     Some(format!(r#"(() => {{ try {{
         if (document.querySelector('.preview-banner, .fatal-error, #main-content > .notice-danger, .native-workflow-panel .notice-danger')) throw 0;
         const text=e=>{{if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0; return e.textContent;}};
-        // Fixed create/preserve diffs only; current caller bodies1479/2303/3079/3816B.
+        // Fixed create/preserve diffs only; current caller bodies1479/3796/3079/3816B.
         // The existing6038-unit per-diff and complete outer bounds stay unchanged.
         const diffText=e=>{{if (!e || typeof e.textContent!=='string' || e.textContent.length>6038) throw 0; return e.textContent;}};
         const visible=e=>{{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible';}};

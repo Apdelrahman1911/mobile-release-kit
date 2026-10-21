@@ -1,10 +1,11 @@
 """Bounded in-memory workflow adapter checks, not native qualification.
 
 The exact imported lease/workspace names are replaced by explicit inert types,
-as in test_config_edit. No real custody object, resource file, descriptor,
-flock, signal, thread, process, transaction, recovery or filesystem probe runs.
-The synthetic resource exercises the existing proposal service, not a second
-generator or a claim about canonical/installed/native workflow behavior.
+as in test_config_edit. No real custody object, descriptor, flock, signal,
+thread, process, transaction, recovery or project filesystem probe runs.
+Most cases use a synthetic resource. The predecessor case reads the fixed
+shipped public resource before entering the inert boundary, then exercises
+the same proposal service; it is not installed/native workflow evidence.
 Source and exact command admission are required separately before execution.
 """
 from __future__ import annotations
@@ -465,6 +466,39 @@ class GitHubWorkflowEditTests(unittest.TestCase):
             self.assertEqual([row["id"] for row in conflict.view["conflicts"]], [_IDS[2]])
             self.assertNotIn("content", json.dumps(conflict.view))
             self.assertEqual(conflict_lease.applies, [])
+
+    def test_shipped_candidate_predecessor_has_complete_review_and_custom_bytes_stay_conflicts(self):
+        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
+        # Read the one shipped public resource before the inert no-IO boundary;
+        # the actual proposal/derive functions, not a second generator, run below.
+        raw = (Path(__file__).resolve().parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        templates = json.loads(raw)["workflows"]
+        generated = tuple(render_workflow_caller(templates[identity].encode(), _REPOSITORY, _SHA)
+                          for identity in _IDS)
+        old = render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "b" * 40)
+        with inert_native(), patch.object(setup, "_read_resource_bytes", return_value=raw), \
+                patch(f"{__name__}.resource_bytes", return_value=raw):
+            lease = InertLease((generated[0], old, generated[2], generated[3]))
+            _, plan = prepare(lease)
+            view = plan.view
+            self.assertEqual([row["action"] for row in view["files"]], ["preserve", "update", "preserve", "preserve"])
+            self.assertEqual(view["files"][1]["previous"], {
+                "content": old.decode(), "byteLength": len(old), "sha256": hashlib.sha256(old).hexdigest()})
+            self.assertEqual(view["files"][1]["generated"]["content"].encode(), generated[1])
+            self.assertEqual(view["templateSet"]["resourceSha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).effect, "committed")
+            self.assertEqual(lease.applies[0][1][0].data, old)
+            self.assertEqual([payload for _, payload in lease.applies[0]], [None, generated[1], None, None])
+            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).reason, "invalid_params")
+            for changed in (old + b"# user change\n", old.replace(b"permissions: {}", b"permissions: write-all"),
+                            old.replace(b"b" * 40, b"c" * 40, 1)):
+                with self.subTest(change=changed[-48:]):
+                    refused = InertLease((generated[0], changed, generated[2], generated[3]))
+                    _, conflict = prepare(refused)
+                    self.assertEqual(conflict.kind, "conflict")
+                    self.assertEqual([row["id"] for row in conflict.view["conflicts"]], ["candidate"])
+                    self.assertFalse(hasattr(conflict, "token"))
+                    self.assertEqual(refused.applies, [])
 
     def test_observation_or_conflict_recheck_failure_never_publishes_partial_rows(self):
         with inert_native() as token:

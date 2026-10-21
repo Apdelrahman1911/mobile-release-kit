@@ -228,6 +228,44 @@ class SetupPublicationTests(unittest.TestCase):
         prepared, _ = self.prepared(Reader({path: old}))
         self.assertEqual(prepared.view()["files"][1]["before"], old.decode())
 
+    def test_previous_candidate_review_and_publication_keep_exact_before_and_current_after(self):
+        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
+        path = p.PATHS[2]
+        old = p.render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "1" * 40)
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                reader = Reader({path: old, "README.md": b"unchanged application", ".github/workflows/custom.yml": b"# user workflow\n"})
+                prepared, _ = self.prepared(reader)
+                view = prepared.view()
+                self.assertEqual(view["files"][2]["before"].encode(), old)
+                self.assertEqual(view["files"][2]["after"].encode(), source().files[2])
+                self.assertIn("recover-play-edit", view["files"][2]["after"])
+                self.assertEqual(p.Prepared.parse(view), prepared)
+                self.assertTrue(all(call.method == "GET" for call in reader.calls))
+                reader.calls.clear(); reader.changed_base = stale
+                result = p.publish(prepared, source(), reader, MemoryJournal())
+                posts = [call for call in reader.calls if call.method == "POST"]
+                if stale:
+                    self.assertEqual(result["reason"], "source-changed")
+                    self.assertEqual(posts, [])
+                else:
+                    self.assertEqual(result["effect"], "draft-pr-observed")
+                    self.assertEqual(json.loads(posts[0].body)["base_tree"], reader.base_tree)
+                    self.assertEqual([item["path"] for item in json.loads(posts[0].body)["tree"]], list(p.PATHS))
+                    self.assertEqual(json.loads(posts[0].body)["tree"][2]["content"].encode(), source().files[2])
+                    self.assertEqual(json.loads(posts[2].body), {"ref": "refs/heads/" + target().head, "sha": COMMIT})
+                self.assertFalse(any(call.method in {"PUT", "PATCH", "DELETE"} or "dispatch" in call.path for call in reader.calls))
+
+        for changed in (old + b"# user edit\n", old.replace(b"\n", b"\r\n"),
+                        old.replace(b"1" * 40, b"2" * 40, 1)):
+            reader = Reader({path: changed})
+            with self.assertRaises(p.Refused): self.prepared(reader)
+            self.assertTrue(all(call.method == "GET" for call in reader.calls))
+            invalid = copy.deepcopy(view); invalid["files"][2]["before"] = changed.decode()
+            with self.assertRaises(ValueError): p.Prepared.parse(invalid)
+        invalid = copy.deepcopy(view); invalid["files"][2]["after"] = old.decode()
+        with self.assertRaises(ValueError): p.Prepared.parse(invalid)  # No legacy AFTER grant.
+
     def test_actual_publication_sequence_preserves_siblings_and_never_updates_refs(self):
         prepared, reader = self.prepared()
         reader.calls.clear(); journal = MemoryJournal()

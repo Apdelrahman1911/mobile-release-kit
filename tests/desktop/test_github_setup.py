@@ -224,15 +224,51 @@ class GitHubSetupTests(unittest.TestCase):
             self.assertEqual(item["content"].encode(), render_workflow_caller(raw, "Example/mobile-release-kit", "A" * 40))
             expected_source = ("${{ inputs.desktop_source_sha || github.sha }}"
                                if item["id"] == "preflight" else "${{ github.sha }}")
+            invocations = 2 if item["id"] == "candidate" else 1
             self.assertEqual(
                 [line for line in item["content"].splitlines() if line.lstrip().startswith("source_sha:")],
-                [f"      source_sha: {expected_source}"],
+                [f"      source_sha: {expected_source}"] * invocations,
             )
-            self.assertEqual(item["content"].count("a" * 40), 2)
+            self.assertEqual(item["content"].count("a" * 40), 2 * invocations)
+            self.assertEqual([line.strip() for line in item["content"].splitlines()
+                              if line.lstrip().startswith("tooling_sha:")],
+                             ["tooling_sha: " + "a" * 40] * invocations)
             self.assertNotIn("secrets: inherit", item["content"])
             if item["id"] != "preflight":
                 self.assertIn("recovery_confirmation:", item["content"])
                 self.assertIn("permissions: {}", item["content"])
+
+    def test_real_generators_share_version_operations_without_dispatch_or_private_inputs(self):
+        from mobile_release.github_setup_publication import Source, Target, TOOLING_REPOSITORY
+        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE, before_workflow_reference
+        from mobile_release.workflow_payloads import canonical_workflow_reference
+
+        result = propose(toolingRepository=TOOLING_REPOSITORY, toolingSha="B" * 40)
+        candidate = result["workflows"][1]
+        target = Target.parse({"projectBinding": "c" * 64, "repository": "owner/app", "accountId": "11",
+            "repositoryId": "22", "base": "main", "toolingRepository": TOOLING_REPOSITORY,
+            "toolingSha": "b" * 40, "marker": "e" * 32})
+        source = Source.from_saved(json.dumps(draft()).encode(), target)
+        self.assertEqual(source.files[2], candidate["content"].encode())
+        self.assertEqual([line.strip() for line in candidate["content"].splitlines() if line.strip().startswith("- ")][:3],
+                         ["- candidate", "- reserve-version", "- recover-play-edit"])
+        self.assertIn("default: candidate", candidate["content"])
+        self.assertIn("operation: ${{ inputs.operation }}", candidate["content"])
+        self.assertIn("recover-play-edit:<candidateUUID>:<attemptUUID>", candidate["content"])
+        for private in ("editId:", "recovery_key:", "MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64", "secrets: inherit"):
+            self.assertNotIn(private, candidate["content"])
+        self.assertFalse(any(result["facts"][key] for key in ("githubContacted", "repositoryObserved", "applyAvailable")))
+
+        old = render_workflow_caller(_PREVIOUS_CANDIDATE, "Previous/toolkit", "a" * 40)
+        template = source.templates[1]
+        self.assertEqual(before_workflow_reference("candidate", template, old), ("Previous/toolkit", "a" * 40))
+        self.assertIsNone(canonical_workflow_reference(template, old))  # Not dispatch/current-output authority.
+        for identity in ("preflight", "external-testing", "production-submit", "unknown"):
+            self.assertIsNone(before_workflow_reference(identity, template, old))
+        for changed in (old + b"# user change\n", old.replace(b"\n", b"\r\n"), old[:-1],
+                        old.replace(b"a" * 40, b"b" * 40, 1), old.replace(b"Previous/toolkit", b"../unsafe"),
+                        old.replace(b"permissions: {}", b"permissions: write-all")):
+            self.assertIsNone(before_workflow_reference("candidate", template, changed))
 
     def test_invalid_configuration_is_redacted_and_has_no_generated_payload_or_resource_read(self):
         value = draft()

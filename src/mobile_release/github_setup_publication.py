@@ -20,7 +20,8 @@ from .api._github_setup import _resource
 from .config import validate_config_data
 from .errors import ConfigurationError
 from .github_preflight import HttpRequest, TOOLING_REPOSITORY, _DIGEST, _MARKER, _SHA, _match, _object, _quote, _require, branch
-from .workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference, render_workflow_caller
+from .workflow_payloads import GITHUB_WORKFLOWS, render_workflow_caller
+from .github_workflow_candidate_compat import before_workflow_reference
 
 PROTOCOL = "mrk-github-setup-publication/1"
 CONFIG_PATH = "release/mobile-release.json"
@@ -237,7 +238,8 @@ class Prepared:
             if old is None:
                 continue
             if index:
-                _require(canonical_workflow_reference(source.templates[index - 1], old) is not None)
+                _require(before_workflow_reference(GITHUB_WORKFLOWS[index - 1][0],
+                                                  source.templates[index - 1], old) is not None)
             else:
                 validate_config_data(_decode_json(old, limit=MAX_CONFIG_BYTES, nodes=20000, depth=32, exact=True))
         result = cls(target, _match(row["baseCommit"], _SHA), _match(row["baseTree"], _SHA),
@@ -373,7 +375,8 @@ def prepare(target: Target, source: Source, exchange: Exchange) -> Prepared:
         _need(len(raw) == size and git_hash("blob", raw) == sha, "source-changed")
         raw.decode("utf-8")
         if index:
-            _need(canonical_workflow_reference(source.templates[index - 1], raw) is not None, "caller-mismatch")
+            _need(before_workflow_reference(GITHUB_WORKFLOWS[index - 1][0],
+                                           source.templates[index - 1], raw) is not None, "caller-mismatch")
         else:
             validate_config_data(_decode_json(raw, limit=MAX_CONFIG_BYTES, nodes=20000, depth=32, exact=True))
         old.append(raw)

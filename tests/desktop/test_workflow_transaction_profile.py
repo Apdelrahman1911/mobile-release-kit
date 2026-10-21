@@ -204,7 +204,8 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
                                                           profile=profile, registered_identity=registered)
                             admitted = platform == "linux" or (platform == "darwin" and profile in (
                                 tx.TypedEditProfile.CONFIGURATION, PROFILE, tx.TypedEditProfile.METADATA_TEXT,
-                                tx.TypedEditProfile.RELEASE_VERSION, tx.TypedEditProfile.METADATA_IMAGES))
+                                tx.TypedEditProfile.RELEASE_VERSION, tx.TypedEditProfile.METADATA_IMAGES,
+                                tx.TypedEditProfile.PROJECT_INITIALIZATION, tx.TypedEditProfile.PROJECT_IDENTITY))
                             if admitted:
                                 lease.acquire()
                                 self.assertTrue(lease._acquired)
@@ -593,7 +594,7 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
 class WorkflowUpdateFilesystemTests(unittest.TestCase):
     """Actual Linux/macOS filesystem cases, separately admitted from inert tests."""
 
-    def _run_update(self, fail_after_first):
+    def _run_update(self, fail_after_first, *, previous_candidate=False):
         import tempfile
         from mobile_release.cancellation import CleanupScope, DefaultCancellation
         from mobile_release.init_workspace_custody import InitRootLease
@@ -608,6 +609,10 @@ class WorkflowUpdateFilesystemTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mrk-workflow-update-") as directory_name:
             root = Path(directory_name).resolve(); callers = root / ".github" / "workflows"; callers.mkdir(parents=True)
             initial = (old[0], None, new[2], old[3]); modes = (0o640, None, 0o644, 0o604)
+            if previous_candidate:
+                from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
+                prior = render_workflow_caller(_PREVIOUS_CANDIDATE, "old/toolkit", "a" * 40)
+                initial = (old[0], prior, new[2], old[3]); modes = (0o640, 0o640, 0o644, 0o604)
             for path, data, mode in zip(PROFILE.paths, initial, modes):
                 if data is not None:
                     target = root / path; target.write_bytes(data); target.chmod(mode)
@@ -676,6 +681,73 @@ class WorkflowUpdateFilesystemTests(unittest.TestCase):
 
     def test_failure_after_first_real_replacement_restores_originals_and_primary(self):
         self._run_update(True)
+
+    def test_previous_candidate_actual_apply_and_rollback_keep_all_originals(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                self._run_update(failure, previous_candidate=True)
+
+    def test_previous_candidate_stale_before_or_noncurrent_after_refuses_without_replacement(self):
+        import tempfile
+        from mobile_release.cancellation import CleanupScope, DefaultCancellation
+        from mobile_release.init_workspace_custody import InitRootLease
+        from mobile_release.github_workflow_candidate_compat import _PREVIOUS_CANDIDATE
+
+        def full_facts(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+        self.assertTrue(sys.platform.startswith("linux") or sys.platform == "darwin")
+        resource_raw, resource = setup._resource()
+        new = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "new/toolkit", "b" * 40)
+                    for identity, _ in tx.WORKFLOWS)
+        prior = render_workflow_caller(_PREVIOUS_CANDIDATE, "old/toolkit", "a" * 40)
+        for fault in ("stale-before", "custom-before", "legacy-after", "custom-after", "resource-changed"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="mrk-workflow-prior-") as name:
+                root = Path(name).resolve(); callers = root / ".github/workflows"; callers.mkdir(parents=True)
+                initial = (new[0], prior + (b"# user change\n" if fault == "custom-before" else b""), new[2], new[3])
+                for path, raw in zip(PROFILE.paths, initial):
+                    (root / path).write_bytes(raw)
+                sentinel = callers / "unrelated.yml"; sentinel.write_bytes(b"# preserve user workflow\n")
+                registered = root.stat()
+                guard = DefaultCancellation(ValidationError, "workflow predecessor fixture cleanup failed")
+                lease = InitRootLease(root, cancellation=guard, profile=PROFILE,
+                    registered_identity={"device": registered.st_dev, "inode": registered.st_ino,
+                        "mode": registered.st_mode, "uid": registered.st_uid, "gid": registered.st_gid})
+                cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
+                expected = list(initial)
+                try:
+                    with cleanup:
+                        guard.install(); guard.activate(); lease.acquire()
+                        with lease.workspace_scope() as owner:
+                            originals = tuple(owner.observe(path, limit=limit)
+                                for path, limit in zip(PROFILE.paths, PROFILE.observation_limits))
+                            revision = lease.bind_revision(owner, originals)
+                        if fault == "stale-before":
+                            expected[1] += b"# later user edit\n"
+                            (root / PROFILE.paths[1]).write_bytes(expected[1])
+                        payload = (render_workflow_caller(_PREVIOUS_CANDIDATE, "new/toolkit", "b" * 40)
+                                   if fault == "legacy-after" else new[1] + (b"# not canonical\n" if fault == "custom-after" else b""))
+                        selected_digest = "f" * 64 if fault == "resource-changed" else hashlib.sha256(resource_raw).hexdigest()
+                        before = {path: full_facts((root / path).stat()) for path in PROFILE.paths}
+                        sentinel_before = full_facts(sentinel.stat())
+                        with self.assertRaises(tx.InitOperationFailure) as caught, patch.object(
+                                tx.InitWorkspace, "_move", side_effect=forbidden) as moves:
+                            with lease.workspace_scope(revision) as owner:
+                                owner.apply_workflows_typed([(item, payload if i == 1 else None)
+                                    for i, item in enumerate(originals)], resource_sha256=selected_digest)
+                finally:
+                    cleanup.__exit__(*sys.exc_info())
+                self.assertTrue(lease.closed); self.assertFalse(guard.lifetime_ledger.fatal)
+                self.assertEqual(guard.handler_state, "RESTORED")
+                moves.assert_not_called()
+                self.assertEqual(caught.exception.outcome.effect, "not_started")
+                self.assertFalse(any((root / state).exists() for state in tx.ALL_STATE_NAMES))
+                for path, raw in zip(PROFILE.paths, expected):
+                    self.assertEqual((root / path).read_bytes(), raw)
+                    self.assertEqual(full_facts((root / path).stat()), before[path])
+                self.assertEqual(sentinel.read_bytes(), b"# preserve user workflow\n")
+                self.assertEqual(full_facts(sentinel.stat()), sentinel_before)
 
 
 if __name__ == "__main__":
