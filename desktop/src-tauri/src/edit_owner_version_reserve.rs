@@ -103,6 +103,22 @@ pub(crate) struct NativeReservedVersionHandoff {
     ))]
     sources: Mutex<crate::asset_source::GitReadSources>,
 }
+
+// DATA admission only. The caller must still supply the original consumed
+// reservation gate/control; this predicate cannot construct an edit handoff.
+fn handoff_data_supported(data: &Value) -> bool {
+    let request = &data["reservation"]["request"];
+    data["schemaVersion"] == 1
+        && data["provider"]["kind"] == "macos-clt-git/1"
+        && ((request["platforms"] == json!(["ios"])
+            && request["policy"]["schemaVersion"] == 2)
+            || (request["platforms"] == json!(["android"])
+                && request["policy"]["schemaVersion"] == 3)
+            || (request["platforms"] == json!(["android", "ios"])
+                && request["policy"]["schemaVersion"] == 4))
+        && wire::bounded(data, 12 * 1024).is_ok()
+}
+
 impl NativeReservedVersionHandoff {
     pub(crate) fn new(
         gate: ReservedVersionEditGate,
@@ -111,15 +127,7 @@ impl NativeReservedVersionHandoff {
         data: Value,
         epoch: u64,
     ) -> Result<Self, BridgeError> {
-        if !control.edit_window()
-            || data["schemaVersion"] != 1
-            || data["provider"]["kind"] != "macos-clt-git/1"
-            || !((data["reservation"]["request"]["platforms"] == json!(["ios"])
-                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 2)
-                 || (data["reservation"]["request"]["platforms"] == json!(["android"])
-                  && data["reservation"]["request"]["policy"]["schemaVersion"] == 3))
-            || wire::bounded(&data, 12 * 1024).is_err()
-        {
+        if !control.edit_window() || !handoff_data_supported(&data) {
             return Err(invalid_owner());
         }
         Ok(Self {
@@ -726,6 +734,56 @@ mod tests {
     use crate::saved_command_owner::{
         AndroidRegistrationControl as Control, AndroidRegistrationPublisherKind as Kind,
     };
+    fn handoff_data(platforms: Value, schema: Value) -> Value {
+        json!({"schemaVersion":1,"provider":{"kind":"macos-clt-git/1"},
+            "reservation":{"request":{"platforms":platforms,"policy":{"schemaVersion":schema}}}})
+    }
+    #[test]
+    fn reserved_handoff_data_admits_only_exact_current_inventory_platform_policies() {
+        // No gate, control, native receipt or handoff is manufactured here.
+        for (platforms, schema) in [
+            (json!(["ios"]), 2),
+            (json!(["android"]), 3),
+            (json!(["android", "ios"]), 4),
+        ] {
+            assert!(handoff_data_supported(&handoff_data(platforms, json!(schema))));
+        }
+        for (platforms, schema) in [
+            (json!(["ios", "android"]), json!(4)),
+            (json!(["android", "android"]), json!(4)),
+            (json!(["android", "ios", "ios"]), json!(4)),
+            (json!(["ios"]), json!(4)),
+            (json!(["android"]), json!(4)),
+            (json!(["android", "ios"]), json!(2)),
+            (json!(["android", "ios"]), json!(3)),
+            (json!(["android"]), json!(2)),
+            (json!(["ios"]), json!(3)),
+            (json!(["android", "ios"]), json!("4")),
+            (json!(["android", "ios"]), json!(4.0)),
+            (json!(["android", "ios"]), json!(true)),
+            (Value::Null, json!(4)),
+            (json!(["android", "ios"]), Value::Null),
+        ] {
+            assert!(!handoff_data_supported(&handoff_data(platforms, schema)));
+        }
+    }
+    #[test]
+    fn paired_handoff_retains_original_envelope_provider_and_byte_bound() {
+        let good = handoff_data(json!(["android", "ios"]), json!(4));
+        for schema in [Value::Null, json!("1"), json!(4)] {
+            let mut bad = good.clone();
+            bad["schemaVersion"] = schema;
+            assert!(!handoff_data_supported(&bad));
+        }
+        for provider in [Value::Null, json!({"kind":"git"}), json!({})] {
+            let mut bad = good.clone();
+            bad["provider"] = provider;
+            assert!(!handoff_data_supported(&bad));
+        }
+        let mut oversized = good;
+        oversized["padding"] = json!("x".repeat(12 * 1024));
+        assert!(!handoff_data_supported(&oversized));
+    }
     fn step(chain: &mut Chain, control: &Arc<Control>, step: ReservedVersionStep) {
         let mut p = control.reserve(Kind::General, false).unwrap();
         chain.begin(&p, step).unwrap();

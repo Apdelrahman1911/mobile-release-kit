@@ -302,7 +302,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -557,7 +557,8 @@ mod tests {
         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 256); // Two detail inboxes plus six distinct 32-row metadata namespaces.
+        assert_eq!(caps["requestDiscovery"]["maxRequests"], 288); // Two detail inboxes plus seven distinct 32-row metadata namespaces.
+        assert!(caps["requestDiscovery"]["families"].as_array().unwrap().iter().any(|family| family == "play-cleanup"));
     }
     #[test]
     fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {

@@ -49,6 +49,38 @@ impl Fixture {
     }
 }
 #[test]
+fn retained_ids_are_project_bound_and_never_expire_claim_or_forget_an_original() {
+    let f = Fixture::new();
+    f.inbox.allow(f.scope.clone()).unwrap();
+    let input = f.submit(4);
+    f.inbox.submit(input.clone()).unwrap();
+    let original = f.inbox.lock().unwrap().entries[0].clone();
+    let row_data = || {
+        let row = original.lock().unwrap();
+        (row.status.clone(), row.claimed, row.armed, row.joined, row.first,
+            row.scope.as_ref().is_some_and(|scope| Arc::ptr_eq(scope, &f.scope)))
+    };
+    let before = row_data();
+    // This genuine memory-scope revocation would be observed by status().
+    // Discovery must not cause that state transition as a read side effect.
+    f.scope.revoke(p::Reason::Expired, Instant::now());
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![id(4)]);
+    assert!(f.inbox.retained_ids(&id(1), &id(9)).unwrap().is_empty());
+    assert_eq!(f.inbox.retained_ids(&id(9), &id(2)), Err(Error::Conflict));
+    assert_eq!(row_data(), before);
+    let stopped = f.inbox.query(&input.origin, false).unwrap();
+    assert_eq!(stopped.state, p::State::Expired);
+    assert!(stopped.do_not_replay);
+    let after = row_data();
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![id(4)]);
+    assert_eq!(row_data(), after);
+    assert!(f.inbox.claim().unwrap().is_none());
+    f.inbox.close(Instant::now());
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)), Err(Error::Unavailable));
+    f.inbox.fence();
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)), Err(Error::StateUnknown));
+}
+#[test]
 fn consumed_access_is_not_revoked_scope_and_exact_retry_never_remints_claim() {
     let f = Fixture::new();
     let input = f.submit(4);

@@ -113,7 +113,8 @@ impl Request {
             "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock});
         if let Some((source,provider)) = native_source {
             require(((selected.schema_version()==2 && selected.0["platforms"]==json!(["ios"]))
-                || (selected.schema_version()==3 && selected.0["platforms"]==json!(["android"])))
+                || (selected.schema_version()==3 && selected.0["platforms"]==json!(["android"]))
+                || (selected.schema_version()==4 && selected.0["platforms"]==json!(["android","ios"])))
                 && source["ref"]==selected.0["source"]["ref"]
                 && source["savedConfig"]["sha256"]==selected.0["source"]["configurationSha256"]
                 && source["savedVersion"]["sha256"]==selected.0["source"]["versionSha256"]
@@ -379,6 +380,135 @@ mod tests {
     }
     fn request(port: &VersionAllocationStatePort, kind: Kind) -> Request {
         Request::from_port(port,"allocation-data-1",kind,"17",Clock::new(70_000_000_000,80_000_000_000).unwrap(),&[]).unwrap()
+    }
+    fn native_template(schema: u32) -> Value {
+        let mut value = template();
+        let (platforms, scope, ceiling) = match schema {
+            2 => (json!(["ios"]), "require-current-ios-inventory", 9999u64),
+            3 => (json!(["android"]), "require-current-android-inventory", 2100000000u64),
+            4 => (json!(["android", "ios"]), "require-current-shared-inventory", 9999u64),
+            _ => unreachable!("fixed test profiles only"),
+        };
+        value["platforms"] = platforms;
+        value["policy"]["schemaVersion"] = json!(schema);
+        value["policy"]["storeScope"] = json!(scope);
+        value["policy"]["buildCeiling"] = json!(ceiling);
+        value["storeContextRevision"] = json!("a".repeat(64));
+        value
+    }
+    fn native_observations() -> Vec<Value> {
+        vec![
+            json!({"platform":"android","scope":"play-android-current-inventory/1",
+                "identityRevision":"b".repeat(64),"contextRevision":"a".repeat(64),"revision":"c".repeat(64),
+                "observedAt":2000,"maxBuild":12,"marketingVersion":null,
+                "counts":{"tracks":2,"releases":2,"versionCodes":3,"bundles":0,"apks":1},
+                "complete":true,"formatSupported":true,"temporaryEdit":"deleted","historicalUniqueness":"not-established"}),
+            json!({"platform":"ios","scope":"asc-ios-current-inventory/1",
+                "identityRevision":"b".repeat(64),"contextRevision":"a".repeat(64),"revision":"d".repeat(64),
+                "observedAt":2000,"maxBuild":0,"marketingVersion":"2.0.0",
+                "counts":{"builds":0,"buildUploads":0,"appStoreVersions":1},
+                "complete":true,"formatSupported":true,"historicalUniqueness":"not-established"}),
+        ]
+    }
+    fn native_source() -> Value {
+        json!({"ref":"refs/heads/main","savedConfig":{"sha256":"f".repeat(64)},
+            "savedVersion":{"sha256":"c".repeat(64)}})
+    }
+    fn prepared_native(f: &Fixture, schema: u32) -> (Arc<PrivateStateDirectory>, VersionAllocationStatePort) {
+        let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let project = ProjectBinding { project_id:Id::parse(&"b".repeat(32)).unwrap(), canonical_root:"/synthetic/version-project".into(),device:1,inode:2 };
+        let mut port = VersionAllocationStatePort::new(store.clone(),project,authority()).unwrap();
+        // Actual bounded load/enrollment/selection, never a hand-set native flag.
+        port.load_bounded(256 * 1024).unwrap();
+        port.enroll(checkpoint()).unwrap();
+        port.select_new(native_template(schema), None).unwrap();
+        (store, port)
+    }
+    #[test]
+    fn native_source_admits_paired_v4_without_changing_original_v2_v3_selection() {
+        for schema in [2, 3, 4] {
+            let f = Fixture::new();
+            let (store, port) = prepared_native(&f, schema);
+            let pair = native_observations();
+            let observations = match schema { 2 => &pair[1..], 3 => &pair[..1], _ => &pair[..] };
+            let selected = port.selected_request().unwrap().clone();
+            let before = port.snapshot().unwrap();
+            let request = Request::from_source(&port, "allocation-native-1", Kind::Reserve, "17",
+                Clock::new(70_000_000_000,80_000_000_000).unwrap(), observations,
+                native_source(), json!({"kind":"macos-clt-git/1"})).unwrap();
+            let initial = frame(request.initial(), INITIAL_LIMIT).unwrap();
+            assert_eq!(initial["protocol"], NATIVE_PROTOCOL);
+            assert_eq!(initial["action"]["source"], native_source());
+            assert_eq!(initial["action"]["candidateId"], selected["candidateId"]);
+            assert_eq!(request.selected(), &selected);
+            assert!(request.matches_initial_port(&port));
+            let after = store.read(Namespace::VersionAllocations).unwrap();
+            assert_eq!(after.revision, before.revision);
+            assert_eq!(after.bytes, before.bytes);
+            assert!(port.enrolled().unwrap().pending.is_none());
+            store.close().unwrap();
+        }
+    }
+    #[test]
+    fn paired_native_source_refuses_foreign_source_provider_or_partial_observations() {
+        let f = Fixture::new();
+        let (store, port) = prepared_native(&f, 4);
+        let selected = port.selected_request().unwrap().clone();
+        let before = port.snapshot().unwrap();
+        let attempt = |source, provider, observations: &[Value]| {
+            Request::from_source(&port, "allocation-native-1", Kind::Reserve, "17",
+                Clock::new(70_000_000_000,80_000_000_000).unwrap(), observations, source, provider)
+        };
+        let provider = json!({"kind":"macos-clt-git/1"});
+        let good = native_observations();
+        let mut wrong_ref = native_source(); wrong_ref["ref"] = json!("refs/heads/other");
+        let mut wrong_config = native_source(); wrong_config["savedConfig"]["sha256"] = json!("0".repeat(64));
+        let mut wrong_version = native_source(); wrong_version["savedVersion"]["sha256"] = json!("0".repeat(64));
+        for source in [wrong_ref, wrong_config, wrong_version, Value::Null] {
+            assert!(attempt(source, provider.clone(), &good).is_err());
+        }
+        assert!(attempt(native_source(), json!({"kind":"git"}), &good).is_err());
+        let mut reversed = good.clone(); reversed.reverse();
+        let mut late = good.clone(); late[1]["observedAt"] = json!(2001);
+        let mut foreign = good.clone(); foreign[0]["contextRevision"] = json!("f".repeat(64));
+        let mut partial = good.clone(); partial[1]["complete"] = json!(false);
+        for observations in [vec![], good[..1].to_vec(), vec![good[0].clone(),good[0].clone()],
+            reversed, late, foreign, partial] {
+            assert!(attempt(native_source(), provider.clone(), &observations).is_err());
+        }
+        assert_eq!(port.selected_request().unwrap(), &selected);
+        let after = store.read(Namespace::VersionAllocations).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.bytes, before.bytes);
+        assert!(port.enrolled().unwrap().pending.is_none());
+        store.close().unwrap();
+    }
+    #[test]
+    fn paired_native_selection_rejects_mixed_policy_platforms_without_replacing_candidate() {
+        let f = Fixture::new();
+        let (store, mut port) = prepared_native(&f, 4);
+        let selected = port.selected_request().unwrap().clone();
+        let before_revision = port.snapshot().unwrap().revision;
+        let before_bytes = port.snapshot().unwrap().bytes.clone();
+        for (schema, platforms) in [
+            (4, json!(["ios", "android"])), (4, json!(["android", "android"])),
+            (4, json!(["android"])), (4, json!(["ios"])),
+            (2, json!(["android", "ios"])), (3, json!(["android", "ios"])),
+        ] {
+            let mut invalid = native_template(schema);
+            invalid["platforms"] = platforms;
+            assert!(port.select_new(invalid, Some(&selected)).is_err());
+            assert_eq!(port.selected_request().unwrap(), &selected);
+            assert_eq!(port.snapshot().unwrap().revision, before_revision);
+        }
+        let mut invalid = native_template(4);
+        invalid["policy"]["storeScope"] = json!("require-current-ios-inventory");
+        assert!(port.select_new(invalid, Some(&selected)).is_err());
+        let after = store.read(Namespace::VersionAllocations).unwrap();
+        assert_eq!(after.revision, before_revision);
+        assert_eq!(after.bytes, before_bytes);
+        assert!(port.enrolled().unwrap().pending.is_none());
+        store.close().unwrap();
     }
     fn pending(port: &VersionAllocationStatePort) -> Value {
         let request = port.selected_request().unwrap();

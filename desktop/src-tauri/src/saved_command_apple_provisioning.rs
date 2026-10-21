@@ -618,6 +618,15 @@ pub(crate) struct AppleProvisioningAdmitted {
     profile: Option<Arc<AppleProfileSession>>,
     key: Option<Arc<super::apple_key::AppleKeySession>>,
 }
+// Check only the shape of the parents already found through the exact
+// active Session/input lookup. This is not custody or admission authority.
+fn admitted_parents_match(
+    mode: apple_wire::Mode,
+    profile: Option<&Arc<AppleProfileSession>>,
+    key: Option<&Arc<super::apple_key::AppleKeySession>>,
+) -> bool {
+    mode.profile() == profile.is_some() && mode.key() == key.is_some()
+}
 impl AppleProvisioningAdmitted {
     pub(crate) fn key(&self) -> Option<&Arc<super::apple_key::AppleKeySession>> { self.key.as_ref() }
     pub(crate) fn profile(&self) -> Option<&Arc<AppleProfileSession>> { self.profile.as_ref() }
@@ -777,7 +786,7 @@ impl SavedCommandOwner {
             registry.active.as_ref().filter(|active| active.owner.apple.input().is_ok_and(|held| Arc::ptr_eq(held, &document)))
                 .and_then(|active| active.owner.apple_key.get().cloned())
         };
-        if document.context().mode.profile() != profile.is_some() || (document.context().mode.local_key() || document.context().mode.certificate()) != key.is_some() {
+        if !admitted_parents_match(document.context().mode, profile.as_ref(), key.as_ref()) {
             return Err(apple_wire::invalid());
         }
         Ok(AppleProvisioningAdmitted {

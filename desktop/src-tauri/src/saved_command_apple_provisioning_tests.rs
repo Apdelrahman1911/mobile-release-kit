@@ -106,6 +106,79 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
 }
 
 #[test]
+fn apple_start_parent_dispatch_matches_actual_initialized_modes() {
+    use apple_wire::Mode;
+    fn scope(mode: Mode) -> apple_wire::Context {
+        let mut scope = context();
+        scope.mode = mode;
+        scope.new_application = mode == Mode::Register;
+        if !matches!(mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview
+            | Mode::CertificateReview | Mode::P12Review)
+        {
+            scope.reference = Some(apple_wire::Reference {
+                operation_id: "d".repeat(32), owner_generation: "e".repeat(32),
+            });
+        }
+        if mode.profile() || mode == Mode::P12Reuse {
+            scope.p12_record_id = Some("f".repeat(32));
+            scope.p12_record_revision = Some(1);
+        }
+        if mode.certificate() || mode.p12() {
+            scope.key_record_id = Some("1".repeat(32));
+            scope.key_record_revision = Some(1);
+        }
+        scope
+    }
+    let fixture = |mode| {
+        let context = scope(mode);
+        assert!(context.valid());
+        let (application, original) = super::super::tests::active_with_context(
+            SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+                std::path::PathBuf::from("/unopened-apple-start-parent-runtime"),
+            )),
+            Context::AppleProvisioning(context),
+        );
+        assert!(original.apple_profile.get().is_none() && original.apple_key.get().is_none());
+        super::super::apple_signing::initialize(&original).unwrap();
+        super::super::apple_key::initialize(&original).unwrap();
+        (application, original)
+    };
+    // Genuine constructor-only parents provide wrong-family/extra-parent
+    // negatives; no native input, loan, ticket or joined receipt is invented.
+    let (_profile_owner, profile_original) = fixture(Mode::ProfileReview);
+    let (_key_owner, key_original) = fixture(Mode::KeyReview);
+    for (mode, needs_profile, needs_key) in [
+        (Mode::Review, false, false), (Mode::Register, false, false), (Mode::Reconcile, false, false),
+        (Mode::ProfileReview, true, false), (Mode::ProfileReuse, true, false),
+        (Mode::ProfileCreate, true, false), (Mode::ProfileReconcile, true, false),
+        (Mode::KeyReview, false, true), (Mode::KeyPrepare, false, true),
+        (Mode::CertificateReview, false, true), (Mode::CertificateCreate, false, true),
+        (Mode::CertificateReconcile, false, true), (Mode::P12Review, false, true),
+        (Mode::P12Reuse, false, true), (Mode::P12Save, false, true),
+    ] {
+        let (_application, original) = fixture(mode);
+        let profile = original.apple_profile.get();
+        let key = original.apple_key.get();
+        assert_eq!((profile.is_some(), key.is_some()), (needs_profile, needs_key), "{mode:?}");
+        assert!(admitted_parents_match(mode, profile, key), "{mode:?}");
+        for (has_profile, has_key) in [(false, false), (true, false), (false, true), (true, true)] {
+            let profile = has_profile.then(|| profile.or(profile_original.apple_profile.get()).unwrap());
+            let key = has_key.then(|| key.or(key_original.apple_key.get()).unwrap());
+            assert_eq!(admitted_parents_match(mode, profile, key),
+                (has_profile, has_key) == (needs_profile, needs_key), "{mode:?}");
+        }
+        if mode.p12() {
+            assert_eq!(key.unwrap().p12_mode(), Some(mode));
+        }
+        assert!(!original.startup.lock().unwrap().attempted);
+        assert!(!original.driver_joined.load(Ordering::SeqCst));
+        assert!(!original.watchdog_joined.load(Ordering::SeqCst));
+        assert!(!native_complete(&original));
+    }
+    assert!(!scope(Mode::KeyRecover).valid());
+}
+
+#[test]
 fn apple_original_session_stop_tightens_audit_and_preserves_earliest_failure() {
     for reason in [Reason::Cancelled, Reason::ContextChanged, Reason::Shutdown] {
         // The existing parent helper installs only an inert original Session.

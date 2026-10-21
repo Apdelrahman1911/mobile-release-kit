@@ -62,6 +62,7 @@ impl ApplicationService {
         additional_requests.extend(self.upload_key_requests.retained_ids(project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::AndroidUploadKey,request_id}));
         additional_requests.extend(self.configuration_requests.catalogue(project)?);
         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
+        additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::PlayCleanup,request_id}));
         let view = data::Catalogue {
             schema_version: 2,
             scope: data::Scope::CurrentHostRetainedRequests,
@@ -249,7 +250,8 @@ mod tests {
     fn lost_ack_reconnect_discovers_git_identity_and_reservation_without_private_data_or_replay() {
         use crate::{agent_identity_requests as identity, service_git_protocol as git,
             service_git_requests as git_requests, service_version_reserve_protocol as version,
-            service_version_reserve_requests as version_requests};
+            service_version_reserve_requests as version_requests,
+            service_play_cleanup_protocol as cleanup};
         let (_f, store, service, project, root, first) = setup();
         let document = Arc::new(());
         let review = Arc::new(());
@@ -292,6 +294,18 @@ mod tests {
             document: Arc::downgrade(&document), review: Arc::downgrade(&review), changes: tokio::sync::watch::channel(0).0,
         }), reserved.grant_id.clone()).unwrap();
         service.service_version_reserve_submit(&first, reserved.clone()).unwrap();
+        let cleanup_point = service.play_cleanup_point("project-1").unwrap();
+        let cleanup_input = cleanup::Submit {
+            origin: cleanup::Query {project_id: project.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap()},
+            consent_id: Id::random().unwrap(),
+        };
+        let cleanup_scope = service.play_cleanup_requests.scope(
+            project.clone(), "project-1".into(), cleanup_input.consent_id.clone(),
+            Instant::now() + Duration::from_secs(100), cleanup_point.read,
+            Arc::downgrade(&document), Arc::downgrade(&review), tokio::sync::watch::channel(0).0, 1,
+        );
+        service.play_cleanup_requests.allow(cleanup_scope).unwrap();
+        service.service_play_cleanup_submit(&first, cleanup_input.clone()).unwrap();
         let before = store.read(Namespace::Projects).unwrap();
         let second = service.admit_client().unwrap();
         assert_ne!(first.client_id, second.client_id);
@@ -302,6 +316,7 @@ mod tests {
             data::AdditionalRequest {family: data::AdditionalFamily::GitIndex, request_id: staged.origin.request_id.clone()},
             data::AdditionalRequest {family: data::AdditionalFamily::Identity, request_id: intent.intent_id.clone()},
             data::AdditionalRequest {family: data::AdditionalFamily::VersionReservation, request_id: reserved.origin.request_id.clone()},
+            data::AdditionalRequest {family: data::AdditionalFamily::PlayCleanup, request_id: cleanup_input.origin.request_id.clone()},
         ]);
         let encoded = serde_json::to_string(&view).unwrap();
         for private in ["sentinel", "desiredIdentity", "grantId", "reviewId", "selection", "state"] {
@@ -313,6 +328,10 @@ mod tests {
         let p::ResponseBody::VersionReserveRequest(status) = service.service_version_reserve_query(&second, &reserved.origin, false).unwrap()
             else {panic!("original reservation status")};
         assert_eq!(status.state, version::State::Queued);
+        let p::ResponseBody::PlayCleanupRequest(status) = service.service_play_cleanup_query(&second, &cleanup_input.origin, false).unwrap()
+            else {panic!("original cleanup status")};
+        assert_eq!(status.state, cleanup::State::Queued);
+        assert!(status.do_not_replay);
         let p::ResponseBody::IdentityIntent(status) = service.query_identity(&second, &identity::Query {
             service_instance: intent.service_instance, project_id: project.clone(), intent_id: intent.intent_id,
         }).unwrap() else {panic!("original identity status")};
@@ -356,12 +375,13 @@ mod tests {
 
     #[test]
     fn unavailable_additional_inbox_is_not_successful_empty_discovery() {
-        for closed in 0..3 {
+        for closed in 0..4 {
             let (_f, store, service, project, _root, client) = setup();
             match closed {
                 0 => service.git_index_requests.close(),
                 1 => service.identity_requests.close(),
-                _ => service.version_reserve_requests.close(Instant::now()),
+                2 => service.version_reserve_requests.close(Instant::now()),
+                _ => service.play_cleanup_requests.close(Instant::now()),
             }
             assert!(matches!(service.discover_requests(&client, &project), Err(Error::Unavailable)));
             finish(&service, &store);
@@ -566,11 +586,34 @@ mod tests {
         service
             .submit_local_check(&client, local_input(&service, &scope))
             .unwrap();
+        let cleanup_review = Arc::new(());
+        let cleanup_point = service.play_cleanup_point("project-2").unwrap();
+        let cleanup_input = crate::service_play_cleanup_protocol::Submit {
+            origin: crate::service_play_cleanup_protocol::Query {
+                project_id: other.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap(),
+            },
+            consent_id: Id::random().unwrap(),
+        };
+        let cleanup_scope = service.play_cleanup_requests.scope(
+            other.clone(), "project-2".into(), cleanup_input.consent_id.clone(),
+            Instant::now() + Duration::from_secs(100), cleanup_point.read,
+            Arc::downgrade(&document), Arc::downgrade(&cleanup_review), tokio::sync::watch::channel(0).0, 1,
+        );
+        service.play_cleanup_requests.allow(cleanup_scope).unwrap();
+        service.service_play_cleanup_submit(&client, cleanup_input.clone()).unwrap();
+        assert_eq!(discover(&service, &client, &other).additional_requests.unwrap(), vec![
+            data::AdditionalRequest {family: data::AdditionalFamily::PlayCleanup, request_id: cleanup_input.origin.request_id},
+        ]);
         service
             .allow_agent_read(vec![project.clone()], Duration::from_secs(300))
             .unwrap();
         let current = service.admit_client().unwrap();
-        assert!(discover(&service, &current, &project).requests.is_empty());
+        let filtered = discover(&service, &current, &project);
+        assert!(filtered.requests.is_empty());
+        assert!(filtered.additional_requests.unwrap().is_empty());
+        let mut foreign = service.admit_client().unwrap();
+        foreign.instance = Id::random().unwrap();
+        assert!(matches!(service.discover_requests(&foreign, &project), Err(Error::AccessDenied)));
         assert_eq!(service.local_checks.entries().unwrap().len(), 1);
         assert!(matches!(
             service.discover_requests(&current, &other),

@@ -480,6 +480,26 @@ impl Inbox {
     pub(crate) fn fence(&self) {
         self.failed.store(true, Ordering::Release);
     }
+    /// Discovery copies immutable original IDs only. In particular, it must
+    /// not sample status, expire a scope, claim work or discard stopped rows.
+    pub(crate) fn retained_ids(&self, instance: &Id, project: &Id) -> Result<Vec<Id>, Error> {
+        let book = self.lock()?;
+        if instance != &self.instance {
+            return Err(Error::Conflict);
+        }
+        if book.closed {
+            return Err(Error::Unavailable);
+        }
+        if book.entries.len() > p::REQUEST_LIMIT
+            || book.entries.iter().any(|entry| entry.input.origin.service_instance != self.instance)
+        {
+            return Err(Error::StateUnknown);
+        }
+        Ok(book.entries.iter()
+            .filter(|entry| &entry.input.origin.project_id == project)
+            .map(|entry| entry.input.origin.request_id.clone())
+            .collect())
+    }
     pub(crate) fn scope(
         &self,
         project_id: Id,
