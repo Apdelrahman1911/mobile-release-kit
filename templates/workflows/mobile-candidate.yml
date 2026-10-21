@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Build an internal candidate, or reserve a version only (Android creates/deletes a temporary Play edit)
+        description: Build, reserve only, or explicitly clean one encrypted known Play edit (no allocation)
         required: false
         default: candidate
         type: choice
         options:
         - candidate
         - reserve-version
+        - recover-play-edit
       platform:
         description: Platforms enabled in the saved configuration
         required: true
@@ -20,7 +21,7 @@ on:
         - ios
         - both
       confirmation:
-        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit)
+        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit); recover-play-edit:<candidateUUID>:<attemptUUID>
         required: true
         type: string
       recovery_run_id:
@@ -71,13 +72,13 @@ jobs:
       desktop_source_sha: ${{ inputs.desktop_source_sha }}
       desktop_expected_ref: ${{ inputs.desktop_expected_ref }}
   reserve_version:
-    if: inputs.operation == 'reserve-version'
+    if: inputs.operation == 'reserve-version' || inputs.operation == 'recover-play-edit'
     permissions:
       actions: read
       contents: read
     uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__
     with:
-      operation: reserve-version
+      operation: ${{ inputs.operation }}
       tooling_sha: __MOBILE_RELEASE_KIT_SHA__
       source_sha: ${{ github.sha }}
       platform: ${{ inputs.platform }}

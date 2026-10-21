@@ -67,6 +67,7 @@ _DIAGNOSTICS = {
     "store": "Current Store inventory or its original private input is unavailable. No manual/counter-only or single-platform fallback is selected.",
     "google": "Hosted Android/shared reservation requires the selected protected MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 service-account key (at most 16 KiB). This fixed reader does not accept WIF/ambient ADC. Normal candidate WIF is unchanged.",
     "play-pending": "A temporary Play edit has an unconfirmed outcome in the hosted journal. Preserve the journal and original operation. Do not retry, recreate an edit, reset or clear the fence; automatic remote cleanup recovery is not available here.",
+    "play-recovery": "Known Play edit cleanup is not confirmed. Preserve the exact journal, capsule and original key version. Configure the dedicated protected recovery key before use. A spent/unknown attempt cannot retry or clear the fence; no counter was allocated.",
     "read": "The original bounded hosted operation did not finish. Preserve its journal and candidate; do not replay an uncertain write.",
 }
 
@@ -92,20 +93,30 @@ class PlayQuery:
     candidate_id: str
     request_sha256: str
     attempt_id: str
+    recovery: object | None = None
 
     def __post_init__(self):
         a._uuid(self.candidate_id)
         p._match(self.request_sha256, p._DIGEST)
         a._uuid(self.attempt_id)
+        from .version_hosted_play_recovery import Record
+        need(self.recovery is None or type(self.recovery) is Record, "journal")
 
-    def value(self):
-        return {"candidateId": self.candidate_id, "requestSha256": self.request_sha256,
-                "attemptId": self.attempt_id}
+    def value(self, schema_version=2):
+        need(schema_version in (2, 3) and (schema_version == 3 or self.recovery is None), "journal")
+        value = {"candidateId": self.candidate_id, "requestSha256": self.request_sha256, "attemptId": self.attempt_id}
+        if schema_version == 3:
+            value["recovery"] = None if self.recovery is None else self.recovery.value()
+        return value
 
     @classmethod
-    def parse(cls, value):
-        row = p._object(value, {"candidateId", "requestSha256", "attemptId"})
-        return cls(row["candidateId"], row["requestSha256"], row["attemptId"])
+    def parse(cls, value, schema_version=2):
+        from .version_hosted_play_recovery import Record
+        need(schema_version in (2, 3), "journal")
+        row = p._object(value, {"candidateId", "requestSha256", "attemptId"}
+                        | ({"recovery"} if schema_version == 3 else set()))
+        return cls(row["candidateId"], row["requestSha256"], row["attemptId"],
+                   None if row.get("recovery") is None else Record.parse(row["recovery"]))
 
     def require_state(self, original):
         matches = [row.request for row in original.candidates if row.request.candidate_id == self.candidate_id]
@@ -123,7 +134,7 @@ class Envelope:
     def to_bytes(self) -> bytes:
         p._integer(self.revision, state.MAX_REVISION, 1)
         need(type(self.state) is state.AllocationState and len(self.state.authorities) == 1, "journal")
-        need(type(self.schema_version) is int and self.schema_version in (1, 2), "journal")
+        need(type(self.schema_version) is int and self.schema_version in (1, 2, 3), "journal")
         need(self.play_query is None or type(self.play_query) is PlayQuery, "journal")
         if self.play_query is not None:
             self.play_query.require_state(self.state)
@@ -131,7 +142,7 @@ class Envelope:
         if self.schema_version == 1:
             need(self.play_query is None, "journal")
         else:
-            value.update(schemaVersion=2, playQuery=None if self.play_query is None else self.play_query.value())
+            value.update(schemaVersion=self.schema_version, playQuery=None if self.play_query is None else self.play_query.value(self.schema_version))
         raw = p.canonical(value) + b"\n"
         # Bound BOTH incoming and prospective outgoing bytes/nodes before the
         # existing state codec/canonical copies. Never write a too-large row.
@@ -149,7 +160,7 @@ class Envelope:
             raise Refused("size") from None
         need(type(value) is dict, "journal")
         if "schemaVersion" in value:
-            need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2, "journal")
+            need(type(value["schemaVersion"]) is int and value["schemaVersion"] in (2, 3), "journal")
             return p._object(value, {"schemaVersion", "revision", "state", "playQuery"})
         return p._object(value, {"revision", "state"})
 
@@ -160,7 +171,7 @@ class Envelope:
             p._integer(row["revision"], state.MAX_REVISION, 1)
             need(type(row["state"]) is dict and row["state"].get("schemaVersion") == 3, "journal")
             result = cls(row["revision"], state.AllocationState.parse(p.canonical(row["state"]) + b"\n"),
-                None if row.get("playQuery") is None else PlayQuery.parse(row["playQuery"]), row.get("schemaVersion", 1))
+                None if row.get("playQuery") is None else PlayQuery.parse(row["playQuery"], row["schemaVersion"]), row.get("schemaVersion", 1))
             need(result.to_bytes() == raw, "journal")
             return result
         except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
@@ -220,6 +231,7 @@ class _Remote:
         self.authority, self.source, self.send = authority, source, send
         self.prefix = "/repos/" + authority.repository
         self.calls = 0
+        self.max_calls = MAX_REQUESTS
         self.stopped = False
 
     def exchange(self, role, request):
@@ -229,7 +241,7 @@ class _Remote:
         validate_body(role, request.body, path=request.path)
         self.source.remaining()
         self.calls += 1
-        need(self.calls <= MAX_REQUESTS)
+        need(self.calls <= self.max_calls <= MAX_REQUESTS)
         try:
             result = self.send(role, request)
             self.source.remaining()  # includes actual TLS close, not receipt time
@@ -295,6 +307,7 @@ class _Journal(state._AllocationTransitions):
         self._loaded = False
         self._schema_version = 1
         self.play_query = self._play_original = None
+        self._cleanup_original = None
 
     def load(self):
         self._usable()
@@ -358,7 +371,7 @@ class _Journal(state._AllocationTransitions):
         if self.play_query is None:
             return
         source = self.remote.source
-        need(self._schema_version == 2 and type(request) is a.AllocationRequest
+        need(self._schema_version in (2, 3) and type(request) is a.AllocationRequest
              and request.version_policy.schema_version == 2
              and request.enabled_platforms == source.enabled == ("ios",)
              and request.source == source.binding and request.identity_revision == source.identity
@@ -412,7 +425,48 @@ class _Journal(state._AllocationTransitions):
                  and ((self.play_query is None and play_query is self._play_original)
                       or (self.play_query is self._play_original and play_query is None)), "play-pending")
         selected_play = self.play_query if play_query is _KEEP else play_query
-        schema = 2 if self._schema_version == 2 or play_query is not _KEEP else 1
+        schema = max(self._schema_version, 2) if play_query is not _KEEP else self._schema_version
+        candidate = after.candidate(self._local_project_id)
+        need(candidate is not None and candidate.request == self._bound_request, "journal")
+        self._commit(after, selected_play, schema, candidate)
+
+    def _commit_play_recovery(self, predecessor, successor, candidate):
+        # Only three closed transitions reuse CAS. Loaded DATA never becomes a
+        # live inventory original; no choose/remint or generic KEEP exception.
+        from .version_hosted_play_recovery import Capture, Cleanup, Record, _selected
+        self._usable()
+        need(self.play_query == predecessor and _selected(self, predecessor) == candidate, "play-recovery")
+        source = self.remote.source
+        material = source.material
+        capture = material.recovery
+        held = self._cleanup_original
+        same = (successor is not None and
+            (successor.candidate_id, successor.request_sha256, successor.attempt_id) ==
+            (predecessor.candidate_id, predecessor.request_sha256, predecessor.attempt_id))
+        if predecessor is self._play_original:
+            need(type(capture) is Capture and capture.journal is self and capture.original is predecessor
+                 and capture.consumed and material._play_closed and material._play_consumed
+                 and material._play_cleanup == "unconfirmed" and capture.returned is material._play_return
+                 and predecessor.recovery is None and same
+                 and successor.recovery == Record(capture.capsule), "play-recovery")
+        else:
+            need(type(held) is Cleanup and held.journal is self and held.row == candidate
+                 and held.material is material and held.source is source and self.writes < 2, "play-recovery")
+            held.current()
+            if predecessor == held.original:
+                need(held.verified is not None and held.claim_entered and held.claim is None
+                     and predecessor.recovery.claim is None and same
+                     and successor.recovery.capsule == held.capsule and successor.recovery.claim is not None,
+                     "play-recovery")
+            else:
+                need(predecessor is held.claim and held.deleted is not None and held.clear_entered
+                     and successor is None, "play-recovery")
+        source.remaining()
+        self._commit(self._state, successor, 3, candidate)
+
+    def _commit(self, after, selected_play, schema, candidate):
+        self._usable()
+        need(self.revision < state.MAX_REVISION and self.writes < MAX_WRITES, "journal")
         raw = Envelope(self.revision + 1, after, selected_play, schema).to_bytes()
         body = {"branch": a.LEDGER_BRANCH, "message": _MESSAGE, "content": base64.b64encode(raw).decode("ascii")}
         if self.blob is not None:
@@ -432,8 +486,7 @@ class _Journal(state._AllocationTransitions):
             need(_journal_content(readback) == raw, "journal")
             self.revision, self.blob, self.commit, self._state = self.revision + 1, _blob(raw), commit, after
             self._schema_version, self.play_query = schema, selected_play
-            candidate = after.candidate(self._local_project_id)
-            need(candidate is not None and candidate.request == self._bound_request, "journal")
+            need(after.candidate(candidate.local_project_id) == candidate, "journal")
         except Exception:
             raise Refused("journal") from None
         self._poisoned = False
@@ -585,7 +638,12 @@ def _reserve(source, settings, selected_policy, remote, material):
         source.check()
         remote.source_current()
         remote.journal_current(journal.commit)
+        material.recovery.bind(journal, request, source, original)
         summary = material.observe_android(source, context_revision, original)
+        if summary["temporaryEdit"] == "unconfirmed" and material.recovery.enabled:
+            from .version_hosted_play_recovery import retain_play_recovery
+            retain_play_recovery(journal, request, source, original)
+            raise Refused("play-recovery")
         journal.finish_play(request, source, original)
         need(summary["observation"] == "observed", "store")
         current = android.CurrentInventory(source.identity, context_revision, summary["revision"],

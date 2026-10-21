@@ -53,6 +53,10 @@ module MobileReleaseKit
           GOOGLE_CLOUD_UNIVERSE_DOMAIN GOOGLE_AUTH_TOKEN_URL GCE_METADATA_HOST RUBYOPT RUBYLIB
           http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY]
         AndroidStoreVersions.need(forbidden.none? { |key| environment.key?(key) })
+        @recovery_environment = %w[MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64 MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION
+          MOBILE_RELEASE_PLAY_EDIT_RECOVERY_AAD MOBILE_RELEASE_PLAY_EDIT_RECOVERY_CAPSULE].to_h do |name|
+          [name, environment[name]&.dup&.freeze]
+        end.freeze
         @package = text(environment, 'MOBILE_RELEASE_PLAY_PACKAGE', 255)
         @context = text(environment, 'MOBILE_RELEASE_PLAY_CONTEXT', 64)
         AndroidStoreVersions.need(@package.match?(/\A[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\z/) &&
@@ -91,6 +95,11 @@ module MobileReleaseKit
         end
       end
       def inspect = '#<AndroidStoreVersions::Input private>'
+      def recovery_environment = (@recovery_environment || {})
+      def recovery_identity
+        key = AndroidStoreVersions.object(@json, SMALL_LIMIT)
+        %w[project_id client_email client_id private_key_id].to_h { |name| [name, key.fetch(name)] }
+      end
       def credentials
         Google::Auth::ServiceAccountCredentials.make_creds(json_key_io: StringIO.new(@json), scope: PLAY_SCOPE,
           token_credential_uri: TOKEN, audience: TOKEN, enable_self_signed_jwt: false)
@@ -182,9 +191,24 @@ module MobileReleaseKit
       end
       def inspect = '#<AndroidStoreVersions::Operation private>'
 
+      def execute_cleanup(verified)
+        AndroidStoreVersions.need(!@used && defined?(PlayEditRecovery::Verified) && verified.instance_of?(PlayEditRecovery::Verified))
+        @cleanup_verified = verified
+        @edit = verified.take(@input)
+        execute
+      end
+
       def execute
         AndroidStoreVersions.need(!@used)
         @used = true
+        unless @cleanup_verified
+          # No environment widening for ordinary/native readers; this path is
+          # present only for explicitly opted-in hosted private input.
+          if @input.recovery_environment.values.any? { |value| value && !value.empty? }
+            require_relative 'play_edit_recovery'
+            @recovery_capture = PlayEditRecovery.capture(@input)
+          end
+        end
         begin
           AndroidStoreVersions.load_sdk!
           check
@@ -217,15 +241,19 @@ module MobileReleaseKit
             token['token_type'] == 'Bearer' && token['expires_in'].instance_of?(Integer) && token['expires_in'] >= 60)
           @token = token['access_token'].dup.freeze
           @service.authorization = @token # String: no apply!, refresh or ambient credentials.
-          api('insert')
-          AndroidStoreVersions.need(!@edit.nil?)
-          %w[tracks bundles apks].each { |step| api(step) }
+          if @cleanup_verified
+            api('delete') # Real token(0) -> DELETE; never simulate an INSERT.
+          else
+            api('insert')
+            AndroidStoreVersions.need(!@edit.nil?)
+            %w[tracks bundles apks].each { |step| api(step) }
+          end
           @finished = true
         rescue StandardError
           failed
         ensure
           failed unless @finished
-          if @edit && !@delete_entered
+          if !@cleanup_verified && @edit && !@delete_entered
             begin
               api('delete')
             rescue StandardError
@@ -233,7 +261,11 @@ module MobileReleaseKit
             end
           end
         end
-        frame
+        if @cleanup_verified
+          @cleanup_verified.output('delete', deleteAttempted: @delete_entered, deleteConfirmed: @delete_confirmed)
+        else
+          frame
+        end
       end
 
       def require_client(client)
@@ -337,7 +369,8 @@ module MobileReleaseKit
       def api(step)
         index = STEPS.index(step)
         AndroidStoreVersions.need(index && @token && !@delete_entered &&
-          (step == 'delete' ? @edit && @sequence.between?(1, 4) : @sequence == index))
+          (@cleanup_verified ? step == 'delete' && @edit && @sequence == 0 :
+            (step == 'delete' ? @edit && @sequence.between?(1, 4) : @sequence == index)))
         @sequence = index + 1 # Never reset a failed command into another insert/list.
         wire = @input.request(step, step == 'insert' ? nil : @edit)
         slot(step, wire['method'], ORIGIN + wire['path'], step == 'insert' ? '{}' : '',
@@ -375,6 +408,9 @@ module MobileReleaseKit
           'packageName' => @input.package, 'pages' => @pages, 'queryFinished' => @finished,
           'temporaryEdit' => { 'insertAttempted' => @insert_entered, 'editId' => @edit,
             'deleteAttempted' => @delete_entered, 'deleteConfirmed' => @delete_confirmed } }
+        if @recovery_capture
+          value['hostedRecovery'] = @edit && !@delete_confirmed ? @recovery_capture.seal(@edit) : nil
+        end
         raw = JSON.generate(value, ascii_only: true) + "\n"
         AndroidStoreVersions.need(raw.bytesize <= FRAME_LIMIT)
         raw

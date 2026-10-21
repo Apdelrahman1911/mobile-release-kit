@@ -87,6 +87,8 @@ class Material:
             self.google_identity = _google_identity(self.google)
         else:
             need(not self.selected[_GOOGLE], "google")
+        from .version_hosted_play_recovery import Capture
+        self.recovery = Capture(enabled="android" in self.enabled)
         self.runtime = _runtime_environment(os.environ)
         # No GitHub credential, proxy, Ruby loader injection or ambient CA path.
         self.runtime.pop("SSL_CERT_DIR", None)
@@ -98,6 +100,7 @@ class Material:
     def check(self):
         from .version_hosted import need
         need(all(os.environ.get(name, "") == value for name, value in self.selected.items()), "store")
+        self.recovery.check()
 
     def context(self, source):
         from .version_hosted import need
@@ -180,11 +183,13 @@ class Material:
                 self._play_runner = runner
                 source.remaining()
                 need(context_revision == self.context(source), "store")
-                hard_end = min(source.end, source.last + android.QUERY_SECONDS)
+                # Opt-in retention leaves 8s before the parent's original end,
+                # inclusive of the owned child's up-to-3s cleanup tail.
+                hard_end = min(source.end - (8 if self.recovery.enabled else 0), source.last + android.QUERY_SECONDS)
                 read_end = min(source.last + android.READ_SECONDS, hard_end - 10)
                 need(source.last < read_end, "store")
                 selected.require(self._play_snapshot)
-                env = {**self._environment(), _GAC: str(path),
+                env = {**self._environment(), **self.recovery.environment(), _GAC: str(path),
                     "MOBILE_RELEASE_PLAY_PACKAGE": source.package, "MOBILE_RELEASE_PLAY_CONTEXT": context_revision,
                     "MOBILE_RELEASE_PLAY_READ_END_NS": str(math.floor(read_end * 1_000_000_000)),
                     "MOBILE_RELEASE_PLAY_HARD_END_NS": str(math.floor(hard_end * 1_000_000_000))}
@@ -199,7 +204,7 @@ class Material:
                 need(type(completed.returncode) is int and completed.returncode == 0
                      and type(completed.stdout) is bytes and 0 < len(completed.stdout) <= android.FRAME_LIMIT
                      and completed.stderr == b"", "play-pending")
-                summary = android.summary_from_frame(completed.stdout,
+                summary = android.summary_from_frame(self.recovery.frame(completed, source.package, context_revision),
                     context_sha256=context_revision, package_name=source.package)
                 need(android.valid_summary(summary), "play-pending")
                 selected.require(self._play_snapshot)

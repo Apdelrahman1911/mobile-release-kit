@@ -53,7 +53,7 @@ mobile_release = ["data/apple-profile-roots.pem", "api/data/*.json"]
   "fastlane/apple_distribution_certificate_policy.rb",
   "fastlane/apple_distribution_certificate_prepare.rb",
   "fastlane/apple_distribution_certificate_verify.rb",
-  "fastlane/apple_provisioning_certificate_issuance.rb",
+  "fastlane/apple_provisioning_certificate_issuance.rb", "fastlane/android_store_versions.rb", "fastlane/play_edit_recovery.rb",
   "fastlane/apple_production.rb",
   "fastlane/apple_asset_upload.rb",
   "fastlane/apple_create_retry.rb",

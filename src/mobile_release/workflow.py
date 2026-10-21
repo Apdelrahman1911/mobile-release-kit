@@ -977,9 +977,12 @@ class Context:
     def current(cls, stage: str, platform: str) -> "Context":
         paired_reserve = (stage == "candidate" and platform == "both"
             and os.environ.get("GITHUB_JOB") == "version_reserve"
-            and os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version"
             and os.environ.get("MOBILE_RELEASE_SELECTED_PLATFORM") == "both"
-            and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
+            and ((os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version"
+                  and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
+                 or (os.environ.get("MOBILE_RELEASE_OPERATION") == "recover-play-edit"
+                     and re.fullmatch(r"recover-play-edit:[0-9a-f-]{36}:[0-9a-f-]{36}",
+                                      os.environ.get("MOBILE_RELEASE_CONFIRMATION", "")) is not None)))
         _require(stage in STAGES and (platform in PLATFORMS or paired_reserve), "workflow stage/platform is invalid")
         _require(os.environ.get("GITHUB_ACTIONS") == "true", "workflow orchestration is restricted to GitHub Actions")
         _require(os.environ.get("GITHUB_SERVER_URL", "https://github.com") == "https://github.com" and os.environ.get("GITHUB_API_URL", "https://api.github.com") == "https://api.github.com", "workflow recovery currently supports github.com only")

@@ -20,17 +20,17 @@ class HostedVersionWorkflowTest < Minitest::Test
   def test_existing_candidate_is_default_and_reserve_has_no_ambient_write_token
     public_input = inputs(@caller, "workflow_dispatch")
     assert_equal "candidate", public_input.fetch("operation").fetch("default")
-    assert_equal %w[candidate reserve-version], public_input.fetch("operation").fetch("options")
+    assert_equal %w[candidate reserve-version recover-play-edit], public_input.fetch("operation").fetch("options")
     assert_equal "candidate", inputs(@reusable, "workflow_call").fetch("operation").fetch("default")
     jobs = @caller.fetch("jobs")
     assert_equal %w[candidate reserve_version], jobs.keys
     candidate, reserve = jobs.values_at("candidate", "reserve_version")
     assert_equal "inputs.operation == 'candidate'", candidate.fetch("if")
-    assert_equal "inputs.operation == 'reserve-version'", reserve.fetch("if")
+    assert_equal "inputs.operation == 'reserve-version' || inputs.operation == 'recover-play-edit'", reserve.fetch("if")
     assert_equal "read", candidate.fetch("permissions").fetch("contents")
     assert_equal({ "actions" => "read", "contents" => "read" }, reserve.fetch("permissions"))
     assert_equal candidate.fetch("uses"), reserve.fetch("uses")
-    assert_equal "reserve-version", reserve.fetch("with").fetch("operation")
+    assert_equal "${{ inputs.operation }}", reserve.fetch("with").fetch("operation")
     %w[recovery_run_id recovery_confirmation desktop_request desktop_source_sha desktop_expected_ref].each do |name|
       assert_equal "${{ inputs.#{name} }}", reserve.fetch("with").fetch(name) # validated, not silently dropped
     end
@@ -58,7 +58,7 @@ class HostedVersionWorkflowTest < Minitest::Test
       end
     end
     validation = jobs.fetch("validate-platform").fetch("steps").first
-    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]'
+    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version|recover-play-edit)$ ]]'
     assert_includes validation.fetch("run"), 'if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then'
     assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]'
     assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]'
@@ -70,7 +70,7 @@ class HostedVersionWorkflowTest < Minitest::Test
 
   def test_single_protected_read_and_reserve_job_has_no_build_upload_source_write_or_other_secret
     reserve = @reusable.fetch("jobs").fetch("version_reserve")
-    assert_equal "inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')", reserve.fetch("if")
+    assert_equal "(inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')) || (inputs.operation == 'recover-play-edit' && (inputs.platform == 'android' || inputs.platform == 'both'))", reserve.fetch("if")
     assert_equal "validate-platform", reserve.fetch("needs")
     assert_equal "mobile-candidate", reserve.fetch("environment")
     assert_equal({ "actions" => "read", "contents" => "read" }, reserve.fetch("permissions"))
@@ -83,10 +83,11 @@ class HostedVersionWorkflowTest < Minitest::Test
     assert checkouts.all? { |s| s.fetch("with").fetch("persist-credentials") == false }
     assert_equal "${{ inputs.source_sha }}", checkouts.first.fetch("with").fetch("ref")
     assert_equal "${{ job.workflow_sha }}", checkouts.last.fetch("with").fetch("ref")
-    assert_equal 2, steps.count { |step| step.key?("run") } # original pin validation, one closed entry
-    invoke = steps.last
+    assert_equal 3, steps.count { |step| step.key?("run") } # pin validation and mutually exclusive fixed entries
+    invoke = steps[-2]
+    assert_equal "inputs.operation == 'reserve-version'", invoke.fetch("if")
     assert_equal "python -P -m mobile_release.version_hosted reserve", invoke.fetch("run")
-    assert_equal %w[MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
+    assert_equal %w[MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
     refute invoke.fetch("env").key?("GH_TOKEN")
     assert_equal "${{ steps.version-token.outputs.token }}", invoke.fetch("env").fetch("MOBILE_RELEASE_VERSION_GITHUB_TOKEN")
     %w[AUTHORITY POLICY].each do |name|
@@ -108,7 +109,7 @@ class HostedVersionWorkflowTest < Minitest::Test
     assert call.fetch("secrets").values.all? { |input| input.fetch("required") == false }
     jobs = @reusable.fetch("jobs")
     steps = jobs.fetch("version_reserve").fetch("steps")
-    mint = steps[-2]
+    mint = steps[-3]
     assert_equal "version-token", mint.fetch("id")
     assert_equal({
       "app-id" => "${{ secrets.version_allocation_app_id }}",
@@ -122,7 +123,7 @@ class HostedVersionWorkflowTest < Minitest::Test
     %w[version_allocation_app MOBILE_RELEASE_VERSION_GITHUB_TOKEN create-github-app-token MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64].each do |private_input|
       refute_includes ordinary, private_input
     end
-    steps[0...-2].each { |step| refute_includes Psych.dump(step), "version_allocation_app" }
+    steps[0...-3].each { |step| refute_includes Psych.dump(step), "version_allocation_app" }
     refute_includes Psych.dump(steps.last), "version_allocation_app"
     refute_includes Psych.dump(jobs.fetch("version_reserve")), "GITHUB_OUTPUT"
   end
@@ -131,7 +132,7 @@ class HostedVersionWorkflowTest < Minitest::Test
     jobs = @reusable.fetch("jobs")
     reserve = jobs.fetch("version_reserve")
     refute jobs.key?("ios_version_reserve")
-    environment = reserve.fetch("steps").last.fetch("env")
+    environment = reserve.fetch("steps")[-2].fetch("env")
     %w[KEY_ID ISSUER_ID PRIVATE_KEY_P8_BASE64].each do |suffix|
       name = "MOBILE_RELEASE_ASC_#{suffix}"
       source = suffix == "PRIVATE_KEY_P8_BASE64" ? "secrets" : "vars"
