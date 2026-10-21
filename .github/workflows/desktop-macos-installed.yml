@@ -1462,7 +1462,7 @@ jobs:
                   stream.write((json.dumps(value, sort_keys=True) + "\n").encode()); stream.flush(); os.fsync(fd)
           finally: os.close(fd)
           PY_EFFECTIVE_RUST
-      - name: Check 34 affected Git and Apple recovery contracts in the same observer feature graph
+      - name: Check 35 affected Git and Apple recovery contracts in the same observer feature graph
         id: git_selected_contracts
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && matrix.target == 'aarch64-apple-darwin' && steps.app_build.outcome == 'success' && steps.app_compiler.outcome == 'success'
         timeout-minutes: 20
@@ -1479,7 +1479,7 @@ jobs:
           # The canonical harness=false observer build/JSON remains untouched.
           # This ONE ordinary libtest links against the same debug feature graph
           # and same original source/release environment. No release/profile switch.
-          # 33 DATA cases plus one existing private Service/Store fixture; that
+          # 34 DATA cases plus one existing private Service/Store fixture; that
           # fixture stops/closes/drops its own directory. No native Git or account.
           rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
           export PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc"
@@ -1519,8 +1519,9 @@ jobs:
             apple_provisioning_protocol::certificate_recovery::tests::restored_key_hashes_cannot_disclose_foreign_project_root_or_target
             apple_provisioning_protocol::certificate_recovery::tests::restored_prior_stays_reconcile_only_and_both_key_hashes_are_rechecked
             saved_command_owner::apple_provisioning::tests::certificate_history_requires_original_entered_returned_key_ack_not_completed_data
+            shell::installed_observation::git_upstream::tests::configured_without_tracking_is_not_remote_or_commit_publication
           )
-          [[ "${#selected_tests[@]}" == 34 ]] || exit 1
+          [[ "${#selected_tests[@]}" == 35 ]] || exit 1
           list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
           run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
           [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -1530,12 +1531,12 @@ jobs:
           # Ordinary Cargo list+run reuse the same one test binary. Exact count
           # and each-once checks prevent absent/renamed cfg tests passing as zero.
           "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-          /usr/bin/grep -Fx '34 tests, 0 benchmarks' "$list_log"
+          /usr/bin/grep -Fx '35 tests, 0 benchmarks' "$list_log"
           for test_name in "${selected_tests[@]}"; do
             [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
           done
           "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-          /usr/bin/grep -Eq '^test result: ok\. 34 passed; 0 failed; 0 ignored;' "$run_log"
+          /usr/bin/grep -Eq '^test result: ok\. 35 passed; 0 failed; 0 ignored;' "$run_log"
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update'))
@@ -2363,18 +2364,20 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # Three success-ordered invocations of the existing owner, not a
+          # Four success-ordered invocations of the existing owner, not a
           # combined case or renewed clock. Each keeps600s suite/120s case and
           # 45/55s original endpoints; all four runtime originals remain bound
           # to the same installed M, including the unused peer pair.
-          # Twelve cases share the unchanged25min outer limit: this is not a
+          # Thirteen cases share the unchanged25min outer limit: this is not a
           # promise every worst-case runtime plus admission overhead will fit.
           # Any nonzero/unknown/78 prevents the next call; no fallback/retry.
           # Synthetic provider responses prove neither TLS nor a live account,
           # and no shipping tool nomination is changed by these observations.
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-fetch-native
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
+          # One ordinary LOCAL configuration/parent/ACK journey, no Connection or provider.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-upstream-native
       - name: Observe four original identity edits on the current installed observer
         id: identity_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'

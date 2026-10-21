@@ -1931,6 +1931,27 @@ mod lookup_memory {
         fn artifact_document(&mut self,document:&Arc<Inner>)->Result<(),Problem>{
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             self.add(vault::installed_backup_observation::document_bytes(document).map_err(|_|Problem::Capacity)?)?;
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                // Snapshot originals under the old book, then release it before
+                // visiting any owner. No inferred picker/quit coverage or IO.
+                let snapshot={
+                    let book=document.installed_macos_session.try_lock().map_err(|_|Problem::Capacity)?;
+                    match book.as_ref().and_then(|b|b.git_upstream.as_ref().map(|c|(b,c))) {
+                        None=>None,
+                        Some((b,c))=>{
+                            if b.originals.len()>2{return Err(Problem::Capacity)}
+                            let bytes=std::mem::size_of::<installed_macos_observation::SessionBook>()
+                                .checked_add(b.originals.capacity().checked_mul(std::mem::size_of::<(Arc<OriginalWork>,Option<Operation>)>()).ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                            Some((Arc::clone(c),b.originals.iter().map(|(o,_)|Arc::clone(o)).collect::<Vec<_>>(),bytes))
+                        }
+                    }
+                };
+                if let Some((control,originals,bytes))=snapshot {
+                    self.add(bytes)?;self.add(control.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    for original in &originals {self.owner(original)?;}
+                }
+            }
             let snapshot=document.bridge.artifact_inspection.artifact_census().map_err(|_|Problem::Capacity)?;
             self.add(snapshot.data_bytes().ok_or(Problem::Capacity)?)?;
             for (original,proof) in snapshot.members(){
@@ -7091,6 +7112,7 @@ mod installed_macos_observation {
     /// the original work book does not retain its retired private payloads.
     include!("asset_session_tool_setup_observation.rs");
     mod push_observation {use super::*;include!("asset_session_git_push_observation.rs");}
+    mod upstream_observation {use super::*;include!("asset_session_git_upstream_observation.rs");}
     mod fetch_observation {use super::*;include!("asset_session_git_fetch_observation.rs");}
     pub(super) struct SessionBook {
         pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
@@ -7104,6 +7126,7 @@ mod installed_macos_observation {
         pub(super) tool_setup: Option<Arc<crate::shell::installed_observation::tool_setup::Control>>,
         pub(super) git_fetch:Option<Arc<crate::shell::installed_observation::git_fetch::Control>>,
         pub(super) git_push:Option<Arc<crate::shell::installed_observation::git_push::Control>>,
+        pub(super) git_upstream:Option<Arc<crate::shell::installed_observation::git_upstream::Control>>,
     }
     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
         match (project_fields, input_case) {
@@ -7114,7 +7137,8 @@ mod installed_macos_observation {
     }
     impl SessionBook {
         fn original_limit(&self) -> Option<u32> {
-            if self.git_fetch.is_some()||self.git_push.is_some(){return (self.project_fields.is_none()&&self.input_case.is_none()&&self.vault.is_none()&&self.tool_setup.is_none()&&!(self.git_fetch.is_some()&&self.git_push.is_some())).then_some(2)}
+            let git_count=usize::from(self.git_fetch.is_some())+usize::from(self.git_push.is_some())+usize::from(self.git_upstream.is_some());
+            if git_count>0{return (git_count==1&&self.project_fields.is_none()&&self.input_case.is_none()&&self.vault.is_none()&&self.tool_setup.is_none()).then_some(2)}
             if let Some(control)=&self.tool_setup {return (self.project_fields.is_none() && self.input_case.is_none() && self.vault.is_none()).then_some(control.case().maximum_original());}
             if let Some(control) = &self.vault {
                 return (self.project_fields.is_none() && self.input_case.is_none()).then_some(control.case.maximum_original());
@@ -7213,7 +7237,7 @@ mod installed_macos_observation {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if book.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity)?;
-            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None,git_push:None });
+            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None,git_push:None,git_upstream:None });
             Ok(())
         }
         pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
@@ -7359,7 +7383,7 @@ mod installed_macos_observation {
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let input_case = token.consume(&self.inner.session_identity)?;
             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None,git_push:None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None }); Ok(())
         }
         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
         pub(crate) fn register_installed_macos_project_fields(&self,
@@ -7372,13 +7396,18 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None,git_push:None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
             let Some(book) = book.as_mut() else { return Ok(()); };
             let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
             if let Some(control)=&book.git_fetch {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control)=&book.git_upstream {
                 if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
                     return Err(AssetError::new(Reason::Unqualified))
                 }
@@ -7709,7 +7738,7 @@ mod installed_macos_observation {
                         && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
                             && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
                         || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
-                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project) || self.macos_git_push_selected(&state,project)),
+                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project) || self.macos_git_push_selected(&state,project) || self.macos_git_upstream_selected(&state,project)),
                 (Some(project), None, true) => self.macos_project_loss(&state, project),
                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
                 _ => false,
