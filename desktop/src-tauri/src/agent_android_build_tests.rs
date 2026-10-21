@@ -6,6 +6,7 @@ fn id(n: u8) -> Id {
 pub(super) fn review() -> Review {
     Review {
         mode: Mode::SavedAndroidBuildStructureAndVersion,
+        signing: None, upload_certificate_sha256: None,
         saved_config: Config {
             bytes: 100,
             sha256: "a".repeat(64),
@@ -44,6 +45,7 @@ impl Fixture {
             document: Arc::downgrade(&document),
             observation_revision: 5,
             review: review().into(),
+            read: None,
             draft_revision: 1,
             baseline_generation: 2,
             changes,
@@ -84,6 +86,7 @@ impl Fixture {
             .bind(FAMILY,id(5), id(6), 1, Instant::now() + Duration::from_secs(300))
             .unwrap();
         claim.returned(true);
+        acknowledge(&link);
         (input, link)
     }
 }
@@ -94,14 +97,16 @@ fn start(input: &Prepare) -> Start {
         owner_generation: id(6),
     }
 }
-fn final_cancel(link: &NativeLink, revision: u32) -> Operation {
-    let mut op = link.entry().status().unwrap().operation.unwrap().android().clone();
-    op.status_revision = revision;
-    op.state = OperationState::Cancelled;
-    op.settlement = Settlement::Settled;
-    op.outcome = Some(Outcome::Cancelled);
-    op.reason = Reason::Cancelled;
-    op
+fn final_cancel(_link: &NativeLink, revision: u32) -> Operation {
+    // Inert native-return DATA, not a getter that promotes a hidden success.
+    Operation { operation_id: id(5), owner_generation: id(6), status_revision: revision,
+        state: OperationState::Cancelled, settlement: Settlement::Settled,
+        outcome: Some(Outcome::Cancelled), reason: Reason::Cancelled,
+        stage: None, disposition: None, result: None }
+}
+fn acknowledge(link: &NativeLink) {
+    let (_, data) = link.entry().claim_history().unwrap().unwrap();
+    link.entry().history_returned(data.status_revision(), Ok(())).unwrap();
 }
 #[test]
 fn named_grant_and_exact_saved_point_required_before_any_prepare() {
@@ -211,7 +216,7 @@ fn lost_prepare_return_keeps_bound_request_and_cannot_authorize_a_retry() {
     drop(claim);
     let status = f.inbox.prepare(FAMILY,input.clone(), &f.point).unwrap();
     assert_eq!(status.request_state, RequestState::AdmissionUnknown);
-    assert!(status.operation.is_some());
+    assert!(status.operation.is_none());
     assert!(f.inbox.start(FAMILY,&start(&input)).is_err());
     assert!(f.inbox.allow(f.scope.clone()).is_err());
     assert!(link.entry().stop_at(Instant::now()).is_some());
@@ -225,12 +230,12 @@ fn start_lost_ack_and_native_unknown_never_become_replay_or_settlement() {
     f.inbox.start(FAMILY,&request).unwrap();
     let claim = f.inbox.claim(FAMILY).unwrap().unwrap();
     link.consume_start(FAMILY).unwrap();
+    let mut unknown = link.entry().status().unwrap().operation.unwrap().android().clone();
     drop(claim);
     assert_eq!(
         f.inbox.start(FAMILY,&request).unwrap().request_state,
         RequestState::AdmissionUnknown
     );
-    let mut unknown = link.entry().status().unwrap().operation.unwrap().android().clone();
     unknown.status_revision += 1;
     unknown.state = OperationState::Unknown;
     unknown.settlement = Settlement::Unknown;
@@ -327,27 +332,21 @@ fn disappearing_link_does_not_release_original_slot_or_create_new_consent() {
 fn claimed_history_is_separate_from_latest_and_failure_never_settles_native_work() {
     let f = Fixture::new();
     let (_, link) = f.bound();
-    let (first, operation) = link.entry().claim_history().unwrap().unwrap();
-    let op = operation.android().clone();
-    assert!(first);
-    let mut running = op.clone();
-    running.status_revision += 1;
-    running.state = OperationState::Running;
+    let mut running = link.entry().status().unwrap().operation.unwrap().android().clone();
+    running.status_revision = 2; running.state = OperationState::Running;
     link.publish(running.clone()).unwrap();
-    assert!(link.entry().claim_history().is_err());
-    link.entry()
-        .history_returned(op.status_revision, Ok(()))
-        .unwrap();
-    let (first, latest) = link.entry().claim_history().unwrap().unwrap();
+    let (first, original) = link.entry().claim_history().unwrap().unwrap();
     assert!(!first);
-    assert_eq!(latest.android(), &running);
-    assert!(link
-        .entry()
-        .history_returned(latest.status_revision(), Err(Error::StateUnknown))
-        .is_err());
+    assert_eq!(link.entry().status().unwrap().operation.unwrap().state(), OperationState::Prepared);
+    let mut next = running.clone(); next.status_revision = 3;
+    link.publish(next.clone()).unwrap();
+    link.entry().history_returned(original.status_revision(), Ok(())).unwrap();
+    let (_, latest) = link.entry().claim_history().unwrap().unwrap();
+    assert_eq!(latest.android(), &next);
+    assert!(link.entry().history_returned(latest.status_revision(), Err(Error::StateUnknown)).is_err());
     let state = link.entry().status().unwrap();
-    assert!(!state.history_available);
-    assert_eq!(state.operation.unwrap().settlement(), Settlement::Pending);
+    assert!(!state.history_available && state.operation.is_none());
+    assert_eq!(state.request_state, RequestState::AdmissionUnknown);
     assert!(link.entry().claim_history().unwrap().is_none());
 }
 #[test]
@@ -370,7 +369,7 @@ fn finite_tombstones_never_evict_or_reissue_a_used_request() {
     );
 }
 #[test]
-fn native_retirement_can_resolve_admission_unknown_but_cannot_rearm_start() {
+fn native_retirement_cannot_resolve_lost_caller_or_rearm_start() {
     let f = Fixture::new();
     let (input, link) = f.bound();
     f.inbox.start(FAMILY,&start(&input)).unwrap();
@@ -378,8 +377,10 @@ fn native_retirement_can_resolve_admission_unknown_but_cannot_rearm_start() {
     drop(claim);
     link.publish(final_cancel(&link, 2)).unwrap();
     let status = f.inbox.start(FAMILY,&start(&input)).unwrap();
-    assert_eq!(status.operation.unwrap().settlement(), Settlement::Settled);
+    assert!(status.operation.is_none());
+    assert_eq!(status.request_state, RequestState::AdmissionUnknown);
     assert_eq!(status.start_state, StartState::Admitting);
+    assert!(f.inbox.allow(f.scope.clone()).is_err());
     assert!(f.inbox.claim(FAMILY).unwrap().is_none());
 }
 #[test]

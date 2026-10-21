@@ -12,6 +12,7 @@ export function ServiceGitCommitAccess({ controller, repository }: { controller:
     <p>Check Git changes, then review the commit message and author entered above. Allow gives the agent 15 minutes to prepare and start one local commit using exactly that draft.</p>
     <p>Editing those fields after Allow does not change the approved draft. Use Stop or explicitly Allow a replacement.</p>
     <p className="review-caution">This commits every staged change, including files staged by another Git client—not just selected rows. No hooks, signing, branch switching, push, credentials, or arbitrary command permission is granted. The existing native Git safety checks still apply.</p>
+    <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
     <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending || state.revokePending}
       onChange={e => controller.acknowledge(e.target.checked)} />I approve the whole staged index and the exact message and author above.</label>
     <div className="button-row">

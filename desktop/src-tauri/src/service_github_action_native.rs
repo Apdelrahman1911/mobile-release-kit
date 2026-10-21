@@ -13,6 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct Allow {
     selection: native::Selection,
     consent_version: String,
+    expected_permission_revision: p::activity::PermissionRevision,
+}
+// MAIN-only typed result; no map-heavy Value copy of the compact snapshot.
+use p::activity::MainAccess;
+fn access_revision(access: p::Access, revision: u64) -> MainAccess {
+    MainAccess { access, permission_revision: p::activity::PermissionRevision(revision) }
 }
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T, BridgeError> {
     if b.is_empty() || b.len() > p::RAW_LIMIT {
@@ -65,6 +71,7 @@ impl DocumentBinding {
         let supervisor = &self.inner.bridge.supervisor;
         let now = Instant::now();
         let available = match a.kind() {
+            p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
             p::Kind::RepositoryCreate => {
                 s.github
                     .repository_create_status(
@@ -107,6 +114,8 @@ impl DocumentBinding {
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
         let review = match a.kind() {
+            p::Kind::ActivityOverview => s.github.github_activity_agent_review(a, generation, &root,
+                &github_setup_project_binding(&root)?, &edit, now),
             p::Kind::RepositoryCreate => s
                 .github
                 .repository_create_agent_review(a, generation, &root, &edit, now),
@@ -127,14 +136,17 @@ impl DocumentBinding {
     pub(crate) fn agent_github_action_access(
         &self,
         window: &str,
-    ) -> Result<p::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.github_action_service()? {
-            Some(s) => s.github_action_requests().access().map_err(public),
-            None => Ok(p::Access::empty()),
-        }
+        let _s = self.lock(); // same revision/inbox snapshot as all counter writers
+        let revision = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
+        let access = match self.github_action_service()? {
+            Some(s) => s.github_action_requests().access().map_err(public)?,
+            None => p::Access::empty(),
+        };
+        Ok(access_revision(access, revision))
     }
     /// Exact original-row observation, not the latest lease. A coalesced relay
     /// update cannot replace the final row that this retained caller still needs.
@@ -156,7 +168,7 @@ impl DocumentBinding {
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<p::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN || !args.selection.valid() || args.consent_version != args.selection.kind().consent() {
             return Err(BridgeError::invalid());
         }
@@ -169,13 +181,13 @@ impl DocumentBinding {
             return Err(public(Error::Busy));
         }
         let _returned = AllowReturned(&self.inner.agent_github_action_allow_pending);
-        // Epoch exists before the first off-Doc lookup, including the first Allow.
-        let epoch = self
-            .inner
-            .agent_github_action_revoke_epoch
-            .load(Ordering::Acquire);
+        // The user supplied the revision of its ACTUALLY joined Access call.
+        // Never replace it with a load performed after delayed async dispatch.
+        let epoch = args.expected_permission_revision;
         let (review, original) = {
             let mut s = self.lock();
+            epoch.successor(self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire))
+                .ok_or_else(|| public(Error::Conflict))?;
             self.github_action_review(&mut s, &args.selection)?
         };
         let service = self
@@ -194,16 +206,14 @@ impl DocumentBinding {
         }
         let grant_id = Id::random().map_err(public)?;
         let mut s = self.lock();
+        // Revoke/relay close use this same Doc; no racing load/store window.
+        let next = epoch.successor(self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire))
+            .ok_or_else(|| public(Error::Conflict))?;
         let (current, current_native) = self.github_action_review(&mut s, &args.selection)?;
-        if epoch == u64::MAX
-            || epoch
-                != self
-                    .inner
-                    .agent_github_action_revoke_epoch
-                    .load(Ordering::Acquire)
-            || !same(&original, &current_native)
+        if !same(&original, &current_native)
             || !Arc::ptr_eq(&review.identity, &current.identity)
             || review.data != current.data
+            || review.activity != current.activity
             || !self
                 .inner
                 .bridge
@@ -243,6 +253,7 @@ impl DocumentBinding {
             .allow(scope.clone(), grant_id)
             .map_err(public)?;
         let installed = match review.data.kind() {
+            p::Kind::ActivityOverview => s.github.github_activity_agent_allow(review, &scope),
             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
             p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_allow(&review, &scope),
             p::Kind::FailedJobsRetry => s.github.actions_retry_agent_allow(&review, &scope),
@@ -252,36 +263,43 @@ impl DocumentBinding {
             scope.unused_closed();
             return Err(e);
         }
-        Ok(access)
+        self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release);
+        Ok(access_revision(access, next))
     }
     pub(crate) fn revoke_agent_github_action(
         &self,
         window: &str,
-    ) -> Result<p::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        self.inner
-            .agent_github_action_revoke_epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
-            .map_err(|_| public(Error::StateUnknown))?;
+        let at = Instant::now(); // invocation-time STOP, before waiting for Doc
         let mut s = self.lock();
+        let revision = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
+        let next = revision.checked_add(1);
+        if let Some(next) = next { self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release); }
         let Some(service) = self.github_action_service()? else {
-            return Ok(p::Access::empty());
+            return next.map(|n| access_revision(p::Access::empty(), n)).ok_or_else(|| public(Error::StateUnknown));
         };
-        if let Some(scope) = service.github_action_requests().scope().map_err(public)? {
-            scope.revoke(p::Reason::PermissionRevoked, Instant::now());
+        let scope = service.github_action_requests().scope();
+        if let Ok(Some(scope)) = &scope {
+            scope.revoke(p::Reason::PermissionRevoked, at);
             match scope.review.kind() {
-                p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(&scope),
-                p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(&scope),
-                p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(&scope),
-                p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(&scope),
+                p::Kind::ActivityOverview => s.github.github_activity_agent_revoke(scope),
+                p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(scope),
+                p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(scope),
+                p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(scope),
+                p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(scope),
             }
         }
-        service
-            .github_action_requests()
-            .revoke(p::Reason::PermissionRevoked, Instant::now())
-            .map_err(public)
+        // Even overflow or a poisoned scope lookup cannot skip the original
+        // cancellation. Unknown stays absorbing and all original rows remain.
+        let access = service.github_action_requests().revoke(p::Reason::PermissionRevoked, at);
+        if scope.is_err() || access.is_err() { service.github_action_requests().fence(); }
+        let access = access.map_err(public)?;
+        scope.map_err(public)?;
+        let next = next.ok_or_else(|| public(Error::StateUnknown))?;
+        Ok(access_revision(access, next))
     }
     fn github_action_start(
         &self,
@@ -324,6 +342,14 @@ impl DocumentBinding {
         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
         let v = &scope.review;
         match v.kind() {
+            p::Kind::ActivityOverview => {
+                let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
+                self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {
+                    session_id: r.session_id.clone(), project_id: scope.runtime_id.clone(),
+                    expected_revision: r.expected_revision, expected_connection_revision: r.expected_connection_revision,
+                    selection: crate::github_activity_protocol::Selection::Overview { branch: None },
+                }), Some(entry.clone()))?;
+            }
             p::Kind::RepositoryCreate => {
                 let v = v.prepared().ok_or_else(BridgeError::invalid)?;
                 let a = crate::github_repository_create_protocol::CreateArgs {
@@ -410,13 +436,11 @@ impl DocumentBinding {
         }
     }
     pub(crate) fn github_action_agent_relay_closed(&self) {
-        let _ = self.inner.agent_github_action_revoke_epoch.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |v| v.checked_add(1),
-        );
-        if let Ok(Some(s)) = self.github_action_service() {
-            s.github_action_requests().close(Instant::now());
-        }
+        let at = Instant::now();
+        let _s = self.lock();
+        let old = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
+        if let Some(next) = old.checked_add(1) { self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release); }
+        // Overflow never skips original close. No Service Store/IO under Doc.
+        if let Ok(Some(s)) = self.github_action_service() { s.github_action_requests().close(at); }
     }
 }

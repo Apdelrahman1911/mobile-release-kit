@@ -8,6 +8,36 @@ export interface CliReadAccessStatus {
 export const CLI_READ_ACCESS_MAX_MS = 60 * 60 * 1000;
 export const CLI_READ_ACCESS_SCOPE = 'Read only the permitted projects’ published, redacted saved snapshots and recorded operation history. This does not expose your in-memory drafts, credentials or arbitrary files, and cannot edit files, run commands, build, sign or publish a release.';
 
+// MAIN-only permission observation. The original shared/CLI/headless status
+// above remains exact three-field DATA, never an Allow capability.
+export interface CliReadAccessCheck {
+  readonly status: CliReadAccessStatus;
+  readonly permissionRevision: string;
+}
+export function cliReadAccessRevisionFits(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 20 &&
+    !/[^0-9]/.test(value) && (value.length === 1 || value[0] !== '0') &&
+    (value.length < 20 || value <= '18446744073709551615');
+}
+export function parseCliReadAccessCheck(value: unknown): CliReadAccessCheck | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+        ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
+    const expected = ['enabled', 'remainingMs', 'projectIds', 'permissionRevision'];
+    const names = Reflect.ownKeys(value);
+    if (names.length !== expected.length || names.some((key) => typeof key !== 'string' || !expected.includes(key))) return null;
+    const data: Record<string, unknown> = {};
+    for (const key of expected) {
+      const field = Object.getOwnPropertyDescriptor(value, key);
+      if (!field?.enumerable || !Object.hasOwn(field, 'value')) return null;
+      data[key] = field.value;
+    }
+    if (!cliReadAccessRevisionFits(data.permissionRevision)) return null;
+    const status = parseCliReadAccessStatus({ enabled: data.enabled, remainingMs: data.remainingMs, projectIds: data.projectIds });
+    return status ? Object.freeze({ status, permissionRevision: data.permissionRevision }) : null;
+  } catch { return null; }
+}
+
 export function parseCliReadAccessStatus(value: unknown): CliReadAccessStatus | null {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value) ||

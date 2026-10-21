@@ -216,11 +216,13 @@ impl Observation {
             Ok(match step {
                 Step::Allow=>{
                     let path=self.record().and_then(|r|r.cli.as_ref()?.files.application().ok()).ok_or_else(bad)?;
-                    let read=document.allow_application_read(&project,&path).await?;
+                    let checked=document.application_read_status()?;
+                    let read=document.allow_application_read(&project,checked.permission_revision,&path).await?;
                     if !read.enabled||read.remaining_ms==0||read.project_ids.len()!=1{return Err(bad());}
+                    let checked=document.agent_local_check_access(WINDOW)?;
                     let args=serde_json::from_value(json!({"projectId":project,"draftRevision":0,"baselineGeneration":1,
-                        "consentVersion":agent::CONSENT})).map_err(|_|bad())?;
-                    let grant=document.allow_agent_local_check(WINDOW,args)?;
+                        "consentVersion":agent::CONSENT,"expectedPermissionRevision":checked.permission_revision})).map_err(|_|bad())?;
+                    let grant=document.allow_agent_local_check(WINDOW,args)?.access;
                     let id=read.project_ids[0].clone();
                     if !grant.enabled||grant.consumed||grant.project_id.as_ref()!=Some(&id)||grant.remaining_ms==0
                         ||grant.observation_revision.is_none_or(|n|n==0){return Err(bad());}
@@ -242,7 +244,7 @@ impl Observation {
                 Step::Terminal=>{
                     let status=document.offline_preflight_status()?;
                     let Some(p)=status.operation.as_ref()else{return Ok(None);};
-                    let grant=document.agent_local_check_access(WINDOW)?;
+                    let grant=document.agent_local_check_access(WINDOW)?.access;
                     let mut r=self.record().ok_or_else(bad)?;let c=r.cli.as_mut().ok_or_else(bad)?;
                     if p.agent_local_check.as_ref()!=c.origin.as_ref(){return Err(bad());}
                     if matches!(p.phase,offline::Phase::Starting|offline::Phase::Running|offline::Phase::Stopping){None}
@@ -263,7 +265,7 @@ impl Observation {
                             c.same(status.operation.as_ref().ok_or_else(bad)?,&project).map_err(|_|bad())?;
                             if !keys(&v,&["phase","origin","reportSha256"])||v["origin"]!=json!(c.origin)
                                 ||v["reportSha256"]!=c.completed.as_ref().ok_or_else(bad)?.digest{return Err(bad());}}
-                        let local=document.revoke_agent_local_check(WINDOW)?;
+                        let local=document.revoke_agent_local_check(WINDOW)?.access;
                         let read=document.revoke_application_read()?;
                         if local.enabled||read.enabled{return Err(bad());}
                         let mut r=self.record().ok_or_else(bad)?;let c=r.cli.as_mut().ok_or_else(bad)?;
@@ -278,8 +280,9 @@ impl Observation {
                         let path=self.record().and_then(|r|r.cli.as_ref()?.files.application().ok()).ok_or_else(bad)?;
                         // READ re-Allow performs its own actual fresh snapshot.
                         // It does not authorize a second execution or replay.
-                        let read=document.allow_application_read(&project,&path).await?;
-                        let local=document.agent_local_check_access(WINDOW)?;
+                        let checked=document.application_read_status()?;
+                        let read=document.allow_application_read(&project,checked.permission_revision,&path).await?;
+                        let local=document.agent_local_check_access(WINDOW)?.access;
                         if !read.enabled||read.remaining_ms==0||local.enabled||read.project_ids.len()!=1{return Err(bad());}
                         let status=document.offline_preflight_status()?;
                         let mut r=self.record().ok_or_else(bad)?;let c=r.cli.as_mut().ok_or_else(bad)?;
@@ -292,7 +295,7 @@ impl Observation {
                     let value={let mut r=self.record().ok_or_else(bad)?;r.cli.as_mut().ok_or_else(bad)?.files.poll(3,"done").map_err(|_|bad())?};
                     if let Some(v)=value {
                         let status=document.offline_preflight_status()?;
-                        if document.agent_local_check_access(WINDOW)?.enabled{return Err(bad());}
+                        if document.agent_local_check_access(WINDOW)?.access.enabled{return Err(bad());}
                         let mut r=self.record().ok_or_else(bad)?;
                         {let c=r.cli.as_mut().ok_or_else(bad)?;
                             c.same(status.operation.as_ref().ok_or_else(bad)?,&project).map_err(|_|bad())?;

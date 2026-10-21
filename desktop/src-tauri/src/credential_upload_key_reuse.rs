@@ -150,7 +150,8 @@ mod tests {
         });
         state.vault = Some(session);
         let record = Id::parse(&id(3).token()).unwrap();
-        let selected = Selection::capture(&state, &record, 1).unwrap();
+        let selected = Selection::capture(&state, &record, 1)
+            .unwrap_or_else(|_| panic!("the exact synthetic saved row must be selected"));
         let actual = state.vault.as_ref().unwrap().rows[0].reference(identity);
         assert!(same_reference(selected.reference, actual));
         assert!(selected.current(&state).is_err()); // No context/key/native ownership was created.

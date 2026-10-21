@@ -22,8 +22,12 @@ mod service_metadata_text_requests;
 mod service_configuration_requests;
 #[path="service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
+#[path="service_version_reserve_review_protocol.rs"] mod service_version_reserve_review_protocol;
+#[path="service_version_reserve_review_requests.rs"] mod service_version_reserve_review_requests;
 #[path="service_store_protocol.rs"]
 mod service_store_protocol;
+#[path="service_local_history_protocol.rs"]
+mod service_local_history_protocol;
 #[path="service_store_prepare_protocol.rs"]
 mod service_store_prepare_protocol;
 #[path="service_store_inventory_protocol.rs"]

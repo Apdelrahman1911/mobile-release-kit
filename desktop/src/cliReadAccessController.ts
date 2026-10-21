@@ -1,13 +1,14 @@
-import { cliReadAccessProjectIdFits, cliReadAccessSummary, parseCliReadAccessStatus } from './cliReadAccess.ts';
-import type { CliReadAccessStatus, CliReadAccessSummary } from './cliReadAccess.ts';
+import { cliReadAccessProjectIdFits, cliReadAccessSummary, parseCliReadAccessCheck, parseCliReadAccessStatus } from './cliReadAccess.ts';
+import type { CliReadAccessCheck, CliReadAccessStatus, CliReadAccessSummary } from './cliReadAccess.ts';
 
 // Root supplies an ORIGINAL host-bound port. No renderer token, service/path
 // override, generic IPC method, command or CLI mutation belongs in this port.
 // revoke() must return the original HOST's fresh status after native revocation.
-// Its native admission epoch, not JS reply suppression, defeats an older Allow.
+// Allow carries the original explicit Check's native epoch. Neither JS reply
+// suppression nor a freshly sampled epoch after Allow arrival is sufficient.
 export interface CliReadAccessPort {
   status(): Promise<unknown>;
-  allow(projectId: string): Promise<unknown>;
+  allow(projectId: string, expectedPermissionRevision: string): Promise<unknown>;
   revoke(): Promise<unknown>;
 }
 export interface CliReadAccessContext {
@@ -36,6 +37,11 @@ interface Scope {
   completion: Promise<void>;
   finish(): void;
 }
+interface Checked {
+  readonly observation: CliReadAccessCheck;
+  readonly context: CliReadAccessContext;
+  readonly epoch: object;
+}
 const absent = (): CliReadAccessContext => ({ port: null, nativeSession: null, selectedProject: null, preview: false, busy: true });
 const nativeReason = (context: CliReadAccessContext): string | null => context.preview ? 'CLI access is unavailable in the browser preview.' :
   !context.port || !context.nativeSession ? 'Open the native app’s current connection to manage CLI access.' : null;
@@ -52,6 +58,7 @@ export class CliReadAccessController {
   private epoch: object = {};
   private normal: Scope | null = null;
   private revocation: Scope | null = null;
+  private checked: Checked | null = null;
   private disposed = false;
   private readonly listeners = new Set<() => void>();
   private state: CliReadAccessView = Object.freeze({ selectedProject: null, observation: null, stale: true,
@@ -86,13 +93,13 @@ export class CliReadAccessController {
   }
   // Root calls synchronously BEFORE selection/service changes (including ABA),
   // then syncContext afterwards. Never dispose/recreate to clear a pending call.
-  invalidateContext(): void { this.epoch = {}; this.patch({ stale: true, issue: null }); }
+  invalidateContext(): void { this.epoch = {}; this.checked = null; this.patch({ stale: true, issue: null }); }
   syncContext(): void {
     if (this.disposed) return;
     const next = this.readContext(), changed = !this.sameContext(this.context, next);
     const displayChanged = this.context.selectedProject?.name !== next.selectedProject?.name || this.context.busy !== next.busy;
     this.context = next;
-    if (changed) this.epoch = {};
+    if (changed) { this.epoch = {}; this.checked = null; }
     if (changed || displayChanged) this.patch({ selectedProject: next.selectedProject, ...(changed ? { stale: true, issue: null } : {}) });
   }
   private now(): number | null {
@@ -109,7 +116,8 @@ export class CliReadAccessController {
   allowReason(): string | null {
     const context = this.readContext();
     return this.statusReason() ?? (!context.selectedProject ? 'Select a project through the native app before allowing access.' :
-      context.busy ? 'Finish the current task before allowing CLI access.' : null);
+      context.busy ? 'Finish the current task before allowing CLI access.' :
+      !this.checkedCurrent(this.checked, context) ? 'Check access for this selection before each explicit Allow.' : null);
   }
   revokeReason(): string | null {
     return this.disposed ? 'This desktop connection has been retired.' : nativeReason(this.readContext()) ??
@@ -118,8 +126,12 @@ export class CliReadAccessController {
   private current(scope: Scope): boolean {
     return !this.disposed && scope.epoch === this.epoch && this.sameContext(scope.context, this.readContext()) && nativeReason(scope.context) === null;
   }
+  private checkedCurrent(checked: Checked | null, context: CliReadAccessContext): checked is Checked {
+    return checked !== null && checked.epoch === this.epoch && this.sameContext(checked.context, context);
+  }
   private begin(kind: Scope['kind'], context: CliReadAccessContext): Scope {
     if (kind === 'revoke') this.epoch = {}; // Fence older replies BEFORE any handoff/listener.
+    this.checked = null; // Consume/invalidate BEFORE any reentrant publication.
     let finish!: () => void;
     const completion = new Promise<void>((resolve) => { finish = resolve; });
     const scope = { kind, context, epoch: this.epoch, startedAt: this.now(), completion, finish };
@@ -136,12 +148,16 @@ export class CliReadAccessController {
   }
   private accept(scope: Scope, raw: unknown): void {
     if (!this.current(scope)) return;
-    const status = parseCliReadAccessStatus(raw);
+    const checked = scope.kind === 'status' ? parseCliReadAccessCheck(raw) : null;
+    const status = scope.kind === 'status' ? checked?.status : parseCliReadAccessStatus(raw);
     if (!this.current(scope)) return; // Descriptor inspection is not native/context authority.
     if (!status || scope.kind === 'allow' && status.enabled && status.projectIds.length !== 1) {
       this.patch({ stale: true, issue: scope.kind === 'revoke' ? 'revoke-unconfirmed' : 'response-invalid' }); return;
     }
     if (scope.kind === 'revoke' && status.enabled) { this.patch({ stale: true, issue: 'revoke-unconfirmed' }); return; }
+    // Only the genuinely returned, still-current explicit Check can supply a
+    // subsequent Allow intent. Allow/Revoke replies remain observation only.
+    if (checked) this.checked = Object.freeze({ observation: checked, context: scope.context, epoch: scope.epoch });
     this.patch({ observation: Object.freeze({ status, startedAt: scope.startedAt }), stale: false, issue: null });
   }
   private failed(scope: Scope): void {
@@ -151,12 +167,14 @@ export class CliReadAccessController {
     if (this.disposed) return false;
     this.syncContext();
     if ((kind === 'allow' ? this.allowReason() : this.statusReason()) !== null) return false;
-    const scope = this.begin(kind, this.readContext());
+    const context = this.readContext(), checked = this.checked;
+    if (kind === 'allow' && !this.checkedCurrent(checked, context)) return false;
+    const scope = this.begin(kind, context);
     try {
       // A listener can change selection, acquire another owner, or explicitly
       // Revoke before this handoff. Never send an Allow behind that Revoke.
       if (!this.current(scope) || this.revocation || kind === 'allow' && (this.readContext().busy || !scope.context.selectedProject)) return false;
-      const raw = kind === 'allow' ? await scope.context.port!.allow(scope.context.selectedProject!.id) : await scope.context.port!.status();
+      const raw = kind === 'allow' ? await scope.context.port!.allow(scope.context.selectedProject!.id, checked!.observation.permissionRevision) : await scope.context.port!.status();
       this.accept(scope, raw);
     } catch { this.failed(scope); }
     finally { this.end(scope); }
@@ -181,5 +199,5 @@ export class CliReadAccessController {
   }
   // Panel unmount only unsubscribes. Root/native still owns shutdown, revocation
   // and original-host joins; this merely prevents future UI delivery/admission.
-  dispose(): void { this.disposed = true; this.epoch = {}; this.patch({ stale: true }); this.listeners.clear(); }
+  dispose(): void { this.disposed = true; this.epoch = {}; this.checked = null; this.patch({ stale: true }); this.listeners.clear(); }
 }

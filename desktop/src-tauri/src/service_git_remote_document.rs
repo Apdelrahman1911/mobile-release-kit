@@ -14,6 +14,7 @@ pub(in crate::asset_session) use native::{outcome, review};
 pub(crate) struct RemoteAllow {
     project_id: String,
     expected_document_revision: u32,
+    expected_permission_revision: PermissionRevision,
     read_operation_id: String,
     action: remote::Action,
     consent_version: String,
@@ -131,26 +132,35 @@ impl DocumentBinding {
     pub(crate) fn agent_git_remote_access(
         &self,
         window: &str,
-    ) -> Result<remote::Access, BridgeError> {
+    ) -> Result<MainAccess<remote::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.git_index_service()? {
-            Some(s) => s.git_index_requests().remote_access().map_err(public),
-            None => Ok(remote::Access::empty()),
-        }
+        let _state = self.lock();
+        let book = self.inner.agent_git_index.book.lock()
+            .map_err(|_| public(Error::StateUnknown))?;
+        let access = match self.git_index_service()? {
+            Some(s) => s.git_index_requests().remote_access().map_err(public)?,
+            None => remote::Access::empty(),
+        };
+        Ok(MainAccess::new(access, book.permission_revision()))
     }
     pub(crate) fn allow_agent_git_remote(
         &self,
         window: &str,
         args: RemoteAllow,
-    ) -> Result<remote::Access, BridgeError> {
+    ) -> Result<MainAccess<remote::Access>, BridgeError> {
         if window != MAIN || args.consent_version != args.action.kind().consent() {
             return Err(BridgeError::invalid());
         }
         let action = native::action(&args.action)?;
-        let (original, approval, revoke_epoch) = {
+        let (original, approval, successor) = {
             let mut state = self.lock();
+            let successor = {
+                let book = self.inner.agent_git_index.book.lock()
+                    .map_err(|_| public(Error::StateUnknown))?;
+                book.next_permission(args.expected_permission_revision)?
+            };
             git_read::reconcile(&mut state);
             git_local::reconcile(&self.inner, &mut state);
             self.git_local_new_gate_for(&state, action.kind())?;
@@ -200,7 +210,7 @@ impl DocumentBinding {
                 &args.action,
                 Instant::now(),
             )?;
-            (observed.original.clone(), approval, book.revoke_epoch)
+            (observed.original.clone(), approval, successor)
         };
         // Existing Host/service checks may do IO: no Doc/Edit/Book is held.
         let service = self
@@ -269,7 +279,7 @@ impl DocumentBinding {
             .book
             .lock()
             .map_err(|_| public(Error::StateUnknown))?;
-        if book.revoke_epoch != revoke_epoch
+        if book.next_permission(args.expected_permission_revision)? != successor
             || !repository::basis_current(&book, &state, &scope, &original)
         {
             return Err(public(Error::Conflict));
@@ -285,6 +295,8 @@ impl DocumentBinding {
                 .set(Arc::downgrade(&service))
                 .map_err(|_| public(Error::StateUnknown))?;
         }
+        // Spend before entering the original fallible lease installer.
+        book.consume_permission(args.expected_permission_revision, successor)?;
         let access = service
             .git_index_requests()
             .allow_remote(scope.clone())
@@ -294,35 +306,23 @@ impl DocumentBinding {
             observation: original,
             remote: Some(approval),
         }));
-        Ok(access)
+        Ok(MainAccess::new(access, successor))
     }
     pub(crate) fn revoke_agent_git_remote(
         &self,
         window: &str,
-    ) -> Result<remote::Access, BridgeError> {
+    ) -> Result<MainAccess<remote::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
         let _state = self.lock();
-        let advance = (|| {
-            let mut book = self
-                .inner
-                .agent_git_index
-                .book
-                .lock()
-                .map_err(|_| public(Error::StateUnknown))?;
-            book.revoke_epoch = book
-                .revoke_epoch
-                .checked_add(1)
-                .ok_or_else(|| public(Error::StateUnknown))?;
-            Ok(())
-        })();
+        let advance = self.revoke_git_permission_revision_locked();
         let stop = match self.git_index_service() {
             Ok(Some(s)) => s.git_index_requests().revoke_remote().map_err(public),
             Ok(None) => Ok(remote::Access::empty()),
             Err(e) => Err(e),
         };
-        advance.and(stop)
+        advance.and_then(|revision| stop.map(|access| MainAccess::new(access, revision)))
     }
 }
 
@@ -375,7 +375,7 @@ mod tests {
     fn desktop_consent_is_kind_specific_and_cli_fields_cannot_select_credentials() {
         for push in [false, true] {
             let a = remote::tests::selection(push).action;
-            let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
+            let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
             assert!(decode_remote_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
             for extra in ["token", "url", "reviewId", "root", "accountId", "window"] {
                 let mut bad = value.clone();
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn new_branch_allow_cannot_borrow_old_consent_or_missing_remote_field() {
         let a = remote::tests::new_branch_selection().action;
-        let good = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,
+        let good = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0",
             "readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
         assert!(decode_remote_allow(&serde_json::to_vec(&good).unwrap()).is_ok());
         for old in [false, true] {

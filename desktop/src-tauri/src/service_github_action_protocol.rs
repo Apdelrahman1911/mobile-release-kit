@@ -1,6 +1,8 @@
 //! Closed IDs-only delegation DATA. No credential, URL, draft or native owner.
 use crate::service_protocol::{Error, Id, Settlement};
 use serde::{Deserialize, Deserializer, Serialize};
+#[path = "service_github_activity_protocol.rs"]
+pub(crate) mod activity;
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
@@ -28,10 +30,12 @@ pub(crate) enum Kind {
     FailedJobsRetry,
     SetupPublish,
     SetupReconcile,
+    ActivityOverview,
 }
 impl Kind {
     pub(crate) fn prefix(self) -> &'static str {
         match self {
+            Self::ActivityOverview => "github-activity-",
             Self::RepositoryCreate => "repository-create-",
             Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
             Self::FailedJobsRetry => "github-actions-retry-",
@@ -40,6 +44,7 @@ impl Kind {
     }
     pub(crate) fn consent(self) -> &'static str {
         match self {
+            Self::ActivityOverview => "agent-activity-overview-once-v1",
             Self::RepositoryCreate => "agent-repository-create-once-v1",
             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
             Self::PrCreate => "agent-pr-create-once-v1",
@@ -50,6 +55,7 @@ impl Kind {
     }
     pub(crate) fn action(self) -> crate::service_protocol::Action {
         match self {
+            Self::ActivityOverview => crate::service_protocol::Action::GitHubActivityOverview,
             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
             Self::PrCreate => crate::service_protocol::Action::GitHubPrCreate,
@@ -59,10 +65,10 @@ impl Kind {
         }
     }
     pub(crate) fn initial_effect(self) -> Effect {
-        if self == Self::SetupReconcile { Effect::None } else { Effect::NotSent }
+        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::NotSent }
     }
     pub(crate) fn go_effect(self) -> Effect {
-        if self == Self::SetupReconcile { Effect::None } else { Effect::PotentiallyApplied }
+        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::PotentiallyApplied }
     }
     pub(crate) fn operation(self, s: &str) -> bool {
         s.strip_prefix(self.prefix()).is_some_and(|n| {
@@ -103,6 +109,7 @@ pub(crate) enum Review {
     FailedJobsRetry(PreparedReference),
     SetupPublish(PreparedReference),
     SetupReconcile(PendingReference),
+    ActivityOverview(activity::Reference),
 }
 fn original(session: &str, revision: u32) -> bool {
     !session.is_empty() && session.len() <= 64
@@ -117,7 +124,7 @@ impl Review {
             Kind::PrCreate => Self::PrCreate(value),
             Kind::FailedJobsRetry => Self::FailedJobsRetry(value),
             Kind::SetupPublish => Self::SetupPublish(value),
-            Kind::SetupReconcile => return None,
+            Kind::SetupReconcile | Kind::ActivityOverview => return None,
         })
     }
     pub(crate) fn kind(&self) -> Kind {
@@ -128,23 +135,25 @@ impl Review {
             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
             Self::SetupPublish(_) => Kind::SetupPublish,
             Self::SetupReconcile(_) => Kind::SetupReconcile,
+            Self::ActivityOverview(_) => Kind::ActivityOverview,
         }
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
         match self {
             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
-            Self::SetupReconcile(_) => None,
+            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
         }
     }
     #[cfg(test)]
     pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
         match self {
             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
-            Self::SetupReconcile(_) => None,
+            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
         }
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
+            Self::ActivityOverview(v) => v.valid(),
             Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
         }
@@ -152,6 +161,7 @@ impl Review {
     pub(crate) fn retained_fits(&self) -> bool {
         // Same exact three string-allocation bounds as the original profile.
         match self {
+            Self::ActivityOverview(v) => v.retained_fits(),
             Self::SetupReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
         }
@@ -180,6 +190,7 @@ pub(crate) enum Selection {
     FailedJobsRetry(PreparedSelection),
     SetupPublish(PreparedSelection),
     SetupReconcile(PendingSelection),
+    ActivityOverview(activity::Selection),
 }
 impl Selection {
     pub(crate) fn kind(&self) -> Kind {
@@ -190,16 +201,18 @@ impl Selection {
             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
             Self::SetupPublish(_) => Kind::SetupPublish,
             Self::SetupReconcile(_) => Kind::SetupReconcile,
+            Self::ActivityOverview(_) => Kind::ActivityOverview,
         }
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedSelection> {
         match self {
             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
-            Self::SetupReconcile(_) => None,
+            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
         }
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
+            Self::ActivityOverview(v) => v.valid(),
             Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32),
             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32)),
         }
@@ -252,7 +265,7 @@ pub(crate) enum Effect {
 impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
         match self {
-            Self::None => k == Kind::SetupReconcile,
+            Self::None => matches!(k, Kind::SetupReconcile | Kind::ActivityOverview),
             Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
             Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
             Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate),
@@ -293,14 +306,27 @@ pub(crate) struct Status {
     pub(crate) effect: Effect,
     pub(crate) never_admitted: bool,
     pub(crate) do_not_replay: bool,
+    // Absent on all six original kinds, preserving their exact serialized bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "activity::optional_snapshot")]
+    pub(crate) snapshot: Option<activity::Snapshot>,
 }
 impl Status {
+    pub(crate) fn limit(&self) -> usize {
+        if self.review.kind() == Kind::ActivityOverview { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
+    }
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        let snapshot_valid = match (&self.review, &self.snapshot) {
+            (Review::ActivityOverview(reference), Some(snapshot)) => self.state == State::Complete
+                && snapshot.valid() && snapshot.matches(reference),
+            (Review::ActivityOverview(_), None) => self.state != State::Complete,
+            (_, None) => true,
+            _ => false,
+        };
         let terminal = matches!(
             self.state,
             State::Complete | State::Refused | State::Cancelled
         );
-        if !self.review.valid()
+        if !snapshot_valid || !self.review.valid()
             || !(1..u32::MAX).contains(&self.revision)
             || !self.do_not_replay
             || !self.effect.valid_for(self.review.kind())
@@ -334,7 +360,7 @@ impl Status {
                 )
             || matches!(self.state, State::Refused | State::Cancelled)
                 && self.reason == Reason::None
-            || serde_json::to_vec(self).map_or(true, |b| b.len() > STATUS_LIMIT)
+            || crate::service_metadata_text_protocol::bounded(self, self.limit()).is_err()
         {
             Err(Error::InvalidRequest)
         } else {

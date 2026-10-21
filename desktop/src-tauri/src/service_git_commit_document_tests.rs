@@ -101,7 +101,7 @@ fn only_exact_private_draft_and_real_whole_index_review_match_common_native_scop
 }
 #[test]
 fn commit_gui_codec_accepts_only_private_draft_and_original_ids_not_a_native_plan() {
-    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1",
+    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1",
         "message":"approved", "authorName":"Example", "authorEmail":"a@example.invalid", "consentVersion":commit::CONSENT});
     assert!(decode_commit_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
     for field in [

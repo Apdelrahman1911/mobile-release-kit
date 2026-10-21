@@ -6,11 +6,13 @@ use crate::{
     service_protocol::{Error, Id},
     service_version_reserve_protocol as wire, service_version_reserve_requests as requests,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[path = "asset_session_agent_version_relay.rs"]
 mod relay;
+#[path = "asset_session_agent_version_reserve_review.rs"]
+pub(in crate::asset_session) mod review;
 pub(crate) use relay::ReserveRelay;
 
 #[derive(Deserialize)]
@@ -19,6 +21,7 @@ pub(crate) struct Allow {
     project_id: String,
     review_id: Id,
     expected_reserve_revision: u32,
+    expected_allow_revision: String,
     consent_version: String,
 }
 pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
@@ -29,6 +32,7 @@ pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
     let args = Allow::deserialize(&value).map_err(|_| BridgeError::invalid())?;
     if !crate::protocol::valid_id(&args.project_id)
         || !(1..u32::MAX).contains(&args.expected_reserve_revision)
+        || allow_revision(&args.expected_allow_revision).is_none()
         || args.consent_version != wire::CONSENT
     {
         return Err(BridgeError::invalid());
@@ -45,6 +49,21 @@ pub(crate) fn decode_empty(bytes: &[u8]) -> Result<(), BridgeError> {
     } else {
         Err(BridgeError::invalid())
     }
+}
+// MAIN-only revocation comparison. The CLI's Access/Submit wire is unchanged.
+// Fixed-width lowercase text avoids JS integer rounding; MAX is absorbing.
+fn allow_revision(value: &str) -> Option<u64> {
+    if value.len() != 16 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    u64::from_str_radix(value, 16).ok().filter(|v| *v < u64::MAX)
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainAccess {
+    #[serde(flatten)]
+    access: wire::Access,
+    allow_revision: String,
 }
 struct Grant {
     scope: Arc<requests::NativeScope>,
@@ -69,8 +88,42 @@ pub(super) struct State {
     grant: Option<Arc<Grant>>,
     active: Option<Active>,
     pending: Option<Arc<requests::Entry>>,
+    review_pending: Option<Arc<review::Link>>,
     epoch: std::sync::atomic::AtomicU64,
     relay_lost: bool,
+}
+impl State {
+    fn allow_epoch(&self) -> Result<u64, Error> {
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        if epoch == u64::MAX { Err(Error::StateUnknown) } else { Ok(epoch) }
+    }
+    // Claimed once at the first real Doc cut, not on arrival from renderer
+    // DATA. Host waiting retains only this exact private successor.
+    fn claim_allow(&self, expected: u64) -> Result<u64, Error> {
+        if expected == u64::MAX { return Err(Error::StateUnknown); }
+        let next = expected.checked_add(1).ok_or(Error::StateUnknown)?;
+        match self.epoch.compare_exchange(expected, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) if next < u64::MAX => Ok(next),
+            Ok(_) | Err(u64::MAX) => Err(Error::StateUnknown),
+            Err(_) => Err(Error::Conflict),
+        }
+    }
+    fn allow_current(&self, successor: u64) -> bool {
+        successor < u64::MAX && self.epoch.load(Ordering::SeqCst) == successor
+    }
+    fn invalidate_allow(&self) -> bool {
+        let old = self.epoch.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+            |value| Some(value.checked_add(1).unwrap_or(u64::MAX))).unwrap();
+        old < u64::MAX - 1
+    }
+    fn main_access(&self, access: wire::Access) -> Result<MainAccess, BridgeError> {
+        access.validate().map_err(public)?;
+        let result = MainAccess { access, allow_revision: format!("{:016x}", self.allow_epoch().map_err(public)?) };
+        if serde_json::to_vec(&result).map_err(|_| BridgeError::protocol())?.len() > wire::STATUS_LIMIT {
+            return Err(BridgeError::protocol());
+        }
+        Ok(result)
+    }
 }
 pub(super) const BACKING: usize = 32 * 1024 + std::mem::size_of::<State>() + relay::BACKING;
 fn public(e: Error) -> BridgeError {
@@ -97,7 +150,7 @@ fn service(state: &DocumentState) -> Result<Option<Arc<ApplicationService>>, Bri
 }
 pub(in crate::asset_session) fn pending(state: &DocumentState) -> bool {
     let agent = &state.version_reserve.agent;
-    agent.relay_lost || agent.pending.as_ref().is_some_and(|e| e.pending())
+    agent.relay_lost || agent.pending.as_ref().is_some_and(|e| e.pending()) || review::pending(state)
 }
 pub(in crate::asset_session) fn gui_current(state: &DocumentState) -> Result<(), BridgeError> {
     if pending(state)
@@ -112,11 +165,16 @@ pub(in crate::asset_session) fn gui_current(state: &DocumentState) -> Result<(),
 /// later timestamp. Only memory cells/STOP, never Service/Host IO.
 pub(in crate::asset_session) fn stop(state: &DocumentState, at: Instant) {
     let agent = &state.version_reserve.agent;
-    let _ = agent
-        .epoch
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-            Some(n.saturating_add(1))
-        });
+    if !agent.invalidate_allow() {
+        // No wrapped/stale revision can grant again. Keep any actual original
+        // and contract its same STOP; never drop it to make room for a grant.
+        if let Some(entry) = &agent.pending { entry.unknown(); }
+        if let Some(link) = &agent.review_pending { link.entry.unknown(); }
+        if let Some(lane) = &state.version_reserve.lane {
+            lane.control.stop_at(at);
+            lane.control.unknown();
+        }
+    }
     if let Some(service) = agent.service.as_ref().and_then(Weak::upgrade) {
         let _ = service
             .version_reserve_requests()
@@ -226,7 +284,9 @@ impl DocumentBinding {
     fn reserve_review_native(
         &self,
         state: &DocumentState,
-        args: &Allow,
+        project_id: &str,
+        review_id: &Id,
+        expected_reserve_revision: u32,
         claimed: Option<&Arc<requests::NativeLink>>,
     ) -> Result<(Arc<()>, NativeProject), BridgeError> {
         self.passive_query_gate_locked(state, &self.inner.bridge)?;
@@ -245,7 +305,7 @@ impl DocumentBinding {
             || !self.inner.bridge.supervisor.can_exit()
             || version_allocation::pending(state)
             || !matches!(state.version_reserve.view.phase, p::Phase::Reviewed)
-            || state.version_reserve.view.revision != args.expected_reserve_revision
+            || state.version_reserve.view.revision != expected_reserve_revision
         {
             return Err(p::refused());
         }
@@ -254,18 +314,19 @@ impl DocumentBinding {
             .review
             .as_ref()
             .filter(|r| {
-                r.id == args.review_id.as_str()
-                    && r.input.project_id == args.project_id
+                r.id == review_id.as_str()
+                    && r.input.project_id == project_id
                     && Instant::now() < r.end
             })
             .ok_or_else(p::refused)?;
+        if review.delegated.as_ref().is_some_and(|v|!v.entry.ready_current(&review.identity,Instant::now())) {return Err(p::refused())}
         if let Some(link) = claimed {
             admission(state, review, link)?;
         }
         let (registration, root) = self
             .inner
             .bridge
-            .native_project(&args.project_id)
+            .native_project(project_id)
             .map_err(|_| p::refused())?;
         let edit = self
             .inner
@@ -278,7 +339,7 @@ impl DocumentBinding {
             .ok_or_else(p::refused)?
             .version_source_input(
                 &self.inner,
-                &args.project_id,
+                project_id,
                 &review.input.reference,
                 &edit,
             )?;
@@ -304,7 +365,7 @@ impl DocumentBinding {
         Ok((
             review.identity.clone(),
             NativeProject {
-                runtime_id: args.project_id.clone(),
+                runtime_id: project_id.to_owned(),
                 canonical_root: root.path,
                 device,
                 inode,
@@ -317,13 +378,13 @@ impl DocumentBinding {
     pub(crate) fn agent_version_reserve_access(
         &self,
         window: &str,
-    ) -> Result<wire::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
         let state = self.lock();
         let Some(service) = service(&state)? else {
-            return Ok(wire::Access::empty());
+            return state.version_reserve.agent.main_access(wire::Access::empty());
         };
         service.native_history_current().map_err(public)?;
         let mut value = service
@@ -355,7 +416,7 @@ impl DocumentBinding {
             }
         }
         value.validate().map_err(public)?;
-        Ok(value)
+        state.version_reserve.agent.main_access(value)
     }
     fn agent_reserved_current(
         &self,
@@ -408,19 +469,27 @@ impl DocumentBinding {
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<wire::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN || args.consent_version != wire::CONSENT {
             return Err(BridgeError::invalid());
         }
+        let expected = allow_revision(&args.expected_allow_revision).ok_or_else(BridgeError::invalid)?;
         let grant_id = Id::random().map_err(public)?;
         let (identity, native, epoch) = {
             let state = self.lock();
-            let (identity, native) = self.reserve_review_native(&state, &args, None)?;
-            (
-                identity,
-                native,
-                state.version_reserve.agent.epoch.load(Ordering::SeqCst),
-            )
+            if state.version_reserve.agent.allow_epoch().map_err(public)? != expected {
+                return Err(p::refused());
+            }
+            let (identity, native) = self.reserve_review_native(&state, &args.project_id,
+                &args.review_id, args.expected_reserve_revision, None)?;
+            let successor = match state.version_reserve.agent.claim_allow(expected) {
+                Ok(value) => value,
+                Err(e) => {
+                    if e == Error::StateUnknown { stop(&state, Instant::now()); }
+                    return Err(public(e));
+                }
+            };
+            (identity, native, successor)
         };
         // Original Host+Service can do IO. No Doc/Edit/inbox/relay guard lives here.
         let host = &self.inner.bridge.application_service;
@@ -434,11 +503,11 @@ impl DocumentBinding {
             return Err(p::refused());
         }
         let mut state = self.lock();
-        let (current, current_native) = self.reserve_review_native(&state, &args, None)?;
+        let (current, current_native) = self.reserve_review_native(&state, &args.project_id,
+            &args.review_id, args.expected_reserve_revision, None)?;
         if !Arc::ptr_eq(&identity, &current)
             || !same_native(&native, &current_native)
-            || state.version_reserve.agent.epoch.load(Ordering::SeqCst) != epoch
-            || epoch == u64::MAX
+            || !state.version_reserve.agent.allow_current(epoch)
             || state
                 .version_reserve
                 .agent
@@ -474,34 +543,34 @@ impl DocumentBinding {
             review: identity,
             native,
         }));
-        Ok(access)
+        state.version_reserve.agent.main_access(access)
     }
     pub(crate) fn revoke_agent_version_reserve(
         &self,
         window: &str,
-    ) -> Result<wire::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
+        let at = Instant::now();
         let mut state = self.lock();
-        let _ = state.version_reserve.agent.epoch.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |n| Some(n.saturating_add(1)),
-        );
+        if !state.version_reserve.agent.invalidate_allow() {
+            stop(&state, at);
+            return Err(public(Error::StateUnknown));
+        }
         let Some(service) = service(&state)? else {
-            return Ok(wire::Access::empty());
+            return state.version_reserve.agent.main_access(wire::Access::empty());
         };
         let result = service
             .version_reserve_requests()
-            .revoke(wire::Reason::PermissionRevoked, Instant::now())
+            .revoke(wire::Reason::PermissionRevoked, at)
             .map_err(public);
         if let Some(active) = &state.version_reserve.agent.active {
             if let Some(lane) = active.lane.upgrade() {
                 forward(&lane);
             }
         }
-        result
+        state.version_reserve.agent.main_access(result?)
     }
     fn agent_reserve_claim(&self) -> Result<Option<requests::Claim>, BridgeError> {
         let mut state = self.lock();
@@ -524,13 +593,8 @@ impl DocumentBinding {
     ) -> Result<(), BridgeError> {
         let state = self.lock();
         let scope = link.scope();
-        let args = Allow {
-            project_id: scope.runtime_id.clone(),
-            review_id: scope.review_id.clone(),
-            expected_reserve_revision: scope.review_revision,
-            consent_version: wire::CONSENT.into(),
-        };
-        let (_, native) = self.reserve_review_native(&state, &args, Some(link))?;
+        let (_, native) = self.reserve_review_native(&state, &scope.runtime_id,
+            &scope.review_id, scope.review_revision, Some(link))?;
         let grant = state
             .version_reserve
             .agent
@@ -565,6 +629,7 @@ impl DocumentBinding {
         }
         if lost {
             state.version_reserve.agent.relay_lost = true;
+            if let Some(link)=&state.version_reserve.agent.review_pending {if link.entry.pending(){link.entry.unknown();}}
             if let Some(entry) = &state.version_reserve.agent.pending {
                 entry.unknown();
             }

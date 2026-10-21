@@ -14,8 +14,8 @@ const revision='a'.repeat(64), references='b'.repeat(64), head='d'.repeat(40), o
 const actions=()=>[{kind:'fetch',expectedRevision:revision,expectedReferenceRevision:references,remote:'origin',reference:'refs/heads/main',connectionSessionId:'session-1',expectedConnectionRevision:12},
  {kind:'push',expectedRevision:revision,expectedReferenceRevision:references,remote:'origin',localRef:'refs/heads/work',remoteRef:'refs/heads/main',oldOid:old,newOid:head,connectionSessionId:'session-1',expectedConnectionRevision:12}];
 const approval=(a=actions()[0])=>({projectId:'project-1',expectedDocumentRevision:1,readOperationId:'read-1',action:a});
-const empty=()=>({enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
-const allowed=(a=actions()[0])=>({enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:a,account:{accountId:'7',login:'Example',repositoryId:'9',repository:'Example/App'},selectionSha256:'3'.repeat(64)}});
+const empty=()=>({permissionRevision:'0',enabled:false,remainingMs:0,consumed:false,projectId:null,grantId:null,selection:null});
+const allowed=(a=actions()[0])=>({permissionRevision:'0',enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:a,account:{accountId:'7',login:'Example',repositoryId:'9',repository:'Example/App'},selectionSha256:'3'.repeat(64)}});
 const observation=()=>({revision,head,branch:'refs/heads/work',unborn:false,detached:false,changes:[],remotes:['origin'],restrictions:[]});
 const observed=()=>({observation:observation(),referenceRevision:references,basis:'local-refs-no-fetch',tracking:{state:'complete',remote:'origin',mergeRef:'refs/heads/main',localRef:'refs/remotes/origin/main',head:old,ahead:1,behind:0}});
 const newBranch=()=>({...actions()[1],kind:'push-new-branch',remote:null,remoteRef:'refs/heads/work',oldOid:'0'.repeat(40)});
@@ -48,8 +48,8 @@ function rawPort(names) {
 }
 function permissionPort() {
   const calls = [];
-  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, input => {
-    const call = { kind, input, ...deferred() }; calls.push(call); return call.promise;
+  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, (input, expectedPermissionRevision) => {
+    const call = { kind, input, expectedPermissionRevision, ...deferred() }; calls.push(call); return call.promise;
   }])) };
 }
 async function fixture({ value=observed(), connected=connection() }={}) {
@@ -63,6 +63,14 @@ async function fixture({ value=observed(), connected=connection() }={}) {
  const controller=new GitRemotePermission(kind=>gitRemotePermissionContext(kind,source));for(const c of [repository,reader,local])c.subscribe(()=>controller.syncContext());controller.syncContext();
  return {controller,grant,reads,writes,reader,repository,local,source:()=>source,change(update,sync=true){source={...source,...update};if(sync)controller.syncContext();}};
 }
+async function checked(c, calls, revision = '0') {
+  const before = calls.length, pending = c.status();
+  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
+  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
+  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
+  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
+}
+
 test('Remote approval and Access are closed, bounded and never local permission or authority',()=>{
  for(const a of actions()){assert.deepEqual(copyGitRemoteApproval(approval(a)),approval(a));assert.deepEqual(parseGitRemoteAccess(allowed(a)),allowed(a));assert.equal(parseGitIndexAccess(allowed(a)),null);assert.equal(parseGitRepositoryAccess(allowed(a)),null);
   for(const field of ['force','token','url','argv','absent','setUpstream'])assert.equal(copyGitRemoteApproval(approval({...a,[field]:true})),null);
@@ -75,14 +83,14 @@ test('Remote approval and Access are closed, bounded and never local permission 
 test('exact RAW calls use separate Fetch/Push consent and mismatched replies stay unconfirmed',async()=>{
  const calls=[];let reply=empty();const api=createGitRemotePermissionApi('native',async(command,raw)=>{assert.ok(raw instanceof Uint8Array);calls.push({command,body:JSON.parse(new TextDecoder().decode(raw))});return reply;});
  assert.equal(createGitRemotePermissionApi('preview',()=>assert.fail()),null);
- for(const a of actions()){reply=allowed(a);assert.deepEqual(await api.allow(approval(a)),reply);assert.deepEqual(calls.at(-1),{command:'allow_agent_git_remote',body:{...approval(a),consentVersion:GIT_REMOTE_CONSENT[a.kind]}});}
- reply=allowed(actions()[1]);await assert.rejects(api.allow(approval(actions()[0])));reply=empty();await api.status();await api.revoke();assert.deepEqual(calls.slice(-2).map(v=>v.command),['agent_git_remote_access','revoke_agent_git_remote']);
+ for(const a of actions()){reply=allowed(a);assert.deepEqual(await api.allow(approval(a), '0'),reply);assert.deepEqual(calls.at(-1),{command:'allow_agent_git_remote',body:{...approval(a),expectedPermissionRevision:'0',consentVersion:GIT_REMOTE_CONSENT[a.kind]}});}
+ reply=allowed(actions()[1]);await assert.rejects(api.allow(approval(actions()[0]), '0'));reply=empty();await api.status();await api.revoke();assert.deepEqual(calls.slice(-2).map(v=>v.command),['agent_git_remote_access','revoke_agent_git_remote']);
  assert.deepEqual(calls.slice(-2).map(v=>v.body),[{},{}]);
 });
 test('existing source controllers select Fetch draft and current committed Push without auto calls',async()=>{
  const h=await fixture();assert.deepEqual(h.controller.getContext().project,approval());assert.equal(h.grant.calls.length,0);h.controller.chooseKind('push');assert.deepEqual(h.controller.getContext().project,approval(actions()[1]));
  assert.equal(h.writes.calls.filter(c=>c.name==='prepare'||c.name==='apply').length,0);await h.controller.allow();assert.equal(h.grant.calls.length,0);
- h.controller.acknowledge(true);const pending=h.controller.allow();assert.equal(h.grant.calls.length,1);assert.equal(h.grant.calls[0].input.action.kind,'push');h.grant.calls[0].resolve(allowed(actions()[1]));await pending;
+ await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const pending=h.controller.allow();assert.equal(h.grant.calls.length,2);assert.equal(h.grant.calls[1].input.action.kind,'push');h.grant.calls[1].resolve(allowed(actions()[1]));await pending;
  assert.equal(h.controller.getState().acknowledged,false);assert.equal(h.local.getSnapshot().original,null);
 });
 test('stale or incomplete account, source, tracking, peer or context cannot substitute for current review',async()=>{
@@ -105,17 +113,17 @@ test('synchronous source/account ABA, action change or peer after Allow notifica
   else if(kind==='account'){const old=h.source().connection;h.change({connection:connection()});h.change({connection:old});}
   else if(kind==='mode'){h.controller.chooseKind('push');h.controller.chooseKind('fetch');}
   else if(kind==='peer')h.change({blocked:'Original owner still running.'});else h.change({epoch:1});
- }});h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,0,kind);assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);}
+ }});await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,1,kind);assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);}
 });
 test('independent Stop retains its original API and both promises across a service change',async()=>{
- const h=await fixture(),fresh=permissionPort();h.controller.acknowledge(true);const allow=h.controller.allow();h.change({api:fresh.api,session:{},epoch:1});const stop=h.controller.revoke();assert.deepEqual(h.grant.calls.map(c=>c.kind),['allow','revoke']);assert.equal(fresh.calls.length,0);
- h.grant.calls[1].resolve(empty());await stop;assert.equal(h.controller.getState().pending,'allow');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
- h.grant.calls[0].resolve(allowed());await allow;assert.equal(h.controller.getState().access.enabled,false);assert.equal(h.controller.getState().pending,null);
+ const h=await fixture(),fresh=permissionPort();await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const allow=h.controller.allow();h.change({api:fresh.api,session:{},epoch:1});const stop=h.controller.revoke();assert.deepEqual(h.grant.calls.map(c=>c.kind),['status','allow','revoke']);assert.equal(fresh.calls.length,0);
+ h.grant.calls[2].resolve(empty());await stop;assert.equal(h.controller.getState().pending,'allow');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
+ h.grant.calls[1].resolve(allowed());await allow;assert.equal(h.controller.getState().access.enabled,false);assert.equal(h.controller.getState().pending,null);
 });
 test('reentrant revoke happens before new Allow and lost ACK stays sticky after status',async()=>{
- const a=await fixture();let stopping;a.controller.subscribe(s=>{if(s.pending==='allow'&&!stopping)stopping=a.controller.revoke();});a.controller.acknowledge(true);const allow=a.controller.allow();assert.deepEqual(a.grant.calls.map(c=>c.kind),['revoke']);a.grant.calls[0].resolve(empty());await stopping;await allow;
- const h=await fixture();h.controller.acknowledge(true);const lost=h.controller.allow();h.grant.calls[0].reject(new Error('inert lost ACK'));await lost;assert.equal(h.controller.getState().uncertain,true);
- const read=h.controller.status();h.grant.calls[1].resolve({...allowed(),enabled:false,remainingMs:0,consumed:true});await read;assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,2);
+ const a=await fixture();let stopping;a.controller.subscribe(s=>{if(s.pending==='allow'&&!stopping)stopping=a.controller.revoke();});await checked(a.controller, a.grant.calls); a.controller.acknowledge(true);const allow=a.controller.allow();assert.deepEqual(a.grant.calls.map(c=>c.kind),['status','revoke']);a.grant.calls[1].resolve(empty());await stopping;await allow;
+ const h=await fixture();await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const lost=h.controller.allow();h.grant.calls[1].reject(new Error('inert lost ACK'));await lost;assert.equal(h.controller.getState().uncertain,true);
+ const read=h.controller.status();h.grant.calls[2].resolve({...allowed(),enabled:false,remainingMs:0,consumed:true});await read;assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,3);
  assert.equal(h.local.getSnapshot().original,null);assert.equal(h.writes.calls.filter(c=>c.name==='apply'||c.name==='prepare').length,0);
 });
 
@@ -134,11 +142,11 @@ test('create-only uses the same RAW Allow with separate consent and cannot accep
  const calls=[];let reply=allowed(newBranch());const api=createGitRemotePermissionApi('native',async(command,raw)=>{
   calls.push({command,body:JSON.parse(new TextDecoder().decode(raw))});return reply;
  });
- await api.allow(approval(newBranch()));assert.deepEqual(calls,[{command:'allow_agent_git_remote',body:{...approval(newBranch()),consentVersion:'agent-git-push-new-branch-once-v1'}}]);
- for(const a of actions()){reply=allowed(a);await assert.rejects(api.allow(approval(newBranch())));}
- reply=allowed(newBranch());for(const a of actions())await assert.rejects(api.allow(approval(a)));
+ await api.allow(approval(newBranch()), '0');assert.deepEqual(calls,[{command:'allow_agent_git_remote',body:{...approval(newBranch()),expectedPermissionRevision:'0',consentVersion:'agent-git-push-new-branch-once-v1'}}]);
+ for(const a of actions()){reply=allowed(a);await assert.rejects(api.allow(approval(newBranch()), '0'));}
+ reply=allowed(newBranch());for(const a of actions())await assert.rejects(api.allow(approval(a), '0'));
  const before=calls.length;const missing={...newBranch()};delete missing.remote;
- await assert.rejects(api.allow(approval(missing)));assert.equal(calls.length,before);
+ await assert.rejects(api.allow(approval(missing), '0'));assert.equal(calls.length,before);
 });
 test('actual unconfigured source needs explicit create-kind and unchecked separate consent without starting Git',async()=>{
  const h=await fixture({value:unconfigured()});assert.equal(h.controller.getContext().project,null);
@@ -146,8 +154,8 @@ test('actual unconfigured source needs explicit create-kind and unchecked separa
  h.controller.acknowledge(true);h.controller.chooseKind('push-new-branch');assert.equal(h.controller.getState().acknowledged,false);
  assert.deepEqual(h.controller.getContext().project,approval(newBranch()));assert.equal(h.controller.getContext().account.repository,'Example/App');
  const before=h.repository.getSnapshot();await h.controller.allow();assert.equal(h.grant.calls.length,0);
- h.controller.acknowledge(true);const allowing=h.controller.allow();assert.equal(h.grant.calls.length,1);
- assert.deepEqual(h.grant.calls[0].input,approval(newBranch()));h.grant.calls[0].resolve(allowed(newBranch()));await allowing;
+ await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);const allowing=h.controller.allow();assert.equal(h.grant.calls.length,2);
+ assert.deepEqual(h.grant.calls[1].input,approval(newBranch()));h.grant.calls[1].resolve(allowed(newBranch()));await allowing;
  assert.equal(h.controller.getState().acknowledged,false);assert.equal(h.repository.getSnapshot(),before);
  assert.equal(h.local.getSnapshot().original,null);assert.deepEqual(h.writes.calls.map(c=>c.name),['status']);
  assert.deepEqual(h.reads.calls.map(c=>c.name),['status','start']);
@@ -180,24 +188,24 @@ test('new-kind reentrant mode, account ABA, peer and epoch changes consume conse
    else if(changedKind==='account'){const old=h.source().connection;h.change({connection:connection()});h.change({connection:old});}
    else if(changedKind==='peer')h.change({blocked:'Peer still running.'});else h.change({epoch:1});
   }});
-  h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,0,changedKind);
+  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,1,changedKind);
   assert.equal(h.controller.getState().pending,null);assert.equal(h.controller.getState().acknowledged,false);
  }
 });
 test('new-kind lost Allow remains original and consumed Status cannot mint a repeat or Apply',async()=>{
- const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);
- const original=h.controller.allow();h.grant.calls[0].reject(new Error('inert lost create-only ACK'));await original;
+ const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
+ const original=h.controller.allow();h.grant.calls[1].reject(new Error('inert lost create-only ACK'));await original;
  assert.equal(h.controller.getState().uncertain,true);const checking=h.controller.status();
- h.grant.calls[1].resolve({...allowed(newBranch()),enabled:false,remainingMs:0,consumed:true});await checking;
- assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,2);
+ h.grant.calls[2].resolve({...allowed(newBranch()),enabled:false,remainingMs:0,consumed:true});await checking;
+ assert.equal(h.controller.getState().uncertain,true);h.controller.acknowledge(true);await h.controller.allow();assert.equal(h.grant.calls.length,3);
  assert.equal(h.local.getSnapshot().original,null);assert.deepEqual(h.writes.calls.map(c=>c.name),['status']);
 });
 test('new-kind Stop keeps original Allow API and promise across replacement and never upgrades its reply',async()=>{
- const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);
+ const h=await fixture({value:unconfigured()});h.controller.chooseKind('push-new-branch');await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
  const original=h.controller.allow(),fresh=permissionPort();h.change({api:fresh.api,session:{},epoch:1});const stopping=h.controller.revoke();
- assert.deepEqual(h.grant.calls.map(c=>c.kind),['allow','revoke']);assert.equal(fresh.calls.length,0);
- h.grant.calls[1].resolve(empty());await stopping;assert.equal(h.controller.getState().pending,'allow');
+ assert.deepEqual(h.grant.calls.map(c=>c.kind),['status','allow','revoke']);assert.equal(fresh.calls.length,0);
+ h.grant.calls[2].resolve(empty());await stopping;assert.equal(h.controller.getState().pending,'allow');
  h.controller.chooseKind('push');h.controller.chooseKind('push-new-branch');h.controller.acknowledge(true);await h.controller.allow();assert.equal(fresh.calls.length,0);
- h.grant.calls[0].resolve(allowed(newBranch()));await original;assert.equal(h.controller.getState().pending,null);
+ h.grant.calls[1].resolve(allowed(newBranch()));await original;assert.equal(h.controller.getState().pending,null);
  assert.equal(h.controller.getState().access.enabled,false);assert.equal(fresh.calls.length,0);
 });

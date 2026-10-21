@@ -1,13 +1,19 @@
-//! The named saved unsigned iOS archive observation. All values are redacted
+//! Named saved iOS unsigned/archive and signed/export observations. All values are redacted
 //! DATA; no tool, material, native input, window or settlement authority.
 pub use crate::agent_android_build::Version;
 pub(crate) use crate::agent_build_requests::{
-    Access, ClaimKind, Entry, Inbox, NativeLink, NativeScope,
+    Access, permission_next, permission_revision, ClaimKind, Entry, Inbox, NativeLink, NativeScope,
 };
 pub use crate::agent_build_requests::{Prepare, Query, RequestState, Start, StartState};
 pub use crate::agent_local_checks::{Config, Outcome};
 use crate::service_protocol::{Error, Id, OperationState, Settlement};
 use serde::{Deserialize, Serialize};
+#[path = "agent_ios_signed_export.rs"]
+pub mod signed;
+#[path = "agent_ios_recovery.rs"]
+pub mod recovery;
+pub use recovery::RequestStatus;
+pub(crate) use recovery::MainAccess;
 pub const CONSENT: &str = "agent-saved-ios-unsigned-archive-v1";
 pub const REPORT_LIMIT: usize = 4096;
 pub(crate) const FAMILY: crate::agent_build_requests::Family =
@@ -16,6 +22,7 @@ pub(crate) const FAMILY: crate::agent_build_requests::Family =
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     SavedIosUnsignedArchive,
+    SavedIosSignedExport,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,10 +30,16 @@ pub struct Review {
     pub mode: Mode,
     pub saved_config: Config,
     pub saved_version: Version,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub signing: Option<signed::Review>,
 }
 impl Review {
     pub fn valid(&self) -> bool {
         self.saved_config.valid() && self.saved_version.valid()
+            && match self.mode {
+                Mode::SavedIosUnsignedArchive => self.signing.is_none(),
+                Mode::SavedIosSignedExport => self.signing.as_ref().is_some_and(signed::Review::valid),
+            }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +80,14 @@ pub enum Reason {
     ArtifactUnsafe,
     ArtifactChanged,
     ArchiveValidationFailed,
+    SigningPolicyRequired,
+    SigningInputMissing,
+    SigningInputInvalid,
+    SigningValidationFailed,
+    AccountAdmissionRefused,
+    ArtifactValidationFailed,
+    SymbolsUploadNotRequested,
+    RecoveryAttention,
     InputLimit,
     ResultLimit,
     WorkRetained,
@@ -78,8 +99,12 @@ pub enum Stage {
     Accepted,
     InputsBound,
     CheckingXcode,
+    ValidatingSigning,
+    MaterializingSigning,
     Preparing,
     Archiving,
+    Exporting,
+    RestoringSigning,
     Inspecting,
     DisposingSnapshot,
     DisposingWork,
@@ -88,6 +113,7 @@ pub enum Stage {
 #[serde(rename_all = "kebab-case")]
 pub enum Scope {
     LocalUnsignedIosArchiveObservation,
+    LocalSignedIosArtifactValidation,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,6 +123,8 @@ pub struct Report {
     pub used_version: Version,
     pub entries: u32,
     pub bytes: u64,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub export: Option<signed::Export>,
 }
 impl Report {
     pub fn valid(&self) -> bool {
@@ -104,6 +132,10 @@ impl Report {
             && self.used_version.valid()
             && (1..=100_000).contains(&self.entries)
             && (1..=8 * 1024u64.pow(3)).contains(&self.bytes)
+            && match self.scope {
+                Scope::LocalUnsignedIosArchiveObservation => self.export.is_none(),
+                Scope::LocalSignedIosArtifactValidation => self.export.as_ref().is_some_and(signed::Export::valid),
+            }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +183,22 @@ pub struct Operation {
     pub result: Option<Report>,
 }
 impl Operation {
+    pub(crate) fn valid_for(&self, review: &Review) -> bool {
+        self.valid() && review.valid()
+            && (review.mode == Mode::SavedIosSignedExport
+                || !matches!(self.reason, Reason::SigningPolicyRequired | Reason::SigningInputMissing
+                    | Reason::SigningInputInvalid | Reason::SigningValidationFailed | Reason::AccountAdmissionRefused
+                    | Reason::ArtifactValidationFailed | Reason::SymbolsUploadNotRequested | Reason::RecoveryAttention)
+                    && !matches!(self.stage, Some(Stage::ValidatingSigning | Stage::MaterializingSigning
+                        | Stage::Exporting | Stage::RestoringSigning)))
+            && self.result.as_ref().is_none_or(|r| {
+                r.used_config == review.saved_config && r.used_version == review.saved_version
+                    && match review.mode {
+                        Mode::SavedIosUnsignedArchive => r.scope == Scope::LocalUnsignedIosArchiveObservation,
+                        Mode::SavedIosSignedExport => r.scope == Scope::LocalSignedIosArtifactValidation,
+                    }
+            })
+    }
     pub fn valid(&self) -> bool {
         if self.status_revision == u32::MAX {
             return false;
@@ -234,15 +282,12 @@ impl Status {
             || !self.do_not_replay
             || !self.review.valid()
             || self.operation.as_ref().is_some_and(|o| {
-                !o.valid()
-                    || o.result.as_ref().is_some_and(|r| {
-                        r.used_config != self.review.saved_config
-                            || r.used_version != self.review.saved_version
-                    })
+                !o.valid_for(&self.review)
             })
             || self.history_available && self.operation.is_none()
             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
             || self.start_state != StartState::NotRequested && self.operation.is_none()
+                && self.request_state != RequestState::AdmissionUnknown
         {
             Err(Error::InvalidRequest)
         } else {

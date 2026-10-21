@@ -36,17 +36,21 @@ impl ApplicationService {
         })
     }
     pub(crate) fn build_point_for_runtime(&self, runtime: &str) -> Result<SavedPoint, Error> {
+        self.build_point_with_read(runtime).map(|(point, _)| point)
+    }
+    /// SAME live READ facet as the already-listening original Service Grant.
+    /// Signed delegates retain this identity, never a later renewed grant.
+    pub(crate) fn build_point_with_read(&self, runtime: &str) -> Result<(SavedPoint, Arc<crate::service_version_reserve_requests::ReadPermission>), Error> {
         let state = self.lock()?;
         self.check(&state)?;
         let id = state.runtime_aliases.get(runtime).ok_or(Error::Conflict)?;
-        if !live_grant(&state)?.projects.contains(id) {
-            return Err(Error::AccessDenied);
-        }
+        let grant = live_grant(&state)?;
+        if !grant.projects.contains(id) { return Err(Error::AccessDenied); }
         let point = Self::build_point(&state, id)?;
         if point.runtime_id != runtime || !point.fresh || point.config.is_none() {
             return Err(Error::Conflict);
         }
-        Ok(point)
+        Ok((point, grant.reserve_read.clone()))
     }
     /// Start's possible project effects make the old shared observation stale.
     /// The original Doc/Edit inputs are rematched AFTER this existing writer.
@@ -56,7 +60,8 @@ impl ApplicationService {
     ) -> Result<(), Error> {
         let mut state = self.lock()?;
         self.check(&state)?;
-        if !live_grant(&state)?.projects.contains(&scope.project_id)
+        let grant = live_grant(&state)?;
+        if !grant.projects.contains(&scope.project_id) || !scope.matches_read(&grant.reserve_read)
             || !scope.matches(&Self::build_point(&state, &scope.project_id)?)
         {
             return Err(Error::Conflict);
@@ -181,6 +186,7 @@ mod tests {
             observation_revision: point.revision,
             review: build::Review {
                 mode: build::Mode::SavedAndroidBuildStructureAndVersion,
+                signing: None, upload_certificate_sha256: None,
                 saved_config: point.config.clone().unwrap(),
                 saved_version: build::Version {
                     bytes: 32,
@@ -194,8 +200,8 @@ mod tests {
                     record_sha256: "c".repeat(64),
                 },
             }.into(),
-            draft_revision: 1,
-            baseline_generation: 1,
+            read: None,
+            input: crate::agent_build_requests::NativeInput::Saved { draft_revision: 1, baseline_generation: 1 },
             changes,
         });
         // Inert native-scope DATA. No native Document/Android approval is minted.
@@ -216,6 +222,10 @@ mod tests {
             )
             .unwrap();
         claim.returned(true);
+        let (_, published) = link.entry().claim_history().unwrap().unwrap();
+        let ack = service.begin_operation("project-1", published.operation_id().clone(), p::Action::Build,
+            published.state(), published.settlement());
+        link.entry().history_returned(published.status_revision(), ack).unwrap();
         let second = service.admit_client().unwrap();
         assert_ne!(first.client_id, second.client_id);
         service

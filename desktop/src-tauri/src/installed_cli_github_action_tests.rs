@@ -62,7 +62,7 @@ fn returned_status_and_lost_reply_keep_exact_original_ids_and_no_replay() {
         reason: github::Reason::None,
         effect: github::Effect::AcceptedUnconfirmed,
         never_admitted: false,
-        do_not_replay: true,
+        do_not_replay: true, snapshot: None,
     };
     let mut response = p::Response {
         version: 1,
@@ -90,9 +90,9 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
     assert_eq!(
         v["kinds"],
-        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile"])
+        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview"])
     );
-    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile"]));
+    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile", "activity-overview"]));
     assert_eq!(v["counterSetup"], false);
     assert_eq!(v["normalPrCreation"], true);
     assert_eq!(v["cliPendingLoad"], false);
@@ -127,7 +127,7 @@ fn publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusi
                 origin:q.clone(),grant_id:id("d"),review,revision:4,state:github::State::Complete,settlement:p::Settlement::Settled,
                 operation_id:Some("github-publication-7".into()),reason:github::Reason::None,
                 effect:if kind==github::Kind::SetupReconcile {github::Effect::None}else{github::Effect::DraftPrObserved},
-                never_admitted:false,do_not_replay:true,
+                never_admitted:false,do_not_replay:true, snapshot:None,
             }),
         };
         let (code,bytes)=output(&response,&q,Some(&id("d")),false).unwrap();assert_eq!(code,0);
@@ -139,4 +139,49 @@ fn publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusi
         assert_eq!(parsed,serde_json::to_value(&response).unwrap());
         let mut wrong=q.clone();wrong.request_id=id("e");assert!(output(&response,&wrong,None,true).is_err());
     }
+}
+
+#[test]
+fn activity_cli_output_is_historical_compact_data_not_a_new_read_permission() {
+    use github::activity::{Reference, Snapshot, Section, SectionState, SectionReason, Coverage};
+    let q = github::Query { project_id: id("a"), service_instance: id("b"), request_id: id("c") };
+    let response = p::Response {
+        version: 1, request_id: id("e"), service_instance: id("b"), client_id: id("f"), session_id: id("a"),
+        response: p::ResponseBody::GitHubActionRequest(github::Status {
+            origin: q.clone(), grant_id: id("d"), revision: 4,
+            review: github::Review::ActivityOverview(Reference {
+                session_id: "session-a".into(), expected_revision: 7, expected_connection_revision: 9,
+                account_id: "11".into(), repository_id: "22".into(),
+            }),
+            state: github::State::Complete, settlement: p::Settlement::Settled,
+            operation_id: Some("github-activity-7".into()), reason: github::Reason::None,
+            effect: github::Effect::None, never_admitted: false, do_not_replay: true,
+            snapshot: Some(Snapshot {
+                account_id: 11, repository_id: 22, observed_at: "2026-10-21T12:00:00Z".into(),
+                pull_requests: Section { state: SectionState::Unavailable, reason: SectionReason::Forbidden,
+                    coverage: Coverage::Unknown, total: None, rows: vec![] },
+                workflow_runs: Section { state: SectionState::Read, reason: SectionReason::None,
+                    coverage: Coverage::Complete, total: Some(0), rows: vec![] },
+            }),
+        }),
+    };
+    let (code, bytes) = output(&response, &q, Some(&id("d")), false).unwrap();
+    assert_eq!(code, 0);
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("historical Activity") && text.contains("no write"));
+    assert!(text.contains("account 11") && text.contains("repository 22"));
+    assert!(text.contains(q.request_id.as_str()) && text.contains("never resubmit automatically"));
+    let (_, bytes) = output(&response, &q, None, true).unwrap();
+    assert!(bytes.len() <= github::activity::RESPONSE_LIMIT + 1);
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value, serde_json::to_value(&response).unwrap());
+    if let p::ResponseBody::GitHubActionRequest(row) = &response.response {
+        let snapshot = row.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.pull_requests.total, None);
+        assert_eq!(snapshot.pull_requests.reason, SectionReason::Forbidden);
+        assert_eq!(snapshot.workflow_runs.total, Some(0));
+    }
+    let mut wrong = q.clone(); wrong.request_id = id("e");
+    assert!(output(&response, &wrong, None, true).is_err());
+    assert!(output(&response, &q, Some(&id("f")), true).is_err());
 }

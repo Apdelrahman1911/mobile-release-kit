@@ -1,3 +1,5 @@
+import { parseLocalHistoryReview, sameLocalHistoryReview } from './agentLocalHistoryProtocol.ts';
+import type { LocalHistoryReview } from './agentLocalHistoryProtocol.ts';
 // UI coordination only. The native saved-command Session owns work and cleanup.
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalHistoryRequest, parseLocalHistoryStatus, localHistoryConsent, candidateHistoryAction, stageHistoryAction } from './localReleaseHistoryProtocol.ts';
@@ -5,7 +7,7 @@ import type { BridgeMode } from './types.ts';
 import type { LocalHistoryIdentity, LocalHistoryApi, LocalHistoryStatus, PrepareLocalHistory, LocalHistoryAction } from './localReleaseHistoryTypes.ts';
 type Port=LocalHistoryApi&{mode:BridgeMode};
 export interface LocalHistoryState {mode:BridgeMode;inputPlatform:'android'|'ios';request:PrepareLocalHistory|null;status:LocalHistoryStatus|null;pending:boolean;callersPending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
-interface Source {projectId:()=>string|null;otherOperationReason:()=>string|null;now?:()=>number}
+interface Source {projectId:()=>string|null;otherOperationReason:()=>string|null;delegationReason?:()=>string|null;now?:()=>number}
 const active=(s:LocalHistoryStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
 const identity=(v:LocalHistoryIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
 const sameId=(a:LocalHistoryIdentity|null|undefined,b:LocalHistoryIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
@@ -18,7 +20,7 @@ export class LocalReleaseHistoryController {
  private state:LocalHistoryState={mode:'unavailable',inputPlatform:'android',request:null,status:null,pending:false,callersPending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
  private action:LocalHistoryAction='verify'; private candidateOperationId:string|undefined; private candidateProjectId:string|null=null; private selectionPending=false; private observedProjectId:string|null=null;
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;private pendingGuiSubmissions=0;
- private attempt:{request:PrepareLocalHistory;epoch:number;after:number;previous:LocalHistoryIdentity|null;id:LocalHistoryIdentity|null;retired:boolean;started:boolean}|null=null;
+ private attempt:{request:PrepareLocalHistory;epoch:number;after:number;previous:LocalHistoryIdentity|null;id:LocalHistoryIdentity|null;retired:boolean;started:boolean;delegated:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
  private readonly source:Source;
  constructor(source:Source){this.source=source;}
@@ -63,7 +65,7 @@ export class LocalReleaseHistoryController {
   const request=this.state.request;
   return !!request&&'stageOperationId' in request&&request.stageOperationId===operationId&&request.action===action;
  };
- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
+ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
  beginConnection=()=>{this.invalidate();if(localHistoryOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
   try{const unlisten=await api.subscribeLocalReleaseHistory(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
@@ -81,14 +83,30 @@ export class LocalReleaseHistoryController {
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});this.detachIfDisposed();}
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading||this.disposed&&!localHistoryOwnerReason(this.state))return;const api=this.api;this.reading=true;const first=this.enterGuiSubmission();try{if(first)this.update({});this.receive(await api.localReleaseHistoryStatus());}catch{this.fail();}finally{this.reading=false;this.returnedGuiSubmission();}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot access project history or Keychain.';if(localHistoryOwnerReason(this.state))return localHistoryOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local release history.';if(!this.state.request)return'Select a project and finish any pending project selection. No Store credentials or saved version are required.';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot access project history or Keychain.';if(localHistoryOwnerReason(this.state))return localHistoryOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local release history.';if(!this.state.request)return'Select a project and finish any pending project selection. No Store credentials or saved version are required.';return this.source.delegationReason?.()??this.source.otherOperationReason();}
  private invocationCurrent(api:Port,a:NonNullable<LocalReleaseHistoryController['attempt']>):boolean{
   const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&!this.selectionPending;
   if(!owned())return false;const project=this.source.projectId(),peer=this.source.otherOperationReason();
   return owned()&&!peer&&project===a.request.projectId&&sameOfflineData(this.state.request,a.request);
  }
+ // Comparison DATA only from THIS genuinely returned Prepare. The private
+ // Attempt/API/epoch, not an awaiting-consent event or a copied DTO, admits Allow.
+ delegationReview():LocalHistoryReview|null{
+  const a=this.attempt,api=this.api,s=this.state,op=s.status?.operation;
+  if(!a||!api||a.retired||a.started||a.delegated||!a.id||a.epoch!==this.epoch||s.pending||this.reading||this.hasPendingGuiSubmission()||s.blocked||s.unconfirmed||s.historical||s.status?.availability!=='available'||op?.phase!=='awaiting-consent'||!op.intentUsable||!sameId(a.id,op)||!sameOfflineData(op.context,a.request)||s.consentUntil===null||!Number.isFinite(this.now())||this.now()>=s.consentUntil||!this.invocationCurrent(api,a))return null;
+  const r=a.request;if(!['enroll','verify','review-inputs'].includes(r.action))return null;
+  return parseLocalHistoryReview({kind:r.action,...a.id,statusRevision:s.status.statusRevision,...(r.platform==='ios'?{platform:'ios'}:{}),...(r.action==='review-inputs'?{candidateOperationId:r.candidateOperationId}:{})});
+ }
+ delegatePrepared(review:LocalHistoryReview):(()=>boolean)|null{
+  const r=this.delegationReview(),a=this.attempt,api=this.api,status=this.state.status;
+  if(!r||!a||!api||!status||!sameLocalHistoryReview(r,review))return null;
+  // Monotone, even if the later Allow is refused/lost. Only the old GUI timer
+  // and hidden-tab cancellation are removed. Native expiry/Stop never changes.
+  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
+  return ()=>this.attempt===a&&a.delegated&&!a.started&&this.state.status===status&&!this.state.pending&&!this.reading&&!this.hasPendingGuiSubmission()&&!this.state.unconfirmed&&!this.state.historical&&this.invocationCurrent(api,a);
+ }
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status)return;const api=this.api,request=this.state.request;
-  this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+  this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false,delegated:false};const a=this.attempt;
   this.enterGuiSubmission();this.update({pending:true,unconfirmed:true,error:null,historical:false});
   try{if(!this.invocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after){a.retired=true;if(this.attempt===a&&!a.id){this.attempt=null;this.update({unconfirmed:this.state.blocked||active(this.state.status)});}else if(a.id)void this.cancelOriginal(false);return;}
    this.receive(await api.prepareLocalReleaseHistory(request));const op=this.state.status?.operation;
@@ -97,7 +115,7 @@ export class LocalReleaseHistoryController {
   }catch{this.fail();}finally{this.update({pending:false});this.returnedGuiSubmission();}}
  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
-  if(a?.started||this.hasPendingGuiSubmission())return; // A queued second click cannot cancel the running original.
+  if(a?.started||a?.delegated||this.hasPendingGuiSubmission())return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   const consentUntil=this.state.consentUntil;a.started=true;this.clearTimer();this.enterGuiSubmission();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
   try{if(this.now()>=consentUntil||!this.invocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable){this.invalidate();return;}

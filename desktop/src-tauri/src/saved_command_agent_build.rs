@@ -5,6 +5,7 @@ use crate::agent_build_requests::{Entry, Family, NativeLink};
 pub(super) enum Preparation {
     Android(agent_android_build::Preparation),
     Ios(agent_ios_archive::Preparation),
+    IosRecovery(agent_ios_recovery::Preparation),
 }
 pub(super) fn prepare(
     input: Option<Preparation>,
@@ -20,6 +21,7 @@ pub(super) fn prepare(
 ) -> Result<Option<Arc<NativeLink>>, BridgeError> {
     match input {
         None => Ok(None),
+        Some(Preparation::IosRecovery(p)) => agent_ios_recovery::prepare(p, inner, r, context, registration, root, id, generation, revision, expires),
         Some(Preparation::Android(p)) => agent_android_build::prepare(
             Some(p),
             inner,
@@ -52,6 +54,7 @@ pub(super) fn start_matches(p: &Prepared, entry: Option<&Arc<Entry>>) -> bool {
         (Some(link), Some(entry)) if link.entry().family() == entry.family() => {
             match entry.family() {
                 Family::AndroidInspect => agent_android_build::start_matches(p, Some(entry)),
+                Family::IosArchive if entry.scope().review.ios_recovery().is_some() => agent_ios_recovery::start_matches(p, Some(entry)),
                 Family::IosArchive => agent_ios_archive::start_matches(p, Some(entry)),
             }
         }
@@ -77,6 +80,9 @@ fn family(r: &Registry) -> Option<Family> {
 pub(super) fn changed(r: &Registry) {
     match family(r) {
         Some(Family::AndroidInspect) => agent_android_build::changed(r),
+        Some(Family::IosArchive) if r.active.as_ref().map(|a| &a.owner.context)
+            .or_else(|| r.prepared.as_ref().map(|p| &p.projection.context))
+            .is_some_and(|c| matches!(c, Context::IOSArchive(c) if c.recovery())) => agent_ios_recovery::changed(r),
         Some(Family::IosArchive) => agent_ios_archive::changed(r),
         None => {}
     }
@@ -85,6 +91,7 @@ pub(super) fn retired_prepared(p: &Prepared, reason: Reason, revision: u32) {
     if let Some(link) = &p.agent_build {
         match link.entry().family() {
             Family::AndroidInspect => agent_android_build::retired_prepared(p, reason, revision),
+            Family::IosArchive if matches!(&p.projection.context, Context::IOSArchive(c) if c.recovery()) => agent_ios_recovery::retired_prepared(p, reason, revision),
             Family::IosArchive => agent_ios_archive::retired_prepared(p, reason, revision),
         }
     }
@@ -93,6 +100,7 @@ pub(super) fn retired(a: &Active, revision: u32) {
     if let Some(link) = &a.owner.agent_build {
         match link.entry().family() {
             Family::AndroidInspect => agent_android_build::retired(a, revision),
+            Family::IosArchive if matches!(&a.owner.context, Context::IOSArchive(c) if c.recovery()) => agent_ios_recovery::retired(a, revision),
             Family::IosArchive => agent_ios_archive::retired(a, revision),
         }
     }

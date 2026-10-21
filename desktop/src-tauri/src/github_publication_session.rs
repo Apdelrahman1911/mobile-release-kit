@@ -70,6 +70,7 @@ pub(super) struct State {
     pub(super) exhausted: bool,
 }
 impl State {
+    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() || self.pending_read.as_ref().is_some_and(|r| r.agent.is_some()) }
     pub(super) fn new() -> Self {
         Self {
             view: p::Status {

@@ -3,6 +3,8 @@
 use super::*;
 use crate::{agent_android_build as agent, service_protocol as service};
 use serde_json::Value;
+#[path = "saved_command_agent_android_signed.rs"]
+mod signed;
 
 fn failure() -> BridgeError {
     BridgeError::new("agent_android_build_unavailable", "This original Android build request cannot proceed. Inspect its exact request; do not replay it.")
@@ -62,14 +64,12 @@ fn same_context(
     };
     let s = entry.scope();
     let Some(review) = s.review.android() else { return false };
-    c.operation == android_wire::Operation::AndroidBuildInspect
-        && c.signing.is_none()
-        && c.action.is_none()
-        && c.artifact_validation.mode == android_wire::ValidationMode::StructureAndVersion
-        && c.artifact_validation.upload_certificate_sha256.is_none()
+    (if review.mode == agent::Mode::SavedAndroidLocalUploadKeySign { signed::same(c, review) }
+        else { c.operation == android_wire::Operation::AndroidBuildInspect && c.signing.is_none() && c.action.is_none()
+            && c.artifact_validation.mode == android_wire::ValidationMode::StructureAndVersion
+            && c.artifact_validation.upload_certificate_sha256.is_none() })
         && c.project_id == s.runtime_id
-        && c.draft_revision == s.draft_revision
-        && c.baseline_generation == s.baseline_generation
+        && s.saved_inputs() == Some((c.draft_revision, c.baseline_generation))
         && c.saved_config.bytes == review.saved_config.bytes
         && c.saved_config.sha256 == review.saved_config.sha256
         && version(&c.saved_version) == review.saved_version
@@ -169,9 +169,9 @@ fn projection(
     let Context::AndroidBuild(c) = &p.context else {
         return Err(failure());
     };
-    if c.operation != android_wire::Operation::AndroidBuildInspect
-        || c.signed()
-        || c.artifact_validation.mode != android_wire::ValidationMode::StructureAndVersion
+    if !matches!(c.operation, android_wire::Operation::AndroidBuildInspect | android_wire::Operation::AndroidBuildSign)
+        || c.action.is_some()
+        || (!c.signed() && c.artifact_validation.mode != android_wire::ValidationMode::StructureAndVersion)
     {
         return Err(failure());
     }
@@ -201,7 +201,8 @@ fn projection(
             Some(Terminal::AndroidBuild(t)) => (
                 Some(copy(&t.disposition)?),
                 if outcome == agent::Outcome::Complete {
-                    Some(report(t.result.as_ref().ok_or_else(failure)?)?)
+                    let native = t.result.as_ref().ok_or_else(failure)?;
+                    Some(if c.signed() { native.agent_signed_report(c)? } else { report(native)? })
                 } else {
                     None
                 },
@@ -309,7 +310,7 @@ impl SavedCommandOwner {
     ) -> Result<Arc<Approval>, BridgeError> {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
         let input = android_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
-        if !fixed(&input) || !self.inner.android_original_document_matches(Some(document)) {
+        if !(fixed(&input) || signed::fixed(&input)) || !self.inner.android_original_document_matches(Some(document)) {
             return Err(failure());
         }
         let r = self.inner.lock();
@@ -326,7 +327,9 @@ impl SavedCommandOwner {
             .filter(|s| s.data() == selected && s.matches_owner(&self.inner))
             .ok_or_else(failure)?;
         let review = agent::Review {
-            mode: agent::Mode::SavedAndroidBuildStructureAndVersion,
+            mode: if input.signing.is_some() { agent::Mode::SavedAndroidLocalUploadKeySign } else { agent::Mode::SavedAndroidBuildStructureAndVersion },
+            signing: input.signing.as_ref().map(signed::selection).transpose()?,
+            upload_certificate_sha256: input.artifact_validation.upload_certificate_sha256.as_deref().and_then(agent::signed::fingerprint),
             saved_config: agent::Config {
                 bytes: input.saved_config.bytes,
                 sha256: input.saved_config.sha256.clone(),
@@ -355,25 +358,41 @@ impl SavedCommandOwner {
         registration: u32,
         root: RegisteredRoot,
         gate: android_wire::Availability,
+        material: Option<Arc<crate::asset_session::AndroidSigningMaterial>>,
     ) -> Result<android_wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
+        if approval.input.signing.is_some() != material.is_some() { return Err(failure()); }
         self.prepare_bound_requests(
             Context::AndroidBuild(approval.input.context()),
             registration,
             root,
             Availability::from_android(gate),
-            None,
+            material.map(PrivateSigningMaterial::Android),
             None,
             None,
             Some(agent_build::Preparation::Android(Preparation { entry, approval })),
         )?
         .android()
     }
+    /// SAME retained Prepared material, never a fresh replacement wrapper.
+    pub(crate) fn agent_android_build_material(&self, entry: &Arc<agent::Entry>)
+        -> Result<Option<Arc<crate::asset_session::AndroidSigningMaterial>>, BridgeError>
+    {
+        let r = self.inner.lock();
+        let p = r.prepared.as_ref().filter(|p| start_matches(p, Some(entry))).ok_or_else(failure)?;
+        match (&p.projection.context, &p.material) {
+            (Context::AndroidBuild(c), Some(PrivateSigningMaterial::Android(m)))
+                if c.operation == android_wire::Operation::AndroidBuildSign => Ok(Some(m.clone())),
+            (Context::AndroidBuild(c), None) if c.operation == android_wire::Operation::AndroidBuildInspect => Ok(None),
+            _ => Err(failure()),
+        }
+    }
     pub(crate) fn start_agent_android_build(
         &self,
         entry: &Arc<agent::Entry>,
         registered: Option<(u32, RegisteredRoot)>,
         gate: android_wire::Availability,
+        material: Option<Arc<crate::asset_session::AndroidSigningMaterial>>,
     ) -> Result<crate::android_build_owner::Admitted, BridgeError> {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
         let input = {
@@ -383,6 +402,11 @@ impl SavedCommandOwner {
                 .as_ref()
                 .filter(|p| start_matches(p, Some(entry)))
                 .ok_or_else(failure)?;
+            if !match (&p.material, &material) {
+                (None, None) => true,
+                (Some(PrivateSigningMaterial::Android(a)), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            } { return Err(failure()); }
             Start {
                 operation_id: p.projection.operation_id.clone(),
                 owner_generation: p.projection.owner_generation.clone(),
@@ -394,7 +418,7 @@ impl SavedCommandOwner {
             at,
             registered,
             Availability::from_android(gate),
-            None,
+            material.map(PrivateSigningMaterial::Android),
             None,
             None,
             None,
@@ -485,11 +509,12 @@ mod tests {
             input_revision: 0,
             document: Arc::downgrade(&document),
             observation_revision: 2,
-            draft_revision: input.draft_revision,
-            baseline_generation: input.baseline_generation,
+            read: None,
+            input: crate::agent_build_requests::NativeInput::Saved { draft_revision: input.draft_revision, baseline_generation: input.baseline_generation },
             changes,
             review: agent::Review {
                 mode: agent::Mode::SavedAndroidBuildStructureAndVersion,
+                signing: None, upload_certificate_sha256: None,
                 saved_config: agent::Config {
                     bytes: input.saved_config.bytes,
                     sha256: input.saved_config.sha256.clone(),
@@ -521,7 +546,7 @@ mod tests {
                     inode: 2,
                     revision: 2,
                     fresh: true,
-                    config: Some(scope.review.config().clone()),
+                    config: Some(scope.review.android().unwrap().saved_config.clone()),
                 },
             )
             .unwrap();
@@ -532,6 +557,8 @@ mod tests {
             .bind(agent::FAMILY,id('a'), id('b'), 1, expires)
             .unwrap();
         preparing.returned(true);
+        let (_, published) = link.entry().claim_history().unwrap().unwrap();
+        link.entry().history_returned(published.status_revision(), Ok(())).unwrap();
         let owner = SavedCommandOwner::android_build(
             RuntimeConfig::packaged("/unopened-android-runtime".into()),
             None,
@@ -542,7 +569,7 @@ mod tests {
                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
             ),
         };
-        let prepared = Prepared { agent_store_preparation:None, agent_store:None, store_witness:None,
+        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
             agent_build: Some(link.clone()),
             agent_local_check: None,
             upload_key_preparation: None,
@@ -586,7 +613,7 @@ mod tests {
                 gui,
                 Instant::now(),
                 Some((1, root.clone())),
-                android_wire::Availability::RuntimeUnqualified
+                android_wire::Availability::RuntimeUnqualified,
             )
             .is_err());
         assert!(owner.inner.lock().prepared.is_some());
@@ -611,7 +638,8 @@ mod tests {
             .start_agent_android_build(
                 starting.entry(),
                 Some((1, root.clone())),
-                android_wire::Availability::RuntimeUnqualified
+                android_wire::Availability::RuntimeUnqualified,
+                None,
             )
             .is_err());
         assert!(owner.inner.lock().prepared.is_some());
@@ -632,6 +660,7 @@ mod tests {
                 starting.entry(),
                 Some((1, root)),
                 android_wire::Availability::RuntimeUnqualified,
+                None,
             )
             .unwrap()
             .release();
@@ -639,15 +668,20 @@ mod tests {
             let r = owner.inner.lock();
             assert!(r.prepared.is_none() && r.active.is_none());
         }
-        let result = starting.entry().status().unwrap();
-        assert_eq!(result.start_state, agent::StartState::Consumed);
+        let waiting = starting.entry().status().unwrap();
+        assert_eq!(waiting.start_state, agent::StartState::Consumed);
+        assert_eq!(waiting.operation.unwrap().state(), service::OperationState::Prepared);
+        assert!(starting.entry().claim_history().unwrap().is_none());
+        starting.returned(true);
+        let (_, returned) = link.entry().claim_history().unwrap().unwrap();
+        link.entry().history_returned(returned.status_revision(), Ok(())).unwrap();
+        let result = link.entry().status().unwrap();
         let operation = result.operation.unwrap();
         let result = operation.android();
         assert_eq!(
             (result.outcome, result.settlement),
             (Some(agent::Outcome::Refused), service::Settlement::Settled)
         );
-        starting.returned(true);
         assert!(inbox.claim(agent::FAMILY).unwrap().is_none());
     }
     #[test]

@@ -4,6 +4,14 @@ use super::*;
 pub(crate) fn id(n: u32) -> Id {
     Id::parse(&format!("{n:032x}")).unwrap()
 }
+
+pub(crate) fn poison_original_read(read: &ReadPermission) {
+    assert!(std::panic::catch_unwind(|| {
+        let _original = read.revoked.lock().unwrap();
+        panic!("inert original READ mutex poison");
+    }).is_err());
+    assert!(read.revoked.is_poisoned());
+}
 pub(crate) struct Rig {
     pub(crate) inbox: Arc<Inbox>,
     pub(crate) scope: Arc<NativeScope>,
@@ -68,7 +76,7 @@ fn catalogue_keeps_original_reservation_ids_without_expiry_or_result_access() {
     let r = Rig::new();
     r.allowed();
     r.inbox.submit(r.input.clone()).unwrap();
-    let entry = r.inbox.book.lock().unwrap().entries[0].clone();
+    let entry = r.inbox.book.lock().unwrap().entries[0].reserve().unwrap().clone();
     r.scope.read.revoke(Instant::now());
     let before = entry.row.lock().unwrap().status.clone();
     let rows = r.inbox.catalogue_requests(&id(1), &id(2)).unwrap();
@@ -329,7 +337,7 @@ fn thirty_two_tombstones_keep_metadata_without_thirty_two_originals() {
     assert!(book
         .entries
         .iter()
-        .all(|e| e.row.lock().unwrap().lease.is_none()));
+        .all(|e| e.reserve().unwrap().row.lock().unwrap().lease.is_none()));
     assert!(Arc::strong_count(&r.scope) <= 3); // Rig + one current lease; no per-row Source/Lane.
 }
 

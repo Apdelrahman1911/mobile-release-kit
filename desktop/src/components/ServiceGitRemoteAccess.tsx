@@ -32,6 +32,7 @@ export function ServiceGitRemoteAccess({ controller, repository, reader, local, 
       {selected?.kind === 'push-new-branch' && <p className="review-caution">Create {selected.remoteRef} at {selected.newOid.slice(0, 12)} in the selected GitHub repository, only if that branch is absent. All reachable committed history may be uploaded; committed secrets could be included. Any occupied target refuses, even with an identical tip. This does not configure a remote or upstream.</p>}
       {current.reason && <p role="status" className="save-note">{current.reason}</p>}
       <p>The agent must prepare a fresh native review, then explicitly start it once. Allow lasts at most 15 minutes; the original review expires within five minutes. Opening this panel never starts Git or grants access.</p>
+      <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
       <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={busy || current.blocked || !selected}
         onChange={e => controller.acknowledge(e.target.checked)} />I approve this one {controller.getKind() === 'push-new-branch' ? 'create-only branch publication' : controller.getKind() === 'push' ? 'remote upload' : 'branch fetch'}, for the exact account, repository and references shown.</label>
       <div className="button-row">

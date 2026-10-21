@@ -11,6 +11,7 @@ impl Admitted {
     pub(crate) fn release(self)->Status{if let Some(release)=self.release{let _=release.send(());}self.status}
 }
 impl LocalReleaseHistoryOwner {
+    pub(crate) fn agent_original(&self)->&SavedCommandOwner{&self.saved}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(crate) fn claim_matches(&self,claim:&crate::saved_command_owner::LocalHistoryClaim)->bool{claim.matches_owner(&self.saved)}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]

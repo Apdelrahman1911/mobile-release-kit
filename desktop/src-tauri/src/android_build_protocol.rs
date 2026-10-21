@@ -2220,7 +2220,7 @@ pub(crate) mod tests {
         value["outcome"]=json!("unknown");value["reason"]=json!("cleanup-unknown");assert!(!terminal(&value,&candidate_context()).unwrap().settled());
     }
 
-    fn signed_complete() -> Value {
+    pub(super) fn signed_complete() -> Value {
         let mut value = upload_complete(); value["context"] = json!(signed_context());
         value["result"]["schemaVersion"] = json!(2);
         value["result"]["toolchainProfile"] = json!(MAC_TOOLCHAIN_PROFILE);
@@ -2460,3 +2460,6 @@ pub(crate) fn assert_macos_toolchain_data_contract() {
     mac_toolchain_contract_tests::original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data();
     mac_toolchain_contract_tests::native_request_binding_rejects_host_root_and_selected_identity_mismatch_data();
 }
+
+#[path = "android_build_agent_signed_projection.rs"]
+mod agent_signed;

@@ -1,3 +1,4 @@
+import { validStorePermissionRevision } from './agentStorePermissionRevision.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { validStoreReleaseReview, validStoreReleaseResult, storeReleaseFromContext } from './agentStoreRelease.ts';
 import type { StoreReleaseReview } from './agentStoreRelease.ts';
@@ -20,11 +21,12 @@ export interface StoreRequestStatus {
   readonly result: Readonly<Record<string, unknown>> | null;
 }
 export interface AgentStoreAccess {
+  readonly permissionRevision:string; // MAIN comparison only; not CLI request authority.
   readonly serviceInstance: string | null; readonly projectId: string | null; readonly grantId: string | null; readonly reviewId: string | null;
   readonly review: StoreReview | null; readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
   readonly pending: boolean; readonly unknown: boolean; readonly requestId: string | null; readonly status: StoreRequestStatus | null;
 }
-export interface AgentStoreAccessPort { status(): Promise<unknown>; allow(review: StoreReview): Promise<unknown>; revoke(): Promise<unknown> }
+export interface AgentStoreAccessPort { status(): Promise<unknown>; allow(review: StoreReview, expectedPermissionRevision:string): Promise<unknown>; revoke(): Promise<unknown> }
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{32}$/.test(v) && v !== '0'.repeat(32);
 const sha = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 const uuid = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v) && v !== '00000000-0000-0000-0000-000000000000';
@@ -78,8 +80,8 @@ function status(v: unknown): v is StoreRequestStatus {
 export function parseAgentStoreAccess(raw: unknown): AgentStoreAccess | null {
   try {
     const v=copyBoundedComparisonData(raw,16384,320);
-    if(!keys(v,['serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status']) ||
-      !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
+    if(!keys(v,['permissionRevision','serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status']) ||
+      !validStorePermissionRevision(v.permissionRevision) || !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
     const present=['serviceInstance','projectId','grantId','reviewId'].every(k=>id(v[k])) && review(v.review);
     if(!present && !['serviceInstance','projectId','grantId','reviewId','review'].every(k=>v[k]===null))return null;
     if(v.enabled!==(present&&!v.consumed&&!v.pending&&!v.unknown&&v.remainingMs>0)||!v.enabled&&v.remainingMs!==0||v.consumed!==(v.requestId!==null)||v.consumed!==(v.status!==null)||!present&&(v.pending||v.unknown||v.consumed))return null;
@@ -93,8 +95,8 @@ export function parseAgentStoreAccess(raw: unknown): AgentStoreAccess | null {
 }
 export function createAgentStoreAccessPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentStoreAccessPort {
   const send=(name:string,body:object)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));return bytes.length<=1024?invoke(name,bytes):Promise.reject({code:'agent_store_invalid'});};
-  return Object.freeze({status:()=>send('agent_store_access',{}),revoke:()=>send('revoke_agent_store',{}),allow:(raw:StoreReview)=>{
-    const r=parseStoreReview(raw);return r?send('allow_agent_store',{kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:storeConsent(r)}):Promise.reject({code:'agent_store_invalid'});
+  return Object.freeze({status:()=>send('agent_store_access',{}),revoke:()=>send('revoke_agent_store',{}),allow:(raw:StoreReview,expectedPermissionRevision:string)=>{
+    const r=parseStoreReview(raw);return r&&validStorePermissionRevision(expectedPermissionRevision)?send('allow_agent_store',{expectedPermissionRevision,kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:storeConsent(r)}):Promise.reject({code:'agent_store_invalid'});
   }});
 }
 export function storeCommands(raw:AgentStoreAccess|null):readonly string[]{const s=parseAgentStoreAccess(raw);if(!s?.grantId)return [];

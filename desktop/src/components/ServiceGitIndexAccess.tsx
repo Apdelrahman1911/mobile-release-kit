@@ -9,6 +9,7 @@ export function ServiceGitIndexAccess({controller}:{controller:GitIndexPermissio
   <p className="review-caution">This changes the local Git index. It does not grant commit, branch switching, push, credentials, or arbitrary commands. This shares one permission with agent Commit and local repository actions; an explicit Allow replaces only an unused permission. Git may run configured clean filters; they can run project code or have file and network effects.</p>
   <label>Action <select value={controller.getAction()} disabled={!!state.pending||state.revokePending} onChange={e=>controller.chooseAction(e.target.value==='unstage'?'unstage':'stage')}>
    <option value="stage">Stage selected files</option><option value="unstage">Unstage selected files</option></select></label>
+  <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
   <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending||state.revokePending} onChange={e=>controller.acknowledge(e.target.checked)}/>I approve this one local Git change to the selected files, with these risks.</label>
   <div className="button-row"><button className="button secondary" disabled={!controller.canAllow()} onClick={()=>void controller.allow()}>Allow</button>
    <button className="button secondary" disabled={state.revokePending} onClick={()=>void controller.revoke()}>Stop</button>

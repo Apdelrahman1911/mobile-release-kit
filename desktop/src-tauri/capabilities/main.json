@@ -18,7 +18,7 @@
     "allow-revoke-agent-git-commit",
     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
     "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
-    "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
+    "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve", "allow-agent-version-reserve-review-status", "allow-cancel-agent-version-reserve-review",
     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
     "allow-agent-store-preparation-access", "allow-revoke-agent-store-preparation", "allow-allow-agent-store-prepare", "allow-allow-agent-store-preparation-start",

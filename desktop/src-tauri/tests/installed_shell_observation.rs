@@ -56,8 +56,12 @@ mod service_metadata_text_requests;
 #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
 #[path="../src/service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
+#[path="../src/service_version_reserve_review_protocol.rs"] mod service_version_reserve_review_protocol;
+#[path="../src/service_version_reserve_review_requests.rs"] mod service_version_reserve_review_requests;
 #[path="../src/service_store_protocol.rs"]
 mod service_store_protocol;
+#[path="../src/service_local_history_protocol.rs"]
+mod service_local_history_protocol;
 #[path="../src/service_store_prepare_protocol.rs"]
 mod service_store_prepare_protocol;
 #[path="../src/service_store_inventory_protocol.rs"]

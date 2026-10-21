@@ -10,6 +10,7 @@ use crate::{
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AllowPrepare {
+    expected_permission_revision:String,
     kind: flow::Kind,
     prepare: serde_json::Value,
     consent_version: String,
@@ -17,6 +18,7 @@ pub(crate) struct AllowPrepare {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AllowStart {
+    expected_permission_revision:String,
     origin: flow::Query,
     review: flow::Review,
     consent_version: String,
@@ -102,6 +104,11 @@ pub(in crate::asset_session) struct Grant {
     pins: Pins,
     _witness: Arc<()>,
 }
+impl Grant {
+    pub(in crate::asset_session) fn occupied(&self) -> bool {
+        self.scope.occupied()
+    }
+}
 impl DocumentBinding {
     fn preparation_owner(&self, kind: flow::Kind) -> &SavedCommandOwner {
         self.store_delegate_owner(if kind.prepares_intent() {
@@ -176,19 +183,18 @@ impl DocumentBinding {
     pub(crate) fn agent_store_preparation_access(
         &self,
         window: &str,
-    ) -> Result<flow::Access, BridgeError> {
+    ) -> Result<MainAccess<flow::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.agent_store_service()? {
-            Some(s) => s.store_requests().preparation_access().map_err(public),
-            None => Ok(flow::Access::empty()),
-        }
+        let _state=self.lock();let revision=self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
+        let access=match self.agent_store_service()?{Some(s)=>s.store_requests().preparation_access().map_err(public)?,None=>flow::Access::empty()};
+        Ok(MainAccess::new(access,revision))
     }
     pub(crate) fn revoke_agent_store_preparation(
         &self,
         window: &str,
-    ) -> Result<flow::Access, BridgeError> {
+    ) -> Result<MainAccess<flow::Access>, BridgeError> {
         self.revoke_agent_store(window)?; // SAME revoke epoch and all original controls.
         self.agent_store_preparation_access(window)
     }
@@ -196,15 +202,17 @@ impl DocumentBinding {
         &self,
         window: &str,
         args: AllowPrepare,
-    ) -> Result<flow::Access, BridgeError> {
+    ) -> Result<MainAccess<flow::Access>, BridgeError> {
         if window != MAIN || args.consent_version != flow::PREPARE_CONSENT {
             return Err(BridgeError::invalid());
         }
+        let expected=permission::parse(&args.expected_permission_revision).map_err(public)?;
         let input = Input::parse(args.kind, &args.prepare)?;
         let selection = input.selection()?;
         let at = Instant::now();
         let (native, stamp, pins, epoch) = {
             let mut s = self.lock();
+            permission::next(&self.inner.agent_store_revoke_epoch,expected).map_err(public)?;
             self.service_document_gate(&s)?;
             if s.agent_store_grant
                 .as_ref()
@@ -234,11 +242,7 @@ impl DocumentBinding {
                 .bridge
                 .edits
                 .saved_registration_guard(&self.inner.session_identity)?;
-            let epoch = self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
-            if epoch == u64::MAX {
-                return Err(public(Error::StateUnknown));
-            }
-            (native, edit.stamp()?, pins, epoch)
+            (native, edit.stamp()?, pins, expected)
         };
         // The original Host and READ query are OFF Doc/Edit/Saved locks.
         let service = self
@@ -280,6 +284,7 @@ impl DocumentBinding {
             _witness: witness,
         });
         let mut s = self.lock();
+        permission::next(&self.inner.agent_store_revoke_epoch,epoch).map_err(public)?;
         if self.inner.agent_store_revoke_epoch.load(Ordering::Acquire) != epoch
             || s.agent_store_grant
                 .as_ref()
@@ -322,12 +327,13 @@ impl DocumentBinding {
                 .set(Arc::downgrade(&service))
                 .map_err(|_| public(Error::StateUnknown))?;
         }
+        let revision=permission::consume(&self.inner.agent_store_revoke_epoch,epoch).map_err(public)?;
         s.agent_store_preparation = Some(grant);
         match service
             .store_requests()
             .allow_preparation(scope.clone(), id)
         {
-            Ok(v) => Ok(v),
+            Ok(v) => Ok(MainAccess::new(v,revision)),
             Err(e) => {
                 scope
                     .control
@@ -340,10 +346,12 @@ impl DocumentBinding {
         &self,
         window: &str,
         args: AllowStart,
-    ) -> Result<flow::Access, BridgeError> {
+    ) -> Result<MainAccess<flow::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
+        let expected=permission::parse(&args.expected_permission_revision).map_err(public)?;
+        {let s=self.lock();permission::next(&self.inner.agent_store_revoke_epoch,expected).map_err(public)?;self.service_document_gate(&s)?;}
         let service = self
             .agent_store_service()?
             .ok_or_else(|| public(Error::Unavailable))?;
@@ -365,6 +373,7 @@ impl DocumentBinding {
         }
         let id = Id::random().map_err(public)?;
         let mut s = self.lock();
+        permission::next(&self.inner.agent_store_revoke_epoch,expected).map_err(public)?;
         let g = s
             .agent_store_preparation
             .as_ref()
@@ -394,11 +403,9 @@ impl DocumentBinding {
             .store_preparation_current(&entry, &args.review)?;
         self.recheck_preparation(&s, &g, &m, registration, &root)?;
         self.preparation_budget(&s, &g.input, &m)?;
+        let revision=permission::consume(&self.inner.agent_store_revoke_epoch,expected).map_err(public)?;
         entry.allow_start(&args.review, id).map_err(public)?;
-        service
-            .store_requests()
-            .preparation_access()
-            .map_err(public)
+        service.store_requests().preparation_access().map(|access|MainAccess::new(access,revision)).map_err(public)
     }
     fn recheck_preparation(
         &self,
@@ -686,8 +693,11 @@ pub(in crate::asset_session) mod tests {
                 }
                 AndroidExternalTesting | IosExternalTesting | AndroidProductionSubmit | IosProductionSubmit => (),
             }
-            let raw=serde_json::to_vec(&serde_json::json!({"kind":kind,"prepare":prepare,"consentVersion":flow::PREPARE_CONSENT})).unwrap();
+            let raw=serde_json::to_vec(&serde_json::json!({"kind":kind,"prepare":prepare,"expectedPermissionRevision":"0","consentVersion":flow::PREPARE_CONSENT})).unwrap();
             let input: AllowPrepare = decode(&raw).unwrap();
+            assert_eq!(permission::parse(&input.expected_permission_revision),Ok(0));
+            let mut missing:serde_json::Value=serde_json::from_slice(&raw).unwrap();missing.as_object_mut().unwrap().remove("expectedPermissionRevision");
+            assert!(decode::<AllowPrepare>(&serde_json::to_vec(&missing).unwrap()).is_err());
             assert_eq!(
                 Input::parse(input.kind, &input.prepare)
                     .unwrap()

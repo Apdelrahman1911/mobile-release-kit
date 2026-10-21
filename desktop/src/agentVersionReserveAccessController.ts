@@ -28,6 +28,7 @@ interface Work {
   completion: Promise<void>; finish(): void;
 }
 interface Binding { context: AgentVersionReserveContext; review: AgentVersionReserveReview; access: AgentVersionReserveAccess }
+interface CheckedAllow { context: AgentVersionReserveContext; review: AgentVersionReserveReview; revision: string }
 const missingOptions = Object.freeze({ reference: '', increment: 'build' as const, newCandidate: false, acknowledgeLimitations: false });
 const missingEpoch = {};
 const absent = (): AgentVersionReserveContext => ({ port: null, nativeSession: null, projectId: null, preview: false,
@@ -48,7 +49,8 @@ export class AgentVersionReserveAccessController {
   private generation: object = {};
   private normal: Work | null = null;
   private revocation: Work | null = null;
-  private consent: { context: AgentVersionReserveContext; review: AgentVersionReserveReview } | null = null;
+  private checkedAllow: CheckedAllow | null = null;
+  private consent: { context: AgentVersionReserveContext; review: AgentVersionReserveReview; checked: CheckedAllow } | null = null;
   private attemptedReview: AgentVersionReserveReview | null = null;
   private binding: Binding | null = null;
   private completed: AgentVersionReserveCompletion | null = null;
@@ -95,7 +97,7 @@ export class AgentVersionReserveAccessController {
     this.context = c;
     const newReview = !!c.review && this.binding !== null && c.review !== this.binding.review;
     if (changed || newReview) { this.binding = null; this.completed = null; }
-    if (changed || reviewChanged) this.consent = null;
+    if (changed || reviewChanged) { this.consent = null; this.checkedAllow = null; }
     if (changed || displayChanged) this.patch({ review: c.review, acknowledged: this.consent !== null, ...(changed || newReview ? { stale: true } : {}),
       ...(reviewChanged && c.review && c.review !== this.attemptedReview && !this.state.unknown ? { issue: null } : {}) });
   }
@@ -106,17 +108,19 @@ export class AgentVersionReserveAccessController {
     const c = this.readContext();
     return this.disposed ? 'This permission controller is retired.' : this.ownerReason() ?? nativeReason(c) ?? c.blockedReason ??
       (!c.enabled || !c.projectId || !c.review ? 'Review the exact version choices in this app first.' :
-        c.review === this.attemptedReview ? 'Review again before allowing another one-use request. Permission is never renewed automatically.' : null);
+        c.review === this.attemptedReview ? 'Review again before allowing another one-use request. Permission is never renewed automatically.' :
+          !this.checkedAllow || this.checkedAllow.review !== c.review || !this.sameContext(this.checkedAllow.context, c) ?
+            'Check CLI permission before confirming this reviewed reservation.' : null);
   }
   allowReason(): string | null {
     const c = this.readContext(), consent = this.consent;
-    return this.consentReason() ?? (!consent || consent.review !== c.review || !this.sameContext(consent.context, c) ?
+    return this.consentReason() ?? (!consent || consent.review !== c.review || consent.checked !== this.checkedAllow || !this.sameContext(consent.context, c) ?
       'Confirm permission for this one reviewed reservation.' : null);
   }
   setAcknowledged(value: boolean): boolean {
     this.syncContext();
     if (typeof value !== 'boolean' || this.disposed || this.normal || this.revocation || value && this.consentReason()) return false;
-    const c = this.readContext(); this.consent = value && c.review ? { context: c, review: c.review } : null;
+    const c = this.readContext(); this.consent = value && c.review && this.checkedAllow ? { context: c, review: c.review, checked: this.checkedAllow } : null;
     this.patch({ acknowledged: this.consent !== null }); return true;
   }
   revokeReason(): string | null { return this.disposed ? 'This permission controller is retired.' : nativeReason(this.controls()) ??
@@ -137,7 +141,9 @@ export class AgentVersionReserveAccessController {
   private begin(kind: Work['kind'], context: AgentVersionReserveContext): Work {
     if (kind === 'revoke') this.generation = {}; // Fence old Allow/status before callbacks or native handoff.
     this.completed = null;
-    if (kind !== 'status') this.consent = null;
+    // An explicit new Check is not a refresh of earlier acknowledgement.
+    this.consent = null;
+    this.checkedAllow = null;
     let finish!: () => void; const completion = new Promise<void>((resolve) => { finish = resolve; });
     const w: Work = { kind, context, generation: this.generation, sent: false, original: null, startedAt: this.now(), completion, finish };
     this.originalContext = context;
@@ -150,7 +156,7 @@ export class AgentVersionReserveAccessController {
     this.patch(); w.finish();
   }
   private delivery(w: Work): boolean { return !this.disposed && w.generation === this.generation && this.originalContext !== null && this.sameHost(w.context, this.originalContext); }
-  private unknown(): void { this.completed = null; this.consent = null; this.patch({ unknown: true, stale: true, acknowledged: false, issue: uncertain }); }
+  private unknown(): void { this.completed = null; this.consent = null; this.checkedAllow = null; this.patch({ unknown: true, stale: true, acknowledged: false, issue: uncertain }); }
   private failed(w: Work, error: unknown): void {
     if (!this.delivery(w)) return;
     let refused = false;
@@ -176,7 +182,14 @@ export class AgentVersionReserveAccessController {
     const old = this.state.access;
     if (old?.grantId && old.grantId === s.grantId && (!sameGrant(old, s) || old.consumed && (!s.consumed || old.requestId !== s.requestId) ||
         old.completedOperationId !== null && s.completedOperationId !== null && old.completedOperationId !== s.completedOperationId)) { this.unknown(); return; }
-    const current = this.isCurrent(w.context);
+    const currentContext = this.readContext();
+    if (!this.delivery(w)) return; // A context callback may revoke this exact Check.
+    const current = !this.disposed && this.sameContext(w.context, currentContext) && nativeReason(w.context) === null;
+    // Only this actual returned explicit Check can supply the stamp for a
+    // later acknowledgement. Neither Allow nor Revoke replies renew intent.
+    if (w.kind === 'status' && current && !this.state.unknown && w.context.review && currentContext.review === w.context.review) {
+      this.checkedAllow = { context: w.context, review: w.context.review, revision: s.allowRevision };
+    }
     if (w.kind === 'allow' && current && !this.state.unknown && w.context.review) this.binding = { context: w.context, review: w.context.review, access: s };
     if (this.binding && !sameGrant(this.binding.access, s)) this.binding = null;
     this.completed = w.kind === 'status' && !this.state.unknown && current && s.completedOperationId && this.binding &&
@@ -187,15 +200,16 @@ export class AgentVersionReserveAccessController {
   }
   private async ordinary(kind: 'status' | 'allow'): Promise<boolean> {
     this.syncContext(); if ((kind === 'allow' ? this.allowReason() : this.statusReason()) !== null) return false;
-    const context = kind === 'allow' ? this.readContext() : this.controls(), consent = this.consent;
+    const context = kind === 'allow' ? this.readContext() : this.controls(), consent = this.consent, checked = this.checkedAllow;
     const w = this.begin(kind, context);
     try {
       const c = this.readContext();
       if (!this.delivery(w) || this.revocation || kind === 'allow' && (!this.isCurrent(context) || c.blockedReason || !context.projectId ||
-          !context.review || c.review !== context.review || !consent || consent.review !== context.review || !this.sameContext(consent.context, c))) return false;
+          !context.review || c.review !== context.review || !consent || consent.review !== context.review || !checked || consent.checked !== checked ||
+          checked.review !== context.review || !this.sameContext(checked.context, c) || !this.sameContext(consent.context, c))) return false;
       w.sent = true;
       if (kind === 'allow') this.attemptedReview = context.review;
-      w.original = kind === 'status' ? context.port!.status() : context.port!.allow(context.projectId!, context.review!.id, context.review!.revision);
+      w.original = kind === 'status' ? context.port!.status() : context.port!.allow(context.projectId!, context.review!.id, context.review!.revision, checked!.revision);
       if (!w.original || typeof w.original.then !== 'function') { this.unknown(); return true; }
       this.accept(w, await w.original);
     } catch (error) { this.failed(w, error); }
@@ -216,5 +230,5 @@ export class AgentVersionReserveAccessController {
     finally { this.end(w); }
     return w.sent;
   }
-  dispose(): void { this.disposed = true; this.generation = {}; this.binding = null; this.completed = null; this.consent = null; this.listeners.clear(); }
+  dispose(): void { this.disposed = true; this.generation = {}; this.binding = null; this.completed = null; this.consent = null; this.checkedAllow = null; this.listeners.clear(); }
 }

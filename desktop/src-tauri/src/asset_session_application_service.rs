@@ -27,10 +27,29 @@ pub(crate) fn empty_request(value: &Value) -> Result<(), BridgeError> {
     else { Err(BridgeError::invalid()) }
 }
 
-pub(crate) fn project_request(value: &Value) -> Result<&str, BridgeError> {
-    let object = value.as_object().filter(|object| object.len() == 1).ok_or_else(BridgeError::invalid)?;
-    object.get("projectId").and_then(Value::as_str).filter(|id| crate::protocol::valid_id(id))
-        .ok_or_else(BridgeError::invalid)
+/// Only this MAIN observation exposes the original permission epoch. The
+/// shared service, installed CLI and headless status DTO remain unchanged.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MainReadAccessStatus {
+    #[serde(flatten)]
+    access: ReadAccessStatus,
+    #[serde(serialize_with = "serialize_permission_revision")]
+    pub(crate) permission_revision: u64,
+}
+fn serialize_permission_revision<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
+}
+
+pub(crate) fn allow_request(value: &Value) -> Result<(&str, u64), BridgeError> {
+    let object = value.as_object().filter(|object| object.len() == 2).ok_or_else(BridgeError::invalid)?;
+    let id = object.get("projectId").and_then(Value::as_str).filter(|id| crate::protocol::valid_id(id))
+        .ok_or_else(BridgeError::invalid)?;
+    let revision = object.get("expectedPermissionRevision").and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit())
+            && (s.len() == 1 || !s.starts_with('0')))
+        .and_then(|s| s.parse::<u64>().ok()).ok_or_else(BridgeError::invalid)?;
+    Ok((id, revision))
 }
 
 struct SharedObservation {
@@ -137,10 +156,11 @@ impl DocumentBinding {
         Ok(current)
     }
 
-    pub(crate) fn application_read_status(&self) -> Result<ReadAccessStatus, BridgeError> {
+    pub(crate) fn application_read_status(&self) -> Result<MainReadAccessStatus, BridgeError> {
         let state = self.lock();
         self.service_document_gate(&state)?;
-        self.inner.bridge.application_service.status().map_err(public_error)
+        let (access, permission_revision) = self.inner.bridge.application_service.status_for_allow().map_err(public_error)?;
+        Ok(MainReadAccessStatus { access, permission_revision })
     }
 
     pub(crate) fn revoke_application_read(&self) -> Result<ReadAccessStatus, BridgeError> {
@@ -149,7 +169,8 @@ impl DocumentBinding {
         self.inner.bridge.application_service.revoke().map_err(public_error)
     }
 
-    pub(crate) async fn allow_application_read(&self, id: &str, app_data: &Path) -> Result<ReadAccessStatus, BridgeError> {
+    pub(crate) async fn allow_application_read(&self, id: &str, expected_permission_revision: u64,
+        app_data: &Path) -> Result<ReadAccessStatus, BridgeError> {
         let host = &self.inner.bridge.application_service;
         let (original, stamp, ticket) = {
             let state = self.lock();
@@ -158,8 +179,8 @@ impl DocumentBinding {
             let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
             let stamp = edit.stamp()?;
             let roster = self.inner.bridge.native_roster().map_err(|_| public_error(ServiceError::Conflict))?;
-            host.reserve_native_location(app_data, &roster.roots).map_err(public_error)?;
-            let ticket = host.begin_allow(original.clone()).map_err(public_error)?;
+            let ticket = host.begin_allow(original.clone(), expected_permission_revision,
+                app_data, &roster.roots).map_err(public_error)?;
             (original, stamp, ticket)
         };
         // A failed old observer must not invalidate a newer caller's ticket.
@@ -201,13 +222,34 @@ mod tests {
     #[test]
     fn read_access_requests_cannot_name_paths_accounts_or_actions() {
         assert!(empty_request(&serde_json::json!({})).is_ok());
-        assert_eq!(project_request(&serde_json::json!({"projectId":"project-1"})).unwrap(), "project-1");
+        let valid = serde_json::json!({"projectId":"project-1","expectedPermissionRevision":"0"});
+        assert_eq!(allow_request(&valid).unwrap(), ("project-1", 0));
+        let last = serde_json::json!({"projectId":"project-1","expectedPermissionRevision":u64::MAX.to_string()});
+        assert_eq!(allow_request(&last).unwrap(), ("project-1", u64::MAX));
         for value in [Value::Null, serde_json::json!([]), serde_json::json!({"root":"/tmp"}),
             serde_json::json!({"projectId":"project-1","action":"publish"}),
+            serde_json::json!({"projectId":"project-1"}),
+            serde_json::json!({"projectId":"project-1","expectedPermissionRevision":"0","root":"/tmp"}),
             serde_json::json!({"projectId":"../../other"}), serde_json::json!({"projectId":1})] {
             assert!(empty_request(&value).is_err());
-            assert!(project_request(&value).is_err());
+            assert!(allow_request(&value).is_err());
         }
+        for revision in [serde_json::json!(0), Value::Null, serde_json::json!(""), serde_json::json!("00"),
+            serde_json::json!("+1"), serde_json::json!("-1"), serde_json::json!("1\n"),
+            serde_json::json!("18446744073709551616")] {
+            assert!(allow_request(&serde_json::json!({"projectId":"project-1","expectedPermissionRevision":revision})).is_err());
+        }
+    }
+    #[test]
+    fn main_read_access_revision_is_lossless_without_changing_shared_status() {
+        let access = ReadAccessStatus { enabled: false, remaining_ms: 0, project_ids: Vec::new() };
+        let base = serde_json::to_value(&access).unwrap();
+        assert_eq!(base, serde_json::json!({"enabled":false,"remainingMs":0,"projectIds":[]}));
+        let main = MainReadAccessStatus { access, permission_revision: 9_007_199_254_740_993 };
+        let value = serde_json::to_value(main).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value["permissionRevision"], "9007199254740993");
+        for field in ["enabled", "remainingMs", "projectIds"] { assert_eq!(value[field], base[field]); }
     }
     #[test]
     fn dormant_document_cannot_grant_or_report_access_as_available() {

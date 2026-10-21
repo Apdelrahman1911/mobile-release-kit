@@ -1,3 +1,4 @@
+import { agentAndroidBuildContext } from './agentAndroidSigned.ts';
 // Native Projection DATA only: observe/STOP, never permission to Prepare/Start.
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
 export interface AgentAndroidBuildOrigin { serviceInstance: string; projectId: string; requestId: string }
@@ -13,7 +14,7 @@ export function sameAgentAndroidBuildOrigin(a: AgentAndroidBuildOrigin | undefin
 }
 export function canObserveAgentAndroidBuild(previous: AndroidBuildStatus | null, next: AndroidBuildStatus, guiPending: boolean): boolean {
   const a = previous?.operation, b = next.operation;
-  return !guiPending && !!b && b.context.operation === 'android-build-inspect' && b.context.artifactValidation.mode === 'structure-and-version' &&
+  return !guiPending && !!b && agentAndroidBuildContext(b.context) &&
     !!b.agentAndroidBuild && validAgentAndroidBuildOrigin(b.agentAndroidBuild) && (!previous || next.statusRevision > previous.statusRevision) &&
     (!a || a.phase === 'terminal') && (!a || a.operationId !== b.operationId || a.ownerGeneration !== b.ownerGeneration);
 }

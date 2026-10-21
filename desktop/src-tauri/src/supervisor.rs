@@ -1061,6 +1061,7 @@ impl Owner {
     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
         github_action_delegation::observe(self, inner);
         agent_metadata_text::observe(self,now);
+        version_allocation::observe_review(self,now);
         play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
         let mut state = lock(&self.state);
         if state.terminal { return None; }
@@ -1078,7 +1079,7 @@ impl Owner {
             if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
             self.stop.send_replace(true); self.changed.notify_waiters(); }
         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
-        if expired { None } else { Some(agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint)))) }
+        if expired { None } else { Some(version_allocation::review_deadline(self,now,agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint))))) }
     }
     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
         if matches!(self.profile,Profile::GitHubPublication)&&self.publication_gate.as_ref().is_none_or(|g|!g.counter_settled()) {self.unknown(inner);return false;}

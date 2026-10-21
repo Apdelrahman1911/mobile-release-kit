@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_ANDROID_BUILD_CONSENT, AgentAndroidBuildPermission, copyAndroidBuildApproval,
   createAgentAndroidBuildApi, encodeAndroidBuildAccessRequest, parseAndroidBuildAccess } from '../src/agentAndroidBuild.ts';
+import { buildPermissionRevision } from '../src/agentBuildPermissionProtocol.ts';
+import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, canonicalAndroidUploadFingerprint } from '../src/agentAndroidSigned.ts';
 import { canObserveAgentAndroidBuild } from '../src/agentAndroidBuildOrigin.ts';
 import { AndroidBuildController } from '../src/androidBuild.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
@@ -19,8 +21,8 @@ const TOOLS = { instance: id('1'), ownerUid: 501, catalogGeneration: 1,
   recordSha256: '2'.repeat(64), inventorySha256: '3'.repeat(64), osProviderSha256: '4'.repeat(64) };
 const approval = () => ({ input: { projectId: 'p1', draftRevision: 0, baselineGeneration: 1, savedConfig: clone(CONFIG),
   savedVersion: clone(VERSION), artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } }, toolchainSelection: clone(TOOLS) });
-const enabled = () => ({ enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
-const disabled = () => ({ enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
+const enabled = (permissionRevision = '1') => ({ permissionRevision, enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
+const disabled = (permissionRevision = '0') => ({ permissionRevision, enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let n = 0; n < 18; n++) await Promise.resolve(); };
 function port() {
@@ -30,7 +32,13 @@ function port() {
   }]));
   return { api, calls };
 }
-function permission(p = port()) { const controller = new AgentAndroidBuildPermission(); controller.bind(p.api, approval()); return { ...p, controller }; }
+async function refresh(controller, p) {
+  const before = p.calls.length, reading = controller.status();
+  assert.equal(p.calls[before].kind, 'status'); p.calls[before].resolve(disabled()); await reading;
+  p.calls.splice(before, 1); // Fixture setup retained a real Status Promise; scenario starts afterwards.
+}
+async function permission(p = port()) { const controller = new AgentAndroidBuildPermission(); controller.bind(p.api, approval());
+  await refresh(controller, p); return { ...p, controller }; }
 const status = (revision = 0, operation = null) => ({ schemaVersion: 1, statusRevision: revision, availability: 'available', operation });
 const operation = (patch = {}, input = approval().input) => ({ operationId: id('d'), ownerGeneration: id('e'),
   context: { ...clone(input), platform: 'android', operation: 'android-build-inspect' },
@@ -99,9 +107,9 @@ test('exact saved pair and full catalog selection enter only the three named per
     assert.ok(raw instanceof Uint8Array && raw.length <= 4096);
     calls.push({ command, value: JSON.parse(new TextDecoder().decode(raw)) }); return disabled();
   });
-  await api.allow(approval()); await api.status(); await api.revoke();
+  await api.allow(approval(), '0'); await api.status(); await api.revoke();
   assert.deepEqual(calls.map((c) => c.command), ['allow_agent_android_build', 'agent_android_build_access', 'revoke_agent_android_build']);
-  assert.deepEqual(calls[0].value, { ...approval(), consentVersion: AGENT_ANDROID_BUILD_CONSENT });
+  assert.deepEqual(calls[0].value, { ...approval(), consentVersion: AGENT_ANDROID_BUILD_CONSENT, expectedPermissionRevision: '0' });
   for (const extra of ['root', 'command', 'window', 'operationId', 'executable', 'environment'])
     assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...calls[0].value, [extra]: 'not-authority' }), null);
   assert.equal(encodeAndroidBuildAccessRequest('shell', {}), null);
@@ -126,7 +134,7 @@ test('approval copy is bounded and never calls getters or serialization hooks', 
   let reads = 0, invocations = 0;
   const a = approval(); Object.defineProperty(a.input, 'savedConfig', { enumerable: true, get() { reads++; return CONFIG; } });
   const api = createAgentAndroidBuildApi('native', async () => { invocations++; return disabled(); });
-  await assert.rejects(api.allow(a)); assert.equal(reads, 0); assert.equal(invocations, 0);
+  await assert.rejects(api.allow(a, '0')); assert.equal(reads, 0); assert.equal(invocations, 0);
   const b = approval(); b.toJSON = () => { reads++; return approval(); }; assert.equal(copyAndroidBuildApproval(b), null);
   assert.equal(parseAndroidBuildAccess({ ...enabled(), get consumed() { reads++; return false; } }), null);
   assert.equal(reads, 0);
@@ -142,7 +150,7 @@ test('permission observations cannot disguise consumed, overlong or unbound gran
 
 test('Allow samples current saved version, catalog and busy state before dispatch', async () => {
   const p = port(); let current = { api: p.api, project: approval(), blocked: false };
-  const c = new AgentAndroidBuildPermission(() => current); c.syncContext(); c.acknowledge(true);
+  const c = new AgentAndroidBuildPermission(() => current); c.syncContext(); await refresh(c, p); c.acknowledge(true);
   current = { ...current, project: approval() }; current.project.input.savedVersion.build++;
   await c.allow(); assert.equal(p.calls.length, 0); assert.equal(c.getState().acknowledged, false);
   c.acknowledge(true); current.project.toolchainSelection.catalogGeneration++;
@@ -153,7 +161,7 @@ test('Allow samples current saved version, catalog and busy state before dispatc
 });
 
 test('reentrant Revoke before native Allow invocation cannot recreate permission', async () => {
-  const p = permission(); let revoked = false, revoking;
+  const p = await permission(); let revoked = false, revoking;
   const unsubscribe = p.controller.subscribe((state) => {
     if (state.pending === 'allow' && !revoked) { revoked = true; revoking = p.controller.revoke(); }
   });
@@ -164,17 +172,19 @@ test('reentrant Revoke before native Allow invocation cannot recreate permission
 });
 
 test('status-only reconnect retains its original API until actual Revoke even after rebinding', async () => {
-  const p = permission(), next = port(); const reading = p.controller.status();
+  const p = await permission(), next = port(); const reading = p.controller.status();
   p.controller.bind(next.api, approval()); p.calls[0].resolve(enabled()); await reading;
   p.controller.acknowledge(true); await p.controller.allow(); assert.equal(next.calls.length, 0);
   const revoking = p.controller.revoke(); assert.deepEqual(p.calls.map((c) => c.kind), ['status', 'revoke']);
   p.calls[1].resolve(disabled()); await revoking;
-  p.controller.acknowledge(true); const allowing = p.controller.allow(); assert.equal(next.calls[0].kind, 'allow');
+  p.controller.acknowledge(true); await p.controller.allow(); assert.equal(next.calls.length, 0);
+  await refresh(p.controller, next); p.controller.acknowledge(true);
+  const allowing = p.controller.allow(); assert.equal(next.calls[0].kind, 'allow');
   next.calls[0].resolve(enabled()); await allowing;
 });
 
 test('lost Allow ACK and changed inputs remain uncertain; status DATA cannot clear that uncertainty', async () => {
-  const p = permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
+  const p = await permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
   p.calls[0].reject(new Error('sensitive-not-rendered')); await allowing;
   const reading = p.controller.status(); p.calls[1].resolve(disabled()); await reading;
   p.controller.acknowledge(true); await p.controller.allow(); assert.equal(p.calls.length, 2); assert.equal(p.controller.getState().uncertain, true);
@@ -186,7 +196,7 @@ test('lost Allow ACK and changed inputs remain uncertain; status DATA cannot cle
 });
 
 test('saturated UI epoch still revokes original permission and suppresses its late Allow ACK', async () => {
-  const p = permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
+  const p = await permission(); p.controller.acknowledge(true); const allowing = p.controller.allow();
   p.controller.epoch = Number.MAX_SAFE_INTEGER; const revoking = p.controller.revoke();
   p.calls[1].resolve(disabled()); await revoking; p.calls[0].resolve(enabled()); await allowing;
   assert.equal(p.controller.getState().access.enabled, false); p.controller.acknowledge(true); await p.controller.allow(); assert.equal(p.calls.length, 2);
@@ -256,4 +266,101 @@ test('actual GUI Start return is retained after terminal before a CLI request ma
   h.calls[1].resolve(status(2, { ...gui, phase: 'starting', intentUsable: false })); await starting;
   assert.equal(h.controller.getSnapshot().status.operation.operationId, id('d')); assert.equal(h.controller.getSnapshot().integrityFailed, false);
   await h.controller.start(id('d'), id('e')); assert.equal(h.calls.length, 2);
+});
+
+
+function signedApproval() {
+  const value = approval(); value.input.artifactValidation = { mode: 'upload-signature', uploadCertificateSha256: Array(32).fill('AF').join(':') };
+  value.input.signing = { mode: 'local-upload-key', assignments: [
+    { kind: 'android-keystore', recordId: id('8'), recordRevision: 1, contextRevision: 2 }] };
+  return value;
+}
+test('signed scope keeps raw policy, exact assigned existing key and a separate one-use consent', async () => {
+  const a = signedApproval(), safe = copyAndroidBuildApproval(a); assert.ok(safe);
+  assert.equal(safe.input.artifactValidation.uploadCertificateSha256, a.input.artifactValidation.uploadCertificateSha256);
+  assert.equal(canonicalAndroidUploadFingerprint(safe.input.artifactValidation.uploadCertificateSha256), 'af'.repeat(32));
+  a.input.signing.assignments[0].recordRevision++; assert.equal(safe.input.signing.assignments[0].recordRevision, 1);
+  assert.ok(Object.isFrozen(safe.input.signing.assignments[0]));
+  const encoded = encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...safe,
+    consentVersion: AGENT_ANDROID_BUILD_SIGNED_CONSENT, expectedPermissionRevision: '9007199254740993' });
+  assert.ok(encoded);
+  assert.equal(JSON.parse(new TextDecoder().decode(encoded)).expectedPermissionRevision, '9007199254740993');
+  for (const [value, consent] of [[safe, AGENT_ANDROID_BUILD_CONSENT], [approval(), AGENT_ANDROID_BUILD_SIGNED_CONSENT]])
+    assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build', { ...value, consentVersion: consent, expectedPermissionRevision: '0' }), null);
+  for (const raw of ['af'.repeat(32) + '\n', ' ' + 'af'.repeat(32), 'af:'.repeat(32), 'af'.repeat(31) + 'ag']) {
+    const v=signedApproval();v.input.artifactValidation.uploadCertificateSha256=raw; assert.equal(copyAndroidBuildApproval(v),null);
+  }
+  const v=signedApproval();v.input.operation='android-candidate-inputs';v.input.action='create';assert.equal(copyAndroidBuildApproval(v),null);
+});
+test('Build MAIN revision is exact full-u64 DATA and old five-field/other API access cannot authorize Allow', async () => {
+  for (const value of ['0','1','9007199254740993','18446744073709551615']) assert.ok(buildPermissionRevision(value));
+  for (const value of ['0\n','1\r','1\u2028','','01','+1','-0','1.0','1e2','18446744073709551616',0]) assert.equal(buildPermissionRevision(value),false);
+  const old = disabled();delete old.permissionRevision;assert.equal(parseAndroidBuildAccess(old),null);
+  const p=port(), controller=new AgentAndroidBuildPermission();controller.bind(p.api,approval());controller.acknowledge(true);
+  await controller.allow();assert.equal(p.calls.length,0);
+  const reading=controller.status();p.calls[0].resolve(disabled('18446744073709551615'));await reading;
+  controller.acknowledge(true);await controller.allow();assert.equal(p.calls.length,1);
+  const revoke=controller.revoke();assert.equal(p.calls[1].kind,'revoke');p.calls[1].reject(new Error('exhausted'));await revoke;
+  assert.equal(controller.getState().uncertain,true);
+});
+test('Revoke before the delayed native first Allow cut cannot recreate either permission or UI authority', async () => {
+  let revision=0n, active=false, received, finish;
+  const original = deferred();
+  const api={status:async()=>disabled(String(revision)), allow:(_input, expected)=>{
+      received=expected; finish=()=>{if(expected!==String(revision))original.reject(new Error('stale revision'));else{active=true;revision++;original.resolve(enabled(String(revision)));}};
+      return original.promise;}, revoke:async()=>{revision++;active=false;return disabled(String(revision));}};
+  const c=new AgentAndroidBuildPermission();c.bind(api,approval());await c.status();c.acknowledge(true);
+  const allowing=c.allow();assert.equal(received,'0');await c.revoke();assert.equal(c.getState().pending,'allow');
+  c.acknowledge(true);assert.equal(c.canAllow(),false);finish();await allowing;
+  assert.equal(active,false);assert.equal(c.getState().access.enabled,false);assert.equal(c.getState().access.permissionRevision,'1');
+  assert.equal(c.getState().uncertain,false);
+});
+test('signed native original can be observed and stopped but its status never creates GUI Start', async (t) => {
+  const signed=operation({},signedApproval().input);signed.context.operation='android-build-sign';
+  assert.ok(parseAndroidBuildStatus(status(3,signed)));
+  const h=await nativeView(t,status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')}))));
+  h.emit(status(3,signed));assert.equal(h.controller.getSnapshot().integrityFailed,false);
+  assert.equal(h.controller.getSnapshot().consent,null);await h.controller.start(id('d'),id('e'));assert.equal(h.calls.length,0);
+  assert.equal(h.controller.cancel(),true);await flush();assert.equal(h.calls[0].kind,'cancel');
+});
+
+
+test('a returned Refresh revision consumes old acknowledgement including acknowledgement during its pending call', async () => {
+  for (const acknowledgeDuringRefresh of [false, true]) {
+    const p = port(), originalAllow = p.api.allow, revisions = [];
+    p.api.allow = (input, expectedRevision) => { revisions.push(expectedRevision); return originalAllow(input); };
+    const { controller } = await permission(p); // Actual first Refresh returned revision zero.
+    controller.acknowledge(true);
+    const reading = controller.status();
+    if (acknowledgeDuringRefresh) controller.acknowledge(true);
+    // Another original Desktop Revoke advanced native permission revision.
+    p.calls[0].resolve(disabled('1')); await reading;
+    assert.equal(controller.getState().acknowledged, false);
+    assert.equal(controller.canAllow(), false);
+    await controller.allow(); assert.equal(p.calls.length, 1);
+    assert.deepEqual(revisions, []);
+    controller.acknowledge(true); const allowing = controller.allow();
+    assert.equal(p.calls[1].kind, 'allow'); assert.deepEqual(revisions, ['1']);
+    p.calls[1].resolve(enabled('2')); await allowing;
+    assert.equal(controller.getState().uncertain, false);
+    assert.equal(controller.getState().access.permissionRevision, '2');
+  }
+  for (const originalKind of ['allow', 'revoke']) {
+    const p = port(), originalAllow = p.api.allow, revisions = [];
+    p.api.allow = (input, expectedRevision) => { revisions.push(expectedRevision); return originalAllow(input); };
+    const { controller } = await permission(p);
+    controller.acknowledge(true);
+    const original = controller[originalKind]();
+    assert.equal(p.calls[0].kind, originalKind);
+    controller.acknowledge(true); // Synchronous/controller reentry while the original Promise remains held.
+    p.calls[0].resolve(originalKind === 'allow' ? enabled('1') : disabled('1')); await original;
+    assert.equal(controller.getState().acknowledged, false, originalKind);
+    assert.equal(controller.canAllow(), false, originalKind);
+    await controller.allow(); assert.equal(p.calls.length, 1, originalKind);
+    controller.acknowledge(true); const next = controller.allow();
+    assert.equal(p.calls[1].kind, 'allow'); assert.equal(revisions.at(-1), '1');
+    p.calls[1].resolve(enabled('2')); await next;
+    assert.equal(controller.getState().uncertain, false);
+    assert.equal(controller.getState().access.permissionRevision, '2');
+  }
 });

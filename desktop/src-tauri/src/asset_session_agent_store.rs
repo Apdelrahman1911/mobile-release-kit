@@ -10,6 +10,9 @@ use crate::{
     service_store_protocol as p, service_store_requests as requests,
 };
 use serde::Deserialize;
+#[path="asset_session_agent_store_permission.rs"]
+pub(crate) mod permission;
+use permission::MainAccess;
 #[path = "asset_session_agent_store_prepare.rs"]
 pub(crate) mod preparation;
 #[path = "asset_session_agent_store_release.rs"]
@@ -23,6 +26,7 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Allow {
+    expected_permission_revision:String,
     kind: p::Kind,
     operation_id: Id,
     owner_generation: Id,
@@ -35,6 +39,11 @@ pub(super) struct Grant {
     approval: Arc<AgentStoreApproval>,
     native: NativeProject,
     stamp: SavedEditStamp,
+}
+impl Grant {
+    pub(in crate::asset_session) fn occupied(&self) -> bool {
+        !self.scope.retired.load(Ordering::Acquire)
+    }
 }
 fn public(e: Error) -> BridgeError {
     super::application_service::public_error(e)
@@ -128,27 +137,32 @@ impl DocumentBinding {
         }
         Ok(())
     }
-    pub(crate) fn agent_store_access(&self, window: &str) -> Result<p::Access, BridgeError> {
+    pub(crate) fn agent_store_access(&self, window: &str) -> Result<MainAccess<p::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.agent_store_service()? {
-            Some(service) => service.store_requests().access().map_err(public),
-            None => Ok(p::Access::empty()),
-        }
+        let _state=self.lock(); // Revision and Access are ONE original Doc snapshot.
+        let revision=self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
+        let access=match self.agent_store_service()? {
+            Some(service)=>service.store_requests().access().map_err(public)?,
+            None=>p::Access::empty(),
+        };
+        Ok(MainAccess::new(access,revision))
     }
     pub(crate) fn allow_agent_store(
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<p::Access, BridgeError> {
+    ) -> Result<MainAccess<p::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
+        let expected=permission::parse(&args.expected_permission_revision).map_err(public)?;
         let (native, stamp, approval, epoch) = {
             let mut state = self.lock();
+            permission::next(&self.inner.agent_store_revoke_epoch,expected).map_err(public)?;
             self.service_document_gate(&state)?;
-            if state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || state
+            if state.agent_local_history.as_ref().is_some_and(|g|!g.scope.retired.load(Ordering::Acquire)||g.scope.control.first().is_err()) || state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || state
                 .agent_store_grant
                 .as_ref()
                 .is_some_and(|g| !g.scope.retired.load(Ordering::Acquire))
@@ -183,11 +197,7 @@ impl DocumentBinding {
                 .bridge
                 .edits
                 .saved_registration_guard(&self.inner.session_identity)?;
-            let epoch = self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
-            if epoch == u64::MAX {
-                return Err(public(Error::StateUnknown));
-            }
-            (native, edit.stamp()?, approval, epoch)
+            (native, edit.stamp()?, approval, expected)
         };
         // Genuine Host/Store IO only OFF Doc/Edit/Saved locks. No startup,
         // Read grant creation or credential discovery is hidden in Allow.
@@ -220,8 +230,9 @@ impl DocumentBinding {
         }
         let grant_id = Id::random().map_err(public)?;
         let mut state = self.lock();
+        permission::next(&self.inner.agent_store_revoke_epoch,epoch).map_err(public)?;
         self.service_document_gate(&state)?;
-        if state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || self.inner.agent_store_revoke_epoch.load(Ordering::Acquire) != epoch
+        if state.agent_local_history.as_ref().is_some_and(|g|!g.scope.retired.load(Ordering::Acquire)||g.scope.control.first().is_err()) || state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || self.inner.agent_store_revoke_epoch.load(Ordering::Acquire) != epoch
             || self.store_delegate_gate(&state, args.kind)
                 != crate::local_store_preflight_protocol::Availability::Available
             || state
@@ -269,6 +280,7 @@ impl DocumentBinding {
         }
         // This small link attaches to the existing Prepared before publication.
         // If any subsequent return is lost, the original stays linked/stoppable.
+        let revision=permission::consume(&self.inner.agent_store_revoke_epoch,epoch).map_err(public)?;
         let binding = self
             .store_delegate_owner(args.kind)
             .bind_store_approval(approval.clone(), scope.clone())?;
@@ -281,7 +293,7 @@ impl DocumentBinding {
         });
         state.agent_store_grant = Some(grant.clone());
         match service.store_requests().allow(scope, grant_id) {
-            Ok(access) => Ok(access),
+            Ok(access) => Ok(MainAccess::new(access,revision)),
             Err(e) => {
                 self.store_delegate_owner(args.kind).stop_agent_store(
                     &grant.binding,
@@ -292,32 +304,17 @@ impl DocumentBinding {
             }
         }
     }
-    pub(crate) fn revoke_agent_store(&self, window: &str) -> Result<p::Access, BridgeError> {
-        if window != MAIN {
-            return Err(BridgeError::invalid());
-        }
-        let state = self.lock();
-        let at = Instant::now();
-        // Before off-Doc Allow can install anything, including first Allow.
-        let advanced = self
-            .inner
-            .agent_store_revoke_epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |e| e.checked_add(1))
-            .map_err(|_| public(Error::StateUnknown));
-        if let Some(g) = &state.agent_store_grant {
-            self.store_delegate_owner(g.scope.review.kind)
-                .stop_agent_store(&g.binding, p::Reason::PermissionRevoked, at);
-        }
-        if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::PermissionRevoked,at);}
-        let result = match self.agent_store_service() {
-            Ok(Some(s)) => s
-                .store_requests()
-                .revoke(p::Reason::PermissionRevoked, at)
-                .map_err(public),
-            Ok(None) => Ok(p::Access::empty()),
-            Err(e) => Err(e),
-        };
-        advanced.and(result)
+    pub(crate) fn revoke_agent_store(&self, window:&str)->Result<MainAccess<p::Access>,BridgeError>{
+        if window!=MAIN{return Err(BridgeError::invalid());}
+        let at=Instant::now(); // Original invocation, not time spent waiting for Doc.
+        let state=self.lock();let mut result=Ok(p::Access::empty());
+        let revision=permission::revoke(&self.inner.agent_store_revoke_epoch,at,|at|{
+            if let Some(g)=&state.agent_store_grant{self.store_delegate_owner(g.scope.review.kind).stop_agent_store(&g.binding,p::Reason::PermissionRevoked,at);}
+            if let Some(g)=&state.agent_local_history{self.stop_history_grant(g,p::Reason::PermissionRevoked,at);}
+            if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::PermissionRevoked,at);}
+            result=match self.agent_store_service(){Ok(Some(s))=>s.store_requests().revoke(p::Reason::PermissionRevoked,at).map_err(public),Ok(None)=>Ok(p::Access::empty()),Err(e)=>Err(e)};
+        }).map_err(public);
+        revision.and_then(|revision|result.map(|access|MainAccess::new(access,revision)))
     }
     fn admit_agent_store(
         &self,
@@ -449,12 +446,17 @@ impl DocumentBinding {
             Err(_) => service.store_requests().fence(),
         }
         self.tick_store_preparation(&service);
+        self.tick_agent_local_history(&service);
         let _ = flush(&service);
     }
     pub(crate) fn agent_store_relay_lost(&self) {
-        if let Ok(Some(s)) = self.agent_store_service() {
-            s.store_requests().fence();
-        }
+        let at=Instant::now();let state=self.lock();
+        permission::relay_lost(&self.inner.agent_store_revoke_epoch,at,|at|{
+            if let Some(g)=&state.agent_store_grant{self.store_delegate_owner(g.scope.review.kind).stop_agent_store(&g.binding,p::Reason::CleanupUnknown,at);}
+            if let Some(g)=&state.agent_local_history{self.stop_history_grant(g,p::Reason::CleanupUnknown,at);}
+            if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::CleanupUnknown,at);}
+            if let Ok(Some(s))=self.agent_store_service(){s.store_requests().fence();}
+        });
     }
     /// Called only after same Saved owners and original relay joins on exit.
     pub(crate) fn drain_agent_store_for_exit(&self) {
@@ -506,6 +508,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         history.returned(result)?;
     }
     preparation::flush_preparation(service)?;
+    super::agent_local_history::flush(service)?;
     service.native_history_current()?;
     returned.known = true;
     Ok(())

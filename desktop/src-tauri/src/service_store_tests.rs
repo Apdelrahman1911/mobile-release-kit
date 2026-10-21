@@ -409,3 +409,6 @@ mod release_tests;
 
 #[path = "service_store_prepare_tests.rs"]
 mod preparation_tests;
+
+#[path="service_local_history_tests.rs"]
+mod local_history_tests;

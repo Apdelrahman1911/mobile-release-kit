@@ -14,7 +14,7 @@ impl LocalHistoryConsent {
     fn matches_context(&self,context:&wire::Context)->bool{
         context.valid()&&self.platform==context.platform&&self.action==context.action&&self.project_id==context.project_id&&self.candidate_operation_id==context.candidate_operation_id&&self.stage_operation_id==context.stage_operation_id
     }
-    fn matches(&self,document:&Arc<Inner>,state:&DocumentState,registration:u32,root:&asset_source::RegisteredRoot)->bool{
+    pub(in crate::asset_session) fn matches(&self,document:&Arc<Inner>,state:&DocumentState,registration:u32,root:&asset_source::RegisteredRoot)->bool{
         self.document.upgrade().is_some_and(|original|Arc::ptr_eq(&original,document))
             && self.selection_matches(state,registration,root)
     }
@@ -68,7 +68,7 @@ impl DocumentBinding {
     pub(crate) fn cancel_local_release_history(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
         let state=self.lock();self.inner.bridge.local_history.cancel(&args.operation_id,&args.owner_generation,self.local_history_gate(&state))
     }
-    fn local_history_gate(&self,state:&DocumentState)->wire::Availability{
+    pub(in crate::asset_session) fn local_history_gate(&self,state:&DocumentState)->wire::Availability{
         use wire::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
             || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || self.inner.bridge.apple_provisioning.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())

@@ -110,6 +110,7 @@ fn quote_with(c: Cells) -> Option<Quote> {
         return None; // The proof is for the unchanged original eight, not a new cap.
     }
     crate::service_github_action_requests::retained_document_backing()?;
+    crate::service_store_requests::history::retained_document_backing()?;
     let common = common(c)?;
     let small = sum(&[
         metadata::INPUT_NODES.checked_mul(1024)?,
@@ -130,12 +131,14 @@ fn quote_with(c: Cells) -> Option<Quote> {
         crate::agent_android_build::REPORT_LIMIT
             .checked_add(crate::agent_build_requests::STATUS_HEAP_BYTES)?,
         crate::service_version_reserve_requests::IPC_WORKER_BACKING,
+        crate::service_version_reserve_review_requests::IPC_WORKER_BACKING,
         crate::service_play_cleanup_requests::IPC_WORKER_BACKING,
         crate::service_upload_key_requests::IPC_WORKER_BACKING,
         crate::service_version_edit_requests::IPC_WORKER_BACKING,
         crate::service_version_edit_prepare_requests::IPC_WORKER_BACKING,
         crate::service_configuration_requests::IPC_WORKER_BACKING,
         crate::service_metadata_images_requests::IPC_WORKER_BACKING,
+        crate::service_store_requests::history::IPC_WORKER_BACKING,
         crate::service_tool_setup_requests::IPC_WORKER_BACKING,
         crate::service_apple_provisioning_protocol::IPC_WORKER_BACKING,
         crate::service_github_action_protocol::IPC_WORKER_BACKING,
@@ -278,6 +281,7 @@ mod tests {
         let old_small = [
             crate::service_git_requests::IPC_WORKER_BACKING,
             crate::service_version_reserve_requests::IPC_WORKER_BACKING,
+        crate::service_version_reserve_review_requests::IPC_WORKER_BACKING,
             crate::service_play_cleanup_requests::IPC_WORKER_BACKING,
             crate::service_upload_key_requests::IPC_WORKER_BACKING,
             crate::service_version_edit_requests::IPC_WORKER_BACKING,

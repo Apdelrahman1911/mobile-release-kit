@@ -1,0 +1,1711 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -9,12 +9,13 @@
+   },
+   "scripts": {
+     "test:github-pr-mode": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/github-pull-request-mode.test.mjs",
++    "test:github-activity-delegation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/github-activity-delegation.test.mjs",
+     "test:agent-github-actions": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-github-actions.test.mjs",
+     "test:agent-store-release": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-release.test.mjs",
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs"
+   },
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -630,12 +630,12 @@
+   actionsRetryRef.current = githubActionsRetry;
+   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
+   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
+-    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
+-    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
++    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
++    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
+     current:()=>{const service=pathService.current;return {
+       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
+       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
+-      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
++      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
+       blockedReason:agentGithubActionAdmission.current(),
+     };},
+   }));
+diff --git a/desktop/src/agentGithubActionAccess.ts b/desktop/src/agentGithubActionAccess.ts
+--- a/desktop/src/agentGithubActionAccess.ts
++++ b/desktop/src/agentGithubActionAccess.ts
+@@ -1,26 +1,29 @@
+-// Closed comparison DATA for three existing mutations, never native consent.
++// Closed comparison DATA, never native consent.
++import { permissionRevision, parseGithubActivitySelection, parseGithubActivityReference, sameGithubActivitySelection, sameGithubActivityReference, parseGithubActivitySnapshot } from './githubActivityDelegation.ts';
++import type { GithubActivitySelection, GithubActivityReference, GithubActivitySnapshot } from './githubActivityDelegation.ts';
+ import { parseGithubPublicationSelection, parseGithubPublicationReference, sameGithubPublicationSelection, sameGithubPublicationReference, githubPublicationEffect } from './githubPublicationDelegation.ts';
+ import type { GithubPublicationSelection, GithubPublicationReference } from './githubPublicationDelegation.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { connectionKeys as keys, sameConnectionData as same } from './githubConnectionProtocol.ts';
+-export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile'] as const;
++export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview'] as const;
+ export type GithubActionKind = typeof GITHUB_ACTION_KINDS[number];
+ interface PreparedSelection { readonly kind:'repository-create'|'draft-pr-create'|'pr-create'|'failed-jobs-retry'; readonly sessionId:string; readonly consentId:string; readonly expectedRevision:number }
+-export type GithubActionSelection = PreparedSelection | GithubPublicationSelection;
+-export type GithubActionReview = (PreparedSelection & { readonly preparedSha256:string }) | GithubPublicationReference;
++export type GithubActionSelection = PreparedSelection | GithubPublicationSelection | GithubActivitySelection;
++export type GithubActionReview = (PreparedSelection & { readonly preparedSha256:string }) | GithubPublicationReference | GithubActivityReference;
+ export interface GithubActionQuery { readonly projectId:string; readonly serviceInstance:string; readonly requestId:string }
+ export interface GithubActionStatus {
+   readonly origin:GithubActionQuery; readonly grantId:string; readonly review:GithubActionReview; readonly revision:number;
+   readonly state:'queued'|'starting'|'running'|'stopping'|'finishing'|'complete'|'refused'|'cancelled'|'unknown';
+   readonly settlement:'pending'|'settled'|'unknown'; readonly operationId:string|null; readonly reason:string;
+   readonly effect:'none'|'branch-observed'|'draft-pr-observed'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'unresolved'|'found-unattributed'|'accepted-unconfirmed'|'accepted'|'advanced-unattributed';
+-  readonly neverAdmitted:boolean; readonly doNotReplay:true;
++  readonly neverAdmitted:boolean; readonly doNotReplay:true; readonly snapshot?:GithubActivitySnapshot;
+ }
+ export interface AgentGithubActionAccess {
++  readonly permissionRevision:string;
+   readonly serviceInstance:string|null; readonly projectId:string|null; readonly grantId:string|null; readonly review:GithubActionReview|null;
+   readonly enabled:boolean; readonly remainingMs:number; readonly consumed:boolean; readonly pending:boolean; readonly unknown:boolean; readonly status:GithubActionStatus|null;
+ }
+-export interface AgentGithubActionPort {access():Promise<unknown>;allow(selection:GithubActionSelection):Promise<unknown>;revoke():Promise<unknown>;request(query:GithubActionQuery):Promise<unknown>}
++export interface AgentGithubActionPort {access():Promise<unknown>;allow(selection:GithubActionSelection,expectedPermissionRevision:string):Promise<unknown>;revoke():Promise<unknown>;request(query:GithubActionQuery):Promise<unknown>}
+ // Each method closes over the SAME existing controller Review/Original. This
+ // interface cannot manufacture a native Start, retirement or provider receipt.
+ export interface GithubActionDelegate {
+@@ -32,6 +35,7 @@
+ const hex=(v:unknown,n:number):v is string=>typeof v==='string'&&v.length===n&&!/[^a-f0-9]/.test(v);
+ const number=(v:unknown,a:number,b:number):v is number=>typeof v==='number'&&Number.isSafeInteger(v)&&!Object.is(v,-0)&&v>=a&&v<=b;
+ function selection(v:unknown,review=false):v is GithubActionSelection {
++  if(v&&typeof v==='object'&&('kind' in v)&&v.kind==='activity-overview')return !!(review?parseGithubActivityReference(v):parseGithubActivitySelection(v));
+   if(v&&typeof v==='object'&&('kind' in v)&&(v.kind==='setup-publish'||v.kind==='setup-reconcile'))return !!(review?parseGithubPublicationReference(v):parseGithubPublicationSelection(v));
+   return keys(v,['kind','sessionId','consentId','expectedRevision',...(review?['preparedSha256']:[])])&&one(v.kind,['repository-create','draft-pr-create','pr-create','failed-jobs-retry'])&&
+     typeof v.sessionId==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(v.sessionId)&&hex(v.consentId,32)&&number(v.expectedRevision,1,0xffff_fffe)&&(!review||hex(v.preparedSha256,64));
+@@ -40,27 +44,34 @@
+ function freeze<T>(v:T):T {if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;}
+ export function parseGithubActionSelection(raw:unknown):GithubActionSelection|null {try{const v=copyBoundedComparisonData(raw,512,16);return selection(v)?freeze(v):null;}catch{return null;}}
+ export function sameGithubActionSelection(a:GithubActionSelection|null,b:GithubActionSelection|null):boolean {
++  if(a?.kind==='activity-overview'||b?.kind==='activity-overview')return a?.kind==='activity-overview'&&b?.kind==='activity-overview'&&sameGithubActivitySelection(a,b);
+   if(a?.kind==='setup-reconcile'||a?.kind==='setup-publish')return b?.kind==='setup-reconcile'||b?.kind==='setup-publish'?sameGithubPublicationSelection(a,b):false;
+   return !!a&&!!b&&b.kind!=='setup-reconcile'&&a.kind===b.kind&&a.sessionId===b.sessionId&&a.consentId===b.consentId&&a.expectedRevision===b.expectedRevision;
+ }
+ export const sameGithubActionReview=(a:GithubActionReview|null,b:GithubActionReview|null):boolean=>{
++  if(a?.kind==='activity-overview'||b?.kind==='activity-overview')return a?.kind==='activity-overview'&&b?.kind==='activity-overview'&&sameGithubActivityReference(a,b);
+   if(a?.kind==='setup-reconcile'||a?.kind==='setup-publish')return b?.kind==='setup-reconcile'||b?.kind==='setup-publish'?sameGithubPublicationReference(a,b):false;
+   return sameGithubActionSelection(a,b)&&!!a&&!!b&&b.kind!=='setup-reconcile'&&a.preparedSha256===b.preparedSha256;
+ };
+-const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-'};
++const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-','activity-overview':'github-activity-'};
+ function operation(v:unknown,k:GithubActionKind):v is string {
+   if(typeof v!=='string'||!v.startsWith(prefixes[k]))return false;const n=v.slice(prefixes[k].length);
+   return /^[1-9][0-9]{0,19}$/.test(n)&&BigInt(n)<=18446744073709551615n;
+ }
+ const reasons=['none','user-cancelled','permission-revoked','expired','context-changed','shutdown','busy','unavailable','native-refused','cleanup-unknown','history-unavailable'];
+ function status(v:unknown):v is GithubActionStatus {
+-  if(!keys(v,['origin','grantId','review','revision','state','settlement','operationId','reason','effect','neverAdmitted','doNotReplay'])||!query(v.origin)||!githubActionId(v.grantId)||
++  if(!keys(v,['origin','grantId','review','revision','state','settlement','operationId','reason','effect','neverAdmitted','doNotReplay',...(v&&typeof v==='object'&&'snapshot' in v?['snapshot']:[])])||!query(v.origin)||!githubActionId(v.grantId)||
+     !selection(v.review,true)||!number(v.revision,1,0xffff_fffe)||v.doNotReplay!==true||typeof v.neverAdmitted!=='boolean'||!one(v.reason,reasons)||
+     !one(v.state,['queued','starting','running','stopping','finishing','complete','refused','cancelled','unknown'])||!one(v.settlement,['pending','settled','unknown'])||
+     v.operationId!==null&&!operation(v.operationId,v.review.kind))return false;
+-  const initial=v.review.kind==='setup-reconcile'?'none':'not-sent';
++  const activity=v.review.kind==='activity-overview';
++  if(activity){
++    if(v.state==='complete'){if(!parseGithubActivitySnapshot(v.snapshot,v.review as GithubActivityReference))return false;}
++    else if('snapshot' in v)return false;
++  }else if('snapshot' in v||new TextEncoder().encode(JSON.stringify(v)).length>2048)return false;
++  const initial=v.review.kind==='setup-reconcile'||activity?'none':'not-sent';
+   const effects=['not-sent','potentially-applied','unresolved',...(v.review.kind==='failed-jobs-retry'?['accepted-unconfirmed','accepted','advanced-unattributed']:['created-observed','found-unattributed']),...((v.review.kind==='draft-pr-create'||v.review.kind==='pr-create')?['acknowledged-unconfirmed']:[])];
+-  const effectValid=v.review.kind==='setup-publish'||v.review.kind==='setup-reconcile'?githubPublicationEffect(v.review.kind,v.effect):one(v.effect,effects);
++  const effectValid=activity?v.effect==='none':v.review.kind==='setup-publish'||v.review.kind==='setup-reconcile'?githubPublicationEffect(v.review.kind,v.effect):one(v.effect,effects);
+   if(!effectValid||v.effect!==initial&&v.operationId===null)return false;
+   const terminal=one(v.state,['complete','refused','cancelled']);
+   if(terminal!==(v.settlement==='settled')||(v.state==='unknown')!==(v.settlement==='unknown')||
+@@ -69,11 +80,11 @@
+     v.state==='complete'&&(v.reason!=='none'||v.operationId===null||v.neverAdmitted)||one(v.state,['refused','cancelled'])&&v.reason==='none')return false;
+   return true;
+ }
+-export function parseGithubActionStatus(raw:unknown):GithubActionStatus|null {try{const v=copyBoundedComparisonData(raw,2048,64);return status(v)?freeze(v):null;}catch{return null;}}
++export function parseGithubActionStatus(raw:unknown):GithubActionStatus|null {try{const v=copyBoundedComparisonData(raw,8192,700);return status(v)?freeze(v):null;}catch{return null;}}
+ export function parseAgentGithubActionAccess(raw:unknown):AgentGithubActionAccess|null {
+   try{
+-    const v=copyBoundedComparisonData(raw,4096,96);
+-    if(!keys(v,['serviceInstance','projectId','grantId','review','enabled','remainingMs','consumed','pending','unknown','status'])||!['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean')||!number(v.remainingMs,0,120000))return null;
++    const v=copyBoundedComparisonData(raw,8192,750);
++    if(!keys(v,['serviceInstance','projectId','grantId','review','enabled','remainingMs','consumed','pending','unknown','status','permissionRevision'])||!permissionRevision(v.permissionRevision)||!['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean')||!number(v.remainingMs,0,120000))return null;
+     const present=[v.serviceInstance,v.projectId,v.grantId].every(githubActionId)&&selection(v.review,true);
+     if(!present&&![v.serviceInstance,v.projectId,v.grantId,v.review].every(x=>x===null)||v.enabled!==(present&&!v.consumed&&!v.pending&&!v.unknown&&v.remainingMs>0)||
+       !v.enabled&&v.remainingMs!==0||v.consumed!==(v.status!==null)||!present&&(v.pending||v.unknown||v.consumed))return null;
+@@ -82,11 +93,11 @@
+     return freeze(v) as unknown as AgentGithubActionAccess;
+   }catch{return null;}
+ }
+-const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1'};
++const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1','activity-overview':'agent-activity-overview-once-v1'};
+ export function createAgentGithubActionPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentGithubActionPort {
+   const send=(name:string,body:object)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));if(bytes.length>1024)throw new Error('Invalid GitHub delegation DATA');return invoke(name,bytes);};
+-  return Object.freeze({access:()=>send('agent_github_action_access',{}),revoke:()=>send('revoke_agent_github_action',{}),allow:(raw:GithubActionSelection)=>{
+-    const s=parseGithubActionSelection(raw);if(!s)throw new Error('Invalid GitHub selection');return send('allow_agent_github_action',{selection:s,consentVersion:consents[s.kind]});
++  return Object.freeze({access:()=>send('agent_github_action_access',{}),revoke:()=>send('revoke_agent_github_action',{}),allow:(raw:GithubActionSelection,revision:string)=>{
++    const s=parseGithubActionSelection(raw);if(!s||!permissionRevision(revision)||revision==='18446744073709551615')throw new Error('Invalid GitHub selection');return send('allow_agent_github_action',{selection:s,consentVersion:consents[s.kind],expectedPermissionRevision:revision});
+   },request:(raw:GithubActionQuery)=>{const q=copyBoundedComparisonData(raw,512,8);if(!query(q))throw new Error('Invalid GitHub request address');return send('agent_github_action_request_status',q);}});
+ }
+ export function githubActionCommands(a:AgentGithubActionAccess|null,s:GithubActionStatus|null):readonly string[] {
+diff --git a/desktop/src/agentGithubActionAccessController.ts b/desktop/src/agentGithubActionAccessController.ts
+--- a/desktop/src/agentGithubActionAccessController.ts
++++ b/desktop/src/agentGithubActionAccessController.ts
+@@ -1,8 +1,8 @@
+ import { GITHUB_ACTION_KINDS, parseAgentGithubActionAccess, parseGithubActionSelection, parseGithubActionStatus, sameGithubActionReview, sameGithubActionSelection } from './agentGithubActionAccess.ts';
+ import type { AgentGithubActionAccess, AgentGithubActionPort, GithubActionDelegate, GithubActionKind, GithubActionQuery, GithubActionReview, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
+ export interface AgentGithubActionContext {port:AgentGithubActionPort|null;nativeSession:object|null;projectId:string|null;epoch:object;preview:boolean;blockedReason:string|null;reviews:readonly GithubActionSelection[]}
+-interface Origin {context:AgentGithubActionContext;selection:GithubActionSelection;delegate:GithubActionDelegate|null;sent:boolean;revoked:boolean;withdrawn:boolean;grant:{id:string;project:string;instance:string;review:GithubActionReview}|null;query:GithubActionQuery|null;status:GithubActionStatus|null}
+-interface Work {kind:'allow'|'check'|'revoke';context:AgentGithubActionContext;origin:Origin|null;original:Promise<unknown>|null;completion:Promise<void>;finish():void}
++interface Origin {permissionRevision:string;context:AgentGithubActionContext;selection:GithubActionSelection;delegate:GithubActionDelegate|null;sent:boolean;revoked:boolean;withdrawn:boolean;grant:{id:string;project:string;instance:string;review:GithubActionReview}|null;query:GithubActionQuery|null;status:GithubActionStatus|null}
++interface Work {expectedPermissionRevision:string|null;kind:'allow'|'check'|'revoke';context:AgentGithubActionContext;origin:Origin|null;original:Promise<unknown>|null;completion:Promise<void>;finish():void}
+ export interface AgentGithubActionView {selected:GithubActionKind;review:GithubActionSelection|null;acknowledged:boolean;access:AgentGithubActionAccess|null;status:GithubActionStatus|null;pending:'allow'|'check'|null;revoking:boolean;withdrawn:boolean;stale:boolean;unknown:boolean;issue:string|null}
+ const missing={};
+ const absent=():AgentGithubActionContext=>({port:null,nativeSession:null,projectId:null,epoch:missing,preview:false,blockedReason:null,reviews:[]});
+@@ -13,7 +13,8 @@
+  * automatic read/retry, native Start or public-status-derived permission. */
+ export class AgentGithubActionAccessController {
+   private context=absent();private origin:Origin|null=null;private normal:Work|null=null;private revokeWork:Work|null=null;private disposed=false;
+-  private consent:{context:AgentGithubActionContext;selection:GithubActionSelection}|null=null;
++  private consent:{context:AgentGithubActionContext;selection:GithubActionSelection;revision:string}|null=null;
++  private accessWitness:{context:AgentGithubActionContext;revision:string}|null=null;
+   private readonly listeners=new Set<()=>void>();
+   private state:AgentGithubActionView=Object.freeze({selected:'repository-create',review:null,acknowledged:false,access:null,status:null,pending:null,revoking:false,withdrawn:false,stale:true,unknown:false,issue:null});
+   private readonly source:{current():AgentGithubActionContext;syncOriginal():void;delegate(selection:GithubActionSelection):GithubActionDelegate|null};
+@@ -23,7 +24,7 @@
+   whenSettled=()=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
+   private read():AgentGithubActionContext {
+     try{const c=this.source.current(),p=c.port;
+-      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>5)return absent();
++      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>6)return absent();
+       const reviews=c.reviews.map(parseGithubActionSelection).filter((r):r is GithubActionSelection=>r!==null);
+       if(new Set(reviews.map(r=>r.kind)).size!==reviews.length)return absent();
+       return {...c,port:p&&['access','allow','request','revoke'].every(k=>typeof p[k as keyof AgentGithubActionPort]==='function')?p:null,
+@@ -37,7 +38,7 @@
+   syncContext=():void=>{
+     if(this.disposed)return;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected)??null;
+     const changed=!same(c,this.context)||!sameGithubActionSelection(r,this.state.review)&&!(r===null&&this.state.review===null);
+-    this.context=c;if(changed){this.consent=null;this.patch({review:r,acknowledged:false,stale:this.origin?!same(c,this.origin.context):true});}
++    if(!same(c,this.context))this.accessWitness=null;this.context=c;if(changed){this.consent=null;this.patch({review:r,acknowledged:false,stale:this.origin?!same(c,this.origin.context):true});}
+   };
+   private usable(c:AgentGithubActionContext):string|null{return c.preview?'Unavailable in preview.':!c.port||!c.nativeSession?'Use the installed Desktop with the original project READ permission.':null;}
+   ownerReason=():string|null=>this.state.unknown?uncertain:this.normal||this.revokeWork?'An original GitHub permission caller is returning.':
+@@ -50,17 +51,17 @@
+   choose(kind:GithubActionKind):boolean {if(this.disposed||!GITHUB_ACTION_KINDS.includes(kind)||this.ownerReason())return false;this.consent=null;this.patch({selected:kind,acknowledged:false});this.syncContext();return true;}
+   consentReason():string|null {
+     const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);
+-    return this.disposed?'This controller is closed.':this.ownerReason()??this.usable(c)??c.blockedReason??(!c.projectId||!r?'Use the original action panel to finish its exact Review first.':null);
++    return this.disposed?'This controller is closed.':this.ownerReason()??this.usable(c)??c.blockedReason??(!c.projectId||!r?'Use the original action panel to finish its exact Review, or connect Activity, first.':null)??(!this.accessWitness||!same(c,this.accessWitness.context)?'Check the original CLI permission before confirming Allow.':this.accessWitness.revision==='18446744073709551615'?'The original permission revision is exhausted. Check and Stop remain available.':null);
+   }
+   allowReason():string|null {const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected)??null;return this.consentReason()??
+-    (!this.consent||!same(c,this.consent.context)||!sameGithubActionSelection(r,this.consent.selection)?'Confirm one local CLI submission of this exact reviewed action or GET-only reconciliation.':null);}
++    (!this.consent||!same(c,this.consent.context)||!sameGithubActionSelection(r,this.consent.selection)||this.accessWitness?.revision!==this.consent.revision?'Confirm one local CLI submission of this exact reviewed action or GET-only reconciliation.':null);}
+   acknowledge(value:boolean):boolean {this.syncContext();if(typeof value!=='boolean'||this.disposed||this.normal||this.revokeWork||value&&this.consentReason())return false;
+-    const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);this.consent=value&&r?{context:c,selection:r}:null;this.patch({acknowledged:!!this.consent});return true;}
++    const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);this.consent=value&&r&&this.accessWitness?{context:c,selection:r,revision:this.accessWitness.revision}:null;this.patch({acknowledged:!!this.consent});return true;}
+   private controls():AgentGithubActionContext{return this.origin?.context??this.context;}
+   checkReason():string|null{return this.disposed?'Closed.':this.usable(this.controls())??(this.normal||this.revokeWork?'Wait for the original permission caller.':null);}
+   revokeReason():string|null{return this.disposed?'Closed.':this.usable(this.controls())??(this.revokeWork?'The original Revoke is returning.':!this.origin&&!this.state.access?.grantId?'No original permission is observed.':null);}
+   private begin(kind:Work['kind'],c:AgentGithubActionContext,o:Origin|null):Work {let finish!:()=>void;const completion=new Promise<void>(r=>{finish=r;});
+-    const w:Work={kind,context:c,origin:o,original:null,completion,finish};if(kind==='revoke')this.revokeWork=w;else this.normal=w;this.consent=null;this.patch({acknowledged:false});return w;}
++    const w:Work={kind,context:c,origin:o,expectedPermissionRevision:kind==='allow'?o?.permissionRevision??null:null,original:null,completion,finish};if(kind==='revoke')this.revokeWork=w;else this.normal=w;this.consent=null;this.patch({acknowledged:false});return w;}
+   private finish(w:Work):void {if(this.normal===w)this.normal=null;if(this.revokeWork===w)this.revokeWork=null;this.patch();w.finish();}
+   private unknown():void {this.consent=null;this.patch({unknown:true,issue:uncertain,stale:true,acknowledged:false});this.origin?.delegate?.uncertain();}
+   private current(w:Work):boolean{return !this.disposed&&same(w.context,this.read())&&(w.kind==='revoke'?this.revokeWork===w:this.normal===w);}
+@@ -78,15 +79,15 @@
+     o.query=s.origin;o.status=s;return true;
+   }
+   async allow():Promise<boolean> {
+-    this.source.syncOriginal();this.syncContext();if(this.allowReason())return false;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);if(!r)return false;
+-    const o:Origin={context:c,selection:r,delegate:null,sent:false,revoked:false,withdrawn:false,grant:null,query:null,status:null};this.origin=o;
+-    const w=this.begin('allow',c,o);this.patch({access:null,status:null,stale:true});let sent=false;
++    this.source.syncOriginal();this.syncContext();if(this.allowReason())return false;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);if(!r||!this.consent)return false;const revision=this.consent.revision;
++    const o:Origin={permissionRevision:revision,context:c,selection:r,delegate:null,sent:false,revoked:false,withdrawn:false,grant:null,query:null,status:null};this.origin=o;
++    this.accessWitness=null;const w=this.begin('allow',c,o);this.patch({access:null,status:null,stale:true});let sent=false;
+     try{
+       this.source.syncOriginal();const live=this.read();if(!this.current(w)||o.revoked||live.blockedReason||!sameGithubActionSelection(r,live.reviews.find(x=>x.kind===r.kind)??null))return false;
+       o.delegate=this.source.delegate(r);
+       if(!o.delegate||!o.delegate.current()||!this.current(w)||o.revoked||this.read().blockedReason)return false;
+-      sent=true;o.sent=true;const raw=await this.returned(w,()=>c.port!.allow(r));const a=parseAgentGithubActionAccess(raw);
+-      if(!a||!this.acceptAccess(a,o)){this.unknown();return true;}
++      sent=true;o.sent=true;const raw=await this.returned(w,()=>c.port!.allow(r,w.expectedPermissionRevision!));const a=parseAgentGithubActionAccess(raw);
++      if(!a||BigInt(a.permissionRevision)!==BigInt(o.permissionRevision)+1n||!this.acceptAccess(a,o)){this.unknown();return true;}
+       if(a.unknown){this.unknown();return true;}
+       o.delegate.allowReturned(); // genuine Allow caller only, never a native Start.
+       if(!this.state.unknown&&!o.revoked)this.patch({access:a,status:o.status,stale:!this.current(w),issue:null});
+@@ -97,7 +98,11 @@
+     return sent;
+   }
+   async check():Promise<boolean> {
+-    this.syncContext();if(this.checkReason())return false;const c=this.controls(),o=this.origin,w=this.begin('check',c,o);
++    this.syncContext();if(this.checkReason())return false;
++    // Only the already-returned old delegate can release this controller for a
++    // NEW Access observation. A copied latest status cannot replace its caller.
++    if(!this.state.unknown&&this.origin?.withdrawn&&this.origin.delegate?.released())this.origin=null;
++    const c=this.controls(),o=this.origin,w=this.begin('check',c,o);
+     try{
+       if(o?.query){
+         const s=parseGithubActionStatus(await this.returned(w,()=>c.port!.request(o.query!)));
+@@ -107,6 +112,10 @@
+       }else{
+         const a=parseAgentGithubActionAccess(await this.returned(w,()=>c.port!.access()));
+         if(!a||o&&!this.acceptAccess(a,o)){this.unknown();return true;}
++        if(!o&&this.current(w)&&!this.revokeWork&&!this.state.unknown){
++          if(this.accessWitness&&same(this.accessWitness.context,c)&&BigInt(a.permissionRevision)<BigInt(this.accessWitness.revision)){this.unknown();return true;}
++          this.accessWitness={context:c,revision:a.permissionRevision};
++        }
+         if(!this.state.unknown)this.patch({access:a,status:o?.status??a.status,stale:!this.current(w),issue:null});
+         if(a.unknown){this.unknown();return true;}
+         if(o&&a.status){
+@@ -122,7 +131,7 @@
+   }
+   async revoke():Promise<boolean> {
+     if(this.revokeReason())return false;const c=this.controls(),o=this.origin;
+-    if(o)o.revoked=true; // latch before publishing listeners or entering raw {} Revoke.
++    this.accessWitness=null;if(o)o.revoked=true; // latch before publishing listeners or entering raw {} Revoke.
+     const w=this.begin('revoke',c,o);
+     try{
+       const a=parseAgentGithubActionAccess(await this.returned(w,()=>c.port!.revoke()));
+diff --git a/desktop/src/components/AgentGithubActionAccess.tsx b/desktop/src/components/AgentGithubActionAccess.tsx
+--- a/desktop/src/components/AgentGithubActionAccess.tsx
++++ b/desktop/src/components/AgentGithubActionAccess.tsx
+@@ -1,9 +1,11 @@
++import { GITHUB_ACTIVITY_NOTICE } from '../githubActivityDelegation.ts';
+ import { useSyncExternalStore } from 'react';
+ import type { AgentGithubActionAccessController } from '../agentGithubActionAccessController.ts';
+ import { GITHUB_ACTION_KINDS, githubActionCommands } from '../agentGithubActionAccess.ts';
+ import type { GithubActionKind } from '../agentGithubActionAccess.ts';
+-const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','pr-create':'Create the reviewed ready-for-review pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent'};
++const labels:Readonly<Record<GithubActionKind,string>>={'repository-create':'Create the reviewed empty repository','draft-pr-create':'Create the reviewed draft pull request','pr-create':'Create the reviewed ready-for-review pull request','failed-jobs-retry':'Retry the reviewed failed and dependent jobs','setup-publish':'Publish the exact five-file setup review','setup-reconcile':'GET-only reconcile the selected original setup intent','activity-overview':'Read a fresh GitHub Activity overview once'};
+ const effects:Readonly<Record<GithubActionKind,string>>={
++  'activity-overview':GITHUB_ACTIVITY_NOTICE,
+   'repository-create':'Creates only the exact reviewed empty GitHub repository with its displayed owner and visibility. No local initialization, files, commit or push.',
+   'draft-pr-create':'Creates the exact same-repository draft PR shown in the original review. Creating even a draft PR can trigger that repository’s CI and existing workflow privileges.',
+   'pr-create':'Creates the exact same-repository READY-FOR-REVIEW PR shown in the original review. Reviewers may be notified and repository workflows can run. This does not approve, merge, convert a draft or authorize a release.',
+@@ -14,14 +16,14 @@
+ export function AgentGithubActionAccess({controller}:{controller:AgentGithubActionAccessController}) {
+   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
+   const commands=githubActionCommands(state.access,state.status);
+-  return <details className="card"><summary>Advanced: let a local CLI use one GitHub review</summary>
+-    <p>Uses the same selected account, native intent, original cleanup and service history. First finish Review in the relevant panel. This permission does not start the action, and ordinary READ access alone never authorizes these actions.</p>
++  return <details className="card"><summary>Advanced: delegate one GitHub action or Activity read</summary>
++    <p>Uses the same selected account, native intent, original cleanup and service history. First finish Review in the relevant panel, or choose a fresh Activity overview after connecting the intended account and repository. This permission does not start the action, and ordinary READ access alone never authorizes these actions.</p>
+     <label>Action <select value={state.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as GithubActionKind)}>
+       {GITHUB_ACTION_KINDS.map(kind=><option key={kind} value={kind}>{labels[kind]}</option>)}
+     </select></label>
+-    <p className="notice">{effects[state.selected]} Stop cannot undo an accepted remote action. Recheck all details in the original visible review.</p>
+-    {state.review&&<p>Original review <code>{state.review.kind==='setup-reconcile'?state.review.marker:state.review.consentId}</code> · native revision {state.review.expectedRevision}. No draft, account token, URL or provider arguments are accepted by the CLI.</p>}
+-    <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact reviewed action or GET-only reconciliation and its displayed effects.</label>
++    <p className="notice">{effects[state.selected]} {state.selected==='activity-overview'?'This separate one-use read consent does not authorize any write.':'Stop cannot undo an accepted remote action. Recheck all details in the original visible review.'}</p>
++    {state.review&&<p>Original review <code>{state.review.kind==='activity-overview'?state.review.sessionId:state.review.kind==='setup-reconcile'?state.review.marker:state.review.consentId}</code> · native revision {state.review.expectedRevision}. No draft, account token, URL or provider arguments are accepted by the CLI.</p>}
++    <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact action, GET-only reconciliation, or fresh Activity overview with its displayed effects.</label>
+     <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this exact action once</button>
+     {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
+     <button disabled={!!controller.checkReason()} onClick={()=>void controller.check()}>Check original CLI permission/request</button>
+@@ -29,7 +31,8 @@
+     {(state.pending||state.revoking)&&<p role="status">The original permission caller is still returning. Do not replace or replay it.</p>}
+     {state.issue&&<p role="alert">{state.issue}</p>}
+     {state.access&&<p>{state.stale?'Earlier context · ':''}{state.status?`${state.status.state} · ${state.status.settlement} · ${state.status.effect}`:state.access.enabled?'One-use permission observed; its original native expiry is unchanged.':'No unused permission observed.'}</p>}
++    {state.status?.snapshot&&<p>Historical Activity · account {state.status.snapshot.accountId}, repository {state.status.snapshot.repositoryId} · {state.status.snapshot.observedAt}. PRs: {state.status.snapshot.pullRequests.state} / {state.status.snapshot.pullRequests.coverage}; runs: {state.status.snapshot.workflowRuns.state} / {state.status.snapshot.workflowRuns.coverage}. Full compact row IDs and statuses are available with <code>github-status --json</code>; no titles, heads, jobs or artifact content.</p>}
+     {commands.length>0&&<><p>Run manually. Keep the request ID printed before submission. A lost response needs the original Status/Cancel, never a new Submit.</p><pre>{commands.join('\n')}</pre></>}
+-    {state.status?.settlement==='settled'&&<p>{state.status.neverAdmitted?'The original relay refused before native registration; no native retirement is claimed.':'The same native owner, Connection acceptance, relay caller and service-history publication returned.'} The effect label is point-in-time evidence, not CI success or permission for another action. Original recovery controls remain in their panel. Read that panel’s local Status to release its retained original; a CLI row alone cannot do so.</p>}
++    {state.status?.settlement==='settled'&&<p>{state.status.neverAdmitted?'The original relay refused before native registration; no native retirement is claimed.':'The same native owner, Connection acceptance, relay caller and service-history publication returned.'} The effect label is point-in-time evidence, not CI success or permission for another action. Original recovery controls remain in their panel. {state.selected==='activity-overview'?'Activity has no GUI-owned Read attempt here; this result is not adopted as a selectable PR or retry input.':'Read that panel’s local Status to release its retained original; a CLI row alone cannot do so.'}</p>}
+   </details>;
+ }
+diff --git a/desktop/src/githubActivityController.ts b/desktop/src/githubActivityController.ts
+--- a/desktop/src/githubActivityController.ts
++++ b/desktop/src/githubActivityController.ts
+@@ -1,3 +1,6 @@
++import type { GithubActionDelegate, GithubActionSelection } from './agentGithubActionAccess.ts';
++import { sameGithubActivitySelection } from './githubActivityDelegation.ts';
++import type { GithubActivitySelection } from './githubActivityDelegation.ts';
+ // Presentation only. The retained native Connection/Setup owner supplies every
+ // result, cancellation and join; navigation never starts a remote read.
+ import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
+@@ -103,6 +106,32 @@
+     try{const promise=o.port.status();if(!(promise instanceof Promise))throw new Error('Original status not retained');w.promise=promise;
+       void promise.then(v=>{this.receive(o,v);},failed).finally(()=>this.finish(w));}catch{failed();this.finish(w);}
+   }
++  /** Comparison only. No fake Prepare or own Read attempt is created. */
++  agentSelection():GithubActivitySelection|null {
++    const o=this.original,c=context(this.connection()),s=o?.status,connection=this.connection();
++    if(this.disposed||this.unknown||this.ownerReason()||!o?.live||o.port!==this.desired||!o.unlisten||!o.fresh||!s?.available||!c||connection.observing||s.sessionId!==c.sessionId||!connection.status)return null;
++    return Object.freeze({kind:'activity-overview',sessionId:c.sessionId,expectedRevision:s.revision,expectedConnectionRevision:connection.status.revision});
++  }
++  delegateOverview(selected:GithubActionSelection):GithubActionDelegate|null {
++    const current=this.agentSelection(),o=this.original,epoch=this.epoch,c=context(this.connection());
++    if(selected.kind!=='activity-overview'||!current||!sameGithubActivitySelection(current,selected)||!o||!c)return null;
++    let returned=false,released=false,unknown=false;
++    const exact=()=>!this.disposed&&!this.unknown&&!unknown&&this.original===o&&o.live&&o.port===this.desired&&epoch===this.epoch&&same(c,context(this.connection()));
++    return {
++      current:()=>exact()&&!!this.agentSelection()&&sameGithubActivitySelection(this.agentSelection()!,selected),
++      allowReturned:()=>{returned=true;},
++      observe:s=>{
++        if(!returned||s.review.kind!=='activity-overview'||!sameGithubActivitySelection(s.review,selected)||s.settlement==='unknown'){unknown=true;return;}
++        // The SAME permission controller calls this only after its original
++        // authenticated Query returned. Activity has NO GUI Read Attempt here:
++        // release only this presentation link, not a fabricated GUI promise or
++        // BoundResult. A later/coalesced Activity view cannot strand this row.
++        if(s.settlement==='settled')released=true;
++      },
++      unusedReturned:()=>{if(returned)released=true;},
++      notSubmitted:()=>{released=true;},uncertain:()=>{unknown=true;},released:()=>released&&!unknown,
++    };
++  }
+   currentResult():ActivityObservation|null{
+     const r=this.result,o=this.original;return r&&!this.disposed&&!this.unknown&&r.owner===o&&o.live&&o.port===this.desired&&o.fresh&&r.epoch===this.epoch&&
+       same(r.context,context(this.connection()))&&same(r.observation,o.status?.result)?r.observation:null;
+diff --git a/desktop/src-tauri/src/asset_session_github_activity.rs b/desktop/src-tauri/src/asset_session_github_activity.rs
+--- a/desktop/src-tauri/src/asset_session_github_activity.rs
++++ b/desktop/src-tauri/src/asset_session_github_activity.rs
+@@ -3,9 +3,15 @@
+ use crate::{github_activity_protocol as p, github_connection_session::activity as s};
+ 
+ pub(crate) struct GitHubActivityGoGate {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     inner: Weak<Inner>,
+ }
+ impl GitHubActivityGoGate {
++    pub(crate) fn agent(&self) -> Option<&Arc<crate::service_github_action_requests::Entry>> { self.agent.as_ref() }
++    pub(crate) fn agent_entering(&self) -> Result<(), BridgeError> {
++        if let Some(e) = &self.agent { e.entering().map_err(application_service::public_error)?; }
++        Ok(())
++    }
+     pub(crate) fn claim(
+         &self,
+         id: &str,
+@@ -73,7 +79,9 @@
+             &root,
+             &edit,
+             Instant::now(),
+-            claim,
++            || { let claimed = claim(); if claimed { if let Some(e) = &self.agent {
++                if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; }
++            }} claimed },
+         )
+     }
+ }
+@@ -135,6 +143,10 @@
+     ) -> Result<p::Status, BridgeError> {
+         let command =
+             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
++        self.github_activity_execute(command, None)
++    }
++    pub(super) fn github_activity_execute(&self, command: p::Command,
++        agent: Option<Arc<crate::service_github_action_requests::Entry>>) -> Result<p::Status, BridgeError> {
+         if matches!(command, p::Command::Status) {
+             return Ok(self.github_activity_status());
+         }
+@@ -200,7 +212,12 @@
+                     p::Reason::Busy
+                 })
+             })?;
++        if let Some(e) = &agent {
++            let p::Command::Read(args) = &command else { return Err(BridgeError::invalid()); };
++            state.github.github_activity_agent_current(e, args, generation, &root, &edit)?;
++        }
+         let gate = GitHubActivityGoGate {
++            agent,
+             inner: Arc::downgrade(&self.inner),
+         };
+         let supervisor = &self.inner.bridge.supervisor;
+diff --git a/desktop/src-tauri/src/github_action_delegation.rs b/desktop/src-tauri/src/github_action_delegation.rs
+--- a/desktop/src-tauri/src/github_action_delegation.rs
++++ b/desktop/src-tauri/src/github_action_delegation.rs
+@@ -12,6 +12,7 @@
+     pub(crate) stamp: SavedEditStamp,
+     pub(crate) end: Instant,
+     pub(crate) data: p::Review,
++    pub(crate) activity: Option<super::activity::delegation::Capture>,
+ }
+ struct Hash {
+     sha: Sha256,
+@@ -51,6 +52,7 @@
+         stamp,
+         end,
+         data,
++        activity: None,
+     })
+ }
+ pub(super) fn origin(scope: &Option<Weak<r::NativeScope>>, entry: Option<&Arc<r::Entry>>) -> bool {
+diff --git a/desktop/src-tauri/src/github_actions_retry_session.rs b/desktop/src-tauri/src/github_actions_retry_session.rs
+--- a/desktop/src-tauri/src/github_actions_retry_session.rs
++++ b/desktop/src-tauri/src/github_actions_retry_session.rs
+@@ -118,6 +118,7 @@
+     pub(super) exhausted: bool,
+ }
+ impl State {
++    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
+     pub(super) fn new() -> Self {
+         Self {
+             view: p::Status {
+diff --git a/desktop/src-tauri/src/github_activity_session.rs b/desktop/src-tauri/src/github_activity_session.rs
+--- a/desktop/src-tauri/src/github_activity_session.rs
++++ b/desktop/src-tauri/src/github_activity_session.rs
+@@ -1,4 +1,6 @@
+ //! One bounded read inside the SAME ConnectionState, Setup supervisor and clock.
++#[path = "service_github_activity_native.rs"]
++pub(crate) mod delegation;
+ use super::*;
+ use crate::{
+     asset_source::RegisteredRoot,
+@@ -70,6 +72,7 @@
+         .unwrap_or_else(|| connection_reason(outcome_error(e)))
+ }
+ struct Active {
++    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
+     ticket: GitHubActivityTicket,
+     request: p::Request,
+     session_id: String,
+@@ -79,6 +82,8 @@
+     stamp: SavedEditStamp,
+ }
+ pub(super) struct State {
++    agent_identity: Arc<()>,
++    agent_permission: Option<delegation::Permission>,
+     view: p::Status,
+     active: Option<Active>,
+     pub(super) exhausted: bool,
+@@ -86,6 +91,8 @@
+ impl State {
+     pub(super) fn new() -> Self {
+         Self {
++            agent_identity: Arc::new(()),
++            agent_permission: None,
+             view: p::Status {
+                 schema_version: 1,
+                 revision: 1,
+@@ -150,6 +157,8 @@
+         }
+     }
+     fn unknown(&mut self) {
++        if let Some(a) = &self.active { super::action_delegation::unknown(&a.agent); }
++        self.revoke_agent();
+         self.stop();
+         self.view.available = false;
+         self.view.reason = p::Reason::CleanupUnknown;
+@@ -162,12 +171,14 @@
+         }
+     }
+     pub(super) fn context_changed(&mut self) {
++        self.revoke_agent();
+         let b = self.view.clone();
+         self.stop();
+         self.view.result = None;
+         self.finish(b);
+     }
+     pub(super) fn retired(&mut self, r: Reason) {
++        self.revoke_agent();
+         let b = self.view.clone();
+         if r == Reason::CleanupUnknown {
+             self.unknown();
+@@ -178,6 +189,7 @@
+         self.finish(b);
+     }
+     pub(super) fn reset(&mut self) {
++        self.revoke_agent();
+         let b = self.view.clone();
+         self.view.result = None;
+         self.view.operation = None;
+@@ -189,7 +201,8 @@
+         {
+             return None;
+         }
+-        self.view.heap()
++        self.view.heap()?.checked_add(2 * std::mem::size_of::<usize>())?
++            .checked_add(self.agent_permission.as_ref().map_or(Some(0), |p| p.heap()?.checked_add(std::mem::size_of::<delegation::Permission>()))?)
+     }
+ }
+ impl ConnectionState {
+@@ -318,7 +331,11 @@
+             return Err(refused(p::Reason::InvalidInput));
+         }
+         p::encode_initial("github-activity-18446744073709551615", &request)?;
+-        let end = (now + Duration::from_secs(60)).min(s.clock.end);
++        let agent = gate.agent().cloned();
++        let end = match &agent {
++            Some(e) => e.activity_end(s.clock.end, now).map_err(crate::asset_session::application_service::public_error)?,
++            None => (now + Duration::from_secs(60)).min(s.clock.end),
++        };
+         let (session_id, project_id) = (s.id.clone(), s.project_id.clone());
+         let retained = self
+             .activity
+@@ -338,7 +355,10 @@
+         if !retained.is_some_and(|n| n <= p::RETAINED_LIMIT) {
+             return Err(refused(p::Reason::ResourcesUnavailable));
+         }
++        if let Some(e) = &agent { self.activity_agent_take(e, &request, generation, &root)?; }
++        else { self.activity.revoke_agent(); }
+         let b = self.activity.view.clone();
++        gate.agent_entering()?;
+         let ticket = supervisor
+             .start_github_activity(request.clone(), gate, end)
+             .map_err(|e| refused(error_reason(&e)))?;
+@@ -367,6 +387,7 @@
+             reason: p::Reason::None,
+         });
+         self.activity.active = Some(Active {
++            agent,
+             ticket,
+             request,
+             session_id: session_id.clone(),
+@@ -437,6 +458,10 @@
+         if self.unknown || self.exhausted || self.activity.exhausted {
+             return Err(refused(p::Reason::CleanupUnknown));
+         }
++        if let Some(e) = &a.agent {
++            e.current(true).map_err(crate::asset_session::application_service::public_error)?;
++            if self.activity_write_review() { return Err(refused(p::Reason::Busy)); }
++        }
+         if self.preflight.native_work_pending()
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+@@ -632,6 +657,8 @@
+         {
+             self.complete_retirement();
+         }
++        if self.unknown { super::action_delegation::unknown(&a.agent); }
++        else { delegation::accepted(&a.agent, a.ticket.operation_id(), reason, self.activity.view.result.as_ref()); }
+     }
+ }
+ 
+diff --git a/desktop/src-tauri/src/github_play_cleanup_session.rs b/desktop/src-tauri/src/github_play_cleanup_session.rs
+--- a/desktop/src-tauri/src/github_play_cleanup_session.rs
++++ b/desktop/src-tauri/src/github_play_cleanup_session.rs
+@@ -93,6 +93,7 @@
+     pub(crate) service: Option<Weak<crate::application_service::ApplicationService>>,
+ }
+ impl State {
++    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
+     pub(super) fn new() -> Self {
+         Self {
+             view: p::Status {
+diff --git a/desktop/src-tauri/src/github_publication_delegation.rs b/desktop/src-tauri/src/github_publication_delegation.rs
+--- a/desktop/src-tauri/src/github_publication_delegation.rs
++++ b/desktop/src-tauri/src/github_publication_delegation.rs
+@@ -243,6 +243,7 @@
+                     stamp: edit.stamp()?,
+                     end: read.end,
+                     data,
++                    activity: None,
+                 })
+             }
+             _ => Err(refused(p::Reason::InvalidInput)),
+diff --git a/desktop/src-tauri/src/github_publication_session.rs b/desktop/src-tauri/src/github_publication_session.rs
+--- a/desktop/src-tauri/src/github_publication_session.rs
++++ b/desktop/src-tauri/src/github_publication_session.rs
+@@ -70,6 +70,7 @@
+     pub(super) exhausted: bool,
+ }
+ impl State {
++    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() || self.pending_read.as_ref().is_some_and(|r| r.agent.is_some()) }
+     pub(super) fn new() -> Self {
+         Self {
+             view: p::Status {
+diff --git a/desktop/src-tauri/src/github_pull_request_session.rs b/desktop/src-tauri/src/github_pull_request_session.rs
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -66,6 +66,7 @@
+     pub(super) exhausted: bool,
+ }
+ impl State {
++    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
+     pub(super) fn new() -> Self {
+         Self {
+             view: p::Status {
+diff --git a/desktop/src-tauri/src/github_repository_create_session.rs b/desktop/src-tauri/src/github_repository_create_session.rs
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -65,6 +65,7 @@
+     pub(super) exhausted: bool,
+ }
+ impl State {
++    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
+     pub(super) fn new() -> Self {
+         Self {
+             view: p::Status {
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -317,12 +317,12 @@
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
+                 "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
+-            "githubActions":{"scope":"one-existing-desktop-prepared-github-action","commands":github_action::COMMANDS,
+-                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile"],"defaultEnabled":false,"oneUse":true,
++            "githubActions":{"scope":"one-desktop-approved-github-action-or-activity-read","commands":github_action::COMMANDS,
++                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview"],"defaultEnabled":false,"oneUse":true,
+                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresExactDesktopConsent":true,
+-                "mutating":true,"readOnlyKinds":["setup-reconcile"],"counterSetup":false,"cliPendingLoad":false,
++                "mutating":true,"readOnlyKinds":["setup-reconcile","activity-overview"],"counterSetup":false,"cliPendingLoad":false,
+                 "cliPrepare":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
+-                "normalPrCreation":true,"merge":false,"workflowDispatch":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
++                "normalPrCreation":true,"merge":false,"workflowDispatch":false,"automaticRetry":false,"nativeAvailabilityChecked":false,"freshActivityOverview":true,"activityReadRequiresSeparateConsent":true,"activityRowsPerSection":30,"activityIncludesHeadsJobsLogsArtifacts":false},
+             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+diff --git a/desktop/src-tauri/src/installed_cli_github_action.rs b/desktop/src-tauri/src/installed_cli_github_action.rs
+--- a/desktop/src-tauri/src/installed_cli_github_action.rs
++++ b/desktop/src-tauri/src/installed_cli_github_action.rs
+@@ -117,6 +117,13 @@
+             status.effect
+         ));
+         match status.review.kind() {
++            github::Kind::ActivityOverview => {
++                text.push_str("One historical Activity overview; no write, automatic refresh, current-head/CI proof, jobs, logs or artifacts.
++");
++                if let Some(snapshot) = &status.snapshot {
++                    text.push_str(&format!("Observed {} · account {} · repository {}. Use --json for all compact PR/run IDs and states.\n", snapshot.observed_at, snapshot.account_id, snapshot.repository_id));
++                }
++            }
+             github::Kind::SetupReconcile => text.push_str("This GET-only check observes the exact original setup intent. It sends no new publication request and cannot prove that an uncertain original was never sent.\n"),
+             github::Kind::SetupPublish => text.push_str("This request uses the reviewed five-file setup only. A sent create/PR request can trigger repository CI; STOP does not undo it. Counter setup is not included.\n"),
+             _ => {}
+diff --git a/desktop/src-tauri/src/installed_cli_github_action_tests.rs b/desktop/src-tauri/src/installed_cli_github_action_tests.rs
+--- a/desktop/src-tauri/src/installed_cli_github_action_tests.rs
++++ b/desktop/src-tauri/src/installed_cli_github_action_tests.rs
+@@ -62,7 +62,7 @@
+         reason: github::Reason::None,
+         effect: github::Effect::AcceptedUnconfirmed,
+         never_admitted: false,
+-        do_not_replay: true,
++        do_not_replay: true, snapshot: None,
+     };
+     let mut response = p::Response {
+         version: 1,
+@@ -90,9 +90,9 @@
+     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
+     assert_eq!(
+         v["kinds"],
+-        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile"])
++        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview"])
+     );
+-    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile"]));
++    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile", "activity-overview"]));
+     assert_eq!(v["counterSetup"], false);
+     assert_eq!(v["normalPrCreation"], true);
+     assert_eq!(v["cliPendingLoad"], false);
+@@ -127,7 +127,7 @@
+                 origin:q.clone(),grant_id:id("d"),review,revision:4,state:github::State::Complete,settlement:p::Settlement::Settled,
+                 operation_id:Some("github-publication-7".into()),reason:github::Reason::None,
+                 effect:if kind==github::Kind::SetupReconcile {github::Effect::None}else{github::Effect::DraftPrObserved},
+-                never_admitted:false,do_not_replay:true,
++                never_admitted:false,do_not_replay:true, snapshot:None,
+             }),
+         };
+         let (code,bytes)=output(&response,&q,Some(&id("d")),false).unwrap();assert_eq!(code,0);
+@@ -140,3 +140,48 @@
+         let mut wrong=q.clone();wrong.request_id=id("e");assert!(output(&response,&wrong,None,true).is_err());
+     }
+ }
++
++#[test]
++fn activity_cli_output_is_historical_compact_data_not_a_new_read_permission() {
++    use github::activity::{Reference, Snapshot, Section, SectionState, SectionReason, Coverage};
++    let q = github::Query { project_id: id("a"), service_instance: id("b"), request_id: id("c") };
++    let response = p::Response {
++        version: 1, request_id: id("e"), service_instance: id("b"), client_id: id("f"), session_id: id("a"),
++        response: p::ResponseBody::GitHubActionRequest(github::Status {
++            origin: q.clone(), grant_id: id("d"), revision: 4,
++            review: github::Review::ActivityOverview(Reference {
++                session_id: "session-a".into(), expected_revision: 7, expected_connection_revision: 9,
++                account_id: "11".into(), repository_id: "22".into(),
++            }),
++            state: github::State::Complete, settlement: p::Settlement::Settled,
++            operation_id: Some("github-activity-7".into()), reason: github::Reason::None,
++            effect: github::Effect::None, never_admitted: false, do_not_replay: true,
++            snapshot: Some(Snapshot {
++                account_id: 11, repository_id: 22, observed_at: "2026-10-21T12:00:00Z".into(),
++                pull_requests: Section { state: SectionState::Unavailable, reason: SectionReason::Forbidden,
++                    coverage: Coverage::Unknown, total: None, rows: vec![] },
++                workflow_runs: Section { state: SectionState::Read, reason: SectionReason::None,
++                    coverage: Coverage::Complete, total: Some(0), rows: vec![] },
++            }),
++        }),
++    };
++    let (code, bytes) = output(&response, &q, Some(&id("d")), false).unwrap();
++    assert_eq!(code, 0);
++    let text = String::from_utf8(bytes).unwrap();
++    assert!(text.contains("historical Activity") && text.contains("no write"));
++    assert!(text.contains("account 11") && text.contains("repository 22"));
++    assert!(text.contains(q.request_id.as_str()) && text.contains("never resubmit automatically"));
++    let (_, bytes) = output(&response, &q, None, true).unwrap();
++    assert!(bytes.len() <= github::activity::RESPONSE_LIMIT + 1);
++    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
++    assert_eq!(value, serde_json::to_value(&response).unwrap());
++    if let p::ResponseBody::GitHubActionRequest(row) = &response.response {
++        let snapshot = row.snapshot.as_ref().unwrap();
++        assert_eq!(snapshot.pull_requests.total, None);
++        assert_eq!(snapshot.pull_requests.reason, SectionReason::Forbidden);
++        assert_eq!(snapshot.workflow_runs.total, Some(0));
++    }
++    let mut wrong = q.clone(); wrong.request_id = id("e");
++    assert!(output(&response, &wrong, None, true).is_err());
++    assert!(output(&response, &q, Some(&id("f")), true).is_err());
++}
+diff --git a/desktop/src-tauri/src/service_github_action_memory.rs b/desktop/src-tauri/src/service_github_action_memory.rs
+--- a/desktop/src-tauri/src/service_github_action_memory.rs
++++ b/desktop/src-tauri/src/service_github_action_memory.rs
+@@ -4,7 +4,8 @@
+ use std::mem::size_of;
+ 
+ const ANCILLARY_LIMIT: usize = 128 * 1024;
+-const UNASSIGNED_SLACK: usize = 128 * 1024;
++// SAME former128KiB slack, now exclusively names every retained Activity snapshot.
++const SNAPSHOTS: usize = p::REQUEST_LIMIT * p::activity::SNAPSHOT_BACKING;
+ const ARC_HEADER: usize = 2 * size_of::<usize>();
+ // NativeScope::valid/Review::retained_fits check physical capacities, not just
+ // string lengths. Submit IDs are rebuilt by Id::parse; the operation is fixed
+@@ -47,7 +48,11 @@
+         // Old claimed scopes are still fully included in every retained row.
+         2 * p::ROW_BACKING,
+         4 * (size_of::<p::Access>() + size_of::<p::Status>() + 2 * OUTPUT_HEAP),
+-        4 * (3 * p::STATUS_LIMIT), // existing GUI/history encoding growth
++        // The one permission controller retains at most one normal plus one
++        // Revoke caller. Typed Tauri uses a String (no Value tree); keep each
++        // serializer's old+new growable backing, not merely its final bytes.
++        2 * 3 * p::activity::RESPONSE_LIMIT,
++        4 * p::activity::SNAPSHOT_BACKING, // public Allow/Access copies, not retained rows
+         32 * ARC_HEADER,
+         16 * (size_of::<tokio::sync::watch::Sender<u32>>()
+             + size_of::<tokio::sync::watch::Receiver<u32>>()),
+@@ -62,7 +67,7 @@
+     let bytes = sum(&[
+         p::REQUEST_LIMIT.checked_mul(p::ROW_BACKING)?,
+         ANCILLARY_LIMIT,
+-        UNASSIGNED_SLACK,
++        SNAPSHOTS,
+     ])?;
+     (bytes == p::DOCUMENT_BACKING).then_some(bytes)
+ }
+@@ -85,7 +90,7 @@
+         assert_eq!(p::REQUEST_LIMIT, 32);
+         assert_eq!(
+             p::DOCUMENT_BACKING,
+-            32 * p::ROW_BACKING + ANCILLARY_LIMIT + UNASSIGNED_SLACK
++            32 * p::ROW_BACKING + ANCILLARY_LIMIT + SNAPSHOTS
+         );
+         println!(
+             "GH retained row={row} ancillary={ancillary} debit={}",
+diff --git a/desktop/src-tauri/src/service_github_action_native.rs b/desktop/src-tauri/src/service_github_action_native.rs
+--- a/desktop/src-tauri/src/service_github_action_native.rs
++++ b/desktop/src-tauri/src/service_github_action_native.rs
+@@ -13,6 +13,12 @@
+ pub(crate) struct Allow {
+     selection: native::Selection,
+     consent_version: String,
++    expected_permission_revision: p::activity::PermissionRevision,
++}
++// MAIN-only typed result; no map-heavy Value copy of the compact snapshot.
++use p::activity::MainAccess;
++fn access_revision(access: p::Access, revision: u64) -> MainAccess {
++    MainAccess { access, permission_revision: p::activity::PermissionRevision(revision) }
+ }
+ pub(crate) fn decode<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T, BridgeError> {
+     if b.is_empty() || b.len() > p::RAW_LIMIT {
+@@ -65,6 +71,7 @@
+         let supervisor = &self.inner.bridge.supervisor;
+         let now = Instant::now();
+         let available = match a.kind() {
++            p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
+             p::Kind::RepositoryCreate => {
+                 s.github
+                     .repository_create_status(
+@@ -107,6 +114,8 @@
+             .edits
+             .saved_registration_guard(&self.inner.session_identity)?;
+         let review = match a.kind() {
++            p::Kind::ActivityOverview => s.github.github_activity_agent_review(a, generation, &root,
++                &github_setup_project_binding(&root)?, &edit, now),
+             p::Kind::RepositoryCreate => s
+                 .github
+                 .repository_create_agent_review(a, generation, &root, &edit, now),
+@@ -127,14 +136,17 @@
+     pub(crate) fn agent_github_action_access(
+         &self,
+         window: &str,
+-    ) -> Result<p::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.github_action_service()? {
+-            Some(s) => s.github_action_requests().access().map_err(public),
+-            None => Ok(p::Access::empty()),
+-        }
++        let _s = self.lock(); // same revision/inbox snapshot as all counter writers
++        let revision = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
++        let access = match self.github_action_service()? {
++            Some(s) => s.github_action_requests().access().map_err(public)?,
++            None => p::Access::empty(),
++        };
++        Ok(access_revision(access, revision))
+     }
+     /// Exact original-row observation, not the latest lease. A coalesced relay
+     /// update cannot replace the final row that this retained caller still needs.
+@@ -156,7 +168,7 @@
+         &self,
+         window: &str,
+         args: Allow,
+-    ) -> Result<p::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN || !args.selection.valid() || args.consent_version != args.selection.kind().consent() {
+             return Err(BridgeError::invalid());
+         }
+@@ -169,13 +181,13 @@
+             return Err(public(Error::Busy));
+         }
+         let _returned = AllowReturned(&self.inner.agent_github_action_allow_pending);
+-        // Epoch exists before the first off-Doc lookup, including the first Allow.
+-        let epoch = self
+-            .inner
+-            .agent_github_action_revoke_epoch
+-            .load(Ordering::Acquire);
++        // The user supplied the revision of its ACTUALLY joined Access call.
++        // Never replace it with a load performed after delayed async dispatch.
++        let epoch = args.expected_permission_revision;
+         let (review, original) = {
+             let mut s = self.lock();
++            epoch.successor(self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire))
++                .ok_or_else(|| public(Error::Conflict))?;
+             self.github_action_review(&mut s, &args.selection)?
+         };
+         let service = self
+@@ -194,16 +206,14 @@
+         }
+         let grant_id = Id::random().map_err(public)?;
+         let mut s = self.lock();
++        // Revoke/relay close use this same Doc; no racing load/store window.
++        let next = epoch.successor(self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire))
++            .ok_or_else(|| public(Error::Conflict))?;
+         let (current, current_native) = self.github_action_review(&mut s, &args.selection)?;
+-        if epoch == u64::MAX
+-            || epoch
+-                != self
+-                    .inner
+-                    .agent_github_action_revoke_epoch
+-                    .load(Ordering::Acquire)
+-            || !same(&original, &current_native)
++        if !same(&original, &current_native)
+             || !Arc::ptr_eq(&review.identity, &current.identity)
+             || review.data != current.data
++            || review.activity != current.activity
+             || !self
+                 .inner
+                 .bridge
+@@ -243,6 +253,7 @@
+             .allow(scope.clone(), grant_id)
+             .map_err(public)?;
+         let installed = match review.data.kind() {
++            p::Kind::ActivityOverview => s.github.github_activity_agent_allow(review, &scope),
+             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
+             p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_allow(&review, &scope),
+             p::Kind::FailedJobsRetry => s.github.actions_retry_agent_allow(&review, &scope),
+@@ -252,36 +263,43 @@
+             scope.unused_closed();
+             return Err(e);
+         }
+-        Ok(access)
++        self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release);
++        Ok(access_revision(access, next))
+     }
+     pub(crate) fn revoke_agent_github_action(
+         &self,
+         window: &str,
+-    ) -> Result<p::Access, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        self.inner
+-            .agent_github_action_revoke_epoch
+-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+-            .map_err(|_| public(Error::StateUnknown))?;
++        let at = Instant::now(); // invocation-time STOP, before waiting for Doc
+         let mut s = self.lock();
++        let revision = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
++        let next = revision.checked_add(1);
++        if let Some(next) = next { self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release); }
+         let Some(service) = self.github_action_service()? else {
+-            return Ok(p::Access::empty());
+-        };
+-        if let Some(scope) = service.github_action_requests().scope().map_err(public)? {
+-            scope.revoke(p::Reason::PermissionRevoked, Instant::now());
++            return next.map(|n| access_revision(p::Access::empty(), n)).ok_or_else(|| public(Error::StateUnknown));
++        };
++        let scope = service.github_action_requests().scope();
++        if let Ok(Some(scope)) = &scope {
++            scope.revoke(p::Reason::PermissionRevoked, at);
+             match scope.review.kind() {
+-                p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(&scope),
+-                p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(&scope),
+-                p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(&scope),
+-                p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(&scope),
+-            }
+-        }
+-        service
+-            .github_action_requests()
+-            .revoke(p::Reason::PermissionRevoked, Instant::now())
+-            .map_err(public)
++                p::Kind::ActivityOverview => s.github.github_activity_agent_revoke(scope),
++                p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(scope),
++                p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(scope),
++                p::Kind::FailedJobsRetry => s.github.actions_retry_agent_revoke(scope),
++                p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_revoke(scope),
++            }
++        }
++        // Even overflow or a poisoned scope lookup cannot skip the original
++        // cancellation. Unknown stays absorbing and all original rows remain.
++        let access = service.github_action_requests().revoke(p::Reason::PermissionRevoked, at);
++        if scope.is_err() || access.is_err() { service.github_action_requests().fence(); }
++        let access = access.map_err(public)?;
++        scope.map_err(public)?;
++        let next = next.ok_or_else(|| public(Error::StateUnknown))?;
++        Ok(access_revision(access, next))
+     }
+     fn github_action_start(
+         &self,
+@@ -324,6 +342,14 @@
+         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
+         let v = &scope.review;
+         match v.kind() {
++            p::Kind::ActivityOverview => {
++                let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
++                self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {
++                    session_id: r.session_id.clone(), project_id: scope.runtime_id.clone(),
++                    expected_revision: r.expected_revision, expected_connection_revision: r.expected_connection_revision,
++                    selection: crate::github_activity_protocol::Selection::Overview { branch: None },
++                }), Some(entry.clone()))?;
++            }
+             p::Kind::RepositoryCreate => {
+                 let v = v.prepared().ok_or_else(BridgeError::invalid)?;
+                 let a = crate::github_repository_create_protocol::CreateArgs {
+@@ -410,13 +436,11 @@
+         }
+     }
+     pub(crate) fn github_action_agent_relay_closed(&self) {
+-        let _ = self.inner.agent_github_action_revoke_epoch.fetch_update(
+-            Ordering::AcqRel,
+-            Ordering::Acquire,
+-            |v| v.checked_add(1),
+-        );
+-        if let Ok(Some(s)) = self.github_action_service() {
+-            s.github_action_requests().close(Instant::now());
+-        }
+-    }
+-}
++        let at = Instant::now();
++        let _s = self.lock();
++        let old = self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire);
++        if let Some(next) = old.checked_add(1) { self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release); }
++        // Overflow never skips original close. No Service Store/IO under Doc.
++        if let Ok(Some(s)) = self.github_action_service() { s.github_action_requests().close(at); }
++    }
++}
+diff --git a/desktop/src-tauri/src/service_github_action_native_tests.rs b/desktop/src-tauri/src/service_github_action_native_tests.rs
+--- a/desktop/src-tauri/src/service_github_action_native_tests.rs
++++ b/desktop/src-tauri/src/service_github_action_native_tests.rs
+@@ -11,7 +11,7 @@
+     ] {
+         let value = serde_json::json!({"selection": {
+             "kind":kind, "sessionId":"github-connection-1", "consentId":"a".repeat(32),
+-            "expectedRevision":7}, "consentVersion":kind.consent()});
++            "expectedRevision":7}, "consentVersion":kind.consent(), "expectedPermissionRevision":"0"});
+         let bytes = serde_json::to_vec(&value).unwrap();
+         let decoded: Allow = decode(&bytes).unwrap();
+         assert_eq!(decoded.selection.kind(), kind);
+@@ -52,3 +52,62 @@
+     boundary.push(b' ');
+     assert!(decode::<super::super::agent_identity::Empty>(&boundary).is_err());
+ }
++
++fn original_document() -> DocumentBinding {
++    // Standard constructors, no runtime/source/Store is entered by these
++    // counter-only methods; this is not an admitted permission fixture.
++    DocumentBinding::new(Arc::new(DesktopBridge::new("/never-opened-gh-main-revision".into())))
++}
++fn activity_allow(revision: &str) -> Allow {
++    decode(&serde_json::to_vec(&serde_json::json!({"selection":{"kind":"activity-overview",
++        "sessionId":"session-a","expectedRevision":3,"expectedConnectionRevision":9},
++        "consentVersion":"agent-activity-overview-once-v1","expectedPermissionRevision":revision})).unwrap()).unwrap()
++}
++#[test]
++fn empty_main_revoke_invalidates_delayed_allow_before_first_off_document_cut() {
++    let d = original_document();
++    let first = d.agent_github_action_access(MAIN).unwrap();
++    assert_eq!(first.permission_revision.0, 0);
++    assert!(first.access.grant_id.is_none());
++    let after = d.revoke_agent_github_action(MAIN).unwrap();
++    assert_eq!(after.permission_revision.0, 1);
++    assert_eq!(d.allow_agent_github_action(MAIN, activity_allow("0")).err().unwrap().code, "cli_access_changed");
++    assert!(d.github_action_service().unwrap().is_none());
++    assert!(!d.inner.agent_github_action_allow_pending.load(Ordering::Acquire));
++    assert_eq!(d.agent_github_action_access(MAIN).unwrap().permission_revision.0, 1);
++    // Ordinary Access neither consumes nor refreshes the observed generation.
++    assert_eq!(d.agent_github_action_access(MAIN).unwrap().permission_revision.0, 1);
++}
++#[test]
++fn main_revoke_and_relay_close_share_doc_epoch_and_exhaustion_never_wraps() {
++    let d = original_document();
++    let expected = p::activity::PermissionRevision(0);
++    {
++        let _s = d.lock();
++        assert_eq!(expected.successor(d.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire)), Some(1));
++    }
++    d.github_action_agent_relay_closed();
++    {
++        let _s = d.lock();
++        assert_eq!(expected.successor(d.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire)), None);
++        d.inner.agent_github_action_revoke_epoch.store(u64::MAX, Ordering::Release);
++    }
++    assert_eq!(d.revoke_agent_github_action(MAIN).err().unwrap().code, "cli_access_unknown");
++    d.github_action_agent_relay_closed();
++    assert_eq!(d.agent_github_action_access(MAIN).unwrap().permission_revision.0, u64::MAX);
++    assert_eq!(d.allow_agent_github_action(MAIN, activity_allow(&u64::MAX.to_string())).err().unwrap().code, "cli_access_changed");
++    assert!(d.github_action_service().unwrap().is_none());
++}
++#[test]
++fn main_expected_revision_is_mandatory_and_cannot_come_from_cli_status() {
++    let valid = serde_json::to_value(serde_json::json!({"selection":{"kind":"activity-overview",
++        "sessionId":"session-a","expectedRevision":3,"expectedConnectionRevision":9},
++        "consentVersion":"agent-activity-overview-once-v1","expectedPermissionRevision":"0"})).unwrap();
++    assert!(decode::<Allow>(&serde_json::to_vec(&valid).unwrap()).is_ok());
++    for v in [serde_json::json!(0), serde_json::json!(null), serde_json::json!("01"), serde_json::json!("18446744073709551616")] {
++        let mut bad = valid.clone(); bad["expectedPermissionRevision"] = v;
++        assert!(decode::<Allow>(&serde_json::to_vec(&bad).unwrap()).is_err());
++    }
++    let mut absent = valid; absent.as_object_mut().unwrap().remove("expectedPermissionRevision");
++    assert!(decode::<Allow>(&serde_json::to_vec(&absent).unwrap()).is_err());
++}
+diff --git a/desktop/src-tauri/src/service_github_action_protocol.rs b/desktop/src-tauri/src/service_github_action_protocol.rs
+--- a/desktop/src-tauri/src/service_github_action_protocol.rs
++++ b/desktop/src-tauri/src/service_github_action_protocol.rs
+@@ -1,6 +1,8 @@
+ //! Closed IDs-only delegation DATA. No credential, URL, draft or native owner.
+ use crate::service_protocol::{Error, Id, Settlement};
+ use serde::{Deserialize, Deserializer, Serialize};
++#[path = "service_github_activity_protocol.rs"]
++pub(crate) mod activity;
+ pub(crate) const REQUEST_LIMIT: usize = 32;
+ pub(crate) const RAW_LIMIT: usize = 1024;
+ pub(crate) const STATUS_LIMIT: usize = 2048;
+@@ -28,10 +30,12 @@
+     FailedJobsRetry,
+     SetupPublish,
+     SetupReconcile,
++    ActivityOverview,
+ }
+ impl Kind {
+     pub(crate) fn prefix(self) -> &'static str {
+         match self {
++            Self::ActivityOverview => "github-activity-",
+             Self::RepositoryCreate => "repository-create-",
+             Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
+             Self::FailedJobsRetry => "github-actions-retry-",
+@@ -40,6 +44,7 @@
+     }
+     pub(crate) fn consent(self) -> &'static str {
+         match self {
++            Self::ActivityOverview => "agent-activity-overview-once-v1",
+             Self::RepositoryCreate => "agent-repository-create-once-v1",
+             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
+             Self::PrCreate => "agent-pr-create-once-v1",
+@@ -50,6 +55,7 @@
+     }
+     pub(crate) fn action(self) -> crate::service_protocol::Action {
+         match self {
++            Self::ActivityOverview => crate::service_protocol::Action::GitHubActivityOverview,
+             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
+             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
+             Self::PrCreate => crate::service_protocol::Action::GitHubPrCreate,
+@@ -59,10 +65,10 @@
+         }
+     }
+     pub(crate) fn initial_effect(self) -> Effect {
+-        if self == Self::SetupReconcile { Effect::None } else { Effect::NotSent }
++        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::NotSent }
+     }
+     pub(crate) fn go_effect(self) -> Effect {
+-        if self == Self::SetupReconcile { Effect::None } else { Effect::PotentiallyApplied }
++        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::PotentiallyApplied }
+     }
+     pub(crate) fn operation(self, s: &str) -> bool {
+         s.strip_prefix(self.prefix()).is_some_and(|n| {
+@@ -103,6 +109,7 @@
+     FailedJobsRetry(PreparedReference),
+     SetupPublish(PreparedReference),
+     SetupReconcile(PendingReference),
++    ActivityOverview(activity::Reference),
+ }
+ fn original(session: &str, revision: u32) -> bool {
+     !session.is_empty() && session.len() <= 64
+@@ -117,7 +124,7 @@
+             Kind::PrCreate => Self::PrCreate(value),
+             Kind::FailedJobsRetry => Self::FailedJobsRetry(value),
+             Kind::SetupPublish => Self::SetupPublish(value),
+-            Kind::SetupReconcile => return None,
++            Kind::SetupReconcile | Kind::ActivityOverview => return None,
+         })
+     }
+     pub(crate) fn kind(&self) -> Kind {
+@@ -128,23 +135,25 @@
+             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
+             Self::SetupPublish(_) => Kind::SetupPublish,
+             Self::SetupReconcile(_) => Kind::SetupReconcile,
++            Self::ActivityOverview(_) => Kind::ActivityOverview,
+         }
+     }
+     pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
+         match self {
+             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+-            Self::SetupReconcile(_) => None,
++            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
+         }
+     }
+     #[cfg(test)]
+     pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
+         match self {
+             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+-            Self::SetupReconcile(_) => None,
++            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
+         }
+     }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
++            Self::ActivityOverview(v) => v.valid(),
+             Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
+             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
+         }
+@@ -152,6 +161,7 @@
+     pub(crate) fn retained_fits(&self) -> bool {
+         // Same exact three string-allocation bounds as the original profile.
+         match self {
++            Self::ActivityOverview(v) => v.retained_fits(),
+             Self::SetupReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
+             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
+         }
+@@ -180,6 +190,7 @@
+     FailedJobsRetry(PreparedSelection),
+     SetupPublish(PreparedSelection),
+     SetupReconcile(PendingSelection),
++    ActivityOverview(activity::Selection),
+ }
+ impl Selection {
+     pub(crate) fn kind(&self) -> Kind {
+@@ -190,16 +201,18 @@
+             Self::FailedJobsRetry(_) => Kind::FailedJobsRetry,
+             Self::SetupPublish(_) => Kind::SetupPublish,
+             Self::SetupReconcile(_) => Kind::SetupReconcile,
++            Self::ActivityOverview(_) => Kind::ActivityOverview,
+         }
+     }
+     pub(crate) fn prepared(&self) -> Option<&PreparedSelection> {
+         match self {
+             Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
+-            Self::SetupReconcile(_) => None,
++            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
+         }
+     }
+     pub(crate) fn valid(&self) -> bool {
+         match self {
++            Self::ActivityOverview(v) => v.valid(),
+             Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32),
+             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32)),
+         }
+@@ -252,7 +265,7 @@
+ impl Effect {
+     pub(crate) fn valid_for(self, k: Kind) -> bool {
+         match self {
+-            Self::None => k == Kind::SetupReconcile,
++            Self::None => matches!(k, Kind::SetupReconcile | Kind::ActivityOverview),
+             Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
+             Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
+             Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate),
+@@ -293,14 +306,27 @@
+     pub(crate) effect: Effect,
+     pub(crate) never_admitted: bool,
+     pub(crate) do_not_replay: bool,
++    // Absent on all six original kinds, preserving their exact serialized bytes.
++    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "activity::optional_snapshot")]
++    pub(crate) snapshot: Option<activity::Snapshot>,
+ }
+ impl Status {
++    pub(crate) fn limit(&self) -> usize {
++        if self.review.kind() == Kind::ActivityOverview { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
++    }
+     pub(crate) fn validate(&self) -> Result<(), Error> {
++        let snapshot_valid = match (&self.review, &self.snapshot) {
++            (Review::ActivityOverview(reference), Some(snapshot)) => self.state == State::Complete
++                && snapshot.valid() && snapshot.matches(reference),
++            (Review::ActivityOverview(_), None) => self.state != State::Complete,
++            (_, None) => true,
++            _ => false,
++        };
+         let terminal = matches!(
+             self.state,
+             State::Complete | State::Refused | State::Cancelled
+         );
+-        if !self.review.valid()
++        if !snapshot_valid || !self.review.valid()
+             || !(1..u32::MAX).contains(&self.revision)
+             || !self.do_not_replay
+             || !self.effect.valid_for(self.review.kind())
+@@ -334,7 +360,7 @@
+                 )
+             || matches!(self.state, State::Refused | State::Cancelled)
+                 && self.reason == Reason::None
+-            || serde_json::to_vec(self).map_or(true, |b| b.len() > STATUS_LIMIT)
++            || crate::service_metadata_text_protocol::bounded(self, self.limit()).is_err()
+         {
+             Err(Error::InvalidRequest)
+         } else {
+diff --git a/desktop/src-tauri/src/service_github_action_protocol_tests.rs b/desktop/src-tauri/src/service_github_action_protocol_tests.rs
+--- a/desktop/src-tauri/src/service_github_action_protocol_tests.rs
++++ b/desktop/src-tauri/src/service_github_action_protocol_tests.rs
+@@ -23,7 +23,7 @@
+         reason: Reason::None,
+         effect: Effect::NotSent,
+         never_admitted: false,
+-        do_not_replay: true,
++        do_not_replay: true, snapshot: None,
+     }
+ }
+ #[test]
+diff --git a/desktop/src-tauri/src/service_github_action_requests.rs b/desktop/src-tauri/src/service_github_action_requests.rs
+--- a/desktop/src-tauri/src/service_github_action_requests.rs
++++ b/desktop/src-tauri/src/service_github_action_requests.rs
+@@ -12,6 +12,8 @@
+ };
+ #[path = "service_github_action_memory.rs"]
+ mod memory;
++#[path = "service_github_activity_requests.rs"]
++mod activity;
+ pub(crate) use memory::retained_document_backing;
+ 
+ pub(crate) struct NativeScope {
+@@ -186,6 +188,7 @@
+     history_claim: Option<Fact>,
+     unknown: Option<p::Reason>,
+     observed_stop: Option<p::Reason>,
++    snapshot: Option<Arc<p::activity::Snapshot>>,
+ }
+ pub(crate) struct Entry {
+     input: p::Submit,
+@@ -328,7 +331,11 @@
+     }
+     // ONLY the original typed Connection accept_* tail invokes this. Its actual
+     // Supervisor receipt has returned; public status cannot call this method.
+-    pub(crate) fn returned_native(&self, id: &str, reason: p::Reason, mut effect: p::Effect) {
++    pub(crate) fn returned_native(&self, id: &str, reason: p::Reason, effect: p::Effect) {
++        self.returned_native_snapshot(id, reason, effect, None)
++    }
++    fn returned_native_snapshot(&self, id: &str, reason: p::Reason, mut effect: p::Effect,
++        snapshot: Option<Arc<p::activity::Snapshot>>) {
+         let Ok(mut r) = self.lock() else { return };
+         if r.unknown.is_some() {
+             return;
+@@ -338,6 +345,8 @@
+                 .as_ref()
+                 .is_none_or(|f| f.admission != Admission::Running)
+             || !effect.valid_for(self.scope.review.kind())
++            || !activity::snapshot_for(&self.scope.review, reason, snapshot.as_deref())
++            || self.scope.review.kind() == p::Kind::ActivityOverview && reason == p::Reason::None && !r.go
+             || matches!(
+                 reason,
+                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
+@@ -358,6 +367,7 @@
+             self.unknown(p::Reason::CleanupUnknown);
+             return;
+         }
++        r.snapshot = snapshot;
+         self.scope.retired.store(true, Ordering::Release);
+     }
+     fn never_admitted(&self, why: p::Reason) -> Result<(), Error> {
+@@ -486,6 +496,7 @@
+             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
+                 && state != p::State::Unknown,
+             do_not_replay: true,
++            snapshot: if state == p::State::Complete { r.snapshot.as_deref().cloned() } else { None },
+         };
+         s.validate().map_err(|_| Error::StateUnknown)?;
+         Ok(s)
+@@ -659,6 +670,7 @@
+                 history_claim: None,
+                 unknown: None,
+                 observed_stop: None,
++                snapshot: None,
+             }),
+         });
+         l.entry = Some(Arc::downgrade(&e));
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -100,7 +100,7 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+-    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
++    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview, GitStage, GitUnstage,
+     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
+ }
+ 
+@@ -493,7 +493,8 @@
+         },
+         ResponseBody::GitHubActionRequest(row)=>{
+             row.validate()?;
+-            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
++            if row.origin.service_instance!=response.service_instance {return Err(Error::InvalidRequest);}
++            crate::service_metadata_text_protocol::bounded(response,row.limit())?;
+         },
+         ResponseBody::MetadataImagesAccess(row)=>{
+             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2060,43 +2060,51 @@
+     }
+     #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+ }
+-#[tauri::command]
+-async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++#[cfg(any(target_os="linux",target_os="macos"))]
++type GithubActionMainAccess = crate::service_github_action_protocol::activity::MainAccess;
++#[cfg(not(any(target_os="linux",target_os="macos")))]
++type GithubActionMainAccess = Value;
++#[cfg(any(target_os="linux",target_os="macos"))]
++type GithubActionMainStatus = crate::service_github_action_protocol::Status;
++#[cfg(not(any(target_os="linux",target_os="macos")))]
++type GithubActionMainStatus = Value;
++#[tauri::command]
++async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+     #[cfg(any(target_os="linux",target_os="macos"))] {
+         let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+-        serde_json::to_value(state.document.agent_github_action_access(window)?).map_err(|_|BridgeError::protocol())
++        state.document.agent_github_action_access(window)
+     }
+     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+ }
+ #[tauri::command]
+-async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+     #[cfg(any(target_os="linux",target_os="macos"))] {
+         let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+-        serde_json::to_value(state.document.allow_agent_github_action(window,args)?).map_err(|_|BridgeError::protocol())
++        state.document.allow_agent_github_action(window,args)
+     }
+     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+ }
+ #[tauri::command]
+-async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+     #[cfg(any(target_os="linux",target_os="macos"))] {
+         let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+-        serde_json::to_value(state.document.revoke_agent_github_action(window)?).map_err(|_|BridgeError::protocol())
++        state.document.revoke_agent_github_action(window)
+     }
+     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+ }
+ #[tauri::command]
+-async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainStatus,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window=edit_window(&webview)?;
+     #[cfg(any(target_os="linux",target_os="macos"))] {
+         let args:crate::service_github_action_protocol::Query=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+-        serde_json::to_value(state.document.agent_github_action_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
++        state.document.agent_github_action_request_status(window,&args)
+     }
+     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+ }
+diff --git a/desktop/src-tauri/src/supervisor_github_action_delegation.rs b/desktop/src-tauri/src/supervisor_github_action_delegation.rs
+--- a/desktop/src-tauri/src/supervisor_github_action_delegation.rs
++++ b/desktop/src-tauri/src/supervisor_github_action_delegation.rs
+@@ -9,6 +9,7 @@
+         .or_else(|| owner.pull_request_gate.as_ref().and_then(|g| g.agent()))
+         .or_else(|| owner.actions_retry_gate.as_ref().and_then(|g| g.agent()))
+         .or_else(|| owner.publication_gate.as_ref().and_then(|g| g.agent()))
++        .or_else(|| owner.github_activity_gate.as_ref().and_then(|g| g.agent()))
+ }
+ pub(super) fn arm(owner: &Owner) -> Result<(), BridgeError> {
+     if let Some(e) = entry(owner) {
+diff --git a/desktop/tests/agent-github-actions.test.mjs b/desktop/tests/agent-github-actions.test.mjs
+--- a/desktop/tests/agent-github-actions.test.mjs
++++ b/desktop/tests/agent-github-actions.test.mjs
+@@ -63,17 +63,17 @@
+   return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),review:{kind:h.kind,sessionId:'session-a',consentId,expectedRevision:3,preparedSha256:hex('c',64)},revision:7,state:'complete',settlement:'settled',operationId:prefixes[h.kind]+'2',reason:'none',effect:h.kind==='failed-jobs-retry'?'accepted':'created-observed',neverAdmitted:false,doNotReplay:true,...patch};
+ }
+ function access(h,status=null,patch={}){
+-  return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:requestStatus(h).review,enabled:status===null,remainingMs:status===null?100000:0,consumed:status!==null,pending:status!==null&&status.settlement!=='settled',unknown:status?.state==='unknown',status,...patch};
++  return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:requestStatus(h).review,enabled:status===null,remainingMs:status===null?100000:0,consumed:status!==null,pending:status!==null&&status.settlement!=='settled',unknown:status?.state==='unknown',status,...patch};
+ }
+-function permission(h){
+-  const calls=[],native={};for(const name of ['access','allow','request','revoke'])native[name]=arg=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg)});calls.push(d);h.calls.push(d);return d.promise;};
++async function permission(h){
++  const calls=[],native={};for(const name of ['access','allow','request','revoke'])native[name]=(arg,revision)=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg),revision});calls.push(d);h.calls.push(d);return d.promise;};
+   let peer=null,epoch={},c;
+   c=new AgentGithubActionAccessController({current:()=>({port:native,nativeSession:h,projectId:'project-a',epoch,preview:false,
+     blockedReason:peer??(c?.peerSelection()&&h.controller.agentSelected(c.peerSelection())?null:h.controller.ownerReason()),reviews:[h.controller.agentSelection()].filter(Boolean)}),
+     syncOriginal:()=>h.controller.syncContext(),delegate:r=>h.controller.delegatePrepared(r)});
+   if(h.kind!=='repository-create')c.choose(h.kind);c.syncContext();
+   const p={controller:c,calls,last:k=>calls.filter(x=>x.kind==='permission-'+k).at(-1),count:k=>calls.filter(x=>x.kind==='permission-'+k).length,peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};
+-  h.permission=p;return p;
++  h.permission=p;const check=c.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
+ }
+ test.afterEach(async()=>{for(const h of retained.splice(0)){for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();h.permission?.controller.dispose();h.controller.dispose();for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();}});
+ 
+@@ -88,10 +88,10 @@
+ test('actual composed bridge has four raw metadata-only methods and no preview capability',async()=>{
+   const calls=[],api=createNativeApi('native',async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;},async()=>()=>{});
+   const s={kind:'repository-create',sessionId:'session-a',consentId,expectedRevision:3},q={projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')};
+-  await api.agentGithubAction.access();await api.agentGithubAction.allow(s);await api.agentGithubAction.request(q);await api.agentGithubAction.revoke();
++  await api.agentGithubAction.access();await api.agentGithubAction.allow(s,'0');await api.agentGithubAction.request(q);await api.agentGithubAction.revoke();
+   assert.deepEqual(calls.map(c=>c[0]),['agent_github_action_access','allow_agent_github_action','agent_github_action_request_status','revoke_agent_github_action']);
+-  assert.equal(calls[1][1].consentVersion,'agent-repository-create-once-v1');
+-  assert.throws(()=>api.agentGithubAction.allow({...s,url:'https://example.invalid'}));
++  assert.equal(calls[1][1].consentVersion,'agent-repository-create-once-v1');assert.equal(calls[1][1].expectedPermissionRevision,'0');
++  assert.throws(()=>api.agentGithubAction.allow({...s,url:'https://example.invalid'},'0'));
+   assert.equal(createNativeApi('preview',()=>assert.fail(),null).agentGithubAction,null);
+   assert.equal(calls.length,4);
+ });
+@@ -102,7 +102,7 @@
+     h.respond('prepare',h.data.review());await flush();assert.ok(h.controller.agentSelection());
+   });
+   test(`${kind}: Allow calls once after exact own-review exemption; ordinary GUI mutation remains unavailable`,async()=>{
+-    const h=await fixture(kind),p=permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
++    const h=await fixture(kind),p=await permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
+     const promise=p.controller.allow();assert.equal(p.count('allow'),1);assert.equal(h.controller.agentSelection(),null);
+     h.controller.setConfirmed(true);if(kind==='failed-jobs-retry')h.controller.retry();else h.controller.create();
+     assert.equal(h.calls.filter(x=>['create','start'].includes(x.kind)).length,0);assert.ok(h.controller.canDiscard());
+@@ -111,48 +111,48 @@
+   });
+ }
+ test('conflicting peer veto performs zero Allow, without creating permission or dropping the review',async()=>{
+-  const h=await fixture(),p=permission(h);p.peer('Other original native work is still pending');assert.ok(p.controller.consentReason());assert.equal(p.controller.acknowledge(true),false);
++  const h=await fixture(),p=await permission(h);p.peer('Other original native work is still pending');assert.ok(p.controller.consentReason());assert.equal(p.controller.acknowledge(true),false);
+   assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.ok(h.controller.agentSelection());
+ });
+ test('synchronous delegation listener changing peer closes exact unsubmitted original; never rewinds it',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);let changed=false;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);let changed=false;
+   const stop=h.controller.subscribe(()=>{if(!changed&&h.controller.agentSelection()===null){changed=true;p.peer('A conflicting peer appeared');}});
+   assert.equal(await p.controller.allow(),false);stop();assert.equal(p.count('allow'),0);assert.equal(h.calls.filter(x=>x.kind==='discard').length,1);
+   h.respond('discard',{...h.data.review(),revision:4,consent:null});await flush();assert.equal(h.controller.agentSelection(),null);assert.equal(h.controller.ownerReason(),null);
+ });
+ test('late successful Allow cannot resurrect a pre-call Revoke; no second origin replaces outstanding callers',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();const revoke=p.controller.revoke();
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();const revoke=p.controller.revoke();
+   assert.equal(p.count('allow'),1);assert.equal(p.count('revoke'),1);assert.equal(await p.controller.allow(),false);
+   p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
+   p.last('allow').resolve(access(h));await allow;assert.equal(p.controller.getSnapshot().access.enabled,false);assert.equal(p.controller.getSnapshot().withdrawn,true);
+   assert.ok(h.controller.ownerReason());
+ });
+ test('lost Allow remains absorbing through known Revoke/readback and never exposes ordinary Create',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(new Error('INERT private detail'));await allow;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(new Error('INERT private detail'));await allow;
+   assert.equal(p.controller.getSnapshot().unknown,true);assert.equal(await p.controller.allow(),false);assert.equal(h.controller.agentSelection(),null);
+   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
+   assert.equal(p.controller.getSnapshot().unknown,true);assert.ok(h.controller.ownerReason());assert.equal(p.count('allow'),1);
+ });
+ test('service final before native Check return never releases original; reconnect uses exact retained Query not latest lease',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+   const progress=requestStatus(h,{revision:5,state:'running',settlement:'pending',effect:'potentially-applied'});
+   const first=p.controller.check();p.last('access').resolve(access(h,progress));await flush();p.last('request').resolve(progress);await first;
+   h.emit(h.data.final());const final=requestStatus(h);h.deferStatus=true;
+-  const check=p.controller.check();assert.equal(p.count('access'),1);assert.deepEqual(p.last('request').args,final.origin);p.last('request').resolve(final);await check;
++  const check=p.controller.check();assert.equal(p.count('access'),2);assert.deepEqual(p.last('request').args,final.origin);p.last('request').resolve(final);await check;
+   assert.ok(h.controller.ownerReason());assert.equal(h.calls.filter(x=>x.kind==='status'&&!x.ended).length,1);
+   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,final));await revoke;
+   h.respond('status',h.data.final());await flush();assert.equal(h.controller.ownerReason(),null);assert.equal(p.controller.ownerReason(),null);
+-  assert.equal(p.count('allow'),1);assert.equal(p.count('access'),1);
++  assert.equal(p.count('allow'),1);assert.equal(p.count('access'),2);
+ });
+ test('pre-arm NeverAdmitted requires original Close plus joined native Check; no fabricated mutation retirement',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+   const final=requestStatus(h,{state:'refused',reason:'native-refused',operationId:null,effect:'not-sent',neverAdmitted:true});
+   const check=p.controller.check();p.last('access').resolve(access(h,final));await flush();p.last('request').resolve(final);await check;await flush();assert.ok(h.controller.ownerReason());
+   h.controller.discardReview();h.respond('discard',{...h.data.review(),revision:4,consent:null});await flush();h.controller.checkStatus();await flush();
+   assert.equal(h.controller.ownerReason(),null);assert.equal(h.calls.filter(x=>x.kind==='create').length,0);
+ });
+ test('service history Unknown and foreign final cannot clear retained original even with a native final event',async()=>{
+-  for(const malformed of [false,true]){const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
++  for(const malformed of [false,true]){const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+     h.emit(h.data.final());const bad=malformed?requestStatus(h,{grantId:hex('9')}):requestStatus(h,{state:'unknown',settlement:'unknown',reason:'history-unavailable'});
+     const check=p.controller.check();p.last('access').resolve(access(h,bad));await check;
+     assert.equal(p.controller.getSnapshot().unknown,true);assert.ok(h.controller.ownerReason());assert.equal(await p.controller.allow(),false);
+diff --git a/desktop/tests/github-publication-delegation.test.mjs b/desktop/tests/github-publication-delegation.test.mjs
+--- a/desktop/tests/github-publication-delegation.test.mjs
++++ b/desktop/tests/github-publication-delegation.test.mjs
+@@ -195,15 +195,16 @@
+ function reference(selection) { return {...selection,[selection.kind==='setup-publish'?'preparedSha256':'recordSha256']:hex('a',64)}; }
+ function cliStatus(selection, patch={}) {return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),review:reference(selection),revision:7,
+   state:'complete',settlement:'settled',operationId:'github-publication-42',reason:'none',effect:'draft-pr-observed',neverAdmitted:false,doNotReplay:true,...patch};}
+-function cliAccess(selection,status=null,patch={}) {return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:reference(selection),enabled:!status,remainingMs:status?0:90000,consumed:!!status,
++function cliAccess(selection,status=null,patch={}) {return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:reference(selection),enabled:!status,remainingMs:status?0:90000,consumed:!!status,
+   pending:!!status&&status.settlement!=='settled',unknown:status?.settlement==='unknown',status,...patch};}
+-function permission(h,kind) {
++async function permission(h,kind) {
+   const calls=[],nativeSession={},epoch={};let peer=null;
+-  const port=Object.fromEntries(['access','allow','request','revoke'].map(k=>[k,(value)=>{const d=deferred();calls.push({kind:k,value,...d});return d.promise;} ]));
++  const port=Object.fromEntries(['access','allow','request','revoke'].map(k=>[k,(value,revision)=>{const d=deferred();calls.push({kind:k,value,revision,...d});return d.promise;} ]));
+   const controller=new AgentGithubActionAccessController({syncOriginal:()=>h.controller.syncContext(),delegate:s=>h.controller.delegatePrepared(s),
+     current:()=>({port,nativeSession,projectId:'project-a',epoch,preview:false,blockedReason:peer,reviews:[h.controller.agentSelection(kind)].filter(Boolean)})});
+   assert.equal(controller.choose(kind),true);
+-  return {controller,calls,port,peer(v){peer=v;},last:k=>calls.filter(c=>c.kind===k).at(-1),count:k=>calls.filter(c=>c.kind===k).length};
++  const p={controller,calls,port,peer(v){peer=v;},last:k=>calls.filter(c=>c.kind===k).at(-1),count:k=>calls.filter(c=>c.kind===k).length};
++  const check=controller.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
+ }
+ async function forCli(kind) {const h=kind==='setup-publish'?await ready():await readReady();if(kind==='setup-reconcile')assert.equal(h.controller.selectPendingForAgent(marker),true);return h;}
+ function nativeFinal(kind) {const s=draftResult(5,kind==='setup-publish'?'publish':'reconcile');s.operation.id='github-publication-42';return s;}
+@@ -212,11 +213,11 @@
+ async function sharedFinal(p,selection,status=cliStatus(selection)) {const work=p.controller.check();p.last('access').resolve(cliAccess(selection,status));await flush();if(status.settlement!=='unknown')p.last('request').resolve(status);await work;}
+ 
+ test('shared publication codec keeps both strict shapes and GET-only effects without inheriting old mutation fallbacks',async()=>{
+-  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile']);
++  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview']);
+   const calls=[],port=createAgentGithubActionPort(async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;});
+   for(const selection of [publish(),reconcile()]) {
+     assert.ok(parseGithubActionSelection(selection));assert.ok(parseGithubActionStatus(cliStatus(selection)));assert.ok(parseAgentGithubActionAccess(cliAccess(selection)));
+-    await port.allow(selection);assert.deepEqual(calls.at(-1)[1],{selection,consentVersion:`agent-${selection.kind}-once-v1`});
++    await port.allow(selection,'0');assert.deepEqual(calls.at(-1)[1],{selection,consentVersion:`agent-${selection.kind}-once-v1`,expectedPermissionRevision:'0'});
+     for(const effect of ['created-observed','accepted','counter-observed','acknowledged-unconfirmed'])assert.equal(parseGithubActionStatus(cliStatus(selection,{effect})),null);
+     for(const field of ['token','files','root','purpose'])assert.equal(parseGithubActionSelection({...selection,[field]:'INERT'}),null);
+   }
+@@ -227,7 +228,7 @@
+ });
+ for(const kind of ['setup-publish','setup-reconcile']) {
+   test(`${kind} shared Allow cannot start native work or replace the original, and real history return still needs later original Status`,async()=>{
+-    const h=await forCli(kind),p=permission(h,kind),selection=await grant(h,p,kind);
++    const h=await forCli(kind),p=await permission(h,kind),selection=await grant(h,p,kind);
+     assert.equal(h.state.delegating,true);assert.equal(h.controller.agentSelection(kind),null);assert.ok(h.controller.startReason());
+     h.controller.setConfirmed(true);h.controller.publish();h.controller.reconcile(marker);assert.equal(h.count('publish'),0);assert.equal(h.count('reconcile'),0);
+     assert.equal(await p.controller.allow(),false);h.emit(nativeFinal(kind));await h.controller.checkStatus();
+@@ -237,7 +238,7 @@
+     assert.equal(p.count('allow'),1);
+   });
+   test(`${kind} pending Allow and pre-history Status cannot retroactively close after terminal events`,async()=>{
+-    const h=await forCli(kind),p=permission(h,kind),selection=h.controller.agentSelection(kind);
++    const h=await forCli(kind),p=await permission(h,kind),selection=h.controller.agentSelection(kind);
+     p.controller.acknowledge(true);const allow=p.controller.allow();h.emit(nativeFinal(kind));
+     const d=deferred(),old=h.api.githubPublicationStatus;h.api.githubPublicationStatus=()=>d.promise;
+     const reading=h.controller.checkStatus();await flush();p.last('allow').resolve(cliAccess(selection));await allow;
+@@ -245,7 +246,7 @@
+     h.api.githubPublicationStatus=old;await h.controller.checkStatus();assert.equal(h.state.delegating,false);
+   });
+   test(`${kind} lost Allow and history Unknown stay absorbing despite known native final and Revoke`,async()=>{
+-    const h=await forCli(kind),p=permission(h,kind),selection=h.controller.agentSelection(kind);
++    const h=await forCli(kind),p=await permission(h,kind),selection=h.controller.agentSelection(kind);
+     p.controller.acknowledge(true);const work=p.controller.allow();p.last('allow').reject(new Error('INERT private'));await work;
+     h.emit(nativeFinal(kind));await h.controller.checkStatus();assert.equal(h.state.uncertain,true);assert.equal(h.state.delegating,true);assert.equal(p.controller.getSnapshot().unknown,true);
+     const revoke=p.controller.revoke();p.last('revoke').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await revoke;
+@@ -253,7 +254,7 @@
+   });
+ }
+ test('reconcile unused permission requires genuine returned revoke/check plus a later same-row Status; no fabricated Consent',async()=>{
+-  const h=await forCli('setup-reconcile'),p=permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
++  const h=await forCli('setup-reconcile'),p=await permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
+   const revoke=p.controller.revoke();p.last('revoke').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await revoke;
+   await h.controller.checkStatus();assert.equal(h.state.delegating,true);
+   const check=p.controller.check();p.last('access').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await check;
+@@ -262,7 +263,7 @@
+ });
+ test('publication handoff latches before reentrant peer/source changes and performs no Allow or duplicate native action',async()=>{
+   for(const kind of ['setup-publish','setup-reconcile']) {
+-    const h=await forCli(kind),p=permission(h,kind);p.controller.acknowledge(true);let once=false;
++    const h=await forCli(kind),p=await permission(h,kind);p.controller.acknowledge(true);let once=false;
+     h.controller.subscribe(()=>{if(!once&&h.state.delegating){once=true;p.peer('Other owner');h.controller.beforeWorkspaceAction();}});
+     assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.equal(h.count('publish'),0);assert.equal(h.count('reconcile'),0);assert.equal(h.controller.agentSelection(kind),null);
+     if(kind==='setup-publish'){h.respond('discard',operation('prepare','settled',4));await flush();}
+@@ -270,9 +271,9 @@
+   }
+ });
+ test('reconcile final must match original operation and full effect; late equal row or foreign final never releases it',async()=>{
+-  const h=await forCli('setup-reconcile'),p=permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
++  const h=await forCli('setup-reconcile'),p=await permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
+   const foreign=nativeFinal('setup-reconcile');foreign.operation.id='github-publication-43';h.emit(foreign);await sharedFinal(p,selection);await h.controller.checkStatus();assert.equal(h.state.delegating,true);
+-  const b=await forCli('setup-reconcile'),q=permission(b,'setup-reconcile'),s=await grant(b,q,'setup-reconcile');
++  const b=await forCli('setup-reconcile'),q=await permission(b,'setup-reconcile'),s=await grant(b,q,'setup-reconcile');
+   b.emit(nativeFinal('setup-reconcile'));await sharedFinal(q,s,cliStatus(s,{state:'unknown',settlement:'unknown',reason:'history-unavailable'}));
+   await b.controller.checkStatus();assert.equal(b.state.uncertain,true);assert.equal(b.state.delegating,true);
+ });
+diff --git a/desktop/tests/github-pull-request-mode.test.mjs b/desktop/tests/github-pull-request-mode.test.mjs
+--- a/desktop/tests/github-pull-request-mode.test.mjs
++++ b/desktop/tests/github-pull-request-mode.test.mjs
+@@ -48,17 +48,17 @@
+ function status(h,patch={}){return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),
+   review:{kind:h.ready?'pr-create':'draft-pr-create',sessionId:'session-a',consentId,expectedRevision:3,preparedSha256:hex('c',64)},
+   revision:7,state:'complete',settlement:'settled',operationId:'github-pull-request-2',reason:'none',effect:'created-observed',neverAdmitted:false,doNotReplay:true,...patch};}
+-function access(h,s=null,patch={}){return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:status(h).review,
++function access(h,s=null,patch={}){return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:status(h).review,
+   enabled:s===null,remainingMs:s===null?100000:0,consumed:s!==null,pending:s!==null&&s.settlement!=='settled',unknown:s?.state==='unknown',status:s,...patch};}
+-function permission(h){const calls=[],native={};
+-  for(const name of ['access','allow','request','revoke'])native[name]=arg=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg)});calls.push(d);h.calls.push(d);return d.promise;};
++async function permission(h){const calls=[],native={};
++  for(const name of ['access','allow','request','revoke'])native[name]=(arg,revision)=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg),revision});calls.push(d);h.calls.push(d);return d.promise;};
+   let peer=null,epoch={},c;
+   c=new AgentGithubActionAccessController({current:()=>({port:native,nativeSession:h,projectId:'project-a',epoch,preview:false,
+     blockedReason:peer??(c?.peerSelection()&&h.controller.agentSelected(c.peerSelection())?null:h.controller.ownerReason()),reviews:[h.controller.agentSelection()].filter(Boolean)}),
+     syncOriginal:()=>h.controller.syncContext(),delegate:r=>h.controller.delegatePrepared(r)});
+   c.choose(h.ready?'pr-create':'draft-pr-create');c.syncContext();
+   const p={controller:c,last:k=>calls.filter(x=>x.kind==='permission-'+k).at(-1),count:k=>calls.filter(x=>x.kind==='permission-'+k).length,
+-    peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};h.permission=p;return p;
++    peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};h.permission=p;const check=c.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
+ }
+ test.afterEach(async()=>{for(const h of retained.splice(0)){
+   for(const c of h.calls)if(!c.ended)c.reject({code:'fixture-ended'});await flush();h.permission?.controller.dispose();h.controller.dispose();
+@@ -137,7 +137,7 @@
+   for(const ready of [false,true]){
+     const h=await fixture(ready),selection=h.controller.agentSelection(),kind=ready?'pr-create':'draft-pr-create';assert.equal(selection.kind,kind);
+     assert.equal(h.controller.delegatePrepared({...selection,kind:ready?'draft-pr-create':'pr-create'}),null);
+-    assert.ok(h.controller.agentSelection());const p=permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
++    assert.ok(h.controller.agentSelection());const p=await permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
+     const allow=p.controller.allow();assert.equal(p.count('allow'),1);assert.deepEqual(p.last('allow').args,selection);assert.equal(h.controller.agentSelection(),null);
+     h.controller.setConfirmed(true);h.controller.create();assert.equal(h.count('create'),0);assert.equal(await p.controller.allow(),false);
+     p.last('allow').resolve(access(h));assert.equal(await allow,true);assert.ok(parseAgentGithubActionAccess(access(h)));
+@@ -147,15 +147,15 @@
+ test('actual metadata-only Allow port emits distinct Ready consent while preserving old Draft bytes',async()=>{
+   const sent=[],port=createAgentGithubActionPort(async(name,raw)=>{sent.push([name,JSON.parse(new TextDecoder().decode(raw))]);return null;});
+   for(const kind of ['draft-pr-create','pr-create']){
+-    const selection={kind,sessionId:'session-a',consentId,expectedRevision:3};assert.ok(parseGithubActionSelection(selection));await port.allow(selection);
+-    assert.deepEqual(sent.at(-1),['allow_agent_github_action',{selection,consentVersion:kind==='pr-create'?'agent-pr-create-once-v1':'agent-draft-pr-create-once-v1'}]);
++    const selection={kind,sessionId:'session-a',consentId,expectedRevision:3};assert.ok(parseGithubActionSelection(selection));await port.allow(selection,'0');
++    assert.deepEqual(sent.at(-1),['allow_agent_github_action',{selection,consentVersion:kind==='pr-create'?'agent-pr-create-once-v1':'agent-draft-pr-create-once-v1',expectedPermissionRevision:'0'}]);
+   }
+-  for(const extra of ['token','path','url','body','creationMode'])assert.throws(()=>port.allow({kind:'pr-create',sessionId:'session-a',consentId,expectedRevision:3,[extra]:'INERT'}));
++  for(const extra of ['token','path','url','body','creationMode'])assert.throws(()=>port.allow({kind:'pr-create',sessionId:'session-a',consentId,expectedRevision:3,[extra]:'INERT'},'0'));
+   assert.equal(sent.length,2);
+ });
+ 
+ test('Ready own-review exemption never suppresses a conflicting peer or a reentrant veto after delegation',async()=>{
+-  const h=await fixture(),p=permission(h);p.peer('Other original remains live');assert.equal(p.controller.acknowledge(true),false);
++  const h=await fixture(),p=await permission(h);p.peer('Other original remains live');assert.equal(p.controller.acknowledge(true),false);
+   assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.ok(h.controller.agentSelection());p.peer(null);p.controller.acknowledge(true);
+   let once=false;const off=h.controller.subscribe(()=>{if(!once&&h.controller.agentSelection()===null){once=true;p.peer('Different original entered');}});
+   assert.equal(await p.controller.allow(),false);off();assert.equal(p.count('allow'),0);assert.equal(h.count('discard'),1);
+@@ -163,14 +163,14 @@
+ });
+ 
+ test('lost Ready Allow remains absorbing through mode edits and known Revoke; no second grant or GUI Create',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(Error('INERT private failure'));await allow;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(Error('INERT private failure'));await allow;
+   h.controller.setCreationMode('draft');assert.equal(p.controller.getSnapshot().unknown,true);assert.equal(await p.controller.allow(),false);
+   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
+   h.controller.setConfirmed(true);h.controller.create();assert.equal(h.count('create'),0);assert.ok(h.controller.ownerReason());assert.equal(p.count('allow'),1);assert.equal(p.controller.getSnapshot().unknown,true);
+ });
+ 
+ test('Ready service final still waits same original native Check return; wrong mode output cannot free it',async()=>{
+-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
++  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+   const progress=status(h,{revision:5,state:'running',settlement:'pending',effect:'potentially-applied'});
+   const first=p.controller.check();p.last('access').resolve(access(h,progress));await flush();p.last('request').resolve(progress);await first;
+   h.emit(final(true));h.deferStatus=true;const done=status(h);assert.ok(parseGithubActionStatus(done));

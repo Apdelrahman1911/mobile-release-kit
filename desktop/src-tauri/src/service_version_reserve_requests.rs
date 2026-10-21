@@ -16,8 +16,22 @@ use std::{
 // Native SOURCE/Lane backing remains on its original owner. Only the explicit
 // IPC term joins the SAME8 pool (including the initial4KiB before the1KiB gate).
 pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT;
-pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * (4096 + std::mem::size_of::<Entry>())
-    + 4 * 8192;
+pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * ROW_BACKING + 4 * 8192
+    + crate::service_version_reserve_review_requests::NON_ROW_BACKING
+    + 2 * p::REQUEST_LIMIT * std::mem::size_of::<Retained>();
+const ROW_BACKING:usize={let old=4096+std::mem::size_of::<Entry>();let new=crate::service_version_reserve_review_requests::ROW_BACKING;if old>new{old}else{new}};
+#[derive(Clone)]
+enum Retained {
+    Reserve(Arc<Entry>),
+    Review(Arc<crate::service_version_reserve_review_requests::Entry>),
+}
+impl Retained {
+    fn origin(&self)->&p::Query{match self{Self::Reserve(e)=>&e.input.origin,Self::Review(e)=>&e.input.origin}}
+    fn reserve(&self)->Option<&Arc<Entry>>{if let Self::Reserve(e)=self{Some(e)}else{None}}
+    fn pending(&self)->bool{match self{Self::Reserve(e)=>e.pending(),Self::Review(e)=>e.pending()}}
+    fn cancel(&self,reason:p::Reason,at:Instant){match self{Self::Reserve(e)=>e.cancel(reason,at),Self::Review(e)=>e.cancel(reason,at)}}
+    fn scope_compatible(&self,scope:&NativeScope)->bool{match self{Self::Reserve(e)=>!e.pending(),Self::Review(e)=>e.scope_compatible(scope)}}
+}
 
 /// Read-only facet of the SAME original service Grant. The Grant's Drop
 /// revokes this comparison; dropping an Arc facet cannot revoke or renew it.
@@ -99,7 +113,7 @@ struct Book {
     current_read: Option<Weak<ReadPermission>>,
     read_epoch: u64,
     lease: Option<Arc<Lease>>,
-    entries: Vec<Arc<Entry>>,
+    entries: Vec<Retained>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -505,13 +519,13 @@ impl Inbox {
         }
         let mut rows = Vec::with_capacity(book.entries.len());
         for entry in &book.entries {
-            if &entry.input.origin.service_instance != instance {
+            if &entry.origin().service_instance != instance {
                 return Err(Error::StateUnknown);
             }
-            if &entry.input.origin.project_id == project {
+            if &entry.origin().project_id == project {
                 rows.push(AdditionalRequest {
                     family: AdditionalFamily::VersionReservation,
-                    request_id: entry.input.origin.request_id.clone(),
+                    request_id: entry.origin().request_id.clone(),
                 });
             }
         }
@@ -561,7 +575,7 @@ impl Inbox {
         if book.closed {
             return Err(Error::Unavailable);
         }
-        if book.entries.len() >= p::REQUEST_LIMIT || book.entries.iter().any(|e| e.pending()) {
+        if book.entries.len() >= p::REQUEST_LIMIT || book.entries.iter().any(|e| !e.scope_compatible(&scope)) {
             return Err(Error::Busy);
         }
         if let Some(old) = &book.lease {
@@ -579,7 +593,7 @@ impl Inbox {
         let Some(lease) = &book.lease else {
             return Ok(p::Access::empty());
         };
-        let consumed = book.entries.iter().find(|e| e.input.grant_id == lease.id);
+        let consumed = book.entries.iter().filter_map(Retained::reserve).find(|e| e.input.grant_id == lease.id);
         let now = Instant::now();
         let remaining = lease
             .scope
@@ -608,12 +622,13 @@ impl Inbox {
         let book = self.lock()?;
         self.access_locked(&book)
     }
-    pub(crate) fn blocks_review(&self) -> Result<bool, Error> {
+    pub(crate) fn blocks_review(&self) -> Result<bool, Error> { self.blocks_review_except(None) }
+    pub(crate) fn blocks_review_except(&self,original:Option<&Arc<crate::service_version_reserve_review_requests::Entry>>)->Result<bool,Error>{
         let book = self.lock()?;
-        Ok(book.entries.iter().any(|e| e.pending())
+        Ok(book.entries.iter().any(|e| e.pending() && !matches!((e,original),(Retained::Review(a),Some(b)) if Arc::ptr_eq(a,b)))
             || book.lease.as_ref().is_some_and(|l| {
                 l.live(Instant::now(), false)
-                    && !book.entries.iter().any(|e| e.input.grant_id == l.id)
+                    && !book.entries.iter().filter_map(Retained::reserve).any(|e| e.input.grant_id == l.id)
             }))
     }
     pub(crate) fn revoke(&self, reason: p::Reason, at: Instant) -> Result<p::Access, Error> {
@@ -672,9 +687,9 @@ impl Inbox {
         if let Some(old) = book
             .entries
             .iter()
-            .find(|e| e.input.origin.request_id == input.origin.request_id)
+            .find(|e| e.origin().request_id == input.origin.request_id)
         {
-            return if old.input == input {
+            return if let Some(old) = old.reserve().filter(|e| e.input == input) {
                 old.status()
             } else {
                 Err(Error::Conflict)
@@ -687,11 +702,12 @@ impl Inbox {
             return Err(Error::Busy);
         }
         let lease = book.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
+        if book.entries.iter().any(|e|!e.scope_compatible(&lease.scope)){return Err(Error::Busy)}
         if input.origin.project_id != lease.scope.project_id
             || input.review_id != lease.scope.review_id
             || input.grant_id != lease.id
             || !lease.live(Instant::now(), false)
-            || book.entries.iter().any(|e| e.input.grant_id == lease.id)
+            || book.entries.iter().filter_map(Retained::reserve).any(|e| e.input.grant_id == lease.id)
         {
             return Err(Error::AccessDenied);
         }
@@ -719,7 +735,7 @@ impl Inbox {
                 stop: None,
             }),
         });
-        book.entries.push(entry);
+        book.entries.push(Retained::Reserve(entry));
         lease.scope.changes.send_modify(|_| {});
         Ok(status)
     }
@@ -731,6 +747,7 @@ impl Inbox {
         let entry = book
             .entries
             .iter()
+            .filter_map(Retained::reserve)
             .find(|e| e.input.origin == *q)
             .ok_or(Error::Conflict)?;
         if cancel {
@@ -743,7 +760,7 @@ impl Inbox {
         if book.closed {
             return Ok(None);
         }
-        for entry in &book.entries {
+        for entry in book.entries.iter().filter_map(Retained::reserve) {
             entry.expire(Instant::now());
             let mut row = entry.lock()?;
             if row.claimed || row.stop.is_some() || row.status.state != p::State::Queued {
@@ -761,6 +778,41 @@ impl Inbox {
             }));
         }
         Ok(None)
+    }
+}
+
+
+impl Inbox {
+    pub(crate) fn enqueue_review(&self,input:crate::service_version_reserve_review_protocol::Request,
+        scope:crate::service_version_reserve_review_requests::Scope,started:Instant)
+        ->Result<crate::service_version_reserve_review_protocol::Status,Error>{
+        input.validate()?;let mut book=self.lock()?;
+        if input.origin.service_instance!=self.instance{return Err(Error::Conflict)}
+        if let Some(old)=book.entries.iter().find(|e|e.origin().request_id==input.origin.request_id){
+            return match old{Retained::Review(e) if e.input==input=>e.status(),_=>Err(Error::Conflict)};
+        }
+        if book.closed{return Err(Error::Unavailable)}
+        if book.entries.len()>=p::REQUEST_LIMIT||book.entries.iter().any(|e|e.pending()||matches!(e,Retained::Review(v) if v.holds_review()))
+            ||book.lease.as_ref().is_some_and(|l|l.live(Instant::now(),false)&&!book.entries.iter().filter_map(Retained::reserve).any(|e|e.input.grant_id==l.id))
+        {return Err(Error::Busy)}
+        let entry=crate::service_version_reserve_review_requests::Entry::new(input,scope,started)?;
+        let status=entry.status()?;book.entries.push(Retained::Review(entry));Ok(status)
+    }
+    pub(crate) fn review_entry(&self,q:&p::Query)->Result<Arc<crate::service_version_reserve_review_requests::Entry>,Error>{
+        let book=self.lock()?;
+        if q.service_instance!=self.instance{return Err(Error::Conflict)}
+        book.entries.iter().find_map(|e|match e{Retained::Review(v) if v.input.origin==*q=>Some(v.clone()),_=>None}).ok_or(Error::Conflict)
+    }
+    pub(crate) fn review_kind(&self,q:&p::Query)->Result<bool,Error>{
+        let book=self.lock()?;
+        if q.service_instance!=self.instance{return Err(Error::Conflict)}
+        book.entries.iter().find(|e|e.origin()==q).map(|e|matches!(e,Retained::Review(_))).ok_or(Error::Conflict)
+    }
+    pub(crate) fn review_status(&self,q:Option<&p::Query>,cancel:bool)->Result<Option<crate::service_version_reserve_review_protocol::Status>,Error>{
+        let entry=if let Some(q)=q{Some(self.review_entry(q)?)}else{
+            let book=self.lock()?;book.entries.iter().rev().find_map(|e|match e{Retained::Review(e)=>Some(e.clone()),_=>None})
+        };
+        entry.map(|e|{if cancel{e.cancel(p::Reason::UserCancelled,Instant::now())}e.status()}).transpose()
     }
 }
 

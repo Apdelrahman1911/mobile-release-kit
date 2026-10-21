@@ -4,7 +4,8 @@ use super::*;
 use std::mem::size_of;
 
 const ANCILLARY_LIMIT: usize = 128 * 1024;
-const UNASSIGNED_SLACK: usize = 128 * 1024;
+// SAME former128KiB slack, now exclusively names every retained Activity snapshot.
+const SNAPSHOTS: usize = p::REQUEST_LIMIT * p::activity::SNAPSHOT_BACKING;
 const ARC_HEADER: usize = 2 * size_of::<usize>();
 // NativeScope::valid/Review::retained_fits check physical capacities, not just
 // string lengths. Submit IDs are rebuilt by Id::parse; the operation is fixed
@@ -47,7 +48,11 @@ fn ancillary_bytes() -> Option<usize> {
         // Old claimed scopes are still fully included in every retained row.
         2 * p::ROW_BACKING,
         4 * (size_of::<p::Access>() + size_of::<p::Status>() + 2 * OUTPUT_HEAP),
-        4 * (3 * p::STATUS_LIMIT), // existing GUI/history encoding growth
+        // The one permission controller retains at most one normal plus one
+        // Revoke caller. Typed Tauri uses a String (no Value tree); keep each
+        // serializer's old+new growable backing, not merely its final bytes.
+        2 * 3 * p::activity::RESPONSE_LIMIT,
+        4 * p::activity::SNAPSHOT_BACKING, // public Allow/Access copies, not retained rows
         32 * ARC_HEADER,
         16 * (size_of::<tokio::sync::watch::Sender<u32>>()
             + size_of::<tokio::sync::watch::Receiver<u32>>()),
@@ -62,7 +67,7 @@ fn checked_backing(row: usize, ancillary: usize) -> Option<usize> {
     let bytes = sum(&[
         p::REQUEST_LIMIT.checked_mul(p::ROW_BACKING)?,
         ANCILLARY_LIMIT,
-        UNASSIGNED_SLACK,
+        SNAPSHOTS,
     ])?;
     (bytes == p::DOCUMENT_BACKING).then_some(bytes)
 }
@@ -85,7 +90,7 @@ mod tests {
         assert_eq!(p::REQUEST_LIMIT, 32);
         assert_eq!(
             p::DOCUMENT_BACKING,
-            32 * p::ROW_BACKING + ANCILLARY_LIMIT + UNASSIGNED_SLACK
+            32 * p::ROW_BACKING + ANCILLARY_LIMIT + SNAPSHOTS
         );
         println!(
             "GH retained row={row} ancillary={ancillary} debit={}",

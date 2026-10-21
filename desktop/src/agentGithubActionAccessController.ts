@@ -1,8 +1,8 @@
 import { GITHUB_ACTION_KINDS, parseAgentGithubActionAccess, parseGithubActionSelection, parseGithubActionStatus, sameGithubActionReview, sameGithubActionSelection } from './agentGithubActionAccess.ts';
 import type { AgentGithubActionAccess, AgentGithubActionPort, GithubActionDelegate, GithubActionKind, GithubActionQuery, GithubActionReview, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
 export interface AgentGithubActionContext {port:AgentGithubActionPort|null;nativeSession:object|null;projectId:string|null;epoch:object;preview:boolean;blockedReason:string|null;reviews:readonly GithubActionSelection[]}
-interface Origin {context:AgentGithubActionContext;selection:GithubActionSelection;delegate:GithubActionDelegate|null;sent:boolean;revoked:boolean;withdrawn:boolean;grant:{id:string;project:string;instance:string;review:GithubActionReview}|null;query:GithubActionQuery|null;status:GithubActionStatus|null}
-interface Work {kind:'allow'|'check'|'revoke';context:AgentGithubActionContext;origin:Origin|null;original:Promise<unknown>|null;completion:Promise<void>;finish():void}
+interface Origin {permissionRevision:string;context:AgentGithubActionContext;selection:GithubActionSelection;delegate:GithubActionDelegate|null;sent:boolean;revoked:boolean;withdrawn:boolean;grant:{id:string;project:string;instance:string;review:GithubActionReview}|null;query:GithubActionQuery|null;status:GithubActionStatus|null}
+interface Work {expectedPermissionRevision:string|null;kind:'allow'|'check'|'revoke';context:AgentGithubActionContext;origin:Origin|null;original:Promise<unknown>|null;completion:Promise<void>;finish():void}
 export interface AgentGithubActionView {selected:GithubActionKind;review:GithubActionSelection|null;acknowledged:boolean;access:AgentGithubActionAccess|null;status:GithubActionStatus|null;pending:'allow'|'check'|null;revoking:boolean;withdrawn:boolean;stale:boolean;unknown:boolean;issue:string|null}
 const missing={};
 const absent=():AgentGithubActionContext=>({port:null,nativeSession:null,projectId:null,epoch:missing,preview:false,blockedReason:null,reviews:[]});
@@ -13,7 +13,8 @@ const uncertain='The original GitHub permission or request is unconfirmed. Keep 
  * automatic read/retry, native Start or public-status-derived permission. */
 export class AgentGithubActionAccessController {
   private context=absent();private origin:Origin|null=null;private normal:Work|null=null;private revokeWork:Work|null=null;private disposed=false;
-  private consent:{context:AgentGithubActionContext;selection:GithubActionSelection}|null=null;
+  private consent:{context:AgentGithubActionContext;selection:GithubActionSelection;revision:string}|null=null;
+  private accessWitness:{context:AgentGithubActionContext;revision:string}|null=null;
   private readonly listeners=new Set<()=>void>();
   private state:AgentGithubActionView=Object.freeze({selected:'repository-create',review:null,acknowledged:false,access:null,status:null,pending:null,revoking:false,withdrawn:false,stale:true,unknown:false,issue:null});
   private readonly source:{current():AgentGithubActionContext;syncOriginal():void;delegate(selection:GithubActionSelection):GithubActionDelegate|null};
@@ -23,7 +24,7 @@ export class AgentGithubActionAccessController {
   whenSettled=()=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
   private read():AgentGithubActionContext {
     try{const c=this.source.current(),p=c.port;
-      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>5)return absent();
+      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>6)return absent();
       const reviews=c.reviews.map(parseGithubActionSelection).filter((r):r is GithubActionSelection=>r!==null);
       if(new Set(reviews.map(r=>r.kind)).size!==reviews.length)return absent();
       return {...c,port:p&&['access','allow','request','revoke'].every(k=>typeof p[k as keyof AgentGithubActionPort]==='function')?p:null,
@@ -37,7 +38,7 @@ export class AgentGithubActionAccessController {
   syncContext=():void=>{
     if(this.disposed)return;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected)??null;
     const changed=!same(c,this.context)||!sameGithubActionSelection(r,this.state.review)&&!(r===null&&this.state.review===null);
-    this.context=c;if(changed){this.consent=null;this.patch({review:r,acknowledged:false,stale:this.origin?!same(c,this.origin.context):true});}
+    if(!same(c,this.context))this.accessWitness=null;this.context=c;if(changed){this.consent=null;this.patch({review:r,acknowledged:false,stale:this.origin?!same(c,this.origin.context):true});}
   };
   private usable(c:AgentGithubActionContext):string|null{return c.preview?'Unavailable in preview.':!c.port||!c.nativeSession?'Use the installed Desktop with the original project READ permission.':null;}
   ownerReason=():string|null=>this.state.unknown?uncertain:this.normal||this.revokeWork?'An original GitHub permission caller is returning.':
@@ -50,17 +51,17 @@ export class AgentGithubActionAccessController {
   choose(kind:GithubActionKind):boolean {if(this.disposed||!GITHUB_ACTION_KINDS.includes(kind)||this.ownerReason())return false;this.consent=null;this.patch({selected:kind,acknowledged:false});this.syncContext();return true;}
   consentReason():string|null {
     const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);
-    return this.disposed?'This controller is closed.':this.ownerReason()??this.usable(c)??c.blockedReason??(!c.projectId||!r?'Use the original action panel to finish its exact Review first.':null);
+    return this.disposed?'This controller is closed.':this.ownerReason()??this.usable(c)??c.blockedReason??(!c.projectId||!r?'Use the original action panel to finish its exact Review, or connect Activity, first.':null)??(!this.accessWitness||!same(c,this.accessWitness.context)?'Check the original CLI permission before confirming Allow.':this.accessWitness.revision==='18446744073709551615'?'The original permission revision is exhausted. Check and Stop remain available.':null);
   }
   allowReason():string|null {const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected)??null;return this.consentReason()??
-    (!this.consent||!same(c,this.consent.context)||!sameGithubActionSelection(r,this.consent.selection)?'Confirm one local CLI submission of this exact reviewed action or GET-only reconciliation.':null);}
+    (!this.consent||!same(c,this.consent.context)||!sameGithubActionSelection(r,this.consent.selection)||this.accessWitness?.revision!==this.consent.revision?'Confirm one local CLI submission of this exact reviewed action or GET-only reconciliation.':null);}
   acknowledge(value:boolean):boolean {this.syncContext();if(typeof value!=='boolean'||this.disposed||this.normal||this.revokeWork||value&&this.consentReason())return false;
-    const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);this.consent=value&&r?{context:c,selection:r}:null;this.patch({acknowledged:!!this.consent});return true;}
+    const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);this.consent=value&&r&&this.accessWitness?{context:c,selection:r,revision:this.accessWitness.revision}:null;this.patch({acknowledged:!!this.consent});return true;}
   private controls():AgentGithubActionContext{return this.origin?.context??this.context;}
   checkReason():string|null{return this.disposed?'Closed.':this.usable(this.controls())??(this.normal||this.revokeWork?'Wait for the original permission caller.':null);}
   revokeReason():string|null{return this.disposed?'Closed.':this.usable(this.controls())??(this.revokeWork?'The original Revoke is returning.':!this.origin&&!this.state.access?.grantId?'No original permission is observed.':null);}
   private begin(kind:Work['kind'],c:AgentGithubActionContext,o:Origin|null):Work {let finish!:()=>void;const completion=new Promise<void>(r=>{finish=r;});
-    const w:Work={kind,context:c,origin:o,original:null,completion,finish};if(kind==='revoke')this.revokeWork=w;else this.normal=w;this.consent=null;this.patch({acknowledged:false});return w;}
+    const w:Work={kind,context:c,origin:o,expectedPermissionRevision:kind==='allow'?o?.permissionRevision??null:null,original:null,completion,finish};if(kind==='revoke')this.revokeWork=w;else this.normal=w;this.consent=null;this.patch({acknowledged:false});return w;}
   private finish(w:Work):void {if(this.normal===w)this.normal=null;if(this.revokeWork===w)this.revokeWork=null;this.patch();w.finish();}
   private unknown():void {this.consent=null;this.patch({unknown:true,issue:uncertain,stale:true,acknowledged:false});this.origin?.delegate?.uncertain();}
   private current(w:Work):boolean{return !this.disposed&&same(w.context,this.read())&&(w.kind==='revoke'?this.revokeWork===w:this.normal===w);}
@@ -78,15 +79,15 @@ export class AgentGithubActionAccessController {
     o.query=s.origin;o.status=s;return true;
   }
   async allow():Promise<boolean> {
-    this.source.syncOriginal();this.syncContext();if(this.allowReason())return false;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);if(!r)return false;
-    const o:Origin={context:c,selection:r,delegate:null,sent:false,revoked:false,withdrawn:false,grant:null,query:null,status:null};this.origin=o;
-    const w=this.begin('allow',c,o);this.patch({access:null,status:null,stale:true});let sent=false;
+    this.source.syncOriginal();this.syncContext();if(this.allowReason())return false;const c=this.read(),r=c.reviews.find(x=>x.kind===this.state.selected);if(!r||!this.consent)return false;const revision=this.consent.revision;
+    const o:Origin={permissionRevision:revision,context:c,selection:r,delegate:null,sent:false,revoked:false,withdrawn:false,grant:null,query:null,status:null};this.origin=o;
+    this.accessWitness=null;const w=this.begin('allow',c,o);this.patch({access:null,status:null,stale:true});let sent=false;
     try{
       this.source.syncOriginal();const live=this.read();if(!this.current(w)||o.revoked||live.blockedReason||!sameGithubActionSelection(r,live.reviews.find(x=>x.kind===r.kind)??null))return false;
       o.delegate=this.source.delegate(r);
       if(!o.delegate||!o.delegate.current()||!this.current(w)||o.revoked||this.read().blockedReason)return false;
-      sent=true;o.sent=true;const raw=await this.returned(w,()=>c.port!.allow(r));const a=parseAgentGithubActionAccess(raw);
-      if(!a||!this.acceptAccess(a,o)){this.unknown();return true;}
+      sent=true;o.sent=true;const raw=await this.returned(w,()=>c.port!.allow(r,w.expectedPermissionRevision!));const a=parseAgentGithubActionAccess(raw);
+      if(!a||BigInt(a.permissionRevision)!==BigInt(o.permissionRevision)+1n||!this.acceptAccess(a,o)){this.unknown();return true;}
       if(a.unknown){this.unknown();return true;}
       o.delegate.allowReturned(); // genuine Allow caller only, never a native Start.
       if(!this.state.unknown&&!o.revoked)this.patch({access:a,status:o.status,stale:!this.current(w),issue:null});
@@ -97,7 +98,11 @@ export class AgentGithubActionAccessController {
     return sent;
   }
   async check():Promise<boolean> {
-    this.syncContext();if(this.checkReason())return false;const c=this.controls(),o=this.origin,w=this.begin('check',c,o);
+    this.syncContext();if(this.checkReason())return false;
+    // Only the already-returned old delegate can release this controller for a
+    // NEW Access observation. A copied latest status cannot replace its caller.
+    if(!this.state.unknown&&this.origin?.withdrawn&&this.origin.delegate?.released())this.origin=null;
+    const c=this.controls(),o=this.origin,w=this.begin('check',c,o);
     try{
       if(o?.query){
         const s=parseGithubActionStatus(await this.returned(w,()=>c.port!.request(o.query!)));
@@ -107,6 +112,10 @@ export class AgentGithubActionAccessController {
       }else{
         const a=parseAgentGithubActionAccess(await this.returned(w,()=>c.port!.access()));
         if(!a||o&&!this.acceptAccess(a,o)){this.unknown();return true;}
+        if(!o&&this.current(w)&&!this.revokeWork&&!this.state.unknown){
+          if(this.accessWitness&&same(this.accessWitness.context,c)&&BigInt(a.permissionRevision)<BigInt(this.accessWitness.revision)){this.unknown();return true;}
+          this.accessWitness={context:c,revision:a.permissionRevision};
+        }
         if(!this.state.unknown)this.patch({access:a,status:o?.status??a.status,stale:!this.current(w),issue:null});
         if(a.unknown){this.unknown();return true;}
         if(o&&a.status){
@@ -122,7 +131,7 @@ export class AgentGithubActionAccessController {
   }
   async revoke():Promise<boolean> {
     if(this.revokeReason())return false;const c=this.controls(),o=this.origin;
-    if(o)o.revoked=true; // latch before publishing listeners or entering raw {} Revoke.
+    this.accessWitness=null;if(o)o.revoked=true; // latch before publishing listeners or entering raw {} Revoke.
     const w=this.begin('revoke',c,o);
     try{
       const a=parseAgentGithubActionAccess(await this.returned(w,()=>c.port!.revoke()));

@@ -8,6 +8,9 @@ use crate::{
 };
 use crate::service_git_commit_protocol::{Draft, Family};
 use serde::Deserialize;
+#[path = "service_git_permission_revision.rs"]
+mod permission_revision;
+use permission_revision::{MainAccess, PermissionRevision};
 
 #[path = "service_git_commit_document.rs"]
 mod commit;
@@ -27,6 +30,7 @@ use std::{path::Path, sync::OnceLock};
 pub(crate) struct Allow {
     project_id: String,
     expected_document_revision: u32,
+    expected_permission_revision: PermissionRevision,
     read_operation_id: String,
     action: wire::Action,
     paths: Vec<String>,
@@ -83,6 +87,9 @@ pub(super) struct NativeState {
 // Two original Observe/Grant comparison witnesses plus temporary rematch/GUI
 // decode, not a new native source owner. Paths themselves are charged once in
 // the inbox; the actual native Git action/review charges remain unchanged.
+// MAIN revisions add one u64 to each of the same two bounded requests and
+// one <=20-digit field to their projection, inside the unchanged 96-byte
+// envelope reserve. No new per-row or eight-worker backing is introduced.
 pub(super) const fn document_backing() -> usize {
     4 * (8192 + std::mem::size_of::<Observation>())
         + std::mem::size_of::<NativeState>()
@@ -221,6 +228,12 @@ impl DocumentBinding {
             .map(|s| s.upgrade().ok_or_else(|| public(Error::Unavailable)))
             .transpose()
     }
+    /// Every caller already holds the original Doc. Failure never skips the
+    /// independently performed original Inbox revoke/close.
+    fn revoke_git_permission_revision_locked(&self) -> Result<PermissionRevision, BridgeError> {
+        self.inner.agent_git_index.book.lock()
+            .map_err(|_| public(Error::StateUnknown))?.revoke_permission()
+    }
     fn git_index_observation_current(
         &self,
         state: &DocumentState,
@@ -259,30 +272,39 @@ impl DocumentBinding {
                 })
             })
     }
-    pub(crate) fn agent_git_index_access(&self, window: &str) -> Result<wire::Access, BridgeError> {
+    pub(crate) fn agent_git_index_access(&self, window: &str) -> Result<MainAccess<wire::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.git_index_service()? {
-            Some(s) => s.git_index_requests().access().map_err(public),
-            None => Ok(wire::Access::empty()),
-        }
+        let _state = self.lock();
+        let book = self.inner.agent_git_index.book.lock()
+            .map_err(|_| public(Error::StateUnknown))?;
+        let access = match self.git_index_service()? {
+            Some(s) => s.git_index_requests().access().map_err(public)?,
+            None => wire::Access::empty(),
+        };
+        Ok(MainAccess::new(access, book.permission_revision()))
     }
     pub(crate) fn allow_agent_git_index(
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<wire::Access, BridgeError> {
+    ) -> Result<MainAccess<wire::Access>, BridgeError> {
         self.allow_agent_git_files(window, args, None)
     }
-    fn allow_agent_git_files(&self, window: &str, args: Allow, commit: Option<Draft>) -> Result<wire::Access, BridgeError> {
+    fn allow_agent_git_files(&self, window: &str, args: Allow, commit: Option<Draft>) -> Result<MainAccess<wire::Access>, BridgeError> {
         let family = if commit.is_some() { Family::Commit } else { Family::Index };
         let consent = if family == Family::Commit { crate::service_git_commit_protocol::CONSENT } else { wire::CONSENT };
         if window != MAIN || args.consent_version != consent || !family.matches(args.action) {
             return Err(BridgeError::invalid());
         }
-        let (original, selected, revoke_epoch) = {
+        let (original, selected, successor) = {
             let mut state = self.lock();
+            let successor = {
+                let book = self.inner.agent_git_index.book.lock()
+                    .map_err(|_| public(Error::StateUnknown))?;
+                book.next_permission(args.expected_permission_revision)?
+            };
             git_read::reconcile(&mut state);
             git_local::reconcile(&self.inner, &mut state);
             self.git_local_new_gate(&state)?;
@@ -328,7 +350,7 @@ impl DocumentBinding {
                 observed.original.clone(),
                 if family == Family::Commit { commit::whole_selection(value)? }
                 else { selection(value, args.action, args.paths)? },
-                book.revoke_epoch,
+                successor,
             )
         };
         // These existing calls can do Store IO. No Doc/Edit/native-book guard.
@@ -387,7 +409,7 @@ impl DocumentBinding {
             .book
             .lock()
             .map_err(|_| public(Error::StateUnknown))?;
-        if book.revoke_epoch != revoke_epoch
+        if book.next_permission(args.expected_permission_revision)? != successor
             || !repository::basis_current(&book, &state, &scope, &original)
         {
             return Err(public(Error::Conflict));
@@ -403,6 +425,8 @@ impl DocumentBinding {
                 .set(Arc::downgrade(&service))
                 .map_err(|_| public(Error::StateUnknown))?;
         }
+        // Spend the supplied generation before any fallible installer return.
+        book.consume_permission(args.expected_permission_revision, successor)?;
         let access = if family == Family::Commit {
             service.git_index_requests().allow_commit(scope.clone()).map(|a| a.0)
         } else { service.git_index_requests().allow(scope.clone()) }.map_err(public)?;
@@ -411,35 +435,23 @@ impl DocumentBinding {
             observation: original,
             remote: None,
         }));
-        Ok(access)
+        Ok(MainAccess::new(access, successor))
     }
-    pub(crate) fn revoke_agent_git_index(&self, window: &str) -> Result<wire::Access, BridgeError> {
+    pub(crate) fn revoke_agent_git_index(&self, window: &str) -> Result<MainAccess<wire::Access>, BridgeError> {
         self.revoke_agent_git_files(window, Family::Index)
     }
-    fn revoke_agent_git_files(&self, window: &str, family: Family) -> Result<wire::Access, BridgeError> {
+    fn revoke_agent_git_files(&self, window: &str, family: Family) -> Result<MainAccess<wire::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
         let _state = self.lock();
-        let advance = (|| {
-            let mut book = self
-                .inner
-                .agent_git_index
-                .book
-                .lock()
-                .map_err(|_| public(Error::StateUnknown))?;
-            book.revoke_epoch = book
-                .revoke_epoch
-                .checked_add(1)
-                .ok_or_else(|| public(Error::StateUnknown))?;
-            Ok(())
-        })();
+        let advance = self.revoke_git_permission_revision_locked();
         let stop = match self.git_index_service() {
             Ok(Some(s)) => if family == Family::Commit { s.git_index_requests().revoke_commit().map(|a| a.0).map_err(public) } else { s.git_index_requests().revoke().map_err(public) },
             Ok(None) => Ok(wire::Access::empty()),
             Err(e) => Err(e),
         };
-        advance.and(stop)
+        advance.and_then(|revision| stop.map(|access| MainAccess::new(access, revision)))
     }
     /// Shared Prepare/Apply boundary, inside the original Doc/Edit guards.
     /// The caller supplies the real publisher epoch for Apply (not epoch()).
@@ -622,19 +634,25 @@ impl DocumentBinding {
         let _ = flush(&service);
     }
     pub(crate) fn git_index_relay_lost(&self) {
+        let _state = self.lock();
+        let _ = self.revoke_git_permission_revision_locked();
         if let Ok(Some(s)) = self.git_index_service() {
             let _ = s.git_index_requests().revoke();
         }
     }
     pub(crate) fn drain_git_index_for_exit(&self) {
-        if let Ok(Some(s)) = self.git_index_service() {
-            s.git_index_requests().close();
-            {
-                let mut state = self.lock();
+        let service = {
+            let mut state = self.lock();
+            let _ = self.revoke_git_permission_revision_locked();
+            let service = self.git_index_service().ok().flatten();
+            if let Some(s) = &service {
+                s.git_index_requests().close();
                 git_local::agent_tick(&self.inner, &mut state);
             }
-            let _ = flush(&s);
-        }
+            service
+        };
+        // Existing service history IO remains outside Doc/Edit/Book.
+        if let Some(s) = service { let _ = flush(&s); }
     }
 }
 fn same_action(action: &local::Action, selection: &wire::Selection) -> bool {

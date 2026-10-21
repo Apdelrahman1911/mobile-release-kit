@@ -4,6 +4,8 @@
 use super::*;
 use crate::ios_archive_protocol as wire;
 use sha2::{Digest, Sha256};
+#[path = "asset_session_agent_ios_signing.rs"]
+pub(super) mod agent;
 
 pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-IOS-MATERIAL/1\n";
 pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-IOS-MATERIAL-END\n";

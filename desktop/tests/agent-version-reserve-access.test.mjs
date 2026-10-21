@@ -6,12 +6,13 @@ import { parseAgentVersionReserveAccess, createAgentVersionReserveAccessPort, ag
 import { VersionReserveController } from '../src/versionReserveController.ts';
 
 const REVIEW = 'a'.repeat(32), OP = 'b'.repeat(32), SERVICE = '1'.repeat(32), PROJECT = '2'.repeat(32), GRANT = '3'.repeat(32), REQUEST = '4'.repeat(32);
+const CHECKED_REVISION = '0000000000000000', CLAIMED_REVISION = '0000000000000001';
 const options = { reference: 'refs/heads/main', increment: 'patch', newCandidate: false, acknowledgeLimitations: true };
 const reservation = { id: OP, candidateId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: '1.2.4', build: 8 };
-const access = (extra = {}) => ({ serviceInstance: SERVICE, projectId: PROJECT, grantId: GRANT, reviewId: REVIEW, reviewRevision: 1,
+const access = (extra = {}) => ({ allowRevision: CLAIMED_REVISION, serviceInstance: SERVICE, projectId: PROJECT, grantId: GRANT, reviewId: REVIEW, reviewRevision: 1,
   enabled: true, remainingMs: 90_000, consumed: false, requestId: null, completedOperationId: null, ...extra });
-const none = () => ({ serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
-  enabled: false, remainingMs: 0, consumed: false, requestId: null, completedOperationId: null });
+const none = (extra = {}) => ({ allowRevision: CHECKED_REVISION, serviceInstance: null, projectId: null, grantId: null, reviewId: null, reviewRevision: null,
+  enabled: false, remainingMs: 0, consumed: false, requestId: null, completedOperationId: null, ...extra });
 const consumed = (completed = false, extra = {}) => access({ enabled: false, remainingMs: 0, consumed: true, requestId: REQUEST,
   completedOperationId: completed ? OP : null, ...extra });
 const status = (phase, revision = 1, extra = {}) => ({ schemaVersion: 1, revision, projectId: 'project-1',
@@ -32,7 +33,11 @@ function harness() {
   return { c, calls, edits, cliAccessPort, port, last: (kind) => calls.filter((v) => v.kind === kind).at(-1),
     set: (v) => { context = { ...context, ...v }; }, ready: () => { c.setEnabled(true); c.configure(options); } };
 }
-async function reviewed(h) { h.ready(); const p = h.c.review(); h.last('review').resolve(status('reviewed')); await p; }
+async function permissionChecked(h, revision = CHECKED_REVISION) {
+  const p = h.c.cliAccess.check(); h.last('access').resolve(none({ allowRevision: revision })); await p;
+}
+// Fixture explicitly clicks Check AFTER the real Review, not an automatic production read.
+async function reviewed(h) { h.ready(); const p = h.c.review(); h.last('review').resolve(status('reviewed')); await p; await permissionChecked(h); }
 async function allowed(h) { await reviewed(h); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
   const p = h.c.cliAccess.allow(); h.last('allow').resolve(access()); await p; }
 async function checked(h, a, native = null) {
@@ -46,7 +51,10 @@ test('closed permission DTO rejects malformed authority, IDs, omissions and acce
     const parsed = parseAgentVersionReserveAccess(v); assert.deepEqual(parsed, v); assert.ok(Object.isFrozen(parsed));
   }
   const missing = access(); delete missing.completedOperationId;
-  for (const v of [missing, access({ source: {} }), access({ grantId: '0'.repeat(32) }), access({ projectId: 'project-1' }),
+  const noStamp = access(); delete noStamp.allowRevision;
+  for (const v of [missing, noStamp, access({ allowRevision: null }), access({ allowRevision: 0 }), access({ allowRevision: '0' }),
+    access({ allowRevision: '000000000000000A' }), access({ allowRevision: '0000000000000000\n' }), access({ allowRevision: 'ffffffffffffffff' }),
+    access({ source: {} }), access({ grantId: '0'.repeat(32) }), access({ projectId: 'project-1' }),
     access({ serviceInstance: SERVICE.toUpperCase().replace('1', 'A') }), access({ reviewRevision: 0 }), access({ reviewRevision: 0xffff_ffff }),
     access({ remainingMs: -0 }), access({ remainingMs: 0 }), access({ remainingMs: 120001 }), access({ remainingMs: 0.5 }), access({ enabled: false }),
     access({ consumed: true }), access({ completedOperationId: OP }), consumed(true, { requestId: null }),
@@ -61,11 +69,12 @@ test('only the three RAW bounded commands are emitted; CLI help contains exact o
     assert.ok(bytes instanceof Uint8Array); assert.ok(bytes.length + 96 <= 1024);
     calls.push([command, JSON.parse(new TextDecoder().decode(bytes))]); return none();
   });
-  await port.status(); await port.allow('project-1', REVIEW, 12); await port.revoke();
+  await port.status(); await port.allow('project-1', REVIEW, 12, CHECKED_REVISION); await port.revoke();
   assert.deepEqual(calls, [['agent_version_reserve_access', {}], ['allow_agent_version_reserve', {
-    projectId: 'project-1', reviewId: REVIEW, expectedReserveRevision: 12, consentVersion: 'agent-version-reserve-once-v1',
+    projectId: 'project-1', reviewId: REVIEW, expectedReserveRevision: 12, expectedAllowRevision: CHECKED_REVISION, consentVersion: 'agent-version-reserve-once-v1',
   }], ['revoke_agent_version_reserve', {}]]);
-  for (const args of [['../project', REVIEW, 1], ['project-1', '0'.repeat(32), 1], ['project-1', REVIEW, 0xffff_ffff]]) await assert.rejects(port.allow(...args));
+  for (const args of [['../project', REVIEW, 1, CHECKED_REVISION], ['project-1', '0'.repeat(32), 1, CHECKED_REVISION], ['project-1', REVIEW, 0xffff_ffff, CHECKED_REVISION],
+    ['project-1', REVIEW, 1], ['project-1', REVIEW, 1, '0000000000000000\n'], ['project-1', REVIEW, 1, 'ffffffffffffffff']]) await assert.rejects(port.allow(...args));
   assert.equal(calls.length, 3);
   assert.deepEqual(agentVersionReserveCommands(access()), [`mrk version-reserve-submit ${PROJECT} ${SERVICE} ${GRANT} ${REVIEW} --reviewed`]);
   assert.deepEqual(agentVersionReserveCommands(consumed()), [`mrk version-reserve-status ${PROJECT} ${SERVICE} ${REQUEST}`, `mrk version-reserve-cancel ${PROJECT} ${SERVICE} ${REQUEST}`]);
@@ -77,8 +86,9 @@ test('manual default and status-shaped review never allow CLI; explicit original
   h.ready(); let p = h.c.check(); h.last('version-status').resolve(status('reviewed')); await p;
   assert.equal(h.c.cliAccess.setAcknowledged(true), false); assert.equal(await h.c.cliAccess.allow(), false);
   p = h.c.review(); h.last('review').resolve(status('reviewed', 2)); await p;
-  assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
-  p = h.c.cliAccess.allow(); assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 2]);
+  assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.c.cliAccess.setAcknowledged(true), false);
+  await permissionChecked(h); assert.equal(h.c.cliAccess.setAcknowledged(true), true);
+  p = h.c.cliAccess.allow(); assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 2, CHECKED_REVISION]);
   h.last('allow').resolve(access({ reviewRevision: 2 })); await p;
   assert.equal(h.c.cliAccess.getSnapshot().acknowledged, false); assert.ok(h.c.ownerReason());
   assert.equal(await h.c.reserve(), false); assert.equal(h.calls.filter((c) => c.kind === 'reserve').length, 0);
@@ -99,6 +109,8 @@ test('Allow rechecks private review, context ABA and peer admission after synchr
 test('immediate original Revoke overtakes pending Allow without dropping either promise or accepting its late grant', async () => {
   const h = harness(); await reviewed(h); h.c.cliAccess.setAcknowledged(true);
   const allow = h.c.cliAccess.allow(); const oldAllow = h.last('allow');
+  assert.deepEqual(oldAllow.args, ['project-1', REVIEW, 1, CHECKED_REVISION]);
+  assert.equal(h.calls.filter(c => c.kind === 'access').length, 1); // No renewal at Allow.
   h.set({ projectId: 'project-2', cliAccessPort: { status() { throw Error('new port'); }, allow() { throw Error('new port'); }, revoke() { throw Error('new port'); } }, nativeSession: {} });
   h.c.beforeContextIntent(); h.c.syncContext();
   const revoke = h.c.cliAccess.revoke(); assert.ok(h.last('revoke')); h.last('revoke').resolve(none()); await revoke;
@@ -168,12 +180,48 @@ test('only source-confirmed pre-grant Allow refusals remain retryable by a new e
   for (const code of ['version_reserve_refused', 'cli_access_busy', 'cli_access_changed']) {
     const h = harness(); await reviewed(h); h.c.cliAccess.setAcknowledged(true);
     const p = h.c.cliAccess.allow(); h.last('allow').reject({ code, message: 'not displayed' }); await p;
-    assert.equal(h.c.cliAccess.getSnapshot().unknown, false); assert.equal(h.c.cliAccess.getSnapshot().access, null);
+    assert.equal(h.c.cliAccess.getSnapshot().unknown, false); assert.deepEqual(h.c.cliAccess.getSnapshot().access, none());
     assert.equal(h.c.cliAccess.getSnapshot().stale, true); assert.equal(h.c.ownerReason(), null);
     assert.equal(await h.c.cliAccess.allow(), false); assert.equal(h.edits.length, 0);
   }
   const h = harness(); const p = h.c.cliAccess.check(); h.last('access').reject({ code: 'cli_access_busy' }); await p;
   assert.equal(h.c.cliAccess.getSnapshot().unknown, true); // That Allow-only proof is not a read/Stop receipt.
+});
+
+test('explicit Check is bound before acknowledgement; a later Check clears rather than refreshes that intent', async () => {
+  const h = harness(); await reviewed(h);
+  assert.equal(h.c.cliAccess.setAcknowledged(true), true);
+  const check = h.c.cliAccess.check();
+  assert.equal(h.c.cliAccess.getSnapshot().acknowledged, false);
+  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
+  h.last('access').resolve(none({ allowRevision: '0000000000000007' })); await check;
+  assert.equal(await h.c.cliAccess.allow(), false); // The old acknowledgement was not rebound.
+  assert.equal(h.c.cliAccess.setAcknowledged(true), true);
+  const allow = h.c.cliAccess.allow();
+  assert.deepEqual(h.last('allow').args, ['project-1', REVIEW, 1, '0000000000000007']);
+  assert.equal(h.calls.filter(c => c.kind === 'access').length, 2);
+  h.last('allow').resolve(access({ allowRevision: '0000000000000008' })); await allow;
+  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 1);
+});
+
+test('Revoke before a Check reply and during acknowledgement cannot recycle its MAIN revision', async () => {
+  const h = harness(); await reviewed(h);
+  const check = h.c.cliAccess.check(), oldCheck = h.last('access');
+  const revoke = h.c.cliAccess.revoke(); h.last('revoke').resolve(none({ allowRevision: '0000000000000004' })); await revoke;
+  oldCheck.resolve(none()); await check;
+  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
+  assert.equal(await h.c.cliAccess.allow(), false);
+  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 0);
+  await permissionChecked(h, '0000000000000004'); // A new explicit user Check, not the Revoke reply.
+  let stop;
+  h.c.cliAccess.subscribe(() => {
+    if (!stop && h.c.cliAccess.getSnapshot().acknowledged) { stop = true; stop = h.c.cliAccess.revoke(); }
+  });
+  h.c.cliAccess.setAcknowledged(true);
+  assert.equal(await h.c.cliAccess.allow(), false);
+  assert.equal(h.calls.filter(c => c.kind === 'allow').length, 0);
+  h.last('revoke').resolve(none({ allowRevision: '0000000000000005' })); await stop;
+  assert.equal(h.c.cliAccess.setAcknowledged(true), false);
 });
 
 test('known failed consumed request is not busy merely because permission was used; native Unknown still blocks', async () => {

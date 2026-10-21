@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { IOSArchiveController, iosArchiveOwnerReason, iosArchiveHelp, iosArchiveInputHelp,
   iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp } from '../src/iosArchive.ts';
+import { AgentIOSArchivePermission } from '../src/agentIOSArchive.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
@@ -976,4 +977,32 @@ test('changing candidate choice retires pending review; unknown start keeps same
   const sent = start(h2, second); sent.call.reject(new Error('private transport sentinel')); await sent.done;
   assert.ok(iosArchiveOwnerReason(h2.state)); assert.equal(h2.controller.setKeepCandidate(false), false);
   assert.doesNotMatch(JSON.stringify(h2.state), /private transport sentinel/);
+});
+
+
+test('agent signed-export approval reuses current saved policy and assignments; candidate and check remain separate', async (t) => {
+  const h=harness(t,{savedSnapshot:signedSnapshot(),assets:assetState(['ios-firebase','project-read-token'])});await h.ready;
+  h.controller.setArchiveMode('signed');const approved=h.controller.agentArchiveApproval();assert.ok(approved,h.controller.prepareReason());
+  assert.deepEqual(clone(approved.input.signing),signingPolicy(['ios-firebase','project-read-token']));
+  assert.equal(h.calls.length,0);assert.equal(approved.input.savedVersion.name,'1.2.3');
+  h.controller.setKeepCandidate(true);assert.equal(h.controller.agentArchiveApproval(),null);
+  h.controller.setKeepCandidate(false);h.controller.setArchiveMode('signing-check');assert.equal(h.controller.agentArchiveApproval(),null);
+  h.controller.setArchiveMode('signed');const changed=clone(h.assets);changed.status.assignments[0].recordRevision++;h.setAssets(changed);
+  assert.equal(h.controller.agentArchiveApproval(),null);assert.equal(approved.input.signing.assignments[0].recordRevision,1);
+  h.controller.setArchiveMode('unsigned');assert.equal(h.controller.agentArchiveApproval().input.signing,undefined);
+  h.dispatch({type:'edit',projectId:'p1',path:'ios.bundleId',value:'org.example.dirty'});
+  assert.equal(h.controller.agentArchiveApproval(),null);assert.equal(h.calls.length,0);
+});
+
+test('agent signed Allow rechecks actual iOS controller after notification before invoking any grant', async (t) => {
+  for(const change of [h=>h.controller.setKeepCandidate(true),h=>h.controller.setArchiveMode('unsigned'),
+    h=>{const a=clone(h.assets);a.contextCurrent=false;h.setAssets(a);}]){
+    const h=harness(t,{savedSnapshot:signedSnapshot(),assets:assetState()});await h.ready;h.controller.setArchiveMode('signed');
+    const calls=[],api={status:async()=>({enabled:false,remainingMs:0,projectId:null,observationRevision:null,consumed:false,permissionRevision:'0'}),
+      allow:async()=>{calls.push('allow');throw Error('should not invoke');},revoke:async()=>assert.fail('no implicit revoke')};
+    const permission=new AgentIOSArchivePermission(()=>({api,project:h.controller.agentArchiveApproval(),blocked:false}));
+    permission.syncContext();await permission.status();permission.acknowledge(true);assert.equal(permission.canAllow(),true);
+    let once=false;const unsub=permission.subscribe(s=>{if(s.pending==='allow'&&!once){once=true;change(h);}});
+    await permission.allow();unsub();assert.equal(calls.length,0);assert.equal(h.calls.length,0);assert.equal(permission.getState().pending,null);
+  }
 });

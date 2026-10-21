@@ -584,6 +584,8 @@ mod known {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_ios_archive_grant: None,
         #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_local_history:None,
+        #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_preparation:None,
@@ -705,6 +707,8 @@ mod known {
         agent_upload_key: agent_upload_key::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_ios_archive_grant: None,
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_local_history:None,
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
         #[cfg(any(target_os="linux",target_os="macos"))]

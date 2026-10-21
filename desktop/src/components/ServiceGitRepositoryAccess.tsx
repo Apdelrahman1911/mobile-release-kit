@@ -30,6 +30,7 @@ export function ServiceGitRepositoryAccess({ controller, repository, reader, loc
       {current.reason && <p className="save-note" role="status">{current.reason}</p>}
       <p>Allow lasts at most 15 minutes. The agent must then prepare the native review and explicitly start it once. Nothing runs when you open this panel or choose an action.</p>
       <p className="save-note">No fetch, push, GitHub repository creation, commit, credentials or arbitrary commands. Unsupported layouts are refused by the original Git safety checks.</p>
+      <p>Check permission for this selection, then acknowledge again before Allow. Every Check or selection change clears the previous acknowledgement.</p>
       <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={pending || !action || current.blocked}
         onChange={e => controller.acknowledge(e.target.checked)} />I approve exactly this one local action, with the names and target shown here.</label>
       <div className="button-row">

@@ -1,6 +1,8 @@
 import {canObserveAgentIOSArchive} from './agentIOSArchiveOrigin.ts';
 import {copyIOSArchiveApproval} from './agentIOSArchive.ts';
 import type {IOSArchiveApproval} from './agentIOSArchive.ts';
+import {copyIOSRecoveryApproval, recoveryAcknowledgementMatches} from './agentIOSRecovery.ts';
+import type {AcknowledgedIOSRecovery, IOSRecoverySelection} from './agentIOSRecovery.ts';
 // App-owned coordination only, following OfflinePreflightController's original
 // observer/one-Start lifetime. A view, Promise or saved comparison is not native
 // custody, qualification, cancellation settlement or a release approval.
@@ -41,7 +43,7 @@ export interface IOSArchiveConsent extends IOSArchiveIdentity { binding: IOSArch
 export interface IOSSigningObservation { policy: IOSSigningPolicy | null; issue: string | null }
 export interface IOSArchiveState {
   mode: BridgeMode; archiveMode: 'unsigned' | 'signed' | 'signing-check'; keepCandidate: boolean; project: IOSArchiveProject | null; signing: IOSSigningObservation;
-  visible: boolean; recoveryVisible: boolean; selectionPending: boolean;
+  visible: boolean; recoveryVisible: boolean; selectionPending: boolean; agentRecoverySelection: IOSRecoverySelection | null;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: IOSArchiveStatus | null;
   consent: IOSArchiveConsent | null; pending: 'prepare' | 'start' | null; originalUnconfirmed: boolean;
@@ -193,7 +195,7 @@ export function iosArchiveOwnerReason(state: IOSArchiveState): string | null {
 
 export class IOSArchiveController {
   private state: IOSArchiveState = freeze<IOSArchiveState>({ mode: 'unavailable', archiveMode: 'unsigned', keepCandidate: false, project: null,
-    signing: { policy: null, issue: 'Review the saved signing policy and current credential assignments.' }, visible: false, recoveryVisible: false, selectionPending: false,
+    signing: { policy: null, issue: 'Review the saved signing policy and current credential assignments.' }, visible: false, recoveryVisible: false, selectionPending: false, agentRecoverySelection: null,
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0, listening: false, initialized: false, readPending: false,
     status: null, consent: null, pending: null, originalUnconfirmed: false, historical: false, cancelClaimed: null, error: null,
     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
@@ -202,6 +204,10 @@ export class IOSArchiveController {
   private attempt: Attempt | null = null;
   private pendingGuiSubmissions = 0;
   private deferredAgentObservation: {observer:Observer;status:IOSArchiveStatus}|null = null;
+  // Comparison-only first observation of this delegated Inspect. Later status
+  // or MAIN access replies cannot renew its original project/API generations.
+  private agentInspection: {observer:Observer; identity:IOSArchiveIdentity; projectId:string;
+    connectionGeneration:number; selectionGeneration:number; contextGeneration:number}|null = null;
   private cancelClaim: IOSArchiveIdentity | null = null;
   private draftReference: ProjectSession['draft'] = null;
   private snapshotReference: ProjectSession['snapshot'] = null;
@@ -398,6 +404,10 @@ export class IOSArchiveController {
       this.pendingGuiSubmissions !== 0 || this.state.pending !== null || this.state.originalUnconfirmed || !!this.attempt && !this.attempt.settled);
     if (agentObservation) {
       this.attempt = null; this.clearTimer(); this.cancelClaim = null;
+      this.agentInspection = b && isIOSRecoveryOperation(b) && b.context.recovery.action === 'inspect' ? {
+        observer, identity:id(b), projectId:b.context.projectId, connectionGeneration:this.state.connectionGeneration,
+        selectionGeneration:this.state.selectionGeneration, contextGeneration:this.state.contextGeneration,
+      } : null;
       // Observe/STOP only; no GUI Start consent is reconstructed.
       this.update({ consent: null, pending: null, originalUnconfirmed: false, historical: true, cancelClaimed: null });
     }
@@ -484,10 +494,56 @@ export class IOSArchiveController {
     return project.inputIssue ?? (operation === 'ios-signed-export' || operation === 'ios-candidate-inputs' || operation === 'ios-signing-inputs-check' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
   }
   /** Same saved observation/selection, not a new reader or tool receipt. */
-  agentArchiveApproval():IOSArchiveApproval|null {
+  agentArchiveApproval(acknowledged: AcknowledgedIOSRecovery | null = null):IOSArchiveApproval|null {
     this.syncProject();const p=this.state.project;
-    if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||this.state.archiveMode!=='unsigned'||this.state.keepCandidate)return null;
-    return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,savedConfig:p.savedConfig,savedVersion:p.savedVersion}});
+    const selection=this.state.agentRecoverySelection;
+    if(this.state.recoveryVisible&&selection) {
+      if(!p||this.agentRecoveryReason(selection.action,acknowledged))return null;
+      const op=this.state.status?.operation;
+      if(selection.action!=='inspect'&&(!op||!sameIOSArchiveIdentity(selection.inspection,op)))return null;
+      return copyIOSRecoveryApproval({projectId:p.projectId,recovery:selection});
+    }
+    if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||
+      (this.state.archiveMode!=='unsigned'&&this.state.archiveMode!=='signed')||this.state.keepCandidate)return null;
+    return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,
+      savedConfig:p.savedConfig,savedVersion:p.savedVersion,
+      ...(this.state.archiveMode==='signed'?{signing:this.state.signing.policy}:{})}});
+  }
+  /** Explicit UI selection only; the native owner, not this DATA, derives the
+   * recovery session. Capturing the displayed pair prevents later substitution. */
+  selectAgentRecovery(action: IOSRecoveryIntent['action'] | null, acknowledged: AcknowledgedIOSRecovery | null = null): boolean {
+    this.syncProject();
+    if(action===null){this.update({agentRecoverySelection:null});return true;}
+    if(this.agentRecoveryReason(action,acknowledged))return false;
+    const op=this.state.status?.operation;
+    this.update({agentRecoverySelection:action==='inspect'?{action}:{action,inspection:id(op!)}});
+    return true;
+  }
+  agentRecoveryReason(action: IOSRecoveryIntent['action'], acknowledged: AcknowledgedIOSRecovery | null = null): string | null {
+    const reason=this.commonReason('ios-local-recovery')??iosArchiveOwnerReason(this.state)??
+      (this.state.status?.availability==='busy'?iosArchiveAvailabilityText.busy:null);
+    if(reason)return reason;
+    if(this.pendingGuiSubmissions!==0)return 'Wait for the original Desktop invocation to return; a terminal event alone is not that return.';
+    if(action==='inspect')return null;
+    if(action!=='account'&&action!=='project')return 'Only ordinary account or project restoration is supported.';
+    const op=this.state.status?.operation;
+    if(!op||!isIOSRecoveryOperation(op))return 'Inspect local recovery state in this original owner first.';
+    // An ordinary GUI Inspect already has its own original caller checks.
+    if(!this.recoveryReason(action,op))return null;
+    const capture=this.agentInspection;
+    if(!capture||capture.observer!==this.observer||!capture.observer.active||
+      capture.connectionGeneration!==this.state.connectionGeneration||capture.selectionGeneration!==this.state.selectionGeneration||
+      capture.contextGeneration!==this.state.contextGeneration||capture.projectId!==this.state.project?.projectId||
+      !sameIOSArchiveIdentity(capture.identity,op)||op.context.projectId!==capture.projectId||
+      op.context.recovery.action!=='inspect'||op.phase!=='terminal'||!op.report)
+      return 'Inspect again for this current project and connection. An old report cannot authorize restoration.';
+    if(!(op.outcome==='complete'&&op.reason==='none'||(op.outcome==='failed'||op.outcome==='refused')&&op.reason==='recovery-attention'))
+      return 'This original inspection did not offer ordinary restoration. Preserve its report; do not reset retained state.';
+    if(!recoveryAcknowledgementMatches(acknowledged,op))
+      return 'Select Inspect and Check permission after the CLI request has actually finished. Native completion and its original caller/history returns must all be confirmed.';
+    const row=op.report[action];
+    return row?.next==='ordinary'&&row.session!==null?null:
+      'This inspected session does not permit ordinary restoration. Wait for busy work or preserve manual/conflicting state.';
   }
   prepareReason = (): string | null => this.commonReason() ?? iosArchiveOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? iosArchiveAvailabilityText.busy : null);

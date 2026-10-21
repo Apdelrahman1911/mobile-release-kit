@@ -1,5 +1,5 @@
 // Fixed Desktop Commit approval. The private draft is never sent to the CLI.
-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { gitReadPathOrder } from './gitReadProtocol.ts';
 export const GIT_COMMIT_CONSENT = 'agent-local-git-commit-once-v1';
@@ -12,6 +12,7 @@ export interface GitCommitSelection {
   readonly paths: readonly string[];
 }
 export interface GitCommitAccess {
+  readonly permissionRevision: string;
   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
   readonly projectId: string | null; readonly grantId: string | null; readonly selection: GitCommitSelection | null;
 }
@@ -38,12 +39,12 @@ export function copyGitCommitApproval(value: unknown): GitCommitApproval | null 
 export function parseGitCommitAccess(value: unknown): GitCommitAccess | null {
   try {
     const v = copyBoundedComparisonData(value, 128 * 1024, 220);
-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection'])
-      || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number'
+    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision'])
+      || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number'
       || !Number.isSafeInteger(v.remainingMs) || v.remainingMs < 0 || v.remainingMs > 900000
       || v.enabled && (v.consumed || !v.remainingMs) || !v.enabled && v.remainingMs !== 0) return null;
     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['summary', 'paths'])
       || !keys(v.selection.summary, ['action', 'repositoryRevision', 'pathCount', 'selectionSha256']) || !Array.isArray(v.selection.paths)) return null;
     const s = v.selection.summary, paths: unknown[] = v.selection.paths;
@@ -52,7 +53,7 @@ export function parseGitCommitAccess(value: unknown): GitCommitAccess | null {
       && (i === 0 || typeof paths[i - 1] === 'string' && gitReadPathOrder(paths[i - 1] as string, p) < 0);
     if (s.action !== 'commit' || !hex(s.repositoryRevision, 64) || !hex(s.selectionSha256, 64)
       || !paths.length || paths.length > 64 || s.pathCount !== paths.length || !paths.every(validPaths)) return null;
-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
       selection: Object.freeze({ summary: Object.freeze({ action: 'commit', repositoryRevision: s.repositoryRevision, pathCount: paths.length, selectionSha256: s.selectionSha256 }), paths: Object.freeze([...paths]) }) });
   } catch { return null; }
 }
@@ -68,7 +69,7 @@ export function createGitCommitApi(mode: string, invoke: Invoke): GitCommitApi |
     } catch { throw failure(); }
   };
   return Object.freeze({ status: () => call('agent_git_commit_access', {}), revoke: () => call('revoke_agent_git_commit', {}),
-    allow: (input: GitCommitApproval) => { const safe = copyGitCommitApproval(input); return safe ? call('allow_agent_git_commit', { ...safe, consentVersion: GIT_COMMIT_CONSENT }) : Promise.reject(failure()); } });
+    allow: (input: GitCommitApproval, expectedPermissionRevision: string) => { const safe = copyGitCommitApproval(input); return safe && gitPermissionRevision(expectedPermissionRevision) ? call('allow_agent_git_commit', { ...safe, expectedPermissionRevision, consentVersion: GIT_COMMIT_CONSENT }) : Promise.reject(failure()); } });
 }
 export class GitCommitPermission extends Permission<GitCommitApproval, GitCommitAccess> {
   constructor(current: () => PermissionContext<GitCommitApproval, GitCommitAccess>) { super(copyGitCommitApproval, current); }

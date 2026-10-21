@@ -184,6 +184,7 @@ mod tests {
         let review = match family {
             build::Family::AndroidInspect => android::Review {
                 mode: android::Mode::SavedAndroidBuildStructureAndVersion,
+                signing: None, upload_certificate_sha256: None,
                 saved_config: config,
                 saved_version: version,
                 tools: android::Tools {
@@ -195,6 +196,7 @@ mod tests {
             .into(),
             build::Family::IosArchive => ios::Review {
                 mode: ios::Mode::SavedIosUnsignedArchive,
+                signing: None,
                 saved_config: config,
                 saved_version: version,
             }
@@ -212,8 +214,8 @@ mod tests {
             document: Arc::downgrade(document),
             observation_revision: point.revision,
             review,
-            draft_revision: 1,
-            baseline_generation: 1,
+            read: None,
+            input: crate::agent_build_requests::NativeInput::Saved { draft_revision: 1, baseline_generation: 1 },
             changes,
         })
     }
@@ -457,7 +459,7 @@ mod tests {
             .unwrap();
         let operation = Id::random().unwrap();
         let generation = Id::random().unwrap();
-        let _link = claim
+        let link = claim
             .entry()
             .bind(
                 build::Family::IosArchive,
@@ -468,6 +470,10 @@ mod tests {
             )
             .unwrap();
         claim.returned(true);
+        let (_, original) = link.entry().claim_history().unwrap().unwrap();
+        let returned = service.begin_operation(&ios.runtime_id, original.operation_id().clone(), p::Action::Build,
+            original.state(), original.settlement());
+        link.entry().history_returned(original.status_revision(), returned).unwrap();
         let view = discover(&service, &client, &project);
         assert_eq!(view.requests.len(), 2);
         assert_eq!(view.requests[0].request_id, old.request_id);

@@ -48,17 +48,17 @@ async function fixture(ready=true,returned=true){let current=idle(),listener=nul
 function status(h,patch={}){return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),
   review:{kind:h.ready?'pr-create':'draft-pr-create',sessionId:'session-a',consentId,expectedRevision:3,preparedSha256:hex('c',64)},
   revision:7,state:'complete',settlement:'settled',operationId:'github-pull-request-2',reason:'none',effect:'created-observed',neverAdmitted:false,doNotReplay:true,...patch};}
-function access(h,s=null,patch={}){return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:status(h).review,
+function access(h,s=null,patch={}){return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:status(h).review,
   enabled:s===null,remainingMs:s===null?100000:0,consumed:s!==null,pending:s!==null&&s.settlement!=='settled',unknown:s?.state==='unknown',status:s,...patch};}
-function permission(h){const calls=[],native={};
-  for(const name of ['access','allow','request','revoke'])native[name]=arg=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg)});calls.push(d);h.calls.push(d);return d.promise;};
+async function permission(h){const calls=[],native={};
+  for(const name of ['access','allow','request','revoke'])native[name]=(arg,revision)=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg),revision});calls.push(d);h.calls.push(d);return d.promise;};
   let peer=null,epoch={},c;
   c=new AgentGithubActionAccessController({current:()=>({port:native,nativeSession:h,projectId:'project-a',epoch,preview:false,
     blockedReason:peer??(c?.peerSelection()&&h.controller.agentSelected(c.peerSelection())?null:h.controller.ownerReason()),reviews:[h.controller.agentSelection()].filter(Boolean)}),
     syncOriginal:()=>h.controller.syncContext(),delegate:r=>h.controller.delegatePrepared(r)});
   c.choose(h.ready?'pr-create':'draft-pr-create');c.syncContext();
   const p={controller:c,last:k=>calls.filter(x=>x.kind==='permission-'+k).at(-1),count:k=>calls.filter(x=>x.kind==='permission-'+k).length,
-    peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};h.permission=p;return p;
+    peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};h.permission=p;const check=c.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
 }
 test.afterEach(async()=>{for(const h of retained.splice(0)){
   for(const c of h.calls)if(!c.ended)c.reject({code:'fixture-ended'});await flush();h.permission?.controller.dispose();h.controller.dispose();
@@ -137,7 +137,7 @@ test('both actual returned modes select distinct CLI consent; Ready cannot deleg
   for(const ready of [false,true]){
     const h=await fixture(ready),selection=h.controller.agentSelection(),kind=ready?'pr-create':'draft-pr-create';assert.equal(selection.kind,kind);
     assert.equal(h.controller.delegatePrepared({...selection,kind:ready?'draft-pr-create':'pr-create'}),null);
-    assert.ok(h.controller.agentSelection());const p=permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
+    assert.ok(h.controller.agentSelection());const p=await permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
     const allow=p.controller.allow();assert.equal(p.count('allow'),1);assert.deepEqual(p.last('allow').args,selection);assert.equal(h.controller.agentSelection(),null);
     h.controller.setConfirmed(true);h.controller.create();assert.equal(h.count('create'),0);assert.equal(await p.controller.allow(),false);
     p.last('allow').resolve(access(h));assert.equal(await allow,true);assert.ok(parseAgentGithubActionAccess(access(h)));
@@ -147,15 +147,15 @@ test('both actual returned modes select distinct CLI consent; Ready cannot deleg
 test('actual metadata-only Allow port emits distinct Ready consent while preserving old Draft bytes',async()=>{
   const sent=[],port=createAgentGithubActionPort(async(name,raw)=>{sent.push([name,JSON.parse(new TextDecoder().decode(raw))]);return null;});
   for(const kind of ['draft-pr-create','pr-create']){
-    const selection={kind,sessionId:'session-a',consentId,expectedRevision:3};assert.ok(parseGithubActionSelection(selection));await port.allow(selection);
-    assert.deepEqual(sent.at(-1),['allow_agent_github_action',{selection,consentVersion:kind==='pr-create'?'agent-pr-create-once-v1':'agent-draft-pr-create-once-v1'}]);
+    const selection={kind,sessionId:'session-a',consentId,expectedRevision:3};assert.ok(parseGithubActionSelection(selection));await port.allow(selection,'0');
+    assert.deepEqual(sent.at(-1),['allow_agent_github_action',{selection,consentVersion:kind==='pr-create'?'agent-pr-create-once-v1':'agent-draft-pr-create-once-v1',expectedPermissionRevision:'0'}]);
   }
-  for(const extra of ['token','path','url','body','creationMode'])assert.throws(()=>port.allow({kind:'pr-create',sessionId:'session-a',consentId,expectedRevision:3,[extra]:'INERT'}));
+  for(const extra of ['token','path','url','body','creationMode'])assert.throws(()=>port.allow({kind:'pr-create',sessionId:'session-a',consentId,expectedRevision:3,[extra]:'INERT'},'0'));
   assert.equal(sent.length,2);
 });
 
 test('Ready own-review exemption never suppresses a conflicting peer or a reentrant veto after delegation',async()=>{
-  const h=await fixture(),p=permission(h);p.peer('Other original remains live');assert.equal(p.controller.acknowledge(true),false);
+  const h=await fixture(),p=await permission(h);p.peer('Other original remains live');assert.equal(p.controller.acknowledge(true),false);
   assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.ok(h.controller.agentSelection());p.peer(null);p.controller.acknowledge(true);
   let once=false;const off=h.controller.subscribe(()=>{if(!once&&h.controller.agentSelection()===null){once=true;p.peer('Different original entered');}});
   assert.equal(await p.controller.allow(),false);off();assert.equal(p.count('allow'),0);assert.equal(h.count('discard'),1);
@@ -163,14 +163,14 @@ test('Ready own-review exemption never suppresses a conflicting peer or a reentr
 });
 
 test('lost Ready Allow remains absorbing through mode edits and known Revoke; no second grant or GUI Create',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(Error('INERT private failure'));await allow;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(Error('INERT private failure'));await allow;
   h.controller.setCreationMode('draft');assert.equal(p.controller.getSnapshot().unknown,true);assert.equal(await p.controller.allow(),false);
   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
   h.controller.setConfirmed(true);h.controller.create();assert.equal(h.count('create'),0);assert.ok(h.controller.ownerReason());assert.equal(p.count('allow'),1);assert.equal(p.controller.getSnapshot().unknown,true);
 });
 
 test('Ready service final still waits same original native Check return; wrong mode output cannot free it',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
   const progress=status(h,{revision:5,state:'running',settlement:'pending',effect:'potentially-applied'});
   const first=p.controller.check();p.last('access').resolve(access(h,progress));await flush();p.last('request').resolve(progress);await first;
   h.emit(final(true));h.deferStatus=true;const done=status(h);assert.ok(parseGithubActionStatus(done));

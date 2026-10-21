@@ -99,8 +99,8 @@ impl CredentialReference {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Action {
-    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitStage, GitUnstage,
+pub enum Action { LocalHistoryEnroll, LocalHistoryReview,
+    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview, GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
 
@@ -210,6 +210,10 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="local-history.scope")] LocalHistoryScope(ProjectQuery),
+    #[serde(rename="local-history.submit")] LocalHistorySubmit(crate::service_local_history_protocol::Submit),
+    #[serde(rename="local-history.status")] LocalHistoryStatus(crate::service_local_history_protocol::Query),
+    #[serde(rename="local-history.cancel")] LocalHistoryCancel(crate::service_local_history_protocol::Query),
     #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
     #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
     #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
@@ -250,6 +254,7 @@ pub enum RequestBody {
     #[serde(rename="version-edit.prepare")] VersionEditPrepare(crate::service_version_edit_prepare_protocol::Prepare),
     #[serde(rename="version-edit.status")] VersionEditStatus(crate::service_version_edit_protocol::Query),
     #[serde(rename="version-edit.cancel")] VersionEditCancel(crate::service_version_edit_protocol::Query),
+    #[serde(rename="version-reserve.review")] VersionReserveReview(crate::service_version_reserve_review_protocol::Request),
     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
@@ -316,6 +321,8 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    LocalHistoryAccess(Box<crate::service_local_history_protocol::Access>),
+    LocalHistoryRequest(Box<crate::service_local_history_protocol::Status>),
     GitHubActionRequest(crate::service_github_action_protocol::Status),
     MetadataImagesAccess(crate::service_metadata_images_protocol::Access),
     MetadataImagesRequest(crate::service_metadata_images_protocol::Status),
@@ -327,6 +334,7 @@ pub enum ResponseBody {
     VersionEditRequest(crate::service_version_edit_protocol::Status),
     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+    VersionReserveReview(crate::service_version_reserve_review_protocol::Status),
     StoreRequest(crate::service_store_protocol::Status),
     StorePreparation(Box<crate::service_store_prepare_protocol::Status>),
     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
@@ -349,7 +357,7 @@ pub enum ResponseBody {
     IdentityAction(crate::agent_identity_requests::actions::Status),
     LocalCheck(crate::agent_local_checks::Status),
     AndroidBuildRequest(crate::agent_android_build::Status),
-    IosArchiveRequest(crate::agent_ios_archive::Status),
+    IosArchiveRequest(crate::agent_ios_archive::RequestStatus),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -403,10 +411,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
         && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+    if matches!(&request.request,RequestBody::LocalHistoryScope(_)|RequestBody::LocalHistorySubmit(_)|RequestBody::LocalHistoryStatus(_)|RequestBody::LocalHistoryCancel(_)) && bytes.len()>crate::service_local_history_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request,RequestBody::StorePrepare(_)|RequestBody::StoreStart(_)|RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request,RequestBody::AppleProvisioningPrepare(_)|RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+    if let RequestBody::VersionReserveReview(v)=&request.request{if bytes.len()>crate::service_version_reserve_review_protocol::REQUEST_BYTES{return Err(Error::InvalidRequest)}v.validate()?;}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
     if matches!(&request.request,RequestBody::ToolSetupSubmit(_)|RequestBody::ToolSetupStatus(_)|RequestBody::ToolSetupCancel(_))
@@ -493,7 +503,8 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         },
         ResponseBody::GitHubActionRequest(row)=>{
             row.validate()?;
-            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
+            if row.origin.service_instance!=response.service_instance {return Err(Error::InvalidRequest);}
+            crate::service_metadata_text_protocol::bounded(response,row.limit())?;
         },
         ResponseBody::MetadataImagesAccess(row)=>{
             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
@@ -531,6 +542,8 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
         },
+        ResponseBody::LocalHistoryAccess(row)=>{row.validate()?;if row.service_instance.as_ref().is_some_and(|id|id!=&response.service_instance)||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
+        ResponseBody::LocalHistoryRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
         ResponseBody::StorePreparation(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance || crate::service_metadata_text_protocol::encoded(response, crate::service_store_prepare_protocol::STATUS_LIMIT).is_err() { return Err(Error::InvalidRequest); }
@@ -546,6 +559,10 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         ResponseBody::AppleProvisioningRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_apple_provisioning_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::VersionReserveReview(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_version_reserve_review_protocol::STATUS_BYTES{return Err(Error::InvalidRequest)}
         },
         ResponseBody::VersionReserveRequest(row) => {
             row.validate()?;
@@ -599,7 +616,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         ResponseBody::IdentityAction(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
-        ResponseBody::IosArchiveRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+        ResponseBody::IosArchiveRequest(row) => { row.validate()?; if row.origin().service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         _ => {}
     }
     Ok(())

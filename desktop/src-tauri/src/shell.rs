@@ -152,9 +152,10 @@ async fn allow_application_read(app: tauri::AppHandle, webview: Webview, request
     edit_window(&webview)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let id = crate::asset_session::application_service::project_request(request_body(&request)?)?.to_owned();
+        let (id, expected) = crate::asset_session::application_service::allow_request(request_body(&request)?)?;
+        let id = id.to_owned();
         let app_data = app.path().app_local_data_dir().map_err(|_| BridgeError::unavailable("The application's private data folder is unavailable."))?;
-        let status = state.document.allow_application_read(&id, &app_data).await?;
+        let status = state.document.allow_application_read(&id, expected, &app_data).await?;
         serde_json::to_value(status).map_err(|_| BridgeError::protocol())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1843,6 +1844,24 @@ async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Req
     { let _=(window,request,state); Err(BridgeError::unavailable("Agent version reservation is unavailable on this platform.")) }
 }
 #[tauri::command]
+async fn agent_version_reserve_review_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Source review has no fixture admission."));
+    let window=edit_window(&webview)?;let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=crate::asset_session::decode_agent_version_reserve_review_status(raw)?;serde_json::to_value(state.document.agent_version_reserve_review_status(window,q.as_ref())?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,raw);Err(BridgeError::invalid())}
+}
+#[tauri::command]
+async fn cancel_agent_version_reserve_review(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::unavailable("Source review has no fixture admission."));
+    let window=edit_window(&webview)?;let raw=match request.body(){tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=crate::asset_session::decode_agent_version_reserve_review_status(raw)?.ok_or_else(BridgeError::invalid)?;serde_json::to_value(state.document.cancel_agent_version_reserve_review(window,&q)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,raw);Err(BridgeError::invalid())}
+}
+#[tauri::command]
 async fn allow_agent_version_reserve(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
@@ -2060,43 +2079,51 @@ async fn agent_tool_setup_request_status(webview:Webview,request:tauri::ipc::Req
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
 }
+#[cfg(any(target_os="linux",target_os="macos"))]
+type GithubActionMainAccess = crate::service_github_action_protocol::activity::MainAccess;
+#[cfg(not(any(target_os="linux",target_os="macos")))]
+type GithubActionMainAccess = Value;
+#[cfg(any(target_os="linux",target_os="macos"))]
+type GithubActionMainStatus = crate::service_github_action_protocol::Status;
+#[cfg(not(any(target_os="linux",target_os="macos")))]
+type GithubActionMainStatus = Value;
 #[tauri::command]
-async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
         let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
-        serde_json::to_value(state.document.agent_github_action_access(window)?).map_err(|_|BridgeError::protocol())
+        state.document.agent_github_action_access(window)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
 #[tauri::command]
-async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
         let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
-        serde_json::to_value(state.document.allow_agent_github_action(window,args)?).map_err(|_|BridgeError::protocol())
+        state.document.allow_agent_github_action(window,args)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
 #[tauri::command]
-async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainAccess,BridgeError>{
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
         let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
-        serde_json::to_value(state.document.revoke_agent_github_action(window)?).map_err(|_|BridgeError::protocol())
+        state.document.revoke_agent_github_action(window)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
 #[tauri::command]
-async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<GithubActionMainStatus,BridgeError>{
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
         let args:crate::service_github_action_protocol::Query=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
-        serde_json::to_value(state.document.agent_github_action_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
+        state.document.agent_github_action_request_status(window,&args)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
@@ -2183,6 +2210,42 @@ async fn revoke_agent_store(webview: Webview, request: tauri::ipc::Request<'_>, 
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn agent_local_history_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_local_history_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Local history delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_local_history(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::agent_local_history::Allow = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_local_history(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Local history delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_local_history(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_local_history(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Local history delegation is not supported on this platform.")) }
 }
 #[tauri::command]
 async fn agent_apple_provisioning_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
@@ -2684,8 +2747,12 @@ async fn version_reserve_status(webview: Webview, request: tauri::ipc::Request<'
 #[tauri::command]
 async fn version_reserve_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_reserve_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Version reservations have no fixture admission."));
-    let crate::version_reserve_protocol::Command::Review(input) = version_reserve_command("version_reserve_review", &webview, &request)?
-        else { return Err(BridgeError::invalid()); };
+    let command=version_reserve_command("version_reserve_review", &webview, &request)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let crate::version_reserve_protocol::Command::AgentReview(origin)=&command {
+        return state.document.review_requested_version_reservation(edit_window(&webview)?,origin).await;
+    }
+    let crate::version_reserve_protocol::Command::Review(input)=command else{return Err(BridgeError::invalid())};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     { state.document.review_version_reservation(input).await }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -3907,6 +3974,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut version_prepare_key=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut version_reserve_review_key=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut apple_prepare_key=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut configuration_revision=None;
@@ -3974,6 +4043,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 if version_edit_key.as_ref()!=Some(&key){
                     let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-edit",&status);version_edit_key=Some(key);
                 }
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(Some(status))=document.agent_version_reserve_review_status(MAIN_WINDOW,None){
+                let key=(status.origin.clone(),status.revision);
+                if version_reserve_review_key.as_ref()!=Some(&key){let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-reserve-review",&status);version_reserve_review_key=Some(key);}
             }
             #[cfg(any(target_os="linux",target_os="macos"))]
             if let Ok(Some(status))=document.agent_version_prepare_status(None){
@@ -5974,7 +6048,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
-            agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
+            agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve, agent_version_reserve_review_status, cancel_agent_version_reserve_review,
             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
@@ -5983,6 +6057,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_store_preparation_access, revoke_agent_store_preparation, allow_agent_store_prepare, allow_agent_store_preparation_start,
             agent_store_access, allow_agent_store, revoke_agent_store,
+            agent_local_history_access, allow_agent_local_history, revoke_agent_local_history,
             agent_github_action_access, allow_agent_github_action, revoke_agent_github_action, agent_github_action_request_status,
             agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
             agent_tool_setup_access, allow_agent_tool_setup, revoke_agent_tool_setup, agent_tool_setup_request_status,

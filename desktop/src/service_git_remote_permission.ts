@@ -1,6 +1,6 @@
 // One closed Remote permission on the existing finite Permission controller.
 // All values are comparison DATA; no token, native review or send is made here.
-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { isGitFetchAction, type GitFetchAction } from './gitFetchProtocol.ts';
 import { isGitPushAction, type GitPushAction } from './gitPushProtocol.ts';
@@ -18,6 +18,7 @@ export const GIT_REMOTE_CONSENT = Object.freeze({ fetch: 'agent-git-fetch-once-v
 export interface GitRemoteApproval { readonly projectId: string; readonly expectedDocumentRevision: number; readonly readOperationId: string; readonly action: GitRemoteAction }
 export interface GitRemoteAccount { readonly accountId: string; readonly login: string; readonly repositoryId: string; readonly repository: string }
 export interface GitRemoteAccess {
+  readonly permissionRevision: string;
   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean; readonly projectId: string | null; readonly grantId: string | null;
   readonly selection: { readonly action: GitRemoteAction; readonly account: GitRemoteAccount; readonly selectionSha256: string } | null;
 }
@@ -60,14 +61,14 @@ export function copyGitRemoteApproval(value: unknown): GitRemoteApproval | null 
 export function parseGitRemoteAccess(value: unknown): GitRemoteAccess | null {
   try {
     const v = copyBoundedComparisonData(value, 8192, 100);
-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection']) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean'
+    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision']) || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean' || typeof v.consumed !== 'boolean'
       || typeof v.remainingMs !== 'number' || !Number.isSafeInteger(v.remainingMs) || Object.is(v.remainingMs, -0) || v.remainingMs < 0 || v.remainingMs > 900000
       || v.enabled && (v.consumed || v.remainingMs === 0) || !v.enabled && v.remainingMs !== 0) return null;
     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['action', 'account', 'selectionSha256']) || !hex(v.selection.selectionSha256, 64)) return null;
     const a = action(v.selection.action), who = account(v.selection.account); if (!a || !who) return null;
-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
       selection: Object.freeze({ action: a, account: who, selectionSha256: v.selection.selectionSha256 }) });
   } catch { return null; }
 }
@@ -85,9 +86,9 @@ export function createGitRemotePermissionApi(mode: string, invoke: Invoke): GitR
       const result = parseGitRemoteAccess(await invoke<unknown>(command, raw)); if (!result) throw failure(); return result;
     } catch { throw failure(); }
   };
-  return Object.freeze({ status: () => call('agent_git_remote_access', {}), revoke: () => call('revoke_agent_git_remote', {}), allow: async (input: GitRemoteApproval) => {
-    const safe = copyGitRemoteApproval(input); if (!safe) throw failure();
-    const result = await call('allow_agent_git_remote', { ...safe, consentVersion: GIT_REMOTE_CONSENT[safe.action.kind] });
+  return Object.freeze({ status: () => call('agent_git_remote_access', {}), revoke: () => call('revoke_agent_git_remote', {}), allow: async (input: GitRemoteApproval, expectedPermissionRevision: string) => {
+    const safe = copyGitRemoteApproval(input); if (!safe || !gitPermissionRevision(expectedPermissionRevision)) throw failure();
+    const result = await call('allow_agent_git_remote', { ...safe, expectedPermissionRevision, consentVersion: GIT_REMOTE_CONSENT[safe.action.kind] });
     if (!result.selection || !sameGitRemoteAction(safe.action, result.selection.action)) throw failure(); return result;
   } });
 }

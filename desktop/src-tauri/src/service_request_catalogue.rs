@@ -103,7 +103,8 @@ impl Progress {
                 start_state,
             } => {
                 if (*request_state == build::RequestState::OriginalAvailable
-                    || *start_state != build::StartState::NotRequested)
+                    || (*start_state != build::StartState::NotRequested
+                        && *request_state != build::RequestState::AdmissionUnknown))
                     && !has_operation
                 {
                     return Err(Error::InvalidRequest);
@@ -180,6 +181,7 @@ pub enum AdditionalFamily {
     MetadataText,
     MetadataImages,
     Store,
+    LocalHistory,
     PlayCleanup,
     AppleProvisioning,
     VersionEdit,
@@ -195,7 +197,7 @@ impl AdditionalFamily {
             Self::VersionReservation => 2,
             Self::AndroidUploadKey => 3,
             Self::Configuration | Self::MetadataText | Self::MetadataImages => 4,
-            Self::Store => 5,
+            Self::Store | Self::LocalHistory => 5,
             Self::PlayCleanup | Self::VersionTag => 6,
             Self::AppleProvisioning=>7,
             Self::VersionEdit=>8,
@@ -216,6 +218,7 @@ impl AdditionalFamily {
             Self::MetadataText => "metadata-text-status",
             Self::MetadataImages => "metadata-images-status",
             Self::Store => "store-status",
+            Self::LocalHistory => "local-history-status",
             Self::PlayCleanup => "play-cleanup-status",
             Self::AppleProvisioning=>"apple-provisioning-status",
             Self::VersionEdit=>"version-edit-status",

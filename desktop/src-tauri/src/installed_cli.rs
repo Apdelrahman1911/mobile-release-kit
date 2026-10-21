@@ -11,6 +11,8 @@ mod identity;
 mod configuration;
 #[path="installed_cli_metadata_images.rs"]
 mod metadata_images;
+#[path="installed_cli_local_history.rs"]
+mod local_history;
 #[path="installed_cli_metadata_text.rs"]
 mod metadata_text;
 #[path = "installed_cli_identity_actions.rs"]
@@ -96,6 +98,7 @@ Usage:\n\
   mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n\
   mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-reserve-review PROJECT_ID SERVICE_INSTANCE --stdin [--json]\n\
   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -125,6 +128,10 @@ Usage:\n\
   mrk git-remote-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
   mrk git-remote-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk git-remote-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk local-history-scope PROJECT_ID [--json]\n\
+  mrk local-history-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+  mrk local-history-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk local-history-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk operations PROJECT_ID [--json]\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
@@ -161,6 +168,8 @@ Local checks require a separate one-use 15-minute project permission in Desktop.
 Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
 Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
 Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
+The separately approved signed Android mode reuses the assigned upload key; no password, key generation, Store action or automatic recovery is accepted from CLI.\n\
+iOS uses the same four archive commands for unsigned archive, signed export, or separately approved local recovery. Recovery needs no saved configuration; each restore requires the original Desktop inspection and new consent. No candidate or material arguments.\n\
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
 Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
 Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
@@ -231,7 +240,7 @@ const GIT_INDEX_COMMANDS: [CommandCapability;5] = [
     CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"STOP is not cleanup."},
 ];
 const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
-    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview unsigned archive; no GO." },
+    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview Desktop-approved archive/export/recovery; no GO." },
     CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start original once." },
     CommandCapability { command: "ios-archive-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Observe original; no replay." },
     CommandCapability { command: "ios-archive-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "STOP is not settlement." },
@@ -277,7 +286,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "commands": LOCAL_CHECK_COMMANDS,
             },
             "androidBuilds": {
-                "scope": "saved-android-build-structure-and-version", "defaultEnabled": false, "oneUse": true,
+                "scope": "saved-android-build-structure-and-version", "scopes": ["saved-android-build-structure-and-version", "saved-android-local-upload-key-sign"], "defaultEnabled": false, "oneUse": true,
+                "signedScope":{"scope":"saved-android-local-upload-key-sign","toolkitSigning":true,"separateConsent":true,"existingAssignedKeyOnly":true,"originalReadStopsWork":true,"cliSecrets":false,"keyGeneration":false,"nativeAvailabilityChecked":false},
                 "maxStartWindowSeconds": crate::agent_android_build::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_android_build::LIMIT,
                 "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
                 "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
@@ -285,9 +295,13 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "commands": ANDROID_BUILD_COMMANDS,
             },
             "iosArchives": {
-                "scope": "saved-ios-unsigned-archive", "defaultEnabled": false, "oneUse": true,
+                "scope": "saved-ios-archive", "defaultEnabled": false, "oneUse": true,
+                "modes": {"saved-ios-unsigned-archive":{"toolkitSigning":false},
+                    "saved-ios-signed-export":{"toolkitSigning":true,"requiresSeparateSigningConsent":true,"requiresOriginalReadThroughCompletion":true},
+                    "local-ios-recovery":{"toolkitSigning":false,"requiresSeparateRecoveryConsent":true,"requiresOriginalReadThroughCompletion":true,
+                        "requiresSavedConfiguration":false,"restoreRequiresOriginalInspection":true,"automaticFollowOn":false,"manualRecovery":false}},
                 "maxStartWindowSeconds": crate::agent_build_requests::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_build_requests::LIMIT,
-                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
+                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "storePublishing": false,
                 "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
                 "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedMacXcodeRuntime": true},
                 "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
@@ -317,12 +331,12 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
                 "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
-            "githubActions":{"scope":"one-existing-desktop-prepared-github-action","commands":github_action::COMMANDS,
-                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile"],"defaultEnabled":false,"oneUse":true,
+            "githubActions":{"scope":"one-desktop-approved-github-action-or-activity-read","commands":github_action::COMMANDS,
+                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview"],"defaultEnabled":false,"oneUse":true,
                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresExactDesktopConsent":true,
-                "mutating":true,"readOnlyKinds":["setup-reconcile"],"counterSetup":false,"cliPendingLoad":false,
+                "mutating":true,"readOnlyKinds":["setup-reconcile","activity-overview"],"counterSetup":false,"cliPendingLoad":false,
                 "cliPrepare":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
-                "normalPrCreation":true,"merge":false,"workflowDispatch":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+                "normalPrCreation":true,"merge":false,"workflowDispatch":false,"automaticRetry":false,"nativeAvailabilityChecked":false,"freshActivityOverview":true,"activityReadRequiresSeparateConsent":true,"activityRowsPerSection":30,"activityIncludesHeadsJobsLogsArtifacts":false},
             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
@@ -343,6 +357,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "kinds":["doctor","inspect-requirements","acquire-missing","inspect-picked-sources","register-reviewed-sources","inspect-saved-requirements"],
                 "readGrantRequired":true,"oneUseApprovalRequired":true,"requiresRunningDesktop":true,
                 "cliPrepare":false,"prepareSavedInspectOnSubmit":true,"privateArguments":false,"automaticNextStep":false,"publicationIsSelection":false},
+            "localHistory":{"scope":"desktop-prepared-local-history","commands":local_history::COMMANDS,"actions":["enroll","verify","review-inputs"],"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"storeAuthority":false,"savedConfigRequired":false,"maxRetainedRequestsSharedWithStore":32,"nativeAvailabilityChecked":false},
             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
@@ -355,7 +370,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
-                "appliesSourceEdits":false,"nativeAvailabilityChecked":false,"commands":version_reserve::COMMANDS},
+                "appliesSourceEdits":false,"sourceReviewUnderRead":true,"reviewQueriesStore":false,"reserveNeedsSeparateDesktopAllow":true,"nativeAvailabilityChecked":false,"commands":version_reserve::COMMANDS},
             "gitCommits": {"scope":"desktop-approved-whole-staged-index", "defaultEnabled":false,"oneUse":true,
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
@@ -388,7 +403,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
             Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
             There is no public-release command.\n\
-            iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
+            iOS archive/export and local recovery share the one-use build grant. Configless recovery requires separate Desktop consent; every restore matches the original inspected session, never report-only authority.\n\
             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
             Prepare never starts a build; project code may have file/network/signing effects.\n\
             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
@@ -397,7 +412,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -409,7 +424,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
-        text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("  mrk version-reserve-review PROJECT_ID SERVICE_INSTANCE --stdin [--json]\n  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
     };
@@ -507,9 +522,11 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::MetadataImagesAccess(_)=>"Prepared image-copy permission DATA; review the full preview in Desktop. No Store upload.\n".into(),
         p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
         p::ResponseBody::ToolSetupRequest(_)=>"Use tool-setup-status with the same original request IDs; never replay.\n".into(),
+        p::ResponseBody::LocalHistoryAccess(_)=>"Use local-history-scope; Desktop must prepare and allow the exact action.\n".into(),
+        p::ResponseBody::LocalHistoryRequest(_)=>"Use local-history-status with the original IDs; never replay an uncertain request.\n".into(),
         p::ResponseBody::StorePreparation(_)=>"Use store-status with the original request; Prepare never authorizes Start.\n".into(),
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
-        p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+        p::ResponseBody::VersionReserveReview(_) | p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
         p::ResponseBody::VersionEditPreparation(_) => "Use version-edit-status with the same original request ID. Review and allow Save separately in Desktop.\n".into(),
         p::ResponseBody::GitHubActionRequest(_) => "Use github-status with the retained original IDs; never replay an unconfirmed GitHub action.\n".into(),
@@ -554,6 +571,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     if upload_key::recognizes(&args) { return upload_key::run(args); }
     if version_edit::recognizes(&args) { return version_edit::run(args); }
     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+    if local_history::recognizes(&args){return local_history::run(args);}
     if store::recognizes(&args){return store::run(args);}
     if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
     if github_action::recognizes(&args){return github_action::run(args);}
@@ -721,7 +739,11 @@ mod tests {
         assert_eq!(value["localChecks"]["commands"].as_array().unwrap().len(), 3);
         assert_eq!(value["androidBuilds"]["commands"].as_array().unwrap().len(), 4);
         assert_eq!(value["androidBuilds"]["prepareStartsBuild"], false);
-        assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
+        assert_eq!(value["androidBuilds"]["toolkitSigning"], false); // Original default scope is unchanged.
+        let signing=&value["androidBuilds"]["signedScope"];
+        assert_eq!(signing["scope"],"saved-android-local-upload-key-sign");assert_eq!(signing["existingAssignedKeyOnly"],true);
+        assert_eq!(signing["separateConsent"],true);assert_eq!(signing["originalReadStopsWork"],true);
+        assert_eq!(signing["cliSecrets"],false);assert_eq!(signing["keyGeneration"],false);
         assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
         assert_eq!(value["foregroundHistory"]["commands"], serde_json::json!(["status","projects","observe","operations","operation"]));
@@ -762,7 +784,19 @@ mod tests {
         assert!(human.contains("mrk ios-archive-prepare") && human.contains("mrk android-build-prepare"));
         let ios=&value["iosArchives"];
         assert_eq!(ios["defaultEnabled"],false);assert_eq!(ios["oneUse"],true);
-        assert_eq!(ios["nativeAvailabilityChecked"],false);assert_eq!(ios["toolkitSigning"],false);
+        assert_eq!(ios["nativeAvailabilityChecked"],false);
+        assert_eq!(ios["modes"]["saved-ios-unsigned-archive"]["toolkitSigning"],false);
+        assert_eq!(ios["modes"]["saved-ios-signed-export"]["toolkitSigning"],true);
+        assert_eq!(ios["modes"]["saved-ios-signed-export"]["requiresSeparateSigningConsent"],true);
+        assert_eq!(ios["modes"]["saved-ios-signed-export"]["requiresOriginalReadThroughCompletion"],true);
+        let recovery=&ios["modes"]["local-ios-recovery"];
+        assert_eq!(recovery["requiresSeparateRecoveryConsent"],true);
+        assert_eq!(recovery["requiresOriginalReadThroughCompletion"],true);
+        assert_eq!(recovery["requiresSavedConfiguration"],false);
+        assert_eq!(recovery["restoreRequiresOriginalInspection"],true);
+        assert_eq!(recovery["automaticFollowOn"],false);assert_eq!(recovery["manualRecovery"],false);
+        assert!(HELP.contains("separately approved local recovery")&&human.contains("Configless recovery"));
+        assert_eq!(ios["commands"].as_array().unwrap().len(),4);
         assert_eq!(ios["storePublishing"],false);assert_eq!(ios["archiveDigestAvailable"],false);
         assert_eq!(ios["maxRetainedRequests"],value["androidBuilds"]["maxRetainedRequests"]);
         assert_eq!(ios["sharesBuildGrantAndRequestLimitWithAndroid"],true);

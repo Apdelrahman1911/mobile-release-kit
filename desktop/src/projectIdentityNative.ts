@@ -99,15 +99,18 @@ export interface AgentIdentityGuiStatus {
   lease: { enabled: boolean; remainingMs: number; projectId: string | null };
   pending: AgentIdentityProposal | null; requests: readonly AgentIntentObservation[];
 }
+export interface AgentIdentityCheck extends AgentIdentityGuiStatus { readonly permissionRevision: string }
 export interface AgentIdentityApi {
   readonly mode: 'native';
-  status(): Promise<unknown>; allow(projectId: string): Promise<unknown>; revoke(): Promise<unknown>;
+  status(): Promise<unknown>; allow(projectId: string, expectedPermissionRevision: string): Promise<unknown>; revoke(): Promise<unknown>;
   decline(intentId: string): Promise<unknown>; review(intentId: string): Promise<unknown>;
   prepare(args: { intentId: string; sessionId: string; revision: string; acknowledgeNewApplication: boolean }): Promise<unknown>;
   apply(args: { intentId: string; sessionId: string; revision: string; planToken: string; reviewed: boolean }): Promise<unknown>;
 }
 const agentToken = (v: unknown): v is string => token(v) && v !== '0'.repeat(32);
 const runtimeProject = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v);
+export const agentIdentityPermissionRevisionFits = (v: unknown): v is string => typeof v === 'string' &&
+  /^(0|[1-9][0-9]{0,19})$(?![\s\S])/.test(v) && (v.length < 20 || v <= '18446744073709551615');
 function agentProposal(value: unknown): AgentIdentityProposal | null {
   if (!keys(value, ['runtimeId', 'request']) || !runtimeProject(value.runtimeId) ||
       !keys(value.request, ['serviceInstance', 'intentId', 'projectId', 'expectedObservationRevision', 'change'])) return null;
@@ -137,6 +140,12 @@ function agentObservation(value: unknown): value is AgentIntentObservation {
 export function parseAgentIdentityGuiStatus(input: unknown): AgentIdentityGuiStatus | null {
   try {
     const v = copyBoundedComparisonData(input, 64 * 1024, 4096);
+    return agentGuiStatusData(v);
+  } catch { return null; }
+}
+// Called only after the original bounded descriptor-safe copy, including the
+// MAIN wrapper below. Do not duplicate the retained proposal/status graph.
+function agentGuiStatusData(v: unknown): AgentIdentityGuiStatus | null {
     if (!keys(v, ['lease', 'pending', 'requests']) || !keys(v.lease, ['enabled', 'remainingMs', 'projectId']) ||
         typeof v.lease.enabled !== 'boolean' || typeof v.lease.remainingMs !== 'number' || !Number.isSafeInteger(v.lease.remainingMs) ||
         v.lease.remainingMs < 0 || v.lease.remainingMs > 900_000 ||
@@ -150,6 +159,13 @@ export function parseAgentIdentityGuiStatus(input: unknown): AgentIdentityGuiSta
     v.requests.forEach(Object.freeze); Object.freeze(v.requests);
     const lease = Object.freeze({ enabled: v.lease.enabled, remainingMs: v.lease.remainingMs, projectId: v.lease.projectId });
     return Object.freeze({ lease, pending, requests: v.requests });
+}
+export function parseAgentIdentityCheck(input: unknown): AgentIdentityCheck | null {
+  try {
+    const v = copyBoundedComparisonData(input, 64 * 1024, 4096);
+    if (!keys(v, ['lease', 'pending', 'requests', 'permissionRevision']) || !agentIdentityPermissionRevisionFits(v.permissionRevision)) return null;
+    const status = agentGuiStatusData({ lease: v.lease, pending: v.pending, requests: v.requests });
+    return status ? Object.freeze({ ...status, permissionRevision: v.permissionRevision }) : null;
   } catch { return null; }
 }
 export function encodeAgentIdentityRequest(command: AgentIdentityCommand, input: unknown): Uint8Array | null {
@@ -157,7 +173,8 @@ export function encodeAgentIdentityRequest(command: AgentIdentityCommand, input:
     const v = copyBoundedComparisonData(input, 4096, 128);
     let valid = false;
     if (command === 'agent_identity_status' || command === 'revoke_agent_identity') valid = keys(v, []);
-    if (command === 'allow_agent_identity') valid = keys(v, ['projectId']) && runtimeProject(v.projectId);
+    if (command === 'allow_agent_identity') valid = keys(v, ['projectId', 'expectedPermissionRevision']) &&
+      runtimeProject(v.projectId) && agentIdentityPermissionRevisionFits(v.expectedPermissionRevision);
     if (command === 'decline_agent_identity' || command === 'review_agent_identity') valid = keys(v, ['intentId']) && agentToken(v.intentId);
     if (command === 'prepare_agent_identity') valid = keys(v, ['intentId', 'sessionId', 'revision', 'acknowledgeNewApplication']) &&
       agentToken(v.intentId) && agentToken(v.sessionId) && agentToken(v.revision) && typeof v.acknowledgeNewApplication === 'boolean';
@@ -177,7 +194,7 @@ export function createAgentIdentityApi(mode: string,
     return invoke(command, body);
   };
   return Object.freeze({ mode: 'native' as const, status: () => call('agent_identity_status', {}),
-    allow: (projectId: string) => call('allow_agent_identity', { projectId }), revoke: () => call('revoke_agent_identity', {}),
+    allow: (projectId: string, expectedPermissionRevision: string) => call('allow_agent_identity', { projectId, expectedPermissionRevision }), revoke: () => call('revoke_agent_identity', {}),
     decline: (intentId: string) => call('decline_agent_identity', { intentId }), review: (intentId: string) => call('review_agent_identity', { intentId }),
     prepare: (args: Parameters<AgentIdentityApi['prepare']>[0]) => call('prepare_agent_identity', args),
     apply: (args: Parameters<AgentIdentityApi['apply']>[0]) => call('apply_agent_identity', args) });

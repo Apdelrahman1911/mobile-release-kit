@@ -1,5 +1,8 @@
 //! One bounded read inside the SAME ConnectionState, Setup supervisor and clock.
+#[path = "service_github_activity_native.rs"]
+pub(crate) mod delegation;
 use super::*;
+use std::sync::Arc;
 use crate::{
     asset_source::RegisteredRoot,
     edit_owner::{SavedEditGuard, SavedEditStamp},
@@ -70,6 +73,7 @@ fn error_reason(e: &BridgeError) -> p::Reason {
         .unwrap_or_else(|| connection_reason(outcome_error(e)))
 }
 struct Active {
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     ticket: GitHubActivityTicket,
     request: p::Request,
     session_id: String,
@@ -79,6 +83,8 @@ struct Active {
     stamp: SavedEditStamp,
 }
 pub(super) struct State {
+    agent_identity: Arc<()>,
+    agent_permission: Option<delegation::Permission>,
     view: p::Status,
     active: Option<Active>,
     pub(super) exhausted: bool,
@@ -86,6 +92,8 @@ pub(super) struct State {
 impl State {
     pub(super) fn new() -> Self {
         Self {
+            agent_identity: Arc::new(()),
+            agent_permission: None,
             view: p::Status {
                 schema_version: 1,
                 revision: 1,
@@ -150,6 +158,8 @@ impl State {
         }
     }
     fn unknown(&mut self) {
+        if let Some(a) = &self.active { super::action_delegation::unknown(&a.agent); }
+        self.revoke_agent();
         self.stop();
         self.view.available = false;
         self.view.reason = p::Reason::CleanupUnknown;
@@ -162,12 +172,14 @@ impl State {
         }
     }
     pub(super) fn context_changed(&mut self) {
+        self.revoke_agent();
         let b = self.view.clone();
         self.stop();
         self.view.result = None;
         self.finish(b);
     }
     pub(super) fn retired(&mut self, r: Reason) {
+        self.revoke_agent();
         let b = self.view.clone();
         if r == Reason::CleanupUnknown {
             self.unknown();
@@ -178,6 +190,7 @@ impl State {
         self.finish(b);
     }
     pub(super) fn reset(&mut self) {
+        self.revoke_agent();
         let b = self.view.clone();
         self.view.result = None;
         self.view.operation = None;
@@ -189,7 +202,8 @@ impl State {
         {
             return None;
         }
-        self.view.heap()
+        self.view.heap()?.checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(self.agent_permission.as_ref().map_or(Some(0), |p| p.heap()?.checked_add(std::mem::size_of::<delegation::Permission>()))?)
     }
 }
 impl ConnectionState {
@@ -318,7 +332,11 @@ impl ConnectionState {
             return Err(refused(p::Reason::InvalidInput));
         }
         p::encode_initial("github-activity-18446744073709551615", &request)?;
-        let end = (now + Duration::from_secs(60)).min(s.clock.end);
+        let agent = gate.agent().cloned();
+        let end = match &agent {
+            Some(e) => e.activity_end(s.clock.end, now).map_err(crate::asset_session::application_service::public_error)?,
+            None => (now + Duration::from_secs(60)).min(s.clock.end),
+        };
         let (session_id, project_id) = (s.id.clone(), s.project_id.clone());
         let retained = self
             .activity
@@ -338,7 +356,10 @@ impl ConnectionState {
         if !retained.is_some_and(|n| n <= p::RETAINED_LIMIT) {
             return Err(refused(p::Reason::ResourcesUnavailable));
         }
+        if let Some(e) = &agent { self.activity_agent_take(e, &request, generation, &root)?; }
+        else { self.activity.revoke_agent(); }
         let b = self.activity.view.clone();
+        gate.agent_entering()?;
         let ticket = supervisor
             .start_github_activity(request.clone(), gate, end)
             .map_err(|e| refused(error_reason(&e)))?;
@@ -367,6 +388,7 @@ impl ConnectionState {
             reason: p::Reason::None,
         });
         self.activity.active = Some(Active {
+            agent,
             ticket,
             request,
             session_id: session_id.clone(),
@@ -436,6 +458,10 @@ impl ConnectionState {
             .ok_or_else(|| refused(p::Reason::TargetChanged))?;
         if self.unknown || self.exhausted || self.activity.exhausted {
             return Err(refused(p::Reason::CleanupUnknown));
+        }
+        if let Some(e) = &a.agent {
+            e.current(true).map_err(crate::asset_session::application_service::public_error)?;
+            if self.activity_write_review() { return Err(refused(p::Reason::Busy)); }
         }
         if self.preflight.native_work_pending()
             || self.release.native_work_pending()
@@ -632,6 +658,8 @@ impl ConnectionState {
         {
             self.complete_retirement();
         }
+        if self.unknown { super::action_delegation::unknown(&a.agent); }
+        else { delegation::accepted(&a.agent, a.ticket.operation_id(), reason, self.activity.view.result.as_ref()); }
     }
 }
 

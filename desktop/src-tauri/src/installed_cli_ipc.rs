@@ -300,6 +300,10 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
     let bytes = p::encode_response(&response)?;
     match &response.response {
         p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::AndroidBuildRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::IosArchiveRequest(view) => service.android_tools_client_current(&client, &view.origin().project_id)?,
+        p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+        p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::MetadataImagesAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
         p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
@@ -310,6 +314,7 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
         p::ResponseBody::ToolSetupRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::StoreRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::StorePreparation(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::VersionReserveReview(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,

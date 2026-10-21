@@ -3,7 +3,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { bindAgentIdentityApi, createAgentIdentityApi, encodeAgentIdentityRequest,
-  parseAgentIdentityGuiStatus, createProjectIdentityApi, ProjectIdentityNativeController } from '../src/projectIdentityNative.ts';
+  parseAgentIdentityGuiStatus, parseAgentIdentityCheck, createProjectIdentityApi, ProjectIdentityNativeController } from '../src/projectIdentityNative.ts';
+import { emptyIdentityPermission, observedIdentityPermission, acknowledgeIdentityPermission, consumeIdentityPermission,
+  identityPermissionChecked, identityPermissionAcknowledged } from '../src/agentIdentityPermission.ts';
 import { ProjectIdentityController } from '../src/projectIdentityController.ts';
 import { IDENTITY_NEW_WARNING } from '../src/projectIdentity.ts';
 
@@ -38,7 +40,7 @@ function ports(hook) {
 test('seven closed native commands queue/review DATA; no preview or generic-command fallback', () => {
   const p = ports();
   assert.equal(p.calls.length, 0);
-  const operations = [p.agent.status(), p.agent.allow('project-1'), p.agent.revoke(), p.agent.decline(INTENT),
+  const operations = [p.agent.status(), p.agent.allow('project-1', '0'), p.agent.revoke(), p.agent.decline(INTENT),
     p.agent.review(INTENT), p.agent.prepare({ intentId: INTENT, sessionId: SID, revision: REV, acknowledgeNewApplication: true }),
     p.agent.apply({ intentId: INTENT, sessionId: SID, revision: REV, planToken: PLAN, reviewed: true })];
   assert.deepEqual(p.calls.map((v) => v.command), ['agent_identity_status', 'allow_agent_identity', 'revoke_agent_identity',
@@ -50,8 +52,9 @@ test('seven closed native commands queue/review DATA; no preview or generic-comm
 
 test('closed RAW inputs reject caller roots, continuity, secrets, duplicate authority and implicit acknowledgements', () => {
   for (const [command, value] of [
-    ['allow_agent_identity', { projectId: 'project-1', root: '/not-authority' }],
-    ['allow_agent_identity', { projectId: '/project-1' }],
+    ['allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: '0', root: '/not-authority' }],
+    ['allow_agent_identity', { projectId: '/project-1', expectedPermissionRevision: '0' }],
+    ['allow_agent_identity', { projectId: 'project-1' }],
     ['review_agent_identity', { intentId: INTENT, window: 'main' }],
     ['review_agent_identity', { intentId: '0'.repeat(32) }],
     ['prepare_agent_identity', { intentId: INTENT, sessionId: SID, revision: REV }],
@@ -91,6 +94,91 @@ test('GUI observations are bounded immutable DATA, never native settlement or a 
   assert.ok(observed); assert.equal(observed.requests[0].state, 'original-sid-available');
   assert.equal(observed.requests[0].historyMustBeQueried, true);
   assert.equal(Object.hasOwn(observed.requests[0], 'settled'), false);
+});
+
+test('only MAIN Check carries a closed full-u64 revision; old response and CLI-shaped data cannot supply it', () => {
+  const plain = gui();
+  assert.ok(parseAgentIdentityGuiStatus(plain));
+  assert.equal(parseAgentIdentityCheck(plain), null);
+  for (const revision of ['0', '1', '9007199254740993', '18446744073709551615']) {
+    const check = { ...gui(), permissionRevision: revision };
+    assert.equal(parseAgentIdentityCheck(check)?.permissionRevision, revision);
+    assert.equal(parseAgentIdentityGuiStatus(check), null, 'the old body parser is not relaxed');
+    const bytes = encodeAgentIdentityRequest('allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: revision });
+    assert.ok(bytes);
+    assert.equal(JSON.parse(new TextDecoder().decode(bytes)).expectedPermissionRevision, revision);
+  }
+  for (const revision of [null, 0, -0, 9007199254740992, '', '00', '01', '-1', '+1', ' 1', '1\n', '1\r', '1\u2028', '18446744073709551616']) {
+    assert.equal(parseAgentIdentityCheck({ ...gui(), permissionRevision: revision }), null);
+    assert.equal(encodeAgentIdentityRequest('allow_agent_identity', { projectId: 'project-1', expectedPermissionRevision: revision }), null);
+  }
+  assert.equal(parseAgentIdentityCheck({ ...gui(), permissionRevision: '0', authority: true }), null);
+  let reads = 0;
+  const getter = { ...gui(), get permissionRevision() { reads++; return '0'; } };
+  assert.equal(parseAgentIdentityCheck(getter), null);
+  assert.equal(reads, 0);
+});
+
+test('same pure Check witness requires new ACK and consumption keeps the original decimal revision', async () => {
+  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 1 };
+  let permission = emptyIdentityPermission;
+  permission = acknowledgeIdentityPermission(permission, true, context);
+  assert.equal(identityPermissionAcknowledged(permission, context), false);
+  assert.equal(consumeIdentityPermission(permission, context).expectedPermissionRevision, null);
+  assert.equal(p.calls.length, 0, 'witness logic cannot invoke anything');
+  const original = p.agent.status();
+  assert.equal(original, p.calls[0].promise);
+  assert.equal(identityPermissionChecked(permission, context), false, 'an entered Check has not returned');
+  p.calls[0].resolve({ ...gui(), permissionRevision: '9007199254740993' });
+  const returned = parseAgentIdentityCheck(await original); assert.ok(returned);
+  permission = observedIdentityPermission(context, returned.permissionRevision);
+  assert.equal(identityPermissionAcknowledged(permission, context), false);
+  permission = acknowledgeIdentityPermission(permission, true, context);
+  const consumed = consumeIdentityPermission(permission, context);
+  permission = consumed.permission;
+  assert.equal(consumed.expectedPermissionRevision, '9007199254740993');
+  assert.equal(consumeIdentityPermission(permission, context).expectedPermissionRevision, null);
+  const allow = p.agent.allow(context.projectId, consumed.expectedPermissionRevision);
+  assert.equal(allow, p.calls[1].promise);
+  assert.deepEqual(p.calls[1].args, { projectId: 'project-1', expectedPermissionRevision: '9007199254740993' });
+  p.calls[1].resolve(gui()); await allow;
+  assert.equal(identityPermissionChecked(permission, context), false, 'Allow DATA does not recreate a Check witness');
+});
+
+test('later equal-revision Check drops ACK; old ACK cannot authorize a replacement witness', () => {
+  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 1 };
+  const first = acknowledgeIdentityPermission(observedIdentityPermission(context, '3'), true, context);
+  assert.equal(identityPermissionAcknowledged(first, context), true);
+  const next = observedIdentityPermission(context, '3');
+  assert.equal(identityPermissionAcknowledged(next, context), false);
+  assert.equal(consumeIdentityPermission({ checked: next.checked, acknowledged: first.acknowledged }, context).expectedPermissionRevision, null);
+  assert.equal(consumeIdentityPermission(acknowledgeIdentityPermission(next, true, context), context).expectedPermissionRevision, '3');
+  assert.equal(consumeIdentityPermission(emptyIdentityPermission, context).expectedPermissionRevision, null, 'Revoke/lost/malformed results keep the explicit empty witness');
+  assert.equal(p.calls.length, 0);
+});
+
+test('witness is bound to original service, API, project and context epoch including ABA; exhausted data cannot arm', () => {
+  const p = ports(), context = { service: {}, api: p.agent, projectId: 'project-1', epoch: 7 };
+  const permission = acknowledgeIdentityPermission(observedIdentityPermission(context, '0'), true, context);
+  for (const changed of [
+    { ...context, service: {} }, { ...context, api: ports().agent }, { ...context, api: null },
+    { ...context, projectId: 'project-2' }, { ...context, projectId: null }, { ...context, epoch: 8 },
+    { ...context, epoch: Number.MAX_SAFE_INTEGER },
+  ]) {
+    assert.equal(identityPermissionChecked(permission, changed), false);
+    assert.equal(consumeIdentityPermission(permission, changed).expectedPermissionRevision, null);
+  }
+  assert.equal(consumeIdentityPermission(permission, { ...context, epoch: 9 }).expectedPermissionRevision, null,
+    'returning to the same project/API after context invalidation is not the old intent');
+  for (const revision of ['18446744073709551614', '18446744073709551615']) {
+    assert.ok(parseAgentIdentityCheck({ ...gui(), permissionRevision: revision }), 'bounded exhausted DATA is still displayable');
+    assert.equal(identityPermissionChecked(observedIdentityPermission(context, revision), context), false);
+  }
+  const captured = observedIdentityPermission(context, '5');
+  context.projectId = 'project-2';
+  assert.equal(captured.checked.context.projectId, 'project-1');
+  assert.ok(Object.isFrozen(captured.checked.context));
+  assert.equal(p.calls.length, 0);
 });
 
 test('binding sends nothing until explicit original Open, rejects changed selection and cannot replay lost Open ACK', async () => {

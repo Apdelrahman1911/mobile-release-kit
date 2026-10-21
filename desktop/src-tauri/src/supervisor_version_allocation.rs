@@ -43,17 +43,7 @@ fn closed(value: &Value, fields: &[&str]) -> bool {
     value.as_object().is_some_and(|row| row.len() == fields.len() && fields.iter().all(|k| row.contains_key(*k)))
 }
 pub(crate) fn source_branch(value: &str) -> bool {
-    let Some(name) = value.strip_prefix("refs/heads/") else {
-        return false;
-    };
-    !name.is_empty()
-        && name.len() <= 200
-        && name.as_bytes()[0].is_ascii_alphanumeric()
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
-        && !name.contains("..")
-        && !name.starts_with("refs/")
-        && name.split('/').count() <= 16
-        && name.split('/').all(|p| !p.is_empty() && !p.starts_with('.') && !p.ends_with('.') && !p.ends_with(".lock"))
+    crate::service_version_reserve_review_protocol::branch(value)
 }
 fn relative(value: &str) -> bool {
     !value.is_empty()
@@ -384,6 +374,22 @@ impl Mailbox {
     }
 }
 
+/// Sample the old READ on the SAME source watchdog, including known cleanup.
+/// No Doc/Host/service IO and no new timer/management owner.
+pub(super) fn observe_review(owner:&Owner,now:Instant){
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let Some(result)=owner.version_allocation_source.as_ref().and_then(|s|s.gate.review_stop(now)){
+        let failure=match result{Ok(Some(at))=>Some((BridgeError::new("cancelled","The original source-review read was stopped."),at)),Err(_)=>Some((BridgeError::cleanup_unknown(),now)),_=>None};
+        if let Some((error,at))=failure{let mut state=lock(&owner.state);if state.terminal||state.unknown{return}state.fail_at(error,at);drop(state);owner.stop.send_replace(true);owner.changed.notify_waiters();}
+    }
+}
+pub(super) fn review_deadline(owner:&Owner,now:Instant,end:Instant)->Instant{
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if owner.version_allocation_source.as_ref().is_some_and(|s|s.gate.review_stop(now).is_some()){
+        let state=lock(&owner.state);if !state.terminal{return crate::service_version_reserve_review_requests::poll_end(now,end,state.unknown)}
+    }
+    end
+}
 pub(super) struct Invocation {
     pub(super) gate: crate::asset_session::VersionAllocationSourceGoGate,
     pub(super) input: Arc<VersionAllocationSourceInput>,

@@ -1,3 +1,4 @@
+import { createAgentLocalHistoryPort } from './agentLocalHistoryProtocol.ts';
 import { createStorePreparationPort } from './agentStorePreparation.ts';
 import { createVersionEditAgentApi } from './serviceVersionEditProtocol.ts';
 import { createAgentGithubActionPort } from './agentGithubActionAccess.ts';
@@ -87,7 +88,7 @@ import { PROJECT_RECOVERY_EVENT, encodeProjectRecoveryRequest, projectRecoveryEr
 import type { ProjectRecoveryCommand } from './projectRecoveryProtocol.ts';
 import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
-import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
+import { cliReadAccessProjectIdFits, cliReadAccessRevisionFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
 import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
@@ -101,6 +102,7 @@ import { createGitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionReservePort } from './versionReserve.ts';
+import { createReserveReviewPort } from './versionReserveReview.ts';
 import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
 import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
 import { createApplePreparationPort } from './agentApplePreparation.ts';
@@ -117,7 +119,7 @@ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -435,6 +437,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     githubDevice: createGitHubDeviceApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    versionReserveReview:mode==='native'&&listen?createReserveReviewPort((command,bytes)=>invoke<unknown>(command,bytes),listen):null,
     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentGithubAction: mode === 'native' ? createAgentGithubActionPort((command,bytes)=>invoke<unknown>(command,bytes)) : null,
@@ -442,6 +445,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentToolSetup: mode === 'native' ? createAgentToolSetupPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentStorePreparation: mode === 'native' ? createStorePreparationPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentLocalHistory: mode === 'native' ? createAgentLocalHistoryPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
@@ -454,9 +458,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
     applicationRead: mode === 'native' ? Object.freeze({
       status: () => call<unknown>('application_read_status', {}),
-      allow: (projectId: string) => cliReadAccessProjectIdFits(projectId)
-        ? call<unknown>('allow_application_read', { projectId })
-        : Promise.reject({ code: 'cli_access_invalid_request', message: 'Select a project in this app first.', retryable: false }),
+      allow: (projectId: string, expectedPermissionRevision: string) => cliReadAccessProjectIdFits(projectId) && cliReadAccessRevisionFits(expectedPermissionRevision)
+        ? call<unknown>('allow_application_read', { projectId, expectedPermissionRevision })
+        : Promise.reject({ code: 'cli_access_invalid_request', message: 'Check access for the selected project in this app first.', retryable: false }),
       revoke: () => call<unknown>('revoke_application_read', {}),
     }) : undefined,
     appInfo: () => call<AppInfo>('app_info'),

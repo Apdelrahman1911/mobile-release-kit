@@ -14,7 +14,7 @@ export function CliReadAccessPanel({ controller }: { controller: CliReadAccessCo
   return <section className="card" aria-labelledby={`${id}-title`} aria-busy={state.pendingCount > 0}>
     <div id={`${id}-title`}><SectionHeading title="CLI / AI access" description="Let a local command-line or AI tool read limited saved information from this running app." /></div>
     <p>{CLI_READ_ACCESS_SCOPE}</p>
-    <p><strong>Allow only tools you trust.</strong> Keep this app open. Permission lasts up to one hour and is not restored after the app closes.</p>
+    <p><strong>Allow only tools you trust.</strong> Check access before each explicit Allow. Keep this app open. Permission lasts up to one hour and is not restored after the app closes.</p>
     <div className="button-row" role="status" aria-live="polite"><Badge tone={summary.tone}>{summary.title}</Badge></div>
     <p className="save-note">{summary.detail}</p>
     {state.pendingCount > 0 && <p className="context-refresh-note" role="status">

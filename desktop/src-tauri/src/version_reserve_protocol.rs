@@ -7,14 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 pub(crate) const LIMIT: usize = 8192;
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Increment {
-    Build,
-    Patch,
-    Minor,
-    Major,
-}
+pub(crate) use crate::service_version_reserve_review_protocol::Increment;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Review {
@@ -50,6 +43,8 @@ impl Review {
 pub(crate) enum Command {
     Status,
     Review(Review),
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    AgentReview(crate::service_version_reserve_review_protocol::Query),
     Reserve {
         project_id: String,
         review_id: String,
@@ -74,6 +69,8 @@ pub(crate) fn decode(name: &str, raw: &[u8]) -> Result<Command, BridgeError> {
         return Ok(Command::Status);
     }
     if name == "version_reserve_review" {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if v.get("intent").is_some(){return crate::asset_session::decode_agent_version_reserve_review_start(v).map(Command::AgentReview)}
         let input: Review = serde_json::from_value(v).map_err(|_| BridgeError::invalid())?;
         return if input.valid() {
             Ok(Command::Review(input))

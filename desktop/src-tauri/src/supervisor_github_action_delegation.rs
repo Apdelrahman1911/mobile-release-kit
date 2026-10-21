@@ -9,6 +9,7 @@ fn entry(owner: &Owner) -> Option<&Arc<Entry>> {
         .or_else(|| owner.pull_request_gate.as_ref().and_then(|g| g.agent()))
         .or_else(|| owner.actions_retry_gate.as_ref().and_then(|g| g.agent()))
         .or_else(|| owner.publication_gate.as_ref().and_then(|g| g.agent()))
+        .or_else(|| owner.github_activity_gate.as_ref().and_then(|g| g.agent()))
 }
 pub(super) fn arm(owner: &Owner) -> Result<(), BridgeError> {
     if let Some(e) = entry(owner) {

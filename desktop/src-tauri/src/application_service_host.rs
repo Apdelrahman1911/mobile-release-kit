@@ -341,8 +341,19 @@ impl ApplicationHost {
             Err(error) => { state.fail(HostFailure::storage(HostStage::Register, error)); Err(error.code) }
         }
     }
-    pub(crate) fn begin_allow(&self, original: NativeProject) -> Result<AllowTicket, Error> {
-        self.begin_start(original, true, None)
+    /// The MAIN caller carries the epoch from its original explicit Check.
+    /// Compare it BEFORE even reserving a location: that reservation can itself
+    /// advance the startup epoch. Revoke cannot interleave with this same-lock
+    /// reservation/consume/ticket handoff, and an old request cannot cancel a
+    /// newer ticket or read grant merely by arriving late.
+    pub(crate) fn begin_allow(&self, original: NativeProject, expected_epoch: u64,
+        app_data: &Path, registered_roots: &[RegisteredRoot]) -> Result<AllowTicket, Error> {
+        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
+        let mut state = self.lock()?;
+        state.available()?;
+        if state.epoch != expected_epoch { return Err(Error::AccessDenied); }
+        Self::reserve_location_locked(&mut state, app_data, registered_roots)?;
+        self.begin_start_locked(&mut state, original, true, None)
     }
     pub(crate) fn begin_native_state(&self, original: NativeProject) -> Result<NativeStateTicket, Error> {
         self.begin_start(original, false, None).map(NativeStateTicket)
@@ -374,6 +385,10 @@ impl ApplicationHost {
         work_end: Option<Instant>) -> Result<AllowTicket, Error> {
         if self.history_lease.is_some() { return Err(Error::AccessDenied); }
         let mut state = if revoke_read { self.lock()? } else { self.try_native_lock()? };
+        self.begin_start_locked(&mut state, original, revoke_read, work_end)
+    }
+    fn begin_start_locked(&self, state: &mut Control, original: NativeProject, revoke_read: bool,
+        work_end: Option<Instant>) -> Result<AllowTicket, Error> {
         state.available()?;
         if state.phase == Phase::Starting { return Err(Error::Busy); }
         if work_end.is_some_and(|end| Instant::now() >= end) { return Err(Error::Expired); }
@@ -672,6 +687,18 @@ impl ApplicationHost {
         let state = self.lock()?; state.available()?;
         match &state.service { Some(service) => service.read_access_status(), None => Ok(denied()) }
     }
+    /// MAIN-only observation, not a grant. The ordinary service/IPC/headless
+    /// status stays the original three-field DATA. Read both facts under the
+    /// SAME Control guard so a completed Revoke cannot leave an old status
+    /// paired with a freshly sampled permission epoch.
+    pub(crate) fn status_for_allow(&self) -> Result<(ReadAccessStatus, u64), Error> {
+        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
+        let state = self.lock()?; state.available()?;
+        let status = match &state.service {
+            Some(service) => service.read_access_status()?, None => denied(),
+        };
+        Ok((status, state.epoch))
+    }
     pub(crate) fn revoke(&self) -> Result<ReadAccessStatus, Error> {
         let mut state = self.lock()?;
         state.retire_pending()?;
@@ -845,6 +872,75 @@ mod tests {
         assert!(state.pending.is_none() && state.store.is_none() && state.service.is_none());
     }
 
+    #[test]
+    fn main_read_check_revoke_and_replay_precede_all_location_and_ticket_mutation() {
+        // The existing fixture supplies real directory identity, but this test
+        // enters NO SourceBook, service, IPC, passive query or grant publication.
+        let f = Fixture::short(); let original = project(&f); let host = ApplicationHost::new();
+        let roots = [fixture_root(&original.canonical_root)];
+        let (off, old) = host.status_for_allow().unwrap();
+        assert!(!off.enabled); assert_eq!(old, 0);
+        host.revoke().unwrap();
+        assert_eq!(host.begin_allow(original.clone(), old, &f.app, &roots).err(), Some(Error::AccessDenied));
+        {
+            let state = host.lock().unwrap();
+            assert_eq!(state.epoch, 1); assert!(state.pending.is_none());
+            assert!(state.native_location.is_none() && state.native_roots.is_empty());
+        }
+        let (_, checked) = host.status_for_allow().unwrap();
+        let first = host.begin_allow(original.clone(), checked, &f.app, &roots).unwrap();
+        assert_eq!(first.epoch, checked + 2, "initial roster and original startup each retain their own epoch advance");
+        // Compare the stale intent before even validating a different path;
+        // an old caller cannot alter the new ticket or the reserved roster.
+        let wrong = f.app.parent().unwrap().join("wrong-name");
+        assert_eq!(host.begin_allow(original.clone(), checked, &wrong, &[]).err(), Some(Error::AccessDenied));
+        {
+            let state = host.lock().unwrap();
+            assert_eq!(state.pending, Some(first.epoch)); assert_eq!(state.epoch, first.epoch);
+            assert_eq!(state.native_location.as_ref(), Some(&f.app)); assert!(state.native_roots == roots);
+            assert!(host.check_allow(&state, &first).is_ok());
+        }
+        host.revoke().unwrap();
+        assert_eq!(host.check_allow(&host.lock().unwrap(), &first), Err(Error::AccessDenied));
+        assert!(!host.status().unwrap().enabled && !f.app.exists());
+        let originals = host.originals.try_lock().unwrap();
+        assert!(originals.source.is_none() && originals.store.is_none() && originals.server.is_none());
+    }
+
+    #[test]
+    fn native_state_startup_invalidates_checked_read_intent_without_issuing_read_permission() {
+        let f = Fixture::short(); let original = project(&f); let host = ApplicationHost::new();
+        reserve(&host, &f, &original);
+        let (_, checked) = host.status_for_allow().unwrap();
+        let native = host.begin_native_state(original.clone()).unwrap();
+        assert_eq!(host.begin_allow(original.clone(), checked, &f.app,
+            &[fixture_root(&original.canonical_root)]).err(), Some(Error::AccessDenied));
+        assert_eq!(host.lock().unwrap().pending, Some(native.0.epoch));
+        assert!(!host.status().unwrap().enabled && !f.app.exists());
+        host.cancel_native_state_ticket(&native).unwrap();
+        assert!(host.lock().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn main_read_epoch_exhaustion_uses_original_permanent_fence_without_wrap_or_grant() {
+        let f = Fixture::short(); let original = project(&f); let host = ApplicationHost::new();
+        reserve(&host, &f, &original);
+        host.lock().unwrap().epoch = u64::MAX;
+        let (_, checked) = host.status_for_allow().unwrap();
+        assert_eq!(checked, u64::MAX);
+        assert_eq!(host.begin_allow(original.clone(), checked, &f.app,
+            &[fixture_root(&original.canonical_root)]).err(), Some(Error::StateUnknown));
+        {
+            let state = host.control.lock().unwrap();
+            assert_eq!(state.epoch, u64::MAX); assert_eq!(state.fence, Some(Error::StateUnknown));
+            assert!(state.pending.is_none() && state.prepared.is_none() && state.service.is_none());
+        }
+        assert_eq!(host.status_for_allow().err(), Some(Error::StateUnknown));
+        assert_eq!(host.begin_native_state(original).err(), Some(Error::StateUnknown));
+        assert_eq!(host.revoke().err(), Some(Error::StateUnknown));
+        assert!(!f.app.exists());
+    }
+
     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
     fn project(f: &Fixture) -> NativeProject {
         let root = f.app.parent().unwrap().join("project");
@@ -855,6 +951,17 @@ mod tests {
             registration_generation: 2, document_identity: Arc::new(()), input_revision: 1 }
     }
     fn list() -> p::Request { p::Request { version: p::VERSION, request_id: p::Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
+    // Existing lifecycle fixtures now obtain the actual same-Host observation
+    // before each explicit Allow. This helper cannot mint a source/read grant:
+    // it keeps the already reserved complete roster, and never calls prepare.
+    fn checked_allow(host: &ApplicationHost, original: NativeProject) -> Result<AllowTicket, Error> {
+        let (_, epoch) = host.status_for_allow()?;
+        let (path, roots) = {
+            let state = host.lock()?;
+            (state.native_location.clone().ok_or(Error::Unavailable)?, state.native_roots.clone())
+        };
+        host.begin_allow(original, epoch, &path, &roots)
+    }
     fn reserve(host: &ApplicationHost, f: &Fixture, project: &NativeProject) {
         host.reserve_native_location(&f.app, &[fixture_root(&project.canonical_root)]).unwrap();
     }
@@ -894,7 +1001,7 @@ mod tests {
     }
     async fn enable(host: &ApplicationHost, f: &Fixture, project: &NativeProject) {
         reserve(host, f, project);
-        let ticket = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(host, &ticket, &f.app).await.unwrap();
+        let ticket = checked_allow(&host, project.clone()).unwrap(); seed_lifecycle_fixture(host, &ticket, &f.app).await.unwrap();
         let status = host.finish_allow(ticket, project, &passive(&project.canonical_root, &"1".repeat(64))).unwrap();
         assert!(status.enabled); assert!(status.remaining_ms <= 3_600_000); assert_eq!(status.project_ids.len(), 1);
     }
@@ -1011,7 +1118,7 @@ mod tests {
             host.control.lock().unwrap().phase = Phase::Starting;
             assert_eq!(host.reserve_native_location(&f.app, &[]), Err(Error::Busy));
             assert_eq!(host.native_exclusion_root().err(), Some(Error::Busy));
-            assert_eq!(host.begin_allow(project.clone()).err(), Some(Error::Busy));
+            assert_eq!(checked_allow(&host, project.clone()).err(), Some(Error::Busy));
             host.retire_allow().unwrap();
             assert_eq!(host.startup_current(&ticket.0), Err(Error::AccessDenied));
             assert!(!f.app.exists());
@@ -1039,17 +1146,17 @@ mod tests {
         runtime().block_on(async {
             let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
             reserve(&host, &f, &project);
-            let first = host.begin_allow(project.clone()).unwrap();
+            let first = checked_allow(&host, project.clone()).unwrap();
             let held = host.originals.lock().await;
             let mut pending = Box::pin(host.prepare(&first, &f.app));
             std::future::poll_fn(|cx| { assert!(pending.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
             host.revoke().unwrap(); drop(pending); drop(held);
             assert!(!f.app.exists());
             assert_eq!(host.prepare(&first, &f.app).await.err(), Some(Error::AccessDenied));
-            let mut expired = host.begin_allow(project.clone()).unwrap(); expired.startup_expires = Instant::now();
+            let mut expired = checked_allow(&host, project.clone()).unwrap(); expired.startup_expires = Instant::now();
             assert_eq!(host.prepare(&expired, &f.app).await.err(), Some(Error::Expired));
             assert!(!f.app.exists()); assert!(host.originals.lock().await.source.is_none());
-            let second = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(&host, &second, &f.app).await.unwrap();
+            let second = checked_allow(&host, project.clone()).unwrap(); seed_lifecycle_fixture(&host, &second, &f.app).await.unwrap();
             host.retire_allow().unwrap();
             assert_eq!(host.finish_allow(second, &project, &passive(&project.canonical_root, &"1".repeat(64))).err().map(|e| e), Some(Error::AccessDenied));
             assert!(!host.status().unwrap().enabled);
@@ -1064,12 +1171,12 @@ mod tests {
             for changed in [NativeProject { document_identity: Arc::new(()), ..project.clone() },
                 NativeProject { registration_generation: 3, ..project.clone() },
                 NativeProject { input_revision: 2, ..project.clone() }] {
-                let ticket = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(&host, &ticket, &f.app).await.unwrap();
+                let ticket = checked_allow(&host, project.clone()).unwrap(); seed_lifecycle_fixture(&host, &ticket, &f.app).await.unwrap();
                 assert_eq!(host.finish_allow(ticket, &changed, &passive(&project.canonical_root, &"1".repeat(64))).err().map(|e| e), Some(Error::Conflict));
                 assert!(!host.status().unwrap().enabled);
             }
             enable(&host, &f, &project).await;
-            let unprepared = host.begin_allow(project.clone()).unwrap();
+            let unprepared = checked_allow(&host, project.clone()).unwrap();
             assert_eq!(host.finish_allow(unprepared, &project, &passive(&project.canonical_root, &"1".repeat(64))).err(), Some(Error::Conflict));
             assert!(!host.status().unwrap().enabled);
             enable(&host, &f, &project).await;
@@ -1123,7 +1230,7 @@ mod tests {
             let store = PrivateStateDirectory::open(&f.app).unwrap();
             store.replace(Namespace::Projects, Revision(0), b"not a service document").unwrap(); store.close().unwrap();
             let preserved = std::fs::read(f.app.join(DIRECTORY).join("projects.state")).unwrap();
-            let host = ApplicationHost::new(); reserve(&host, &f, &project); let ticket = host.begin_allow(project).unwrap();
+            let host = ApplicationHost::new(); reserve(&host, &f, &project); let ticket = checked_allow(&host, project).unwrap();
             assert_eq!(seed_lifecycle_fixture(&host, &ticket, &f.app).await.err(), Some(Error::RecoveryRequired));
             assert!(host.originals.lock().await.store.is_some());
             assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::RecoveryRequired));
@@ -1224,9 +1331,9 @@ mod tests {
             assert_eq!(host.reserve_native_location(&f.app, &[
                 fixture_root(&project.canonical_root), fixture_root(ancestor),
             ]), Err(Error::Conflict));
-            assert!(host.begin_allow(project.clone()).is_err());
+            assert!(checked_allow(&host, project.clone()).is_err());
             reserve(&host, &f, &project);
-            let ticket = host.begin_allow(project.clone()).unwrap();
+            let ticket = checked_allow(&host, project.clone()).unwrap();
             let other = ancestor.join("other").join("dev.mobile-release-kit.desktop");
             assert_eq!(host.prepare(&ticket, &other).await.err(), Some(Error::Conflict));
             // A changed COMPLETE native roster retires the pending attempt;
@@ -1244,7 +1351,7 @@ mod tests {
     fn native_source_admission_precedes_private_state_and_retains_original_book() {
         runtime().block_on(async {
             let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
-            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            reserve(&host, &f, &project); let ticket = checked_allow(&host, project.clone()).unwrap();
             // Inspect the real filesystem, without replacing native policy.
             // On the current overlayfs VPS this proves refusal/closure ONLY.
             #[cfg(target_os = "linux")]
@@ -1275,7 +1382,7 @@ mod tests {
             let mut before_book = SourceBook::new();
             let before = asset_source::probe_project(&mut before_book, project.canonical_root.clone(), &[], &mut || false).unwrap();
             assert!(before_book.settled());
-            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            reserve(&host, &f, &project); let ticket = checked_allow(&host, project.clone()).unwrap();
             host.prepare(&ticket, &f.app).await.unwrap();
             let application = host.native_exclusion_root().unwrap().unwrap();
             assert_eq!(host.check_project_root(&before), Err(Error::Conflict));
@@ -1306,7 +1413,7 @@ mod tests {
             let preserved = std::fs::read(f.app.join(DIRECTORY).join("projects.state")).unwrap();
             let host = ApplicationHost::new();
             host.reserve_native_location(&f.app, &[fixture_root(&project.canonical_root), fixture_root(&alternate)]).unwrap();
-            let ticket = host.begin_allow(project).unwrap();
+            let ticket = checked_allow(&host, project).unwrap();
             assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::Conflict));
             assert!(host.originals.lock().await.store.is_none());
             assert!(host.originals.lock().await.source.as_ref().unwrap().settled());
@@ -1316,7 +1423,7 @@ mod tests {
             // Current registered roots are re-probed, not trusted from an old
             // registration stamp after their actual directories are replaced.
             let f = Fixture::short(); let project = self::project(&f); let host = ApplicationHost::new();
-            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            reserve(&host, &f, &project); let ticket = checked_allow(&host, project.clone()).unwrap();
             std::fs::rename(&project.canonical_root, project.canonical_root.with_file_name("retained-project")).unwrap();
             std::fs::create_dir(&project.canonical_root).unwrap();
             std::fs::set_permissions(&project.canonical_root, std::fs::Permissions::from_mode(0o700)).unwrap();

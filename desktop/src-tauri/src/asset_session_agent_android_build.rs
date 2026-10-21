@@ -9,6 +9,9 @@ use crate::{
     service_protocol::{Action, Error},
 };
 use serde::Deserialize;
+#[path = "asset_session_agent_android_signed.rs"]
+mod signed;
+use crate::agent_build_requests::{MainAccess, permission_revision, permission_next};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -16,6 +19,7 @@ pub(crate) struct Allow {
     input: wire::Prepare,
     toolchain_selection: wire::MacToolchainSelection,
     consent_version: String,
+    expected_permission_revision: String,
 }
 /// The current saved reader, edit stamp and catalog comparison are ORIGINALS,
 /// not decoded from the consent body. Only one grant retains this small pair.
@@ -25,6 +29,7 @@ pub(super) struct Grant {
     stamp: SavedEditStamp,
     saved: ValidatedSavedInput,
     approval: Arc<crate::saved_command_owner::AgentAndroidBuildApproval>,
+    signing: Option<signed::Pins>,
 }
 fn public(error: Error) -> BridgeError {
     application_service::public_error(error)
@@ -101,30 +106,37 @@ impl DocumentBinding {
         {
             return Err(public(Error::Conflict));
         }
+        self.agent_android_signing_material(state, grant, registration, root)?;
         Ok(())
     }
     pub(crate) fn agent_android_build_access(
         &self,
         window: &str,
-    ) -> Result<agent::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.agent_android_service()? {
-            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public),
-            None => Ok(empty()),
-        }
+        let _state = self.lock();
+        let revision = self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire);
+        let access = match self.agent_android_service()? {
+            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public)?,
+            None => empty(),
+        };
+        Ok(MainAccess::new(access, revision))
     }
     pub(crate) fn allow_agent_android_build(
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<agent::Access, BridgeError> {
-        if window != MAIN || args.consent_version != agent::CONSENT {
+    ) -> Result<MainAccess, BridgeError> {
+        let signed = args.input.signing.is_some();
+        if window != MAIN || args.consent_version != if signed { agent::signed::CONSENT } else { agent::CONSENT } {
             return Err(BridgeError::invalid());
         }
-        let (native, stamp, saved, approval, epoch) = {
+        let expected = permission_revision(&args.expected_permission_revision).map_err(public)?;
+        let (native, stamp, saved, approval, signing) = {
             let mut state = self.lock();
+            permission_next(expected, self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
             if self.android_build_gate(&state) != wire::Availability::Available {
                 return Err(crate::android_build_owner::unavailable());
             }
@@ -155,14 +167,13 @@ impl DocumentBinding {
                     &args.toolchain_selection,
                     &self.inner.session_identity,
                 )?;
-            let epoch = self
-                .inner
-                .agent_android_build_revoke_epoch
-                .load(Ordering::Acquire);
-            if epoch == u64::MAX {
-                return Err(public(Error::StateUnknown));
-            }
-            (native, edit.stamp()?, saved, approval, epoch)
+            let signing = if signed {
+                let material = self.review_android_material(&state, &approval.input().context(), registration, &root)?;
+                let pins = signed::Pins::capture(&material)?;
+                pins.admitted(&approval)?;
+                Some(pins) // Only weak comparison pins cross this Doc cut.
+            } else { None };
+            (native, edit.stamp()?, saved, approval, signing)
         };
         // These original Host/Service calls may perform store IO. NEVER hold
         // Doc/Edit across them. They require the already-listening read host;
@@ -173,9 +184,7 @@ impl DocumentBinding {
             .application_service
             .identity_request_service(&native)
             .map_err(public)?;
-        let point = service
-            .build_point_for_runtime(&native.runtime_id)
-            .map_err(public)?;
+        let (point, read) = service.build_point_with_read(&native.runtime_id).map_err(public)?;
         let scope = Arc::new(agent::NativeScope {
             project_id: point.project_id.clone(),
             runtime_id: native.runtime_id.clone(),
@@ -187,8 +196,8 @@ impl DocumentBinding {
             document: Arc::downgrade(&self.inner.session_identity),
             observation_revision: point.revision,
             review: approval.review().clone().into(),
-            draft_revision: approval.input().draft_revision,
-            baseline_generation: approval.input().baseline_generation,
+            read: signed.then_some(read),
+            input: crate::agent_build_requests::NativeInput::Saved { draft_revision: approval.input().draft_revision, baseline_generation: approval.input().baseline_generation },
             changes: self.inner.changes.clone(),
         });
         if !scope.matches(&point) {
@@ -200,6 +209,7 @@ impl DocumentBinding {
             stamp,
             saved,
             approval,
+            signing,
         });
         let mut state = self.lock();
         if self.android_build_gate(&state) != wire::Availability::Available {
@@ -214,14 +224,8 @@ impl DocumentBinding {
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
         self.agent_android_current(&state, &grant, &edit, registration, &root)?;
-        if self
-            .inner
-            .agent_android_build_revoke_epoch
-            .load(Ordering::Acquire)
-            != epoch
-        {
-            return Err(public(Error::AccessDenied));
-        }
+        let next = permission_next(expected,
+            self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
         if let Some(original) = self.inner.agent_android_build_service.get() {
             if original.as_ptr() != Arc::as_ptr(&service) {
                 return Err(public(Error::Conflict));
@@ -232,16 +236,18 @@ impl DocumentBinding {
                 .set(Arc::downgrade(&service))
                 .map_err(|_| public(Error::StateUnknown))?;
         }
-        // Same Doc guard linearizes first-Allow against Revoke. Inbox is only
-        // bounded memory, and has no reverse callback into this document.
+        // Both cuts compare the SAME revision actually returned to MAIN;
+        // an earlier Revoke or successful Allow cannot be silently rebased.
+        // Overflow was checked before any Inbox/Doc grant installation.
         let access = service.build_requests().allow(scope).map_err(public)?;
         state.agent_android_build_grant = Some(grant);
-        Ok(access)
+        self.inner.agent_android_build_revoke_epoch.store(next, Ordering::Release);
+        Ok(MainAccess::new(access, next))
     }
     pub(crate) fn revoke_agent_android_build(
         &self,
         window: &str,
-    ) -> Result<agent::Access, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
@@ -256,7 +262,9 @@ impl DocumentBinding {
             Ok(None) => Ok(empty()),
             Err(e) => Err(e),
         };
-        advanced.and(revoked) // Counter failure must not skip the original STOP.
+        // Counter failure must not skip the original STOP.
+        advanced.and(revoked).map(|a| MainAccess::new(a,
+            self.inner.agent_android_build_revoke_epoch.load(Ordering::Acquire)))
     }
     fn admit_agent_android_build(
         &self,
@@ -285,12 +293,8 @@ impl DocumentBinding {
         }
         match kind {
             agent::ClaimKind::Prepare => {
-                if !entry.prepare_live()
-                    || !entry.scope().matches(
-                        &service
-                            .build_point_for_runtime(&grant.native.runtime_id)
-                            .map_err(public)?,
-                    )
+                let (point, read) = service.build_point_with_read(&grant.native.runtime_id).map_err(public)?;
+                if !entry.prepare_live() || !entry.scope().matches(&point) || !entry.scope().matches_read(&read)
                 {
                     return Err(public(Error::Conflict));
                 }
@@ -336,15 +340,25 @@ impl DocumentBinding {
                         entry.clone(),
                         grant.approval.clone(),
                         registration,
-                        root,
+                        root.clone(),
                         gate,
+                        self.agent_android_signing_material(&state, &grant, registration, &root)?,
                     )?;
             }
             agent::ClaimKind::Start => {
+                let material = self.inner.bridge.android_build.agent_android_build_material(entry)?;
+                match (&grant.signing, &material) {
+                    (None, None) => {},
+                    (Some(pins), Some(original)) if pins.matches(original) => {
+                        self.recheck_android_material(&state, original, registration, &root)?;
+                    },
+                    _ => return Err(public(Error::Conflict)),
+                }
                 let admitted = self.inner.bridge.android_build.start_agent_android_build(
                     entry,
                     Some((registration, root)),
                     gate,
+                    material,
                 )?;
                 drop(edit);
                 drop(state);
@@ -434,6 +448,11 @@ pub(super) fn flush(service: &ApplicationService, family: crate::agent_build_req
         let Some((first, data)) = claimed else {
             continue;
         };
+        struct OriginalHistory<'a> { entry: &'a agent::Entry, returned: bool }
+        impl Drop for OriginalHistory<'_> {
+            fn drop(&mut self) { if !self.returned { self.entry.history_lost(); } }
+        }
+        let mut original = OriginalHistory { entry: &entry, returned: false };
         let result = if first {
             service.begin_operation(
                 &entry.scope().runtime_id,
@@ -451,9 +470,9 @@ pub(super) fn flush(service: &ApplicationService, family: crate::agent_build_req
                 data.settlement(),
             )
         };
-        if let Err(e) = entry.history_returned(data.status_revision(), result) {
-            failed.get_or_insert(e);
-        }
+        let result = entry.history_returned(data.status_revision(), result);
+        original.returned = true;
+        if let Err(e) = result { failed.get_or_insert(e); }
     }
     if let Some(e) = failed {
         Err(e)
@@ -480,11 +499,30 @@ mod tests {
         assert!(!bridge.application_service.status().unwrap().enabled);
     }
     #[test]
+    fn actual_main_revoke_before_first_allow_cut_invalidates_the_returned_revision() {
+        let bridge=Arc::new(DesktopBridge::new(std::path::PathBuf::from("/inert/unopened-build-revision")));
+        let doc=DocumentBinding::new(bridge.clone());
+        let access=doc.agent_android_build_access(MAIN).unwrap();assert_eq!(access.permission_revision,"0");
+        assert_eq!(doc.revoke_agent_android_build(MAIN).unwrap().permission_revision,"1");
+        let input=wire::prepare(&serde_json::json!({"projectId":"inert","draftRevision":1,"baselineGeneration":2,
+            "savedConfig":{"bytes":123,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":32,"sha256":"b".repeat(64),"name":"1.2.3","build":7},
+            "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}})).unwrap();
+        let selection=wire::MacToolchainSelection { instance:"c".repeat(32),owner_uid:501,catalog_generation:1,
+            record_sha256:"d".repeat(64),inventory_sha256:"e".repeat(64),os_provider_sha256:"f".repeat(64) };
+        let args=Allow {input,toolchain_selection:selection,consent_version:agent::CONSENT.into(),expected_permission_revision:access.permission_revision};
+        assert_eq!(doc.allow_agent_android_build(MAIN,args).unwrap_err().code,public(Error::AccessDenied).code);
+        assert!(doc.lock().agent_android_build_grant.is_none());assert!(doc.inner.agent_android_build_service.get().is_none());
+        doc.inner.agent_android_build_revoke_epoch.store(u64::MAX,Ordering::Release);
+        assert!(doc.revoke_agent_android_build(MAIN).is_err());
+        assert_eq!(doc.agent_android_build_access(MAIN).unwrap().permission_revision,u64::MAX.to_string());
+        assert!(!bridge.application_service.status().unwrap().enabled);
+    }
+    #[test]
     fn consent_body_cannot_supply_paths_commands_original_ids_or_window() {
         let base = serde_json::json!({"input":{"projectId":"project-1","draftRevision":0,"baselineGeneration":0,
             "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":3,"sha256":"b".repeat(64),"name":"1.0","build":1},
             "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}},
-            "toolchainSelection":{"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,"recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)},"consentVersion":agent::CONSENT});
+            "toolchainSelection":{"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,"recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)},"consentVersion":agent::CONSENT,"expectedPermissionRevision":"0"});
         let decode = |v: &Value| {
             super::super::agent_identity::decode::<Allow>(&serde_json::to_vec(v).unwrap())
         };

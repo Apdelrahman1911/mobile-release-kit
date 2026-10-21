@@ -1,7 +1,7 @@
 // Closed permission DATA for the existing GitLocal owner. This does not
 // inspect a repository, mint a review, start Git or establish native finality.
 import { isGitUpstreamAction, sameUpstreamAction, type GitUpstreamAction } from './gitUpstreamProtocol.ts';
-import { Permission, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
+import { Permission, gitPermissionRevision, type PermissionApi, type PermissionContext } from './service_git_permission.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { isGitInitAction, type GitInitAction } from './gitInitProtocol.ts';
 import { isGitBranchAction, type GitBranchAction } from './gitBranchesProtocol.ts';
@@ -17,6 +17,7 @@ export interface GitRepositoryApproval {
   readonly action: GitRepositoryPermissionAction;
 }
 export interface GitRepositoryAccess {
+  readonly permissionRevision: string;
   readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
   readonly projectId: string | null; readonly grantId: string | null;
   readonly selection: { readonly action: GitRepositoryPermissionAction; readonly selectionSha256: string } | null;
@@ -54,15 +55,15 @@ export function copyGitRepositoryApproval(value: unknown): GitRepositoryApproval
 export function parseGitRepositoryAccess(value: unknown): GitRepositoryAccess | null {
   try {
     const v = copyBoundedComparisonData(value, 8192, 80);
-    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection']) || typeof v.enabled !== 'boolean'
+    if (!keys(v, ['enabled', 'remainingMs', 'consumed', 'projectId', 'grantId', 'selection', 'permissionRevision']) || !gitPermissionRevision(v.permissionRevision) || typeof v.enabled !== 'boolean'
       || typeof v.consumed !== 'boolean' || typeof v.remainingMs !== 'number' || !Number.isSafeInteger(v.remainingMs)
       || v.remainingMs < 0 || v.remainingMs > 900000 || v.enabled && (v.consumed || v.remainingMs === 0)
       || !v.enabled && v.remainingMs !== 0) return null;
     if (v.projectId === null || v.grantId === null || v.selection === null) return v.projectId === null && v.grantId === null && v.selection === null && !v.enabled && !v.consumed
-      ? Object.freeze({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
+      ? Object.freeze({ permissionRevision: v.permissionRevision, enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null }) : null;
     if (!hex(v.projectId, 32) || !hex(v.grantId, 32) || !keys(v.selection, ['action', 'selectionSha256']) || !hex(v.selection.selectionSha256, 64)) return null;
     const a = action(v.selection.action); if (!a) return null;
-    return Object.freeze({ enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
+    return Object.freeze({ permissionRevision: v.permissionRevision, enabled: v.enabled, remainingMs: v.remainingMs, consumed: v.consumed, projectId: v.projectId, grantId: v.grantId,
       selection: Object.freeze({ action: a, selectionSha256: v.selection.selectionSha256 }) });
   } catch { return null; }
 }
@@ -86,9 +87,9 @@ export function createGitRepositoryPermissionApi(mode: string, invoke: Invoke): 
     } catch { throw failure(); }
   };
   return Object.freeze({ status: () => call('agent_git_repository_access', {}), revoke: () => call('revoke_agent_git_repository', {}),
-    allow: async (input: GitRepositoryApproval) => {
-      const safe = copyGitRepositoryApproval(input); if (!safe) throw failure();
-      const result = await call('allow_agent_git_repository', { ...safe, consentVersion: GIT_REPOSITORY_CONSENT });
+    allow: async (input: GitRepositoryApproval, expectedPermissionRevision: string) => {
+      const safe = copyGitRepositoryApproval(input); if (!safe || !gitPermissionRevision(expectedPermissionRevision)) throw failure();
+      const result = await call('allow_agent_git_repository', { ...safe, expectedPermissionRevision, consentVersion: GIT_REPOSITORY_CONSENT });
       if (!result.selection || !sameGitRepositoryPermissionAction(safe.action, result.selection.action)) throw failure();
       return result; // The native digest stays paired with its action; it is not renderer authority.
     } });

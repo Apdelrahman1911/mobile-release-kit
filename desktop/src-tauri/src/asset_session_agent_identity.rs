@@ -19,6 +19,28 @@ pub(crate) mod actions;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PermitRequest {
     pub(crate) project_id: String,
+    pub(crate) expected_permission_revision: String,
+}
+/// Only the genuine MAIN Check exposes this ordering stamp. The shared
+/// service/CLI and the other three-field GUI replies remain unchanged.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PermissionCheck {
+    #[serde(flatten)]
+    status: requests::GuiStatus,
+    #[serde(serialize_with = "serialize_permission_revision")]
+    permission_revision: u64,
+}
+fn serialize_permission_revision<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
+}
+fn permission_revision(text: &str) -> Result<u64, BridgeError> {
+    if text.is_empty() || text.len() > 20 || !text.bytes().all(|c| c.is_ascii_digit())
+        || text.len() > 1 && text.starts_with('0')
+    {
+        return Err(BridgeError::invalid());
+    }
+    text.parse().map_err(|_| BridgeError::invalid())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -95,6 +117,19 @@ fn empty_status() -> requests::GuiStatus {
 }
 
 impl DocumentBinding {
+    fn consume_agent_allow_epoch(
+        &self,
+        _original_guard: &DocumentState,
+        expected: u64,
+    ) -> Result<u64, BridgeError> {
+        // MAX is terminal: a saturated Revoke must never leave a usable
+        // in-flight Allow at that same value. A refused attempt is not reset.
+        let next = expected.checked_add(1).filter(|next| *next < u64::MAX)
+            .ok_or_else(|| public(Error::StateUnknown))?;
+        self.inner.agent_identity_revoke_epoch
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| next).map_err(|_| public(Error::AccessDenied))
+    }
     fn agent_allow_epoch(
         &self,
         _original_guard: &DocumentState,
@@ -146,8 +181,15 @@ impl DocumentBinding {
             return Err(BridgeError::invalid());
         }
         let state = self.lock();
-        self.passive_query_gate_locked(&state, &self.inner.bridge)?;
-        let native = self.service_project_locked(&state, project)?;
+        self.agent_context_locked(&state, project)
+    }
+    fn agent_context_locked(
+        &self,
+        state: &DocumentState,
+        project: &str,
+    ) -> Result<(NativeProject, SavedEditStamp, u64), BridgeError> {
+        self.passive_query_gate_locked(state, &self.inner.bridge)?;
+        let native = self.service_project_locked(state, project)?;
         let edit = self
             .inner
             .bridge
@@ -165,13 +207,13 @@ impl DocumentBinding {
     pub(crate) fn agent_identity_status(
         &self,
         window: &str,
-    ) -> Result<requests::GuiStatus, BridgeError> {
+    ) -> Result<PermissionCheck, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
         let state = self.lock();
         self.service_document_gate(&state)?;
-        match self.inner.agent_identity_service.get() {
+        let status = match self.inner.agent_identity_service.get() {
             None => Ok(empty_status()),
             Some(original) => original
                 .upgrade()
@@ -179,14 +221,29 @@ impl DocumentBinding {
                 .identity_requests()
                 .gui_status()
                 .map_err(public),
-        }
+        }?;
+        Ok(PermissionCheck {
+            status,
+            permission_revision: self.inner.agent_identity_revoke_epoch.load(Ordering::Acquire),
+        })
     }
     pub(crate) fn allow_agent_identity(
         &self,
         window: &str,
         args: PermitRequest,
     ) -> Result<requests::GuiStatus, BridgeError> {
-        let (original, stamp, epoch) = self.agent_context(window, &args.project_id)?;
+        if window != MAIN || !crate::protocol::valid_id(&args.project_id) {
+            return Err(BridgeError::invalid());
+        }
+        let expected = permission_revision(&args.expected_permission_revision)?;
+        let (original, stamp, epoch) = {
+            let state = self.lock();
+            // Consume the original returned MAIN Check before any startup,
+            // project or off-Doc Host work; never capture a fresh arrival epoch.
+            let epoch = self.consume_agent_allow_epoch(&state, expected)?;
+            let (original, stamp, _) = self.agent_context_locked(&state, &args.project_id)?;
+            (original, stamp, epoch)
+        };
         // Both may acquire original Host/Service locks and inspect durable
         // saved state. They are deliberately OUTSIDE Document/Edit guards.
         let service = self
@@ -469,7 +526,8 @@ mod tests {
             .allow_agent_identity(
                 "main",
                 PermitRequest {
-                    project_id: "project-1".into()
+                    project_id: "project-1".into(),
+                    expected_permission_revision: "0".into(),
                 }
             )
             .is_err());
@@ -518,5 +576,89 @@ mod tests {
                 .load(Ordering::Acquire),
             captured + 1
         );
+    }
+
+    #[test]
+    fn main_check_revision_is_closed_decimal_and_other_reply_bytes_stay_unchanged() {
+        for text in ["0", "1", "9007199254740993", "18446744073709551615"] {
+            assert_eq!(permission_revision(text).unwrap().to_string(), text);
+        }
+        for text in ["", "00", "01", "-0", "+1", " 1", "1\n", "1\r", "1\u{2028}",
+            "18446744073709551616", "100000000000000000000"]
+        {
+            assert!(permission_revision(text).is_err());
+        }
+        for raw in [
+            r#"{"projectId":"project-1"}"#,
+            r#"{"projectId":"project-1","expectedPermissionRevision":0}"#,
+            r#"{"projectId":"project-1","expectedPermissionRevision":null}"#,
+            r#"{"projectId":"project-1","expectedPermissionRevision":"0","expectedPermissionRevision":"1"}"#,
+            r#"{"projectId":"project-1","expectedPermissionRevision":"0","window":"main"}"#,
+        ] {
+            assert!(decode::<PermitRequest>(raw.as_bytes()).is_err());
+        }
+        let request: PermitRequest = decode(br#"{"projectId":"project-1","expectedPermissionRevision":"9007199254740993"}"#).unwrap();
+        assert_eq!(permission_revision(&request.expected_permission_revision).unwrap(), 9_007_199_254_740_993);
+        let base = serde_json::to_value(empty_status()).unwrap();
+        let check = serde_json::to_value(PermissionCheck { status: empty_status(), permission_revision: u64::MAX }).unwrap();
+        assert_eq!(base.as_object().unwrap().len(), 3);
+        assert_eq!(check.as_object().unwrap().len(), 4);
+        assert_eq!(check["permissionRevision"], "18446744073709551615");
+        for field in ["lease", "pending", "requests"] { assert_eq!(check[field], base[field]); }
+        assert!(serde_json::to_vec(&check).unwrap().len() < 64 * 1024);
+    }
+
+    #[test]
+    fn delayed_first_allow_uses_old_checked_revision_after_actual_revoke() {
+        let bridge = Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-arrival-fixture")));
+        let document = DocumentBinding::new(bridge.clone());
+        // No native window/root/Check is fabricated on this unbound fixture.
+        // Exercise the actual late-Allow refusal before those gates or Host IO.
+        assert!(document.agent_identity_status(MAIN).is_err());
+        assert!(!document.revoke_agent_identity(MAIN).unwrap().lease.enabled);
+        assert_eq!(document.allow_agent_identity(MAIN, PermitRequest {
+            project_id: "project-1".into(), expected_permission_revision: "0".into(),
+        }).err().unwrap(), public(Error::AccessDenied));
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1);
+        assert!(document.inner.agent_identity_service.get().is_none());
+        assert!(!bridge.application_service.status().unwrap().enabled);
+    }
+
+    #[test]
+    fn startup_refusal_consumes_only_initial_allow_and_cannot_replay() {
+        let bridge = Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-consume-fixture")));
+        let document = DocumentBinding::new(bridge.clone());
+        let input = || PermitRequest { project_id: "project-1".into(), expected_permission_revision: "0".into() };
+        assert!(document.allow_agent_identity("not-main", input()).is_err());
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 0);
+        assert!(document.allow_agent_identity(MAIN, input()).is_err());
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1);
+        assert_eq!(document.allow_agent_identity(MAIN, input()).err().unwrap(), public(Error::AccessDenied));
+        assert!(document.agent_context(MAIN, "project-1").is_err());
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), 1,
+            "ordinary Review context does not consume a proposal-permission revision");
+        assert!(document.inner.agent_identity_service.get().is_none());
+        assert!(!bridge.application_service.status().unwrap().enabled);
+    }
+
+    #[test]
+    fn permission_exhaustion_never_rebases_or_skips_original_revoke() {
+        let document = DocumentBinding::new(Arc::new(DesktopBridge::new(std::path::PathBuf::from("/unopened-identity-exhaustion-fixture"))));
+        {
+            let state = document.lock();
+            document.inner.agent_identity_revoke_epoch.store(u64::MAX - 2, Ordering::Release);
+            assert_eq!(document.consume_agent_allow_epoch(&state, u64::MAX - 2).unwrap(), u64::MAX - 1);
+            assert!(document.consume_agent_allow_epoch(&state, u64::MAX - 2).is_err());
+            assert!(document.consume_agent_allow_epoch(&state, u64::MAX - 1).is_err());
+            assert!(document.consume_agent_allow_epoch(&state, u64::MAX).is_err());
+            assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX - 1);
+        }
+        assert!(!document.revoke_agent_identity(MAIN).unwrap().lease.enabled);
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX);
+        assert_eq!(document.revoke_agent_identity(MAIN).err().unwrap(), public(Error::StateUnknown));
+        assert_eq!(document.inner.agent_identity_revoke_epoch.load(Ordering::Acquire), u64::MAX);
+        assert!(document.inner.agent_identity_service.get().is_none());
+        // The real method's unconditional original Edit STOP is unchanged;
+        // this fixture does not invent an active owner or settlement receipt.
     }
 }

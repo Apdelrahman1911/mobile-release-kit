@@ -373,7 +373,7 @@ function recoveryReport(value: unknown, ctx: IOSRecoveryContext): value is IOSRe
   return true;
 }
 function recoveryOperation(value: Record<string, unknown>, ctx: IOSRecoveryContext): value is Record<string, unknown> & IOSRecoveryOperation {
-  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'report']) ||
+  if (Object.hasOwn(value,'agentIosArchive')&&!validAgentIOSArchiveOrigin(value.agentIosArchive)||!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'report', ...(Object.hasOwn(value,'agentIosArchive') ? ['agentIosArchive'] : [])]) ||
       !(value.activity === null || keys(value.activity, ['stage']) && oneOf(value.activity.stage, IOS_RECOVERY_STAGES)) ||
       !(value.report === null || recoveryReport(value.report, ctx))) return false;
   const op = value as unknown as IOSRecoveryOperation;
@@ -434,7 +434,7 @@ function operation(value: unknown): value is IOSArchiveOperation {
   if (value.context.operation === 'ios-local-recovery') return recoveryOperation(value, value.context);
   if (value.context.operation === 'ios-signing-inputs-check') return signingCheckOperation(value, value.context);
   if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', ...(Object.hasOwn(value,'agentIosArchive') ? ['agentIosArchive'] : [])]) ||
-      Object.hasOwn(value,'agentIosArchive') && (value.context.operation !== 'ios-unsigned-archive' || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
+      Object.hasOwn(value,'agentIosArchive') && (!['ios-unsigned-archive', 'ios-signed-export'].includes(value.context.operation) || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
       !(value.activity === null || activity(value.activity, value.context)) ||
       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
       !(value.result === null || (value.context.operation === 'ios-candidate-inputs' ? candidateResult(value.result, value.context, value.operationId) : result(value.result, value.context, value.operationId)))) return false;

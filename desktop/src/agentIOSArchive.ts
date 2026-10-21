@@ -1,18 +1,20 @@
+import {copyIOSRecoveryApproval, parseIOSRecoveryAccess, recoveryConfirmation, AGENT_IOS_RECOVERY_CONSENT} from './agentIOSRecovery.ts';
+import type {IOSRecoveryApproval, IOSRecoveryAccess, AcknowledgedIOSRecovery} from './agentIOSRecovery.ts';
 import { BuildPermission } from './agentBuildPermission.ts';
+import { buildPermissionRevision } from './agentBuildPermissionProtocol.ts';
 // A single exact-input START permission, separate from reading and local checks.
 // The existing iOS controller owns display/STOP; this creates no executor.
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { copyIOSArchiveRequest } from './iosArchiveProtocol.ts';
-import { parseLocalCheckAccess } from './agentLocalChecks.ts';
-import type { LocalCheckAccess } from './agentLocalChecks.ts';
 import type { PrepareIOSBuild } from './iosArchiveTypes.ts';
 export const AGENT_IOS_ARCHIVE_CONSENT = 'agent-saved-ios-unsigned-archive-v1';
+export const AGENT_IOS_SIGNED_EXPORT_CONSENT = 'agent-saved-ios-signed-export-v1';
 const REQUEST_LIMIT = 4096; // Same whole RAW GUI body / service frame limit, not stdin alone.
-export interface IOSArchiveApproval { input: PrepareIOSBuild }
-export type IOSArchiveAccess = LocalCheckAccess; // Same closed DATA shape, not a reusable grant.
-export const parseIOSArchiveAccess = parseLocalCheckAccess;
+export type IOSArchiveApproval = { input: PrepareIOSBuild } | IOSRecoveryApproval;
+export type IOSArchiveAccess = IOSRecoveryAccess; // MAIN-only revision DATA; never a reusable grant.
+export const parseIOSArchiveAccess = parseIOSRecoveryAccess;
 export interface AgentIOSArchiveApi {
-  status(): Promise<IOSArchiveAccess>; allow(input: IOSArchiveApproval): Promise<IOSArchiveAccess>; revoke(): Promise<IOSArchiveAccess>;
+  status(): Promise<IOSArchiveAccess>; allow(input: IOSArchiveApproval, expectedPermissionRevision: string): Promise<IOSArchiveAccess>; revoke(): Promise<IOSArchiveAccess>;
 }
 type Command = 'agent_ios_archive_access' | 'allow_agent_ios_archive' | 'revoke_agent_ios_archive';
 type Invoke = <T>(command: string, input?: Record<string, unknown> | Uint8Array) => Promise<T>;
@@ -21,10 +23,14 @@ const keys = (v: unknown, names: string[]): v is Record<string, unknown> => reco
 export function copyIOSArchiveApproval(value: unknown): IOSArchiveApproval | null {
   try {
     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
-    if (!keys(v, ['input'])) return null;
+    if (!keys(v, ['input'])) return copyIOSRecoveryApproval(v);
     const input = copyIOSArchiveRequest('prepare_ios_archive', v.input) as PrepareIOSBuild | null;
-    if (!input || 'recovery' in input || input.signing !== undefined || input.action !== undefined) return null;
+    if (!input || 'recovery' in input || input.action !== undefined) return null;
     Object.freeze(input.savedConfig); Object.freeze(input.savedVersion);
+    if (input.signing) {
+      for (const assignment of input.signing.assignments) Object.freeze(assignment);
+      Object.freeze(input.signing.assignments); Object.freeze(input.signing);
+    }
     return Object.freeze({input:Object.freeze(input)});
   } catch { return null; }
 }
@@ -32,8 +38,17 @@ export function encodeIOSArchiveAccessRequest(command: Command, value: unknown):
   try {
     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
     if (command === 'allow_agent_ios_archive') {
-      if (!keys(v, ['input', 'consentVersion']) || v.consentVersion !== AGENT_IOS_ARCHIVE_CONSENT ||
-          !copyIOSArchiveApproval({ input: v.input })) return null;
+      if (!record(v)||!buildPermissionRevision(v.expectedPermissionRevision)) return null;
+      if(Object.hasOwn(v,'recovery')) {
+        const approval=copyIOSRecoveryApproval({projectId:v.projectId,recovery:v.recovery});
+        const confirmation=approval?recoveryConfirmation(approval.recovery.action):undefined;
+        if(!approval||!keys(v,['projectId','recovery','consentVersion','expectedPermissionRevision',...(confirmation===undefined?[]:['confirmation'])])||
+          v.consentVersion!==AGENT_IOS_RECOVERY_CONSENT||v.confirmation!==confirmation)return null;
+      } else {
+        if(!keys(v,['input','consentVersion','expectedPermissionRevision']))return null;
+        const approval=copyIOSArchiveApproval({input:v.input});
+        if(!approval||!('input' in approval)||v.consentVersion!==(approval.input.signing?AGENT_IOS_SIGNED_EXPORT_CONSENT:AGENT_IOS_ARCHIVE_CONSENT))return null;
+      }
     } else if ((command !== 'agent_ios_archive_access' && command !== 'revoke_agent_ios_archive') || !keys(v, [])) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= REQUEST_LIMIT ? bytes : null;
   } catch { return null; }
@@ -47,11 +62,20 @@ export function createAgentIOSArchiveApi(mode: string, invoke: Invoke): AgentIOS
     catch { return Promise.reject(refusal()); }
   };
   return Object.freeze({ status: () => call('agent_ios_archive_access', {}),
-    allow: (input: IOSArchiveApproval) => { const safe = copyIOSArchiveApproval(input); return safe ? call('allow_agent_ios_archive', { ...safe, consentVersion: AGENT_IOS_ARCHIVE_CONSENT }) : Promise.reject(refusal()); },
+    allow: (input: IOSArchiveApproval, expectedPermissionRevision: string) => {
+      const safe = copyIOSArchiveApproval(input);
+      return safe ? call('allow_agent_ios_archive', { ...safe, expectedPermissionRevision,
+        consentVersion: 'input' in safe?(safe.input.signing ? AGENT_IOS_SIGNED_EXPORT_CONSENT : AGENT_IOS_ARCHIVE_CONSENT):AGENT_IOS_RECOVERY_CONSENT,
+        ...(!('input' in safe)&&safe.recovery.action!=='inspect'?{confirmation:recoveryConfirmation(safe.recovery.action)}:{}) }) : Promise.reject(refusal());
+    },
     revoke: () => call('revoke_agent_ios_archive', {}) });
 }
 export type PermissionContext=import('./agentBuildPermission.ts').PermissionContext<IOSArchiveApproval>;
 export type {PermissionState} from './agentBuildPermission.ts';
 export class AgentIOSArchivePermission extends BuildPermission<IOSArchiveApproval>{
-  constructor(current?:()=>PermissionContext){super(copyIOSArchiveApproval,current);}
+  constructor(current?:()=>PermissionContext){super(copyIOSArchiveApproval,current,parseIOSArchiveAccess);}
+  acknowledgedInspection():AcknowledgedIOSRecovery|null {
+    const value=this.currentReturnedAccess((a,b)=>!!a&&!!b&&!('input' in a)&&!('input' in b)&&a.projectId===b.projectId);
+    return parseIOSArchiveAccess(value)?.recoveryInspection??null;
+  }
 }

@@ -1,3 +1,5 @@
+import { VersionReserveReviewController } from './versionReserveReviewController.ts';
+import type { ReserveReviewPort, ReserveReviewStatus } from './versionReserveReview.ts';
 import { parseReserveOptions, parseVersionReserveStatus, reserveActive, reserveProject } from './versionReserve.ts';
 import type { ReservedVersion, VersionReserveOptions, VersionReservePort, VersionReserveStatus } from './versionReserve.ts';
 import { AgentVersionReserveAccessController } from './agentVersionReserveAccessController.ts';
@@ -8,6 +10,7 @@ export interface VersionReserveContext {
   port: VersionReservePort | null; nativeSession: object | null; projectId: string | null; preview: boolean;
   blockedReason: string | null; // OTHER owners only. Native still admits every action.
   cliAccessPort?: AgentVersionReserveAccessPort | null;
+  reviewPort?: ReserveReviewPort | null;
   editor: { reservedOpenReason(): string | null; openReserved(value: ReservedVersion): boolean } | null;
 }
 export interface VersionReserveView {
@@ -17,7 +20,7 @@ export interface VersionReserveView {
 }
 type Kind = 'review' | 'reserve' | 'status' | 'cancel';
 interface Work {
-  kind: Kind; context: VersionReserveContext; epoch: object; options: VersionReserveOptions; operationId: string | null;
+  kind: Kind; context: VersionReserveContext; epoch: object; options: VersionReserveOptions; form: VersionReserveOptions; operationId: string | null;
   sent: boolean; original: Promise<unknown> | null; completion: Promise<void>; finish(): void;
   cliCompletion: AgentVersionReserveCompletion | null;
 }
@@ -29,14 +32,17 @@ const unknownReason = 'The original reservation is unconfirmed. Keep it and chec
 const busyReason = 'The original reservation operation is still finishing. Check its status or request Stop.';
 
 // One finite native interaction and separate original status/STOP promises.
-// No timer, automatic read/bump/retry, token, path or replacement native owner.
+// No automatic allocation/bump/retry, token, path or replacement native owner.
+// The bounded CLI child only reconciles its own read metadata.
 export class VersionReserveController {
   readonly cliAccess: AgentVersionReserveAccessController;
+  readonly cliReview: VersionReserveReviewController;
+  private proposed: VersionReserveOptions | null = null;
   private readonly currentContext: () => VersionReserveContext;
   private context: VersionReserveContext = absent();
   private originalContext: VersionReserveContext | null = null;
   private epoch: object = {};
-  private reviewed: { epoch: object; id: string; options: VersionReserveOptions; cli: AgentVersionReserveReview } | null = null;
+  private reviewed: { epoch: object; id: string; options: VersionReserveOptions; delegated:boolean; cli: AgentVersionReserveReview } | null = null;
   private reserved: { epoch: object; id: string; cliCompletion?: AgentVersionReserveCompletion } | null = null;
   private work: Work | null = null;
   private query: Work | null = null;
@@ -50,21 +56,24 @@ export class VersionReserveController {
     this.currentContext = options.current;
     this.cliAccess = new AgentVersionReserveAccessController({ current: () => {
       const c = this.readContext(), s = this.state.status, r = this.reviewed;
-      const review = !this.state.stale && !this.state.unknown && r?.epoch === this.epoch && r.options === this.state.options &&
+      const review = !this.state.stale && !this.state.unknown && r?.epoch === this.epoch && r.options === this.effectiveOptions() && (!r.delegated || this.cliReview?.supports(r.id,r.cli.revision)) &&
         s?.phase === 'reviewed' && s.projectId === c.projectId && s.review?.id === r.id && s.revision === r.cli.revision &&
         s.review.reference === r.options.reference && s.review.increment === r.options.increment && s.review.newCandidate === r.options.newCandidate && s.review.futureTag === r.options.futureTag ? r.cli : null;
       return { port: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: c.projectId, preview: c.preview,
-        epoch: this.epoch, options: this.state.options, enabled: this.state.enabled, review,
+        epoch: this.epoch, options: this.effectiveOptions(), enabled: this.state.enabled, review,
         blockedReason: this.nativeOwnerReason() ?? unavailable(c) ?? c.blockedReason };
     } });
     this.cliAccess.subscribe(() => this.patch());
+    this.cliReview=new VersionReserveReviewController({current:()=>{const c=this.readContext();return {port:c.reviewPort??null,nativeSession:c.nativeSession,projectId:c.projectId,epoch:this.epoch,enabled:this.state.enabled,preview:c.preview};},start:(s,p)=>this.reviewFromCli(s,p)});
+    this.cliReview.subscribe(()=>this.patch());
     this.syncContext();
   }
   getSnapshot = (): VersionReserveView => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  whenSettled = (): Promise<void> => Promise.all([this.work?.completion, this.query?.completion, this.stopping?.completion, this.cliAccess.whenSettled()]).then(() => undefined);
+  whenSettled = (): Promise<void> => Promise.all([this.work?.completion, this.query?.completion, this.stopping?.completion, this.cliAccess.whenSettled(), this.cliReview.whenSettled()]).then(() => undefined);
   ownerReason = (): string | null => this.nativeOwnerReason() ?? this.cliAccess.ownerReason();
-  private nativeOwnerReason = (): string | null => this.state.unknown || this.state.status?.phase === 'cleanup-unknown' ? unknownReason :
+  private nativeOwnerReason = (): string | null => this.nativeWorkReason() ?? this.cliReview?.ownerReason() ?? null;
+  private nativeWorkReason = (): string | null => this.state.unknown || this.state.status?.phase === 'cleanup-unknown' ? unknownReason :
     this.work || this.query || this.stopping || reserveActive(this.state.status) ? busyReason : null;
   private readContext(): VersionReserveContext {
     try {
@@ -72,28 +81,29 @@ export class VersionReserveController {
       if (typeof c.preview !== 'boolean' || c.nativeSession !== null && typeof c.nativeSession !== 'object' ||
           c.blockedReason !== null && typeof c.blockedReason !== 'string') return absent();
       return { port: p && ['status', 'review', 'reserve', 'cancel'].every((k) => typeof p[k as keyof VersionReservePort] === 'function') ? p : null,
-        cliAccessPort: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: reserveProject(c.projectId) ? c.projectId : null, preview: c.preview,
+        reviewPort:c.reviewPort??null,cliAccessPort: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: reserveProject(c.projectId) ? c.projectId : null, preview: c.preview,
         blockedReason: c.blockedReason, editor: c.editor && typeof c.editor.openReserved === 'function' && typeof c.editor.reservedOpenReason === 'function' ? c.editor : null };
     } catch { return absent(); }
   }
   private sameHost(a: VersionReserveContext, b: VersionReserveContext): boolean {
-    return a.port === b.port && a.nativeSession === b.nativeSession && a.preview === b.preview && a.editor === b.editor && a.cliAccessPort === b.cliAccessPort;
+    return a.port === b.port && a.nativeSession === b.nativeSession && a.preview === b.preview && a.editor === b.editor && a.cliAccessPort === b.cliAccessPort && a.reviewPort===b.reviewPort;
   }
   private sameContext(a: VersionReserveContext, b: VersionReserveContext): boolean { return this.sameHost(a, b) && a.projectId === b.projectId; }
-  private current(work: Work): boolean { return !this.disposed && work.epoch === this.epoch && this.sameContext(work.context, this.readContext()); }
+  private current(work: Work): boolean { return !this.disposed && work.epoch === this.epoch && work.form===this.state.options && this.sameContext(work.context, this.readContext()); }
   private patch(patch: Partial<VersionReserveView> = {}): void {
     this.state = Object.freeze({ ...this.state, ...patch, pending: this.work?.kind === 'reserve' ? 'reserve' : this.work ? 'review' : null,
       checking: this.query !== null, stopping: this.stopping !== null });
     this.cliAccess?.syncContext();
     if (!this.disposed) for (const callback of [...this.listeners]) { try { callback(); } catch { /* Delivery cannot free an original. */ } }
   }
-  beforeContextIntent = (): void => { this.epoch = {}; this.reviewed = null; this.reserved = null; this.patch({ stale: true }); };
+  beforeContextIntent = (): void => { this.epoch = {}; this.proposed=null; this.reviewed = null; this.reserved = null; this.patch({ stale: true }); };
   syncContext(): void {
     if (this.disposed) return;
     const c = this.readContext(), changed = !this.sameContext(c, this.context), display = c.blockedReason !== this.context.blockedReason;
     this.context = c;
-    if (changed) { this.epoch = {}; this.reviewed = null; this.reserved = null; }
+    if (changed) { this.epoch = {}; this.proposed=null; this.reviewed = null; this.reserved = null; }
     if (changed || display) this.patch(changed ? { stale: true } : {});
+    this.cliReview?.syncContext();
   }
   setEnabled(enabled: boolean): boolean {
     if (this.disposed || this.ownerReason() || typeof enabled !== 'boolean' || enabled === this.state.enabled) return false;
@@ -118,10 +128,12 @@ export class VersionReserveController {
       (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native Android or iOS project.' : c.blockedReason) ??
       (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch, any selected future full tag, and acknowledge the Store limits.' : null);
   }
+  private effectiveOptions():VersionReserveOptions{return this.proposed??this.state.options}
+  private readyReason():string|null{const c=this.readContext();return this.disposed?'This controller is retired.':this.ownerReason()??unavailable(c)??(!this.state.enabled?'Manual versions are selected.':!c.projectId?'Choose a saved native project.':c.blockedReason)}
   reserveReason(): string | null {
     const s = this.state.status;
-    return this.reviewReason() ?? (this.state.stale || s?.phase !== 'reviewed' || s.projectId !== this.readContext().projectId ||
-      this.reviewed?.epoch !== this.epoch || this.reviewed.id !== s.review?.id || this.reviewed.options !== this.state.options ?
+    return this.readyReason() ?? (this.state.stale || s?.phase !== 'reviewed' || s.projectId !== this.readContext().projectId ||
+      this.reviewed?.epoch !== this.epoch || this.reviewed.id !== s.review?.id || this.reviewed.options !== this.effectiveOptions() || this.reviewed.delegated&&!this.cliReview.supports(this.reviewed.id,this.reviewed.cli.revision) ?
       'Review these exact choices first. A status read cannot replace that review.' : null);
   }
   editReason(): string | null {
@@ -148,12 +160,12 @@ export class VersionReserveController {
       (!this.state.status?.operationId || this.work && this.work.operationId !== this.state.status.operationId ? 'Check status to identify the original operation first.' :
         !reserveActive(this.state.status) && !this.work ? 'No pending reservation operation was reported.' : null);
   }
-  private begin(kind: Kind, context: VersionReserveContext): Work {
+  private begin(kind: Kind, context: VersionReserveContext, proposed?:VersionReserveOptions): Work {
     const reset = this.originalContext !== null && !this.sameHost(context, this.originalContext);
     this.originalContext = context;
     let finish!: () => void;
     const completion = new Promise<void>((resolve) => { finish = resolve; });
-    const work: Work = { kind, context, epoch: this.epoch, options: this.state.options, operationId: kind === 'cancel' ? this.state.status?.operationId ?? null : null,
+    const work: Work = { kind, context, epoch: this.epoch, options: proposed??this.effectiveOptions(), form:this.state.options, operationId: kind === 'cancel' ? this.state.status?.operationId ?? null : null,
       sent: false, original: null, completion, finish, cliCompletion: kind === 'status' ? this.cliAccess.checkedCompletion() : null };
     if (kind === 'status') this.query = work;
     else if (kind === 'cancel') this.stopping = work;
@@ -190,7 +202,7 @@ export class VersionReserveController {
     // Descriptor parsing can invoke Proxy traps: rematch original epoch/API
     // afterwards. Stale replies remain original DATA, never a new intent.
     const current = this.current(work) && (s.phase !== 'reserved' || s.reservation!.futureTag === work.options.futureTag) && (s.projectId === null || s.projectId === work.context.projectId) && !this.state.unknown;
-    if (work.kind === 'review' && s.phase === 'reviewed' && current) this.reviewed = { epoch: work.epoch, id: s.review!.id, options: work.options,
+    if (work.kind === 'review' && s.phase === 'reviewed' && current) this.reviewed = { epoch: work.epoch, id: s.review!.id, options: work.options, delegated:this.proposed===work.options,
       cli: Object.freeze({ id: s.review!.id, revision: s.revision, options: work.options }) };
     else if (s.phase !== 'reviewed') this.reviewed = null;
     if (work.kind === 'reserve' && s.phase === 'reserved' && current) this.reserved = { epoch: work.epoch, id: s.reservation!.id };
@@ -214,14 +226,27 @@ export class VersionReserveController {
   private async action(kind: 'review' | 'reserve'): Promise<boolean> {
     this.syncContext(); if ((kind === 'review' ? this.reviewReason() : this.reserveReason()) !== null) return false;
     const review = kind === 'reserve' ? this.state.status!.review!.id : null;
-    const work = this.begin(kind, this.readContext());
+    if(kind==='review')this.proposed=null;
+    const work = this.begin(kind, this.readContext(),kind==='review'?this.state.options:undefined);
     try {
-      if (!this.current(work) || this.stopping || this.cliAccess.ownerReason() || this.readContext().blockedReason !== null || !work.context.projectId || work.options !== this.state.options || !this.state.enabled) return false;
+      if (!this.current(work) || this.stopping || this.cliAccess.ownerReason() || this.readContext().blockedReason !== null || !work.context.projectId || work.form !== this.state.options || !this.state.enabled) return false;
       work.sent = true;
       work.original = kind === 'review' ? work.context.port!.review(work.context.projectId, work.options) : work.context.port!.reserve(work.context.projectId, review!);
       this.accept(work, await work.original);
     } catch (e) { this.fail(work, e); } finally { this.end(work); }
     return work.sent;
+  }
+  private async reviewFromCli(status:ReserveReviewStatus,port:ReserveReviewPort):Promise<boolean>{
+    this.syncContext();const c=this.readContext();
+    if(this.disposed||this.nativeWorkReason()||this.cliAccess.ownerReason()||unavailable(c)||c.reviewPort!==port||!this.state.enabled||c.blockedReason||c.projectId!==status.runtimeProjectId||this.reviewed||status.phase!=='queued')return false;
+    const options=parseReserveOptions(status.options);if(!options)return false;
+    this.proposed=options;
+    const work=this.begin('review',c,options);let admitted=true;
+    try{
+      if(!this.current(work)||this.stopping||this.cliAccess.ownerReason()||this.readContext().blockedReason||!this.state.enabled||this.proposed!==options)return false;
+      work.sent=true;work.original=port.review(status.origin);this.accept(work,await work.original);
+    }catch(e){this.fail(work,e);if(!this.state.unknown)admitted=false}finally{this.end(work)}
+    return work.sent&&admitted;
   }
   review = (): Promise<boolean> => this.action('review');
   reserve = (): Promise<boolean> => this.action('reserve');
@@ -246,5 +271,5 @@ export class VersionReserveController {
     return sent && !access.stale && !access.unknown && access.access?.consumed ? this.check() : sent;
   };
   stop = (): Promise<boolean> => this.control('cancel');
-  dispose(): void { this.disposed = true; this.beforeContextIntent(); this.cliAccess.dispose(); this.listeners.clear(); }
+  dispose(): void { this.disposed = true; this.beforeContextIntent(); this.cliAccess.dispose(); this.cliReview.dispose(); this.listeners.clear(); }
 }

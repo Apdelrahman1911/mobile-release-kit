@@ -380,7 +380,7 @@ test('ten reviewed identity and upload-key controls have exact local-main ACL gr
   assert.ok(agent); assert.equal(emitted.length, 0);
   const [intentId, sessionId, revision, planToken] = ['a', 'b', 'c', 'd'].map((c) => c.repeat(32));
   for (const action of [
-    () => agent.status(), () => agent.allow('project-1'), () => agent.revoke(),
+    () => agent.status(), () => agent.allow('project-1', '0'), () => agent.revoke(),
     () => agent.decline(intentId), () => agent.review(intentId),
     () => agent.prepare({ intentId, sessionId, revision, acknowledgeNewApplication: true }),
     () => agent.apply({ intentId, sessionId, revision, planToken, reviewed: true }),
@@ -394,10 +394,13 @@ test('ten reviewed identity and upload-key controls have exact local-main ACL gr
     'upload_key_status', 'upload_key_prepare', 'upload_key_create',
   ]);
   assert.ok(emitted.slice(0, 7).every(({ args }) => args instanceof Uint8Array));
-  const permitted = capability.permissions.filter((p) => typeof p === 'string'
-    && (p.includes('agent-identity') || p.startsWith('allow-upload-key-')));
+  // This case invokes these ten controls, not the later identity-action or
+  // upload-key recovery controls covered by their own contracts.
+  const emittedGrants = new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-')));
+  assert.equal(emittedGrants.size, 10);
+  const permitted = capability.permissions.filter((p) => emittedGrants.has(p));
   assert.equal(permitted.length, 10);
-  assert.deepEqual(new Set(permitted), new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-'))));
+  assert.deepEqual(new Set(permitted), emittedGrants);
   assert.deepEqual(capability.windows, ['main']); assert.equal(capability.local, true);
   assert.equal(Object.hasOwn(capability, 'remote'), false);
   assert.equal(Object.hasOwn(capability, 'webviews'), false);

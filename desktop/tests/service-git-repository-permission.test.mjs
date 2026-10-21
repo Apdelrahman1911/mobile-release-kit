@@ -16,8 +16,8 @@ const actions = () => [{ kind: 'initialize' }, ...['branch-create', 'branch-swit
   kind, expectedRevision: revision, expectedReferenceRevision: references, name: 'next-release',
 })), { kind: 'fast-forward', expectedRevision: revision, expectedReferenceRevision: references, targetRef: 'refs/remotes/origin/main', targetOid: target }];
 const approval = (action = actions()[1]) => ({ projectId: 'project-1', expectedDocumentRevision: 1, readOperationId: action.kind === 'initialize' ? null : 'read-original', action });
-const empty = () => ({ enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
-const allowed = (action = actions()[1]) => ({ enabled: true, remainingMs: 900000, consumed: false, projectId: '1'.repeat(32), grantId: '2'.repeat(32),
+const empty = () => ({ permissionRevision: '0', enabled: false, remainingMs: 0, consumed: false, projectId: null, grantId: null, selection: null });
+const allowed = (action = actions()[1]) => ({ permissionRevision: '0', enabled: true, remainingMs: 900000, consumed: false, projectId: '1'.repeat(32), grantId: '2'.repeat(32),
   selection: { action, selectionSha256: '3'.repeat(64) } });
 const observation = (changes = []) => ({ revision, head, branch: 'refs/heads/main', unborn: false, detached: false, changes, remotes: [], restrictions: [] });
 const tracking = (updates = {}) => ({ state: 'complete', remote: 'origin', mergeRef: 'refs/heads/main', localRef: 'refs/remotes/origin/main', head: target, ahead: 0, behind: 1, ...updates });
@@ -44,8 +44,8 @@ function rawPort(names) {
 }
 function permissionPort() {
   const calls = [];
-  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, input => {
-    const call = { kind, input, ...deferred() }; calls.push(call); return call.promise;
+  return { calls, api: Object.fromEntries(['status', 'allow', 'revoke'].map(kind => [kind, (input, expectedPermissionRevision) => {
+    const call = { kind, input, expectedPermissionRevision, ...deferred() }; calls.push(call); return call.promise;
   }])) };
 }
 async function fixture({ observe = true, checked = true, value = observed() } = {}) {
@@ -72,6 +72,14 @@ async function fixture({ observe = true, checked = true, value = observed() } = 
     change(update, sync = true) { source = { ...source, ...update }; if (sync) controller.syncContext(); },
     async branches() { reads.queue('start', readReply('branches', branches())); assert.equal(await reader.readBranches('project-1', revision), true); },
   };
+}
+
+async function checked(c, calls, revision = '0') {
+  const before = calls.length, pending = c.status();
+  assert.equal(calls.length, before + 1); assert.equal(calls[before].kind, 'status');
+  c.acknowledge(true); assert.equal(c.getState().acknowledged, false);
+  calls[before].resolve({ ...empty(), permissionRevision: revision }); await pending;
+  assert.equal(c.getState().pending, null); assert.equal(c.getState().acknowledged, false);
 }
 
 test('five existing actions use exact bounded RAW approval fields, with null read only for initialization', () => {
@@ -109,14 +117,14 @@ test('only the agreed three native RAW calls exist, and an Allow reply must matc
     return name === 'allow_agent_git_repository' ? allowed(body.action) : empty();
   });
   assert.equal(createGitRepositoryPermissionApi('preview', () => assert.fail('no preview invoke')), null);
-  for (const a of actions()) await api.allow(approval(a));
+  for (const a of actions()) await api.allow(approval(a), '0');
   await api.status(); await api.revoke();
   assert.deepEqual(calls.map(c => c.name), [...actions().map(() => 'allow_agent_git_repository'), 'agent_git_repository_access', 'revoke_agent_git_repository']);
-  assert.deepEqual(calls[0].body, { ...approval(actions()[0]), consentVersion: GIT_REPOSITORY_CONSENT });
+  assert.deepEqual(calls[0].body, { ...approval(actions()[0]), expectedPermissionRevision:'0',consentVersion: GIT_REPOSITORY_CONSENT });
   assert.ok(calls.every(c => c.size + 96 <= (c.name === 'allow_agent_git_repository' ? 8192 : 1024)));
-  const count = calls.length; await assert.rejects(api.allow({ ...approval(), root: '/not-an-input' })); assert.equal(calls.length, count);
+  const count = calls.length; await assert.rejects(api.allow({ ...approval(), root: '/not-an-input' }, '0')); assert.equal(calls.length, count);
   const mismatched = createGitRepositoryPermissionApi('native', async () => allowed(actions()[0]));
-  await assert.rejects(mismatched.allow(approval()), e => e.code === 'agent_git_repository_unconfirmed' && e.retryable === false);
+  await assert.rejects(mismatched.allow(approval(), '0'), e => e.code === 'agent_git_repository_unconfirmed' && e.retryable === false);
   const bad = createGitRepositoryPermissionApi('native', async () => { throw new Error('private untrusted diagnostic'); });
   await assert.rejects(bad.status(), e => !JSON.stringify(e).includes('private untrusted'));
 });
@@ -128,8 +136,8 @@ test('initialization uses a current local-status check, not a fabricated Observe
   assert.equal(h.reads.calls.length, 0); assert.equal(h.writes.calls.some(c => c.name === 'prepare'), false);
   assert.match(gitRepositoryPermissionEffect(actions()[0]), /only if the native review confirms/);
   await h.controller.allow(); assert.equal(h.grant.calls.length, 0);
-  h.controller.acknowledge(true); const allow = h.controller.allow(); assert.equal(h.grant.calls[0].input.readOperationId, null);
-  h.grant.calls[0].resolve(allowed(actions()[0])); await allow;
+  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); const allow = h.controller.allow(); assert.equal(h.grant.calls[1].input.readOperationId, null);
+  h.grant.calls[1].resolve(allowed(actions()[0])); await allow;
   assert.equal(h.controller.getState().acknowledged, false);
   const existing = await fixture(); assert.equal(existing.controller.getContext().project, null);
 });
@@ -170,41 +178,41 @@ test('a synchronous name ABA after Allow notification withdraws consent before t
   h.controller.subscribe(s => { if (s.pending === 'allow' && !changed) {
     changed = true; h.repository.editBranchName('different'); h.repository.editBranchName('next-release');
   } });
-  h.controller.acknowledge(true); await h.controller.allow();
-  assert.equal(h.grant.calls.length, 0); assert.equal(h.controller.getState().pending, null);
+  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); await h.controller.allow();
+  assert.equal(h.grant.calls.length, 1); assert.equal(h.controller.getState().pending, null);
   assert.equal(h.repository.getSnapshot().branchDraft.name, 'next-release'); assert.equal(h.controller.getState().acknowledged, false);
 });
 test('action changes, peers, and a new service epoch refuse stale checkbox approval without an implicit operation', async () => {
   for (const change of [{ epoch: 1 }, { session: {} }, { blocked: 'An original task needs recovery.' }]) {
-    const h = await fixture(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true); h.change(change, false);
-    await h.controller.allow(); assert.equal(h.grant.calls.length, 0); assert.equal(h.controller.getState().acknowledged, false);
+    const h = await fixture(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); h.change(change, false);
+    await h.controller.allow(); assert.equal(h.grant.calls.length, 1); assert.equal(h.controller.getState().acknowledged, false);
   }
   const h = await fixture(); h.controller.chooseKind('branch-create'); let changed = false;
   h.controller.subscribe(s => { if (s.pending === 'allow' && !changed) { changed = true; h.controller.chooseKind('branch-rename'); } });
-  h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 0);
+  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 1);
 });
 test('reentrant Stop runs immediately before Allow dispatch and keeps the original finite controller', async () => {
   const h = await fixture(); h.controller.chooseKind('branch-create'); let stop;
   h.controller.subscribe(s => { if (s.pending === 'allow' && !stop) stop = h.controller.revoke(); });
-  h.controller.acknowledge(true); const allow = h.controller.allow(); assert.deepEqual(h.grant.calls.map(c => c.kind), ['revoke']);
-  h.grant.calls[0].resolve(empty()); await stop; await allow; assert.equal(h.controller.getState().access.enabled, false);
+  await checked(h.controller, h.grant.calls); h.controller.acknowledge(true); const allow = h.controller.allow(); assert.deepEqual(h.grant.calls.map(c => c.kind), ['status','revoke']);
+  h.grant.calls[1].resolve(empty()); await stop; await allow; assert.equal(h.controller.getState().access.enabled, false);
 });
 test('Allow and independent Stop retain both promises across a service/project change and late acknowledgement', async () => {
-  const h = await fixture(), fresh = permissionPort(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true);
+  const h = await fixture(), fresh = permissionPort(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
   const allow = h.controller.allow(); h.change({ api: fresh.api, session: {}, projectId: 'project-2', epoch: 2 });
-  const stop = h.controller.revoke(); assert.equal(h.grant.calls[1].kind, 'revoke'); assert.equal(fresh.calls.length, 0);
-  h.grant.calls[1].resolve(empty()); await stop;
+  const stop = h.controller.revoke(); assert.equal(h.grant.calls[2].kind, 'revoke'); assert.equal(fresh.calls.length, 0);
+  h.grant.calls[2].resolve(empty()); await stop;
   assert.equal(h.controller.getState().pending, 'allow'); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(fresh.calls.length, 0);
-  h.grant.calls[0].resolve(allowed()); await allow;
+  h.grant.calls[1].resolve(allowed()); await allow;
   assert.equal(h.controller.getState().access.enabled, false); assert.equal(h.controller.getState().pending, null);
 });
 test('lost acknowledgement is not a no-grant receipt; consumed Access is not Git completion or Apply permission', async () => {
-  const h = await fixture(); h.controller.chooseKind('branch-create'); h.controller.acknowledge(true);
-  const allow = h.controller.allow(); h.grant.calls[0].reject(new Error('inert lost acknowledgement')); await allow;
-  assert.equal(h.controller.getState().uncertain, true); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 1);
-  const status = h.controller.status(); h.grant.calls[1].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await status;
+  const h = await fixture(); h.controller.chooseKind('branch-create'); await checked(h.controller, h.grant.calls); h.controller.acknowledge(true);
+  const allow = h.controller.allow(); h.grant.calls[1].reject(new Error('inert lost acknowledgement')); await allow;
+  assert.equal(h.controller.getState().uncertain, true); h.controller.acknowledge(true); await h.controller.allow(); assert.equal(h.grant.calls.length, 2);
+  const status = h.controller.status(); h.grant.calls[2].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await status;
   assert.equal(h.controller.getState().uncertain, true); assert.equal(h.local.getSnapshot().original, null);
   assert.equal(h.writes.calls.some(c => c.name === 'prepare' || c.name === 'apply'), false);
-  const stop = h.controller.revoke(); h.grant.calls[2].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await stop;
+  const stop = h.controller.revoke(); h.grant.calls[3].resolve({ ...allowed(), enabled: false, remainingMs: 0, consumed: true }); await stop;
   assert.equal(h.controller.getState().access.consumed, true); assert.equal(h.local.getSnapshot().original, null);
 });

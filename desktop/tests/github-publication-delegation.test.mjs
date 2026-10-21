@@ -195,15 +195,16 @@ const hex=(c,n=32)=>c.repeat(n);
 function reference(selection) { return {...selection,[selection.kind==='setup-publish'?'preparedSha256':'recordSha256']:hex('a',64)}; }
 function cliStatus(selection, patch={}) {return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),review:reference(selection),revision:7,
   state:'complete',settlement:'settled',operationId:'github-publication-42',reason:'none',effect:'draft-pr-observed',neverAdmitted:false,doNotReplay:true,...patch};}
-function cliAccess(selection,status=null,patch={}) {return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:reference(selection),enabled:!status,remainingMs:status?0:90000,consumed:!!status,
+function cliAccess(selection,status=null,patch={}) {return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:reference(selection),enabled:!status,remainingMs:status?0:90000,consumed:!!status,
   pending:!!status&&status.settlement!=='settled',unknown:status?.settlement==='unknown',status,...patch};}
-function permission(h,kind) {
+async function permission(h,kind) {
   const calls=[],nativeSession={},epoch={};let peer=null;
-  const port=Object.fromEntries(['access','allow','request','revoke'].map(k=>[k,(value)=>{const d=deferred();calls.push({kind:k,value,...d});return d.promise;} ]));
+  const port=Object.fromEntries(['access','allow','request','revoke'].map(k=>[k,(value,revision)=>{const d=deferred();calls.push({kind:k,value,revision,...d});return d.promise;} ]));
   const controller=new AgentGithubActionAccessController({syncOriginal:()=>h.controller.syncContext(),delegate:s=>h.controller.delegatePrepared(s),
     current:()=>({port,nativeSession,projectId:'project-a',epoch,preview:false,blockedReason:peer,reviews:[h.controller.agentSelection(kind)].filter(Boolean)})});
   assert.equal(controller.choose(kind),true);
-  return {controller,calls,port,peer(v){peer=v;},last:k=>calls.filter(c=>c.kind===k).at(-1),count:k=>calls.filter(c=>c.kind===k).length};
+  const p={controller,calls,port,peer(v){peer=v;},last:k=>calls.filter(c=>c.kind===k).at(-1),count:k=>calls.filter(c=>c.kind===k).length};
+  const check=controller.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
 }
 async function forCli(kind) {const h=kind==='setup-publish'?await ready():await readReady();if(kind==='setup-reconcile')assert.equal(h.controller.selectPendingForAgent(marker),true);return h;}
 function nativeFinal(kind) {const s=draftResult(5,kind==='setup-publish'?'publish':'reconcile');s.operation.id='github-publication-42';return s;}
@@ -212,11 +213,11 @@ async function grant(h,p,kind) {const selection=h.controller.agentSelection(kind
 async function sharedFinal(p,selection,status=cliStatus(selection)) {const work=p.controller.check();p.last('access').resolve(cliAccess(selection,status));await flush();if(status.settlement!=='unknown')p.last('request').resolve(status);await work;}
 
 test('shared publication codec keeps both strict shapes and GET-only effects without inheriting old mutation fallbacks',async()=>{
-  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile']);
+  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview']);
   const calls=[],port=createAgentGithubActionPort(async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;});
   for(const selection of [publish(),reconcile()]) {
     assert.ok(parseGithubActionSelection(selection));assert.ok(parseGithubActionStatus(cliStatus(selection)));assert.ok(parseAgentGithubActionAccess(cliAccess(selection)));
-    await port.allow(selection);assert.deepEqual(calls.at(-1)[1],{selection,consentVersion:`agent-${selection.kind}-once-v1`});
+    await port.allow(selection,'0');assert.deepEqual(calls.at(-1)[1],{selection,consentVersion:`agent-${selection.kind}-once-v1`,expectedPermissionRevision:'0'});
     for(const effect of ['created-observed','accepted','counter-observed','acknowledged-unconfirmed'])assert.equal(parseGithubActionStatus(cliStatus(selection,{effect})),null);
     for(const field of ['token','files','root','purpose'])assert.equal(parseGithubActionSelection({...selection,[field]:'INERT'}),null);
   }
@@ -227,7 +228,7 @@ test('shared publication codec keeps both strict shapes and GET-only effects wit
 });
 for(const kind of ['setup-publish','setup-reconcile']) {
   test(`${kind} shared Allow cannot start native work or replace the original, and real history return still needs later original Status`,async()=>{
-    const h=await forCli(kind),p=permission(h,kind),selection=await grant(h,p,kind);
+    const h=await forCli(kind),p=await permission(h,kind),selection=await grant(h,p,kind);
     assert.equal(h.state.delegating,true);assert.equal(h.controller.agentSelection(kind),null);assert.ok(h.controller.startReason());
     h.controller.setConfirmed(true);h.controller.publish();h.controller.reconcile(marker);assert.equal(h.count('publish'),0);assert.equal(h.count('reconcile'),0);
     assert.equal(await p.controller.allow(),false);h.emit(nativeFinal(kind));await h.controller.checkStatus();
@@ -237,7 +238,7 @@ for(const kind of ['setup-publish','setup-reconcile']) {
     assert.equal(p.count('allow'),1);
   });
   test(`${kind} pending Allow and pre-history Status cannot retroactively close after terminal events`,async()=>{
-    const h=await forCli(kind),p=permission(h,kind),selection=h.controller.agentSelection(kind);
+    const h=await forCli(kind),p=await permission(h,kind),selection=h.controller.agentSelection(kind);
     p.controller.acknowledge(true);const allow=p.controller.allow();h.emit(nativeFinal(kind));
     const d=deferred(),old=h.api.githubPublicationStatus;h.api.githubPublicationStatus=()=>d.promise;
     const reading=h.controller.checkStatus();await flush();p.last('allow').resolve(cliAccess(selection));await allow;
@@ -245,7 +246,7 @@ for(const kind of ['setup-publish','setup-reconcile']) {
     h.api.githubPublicationStatus=old;await h.controller.checkStatus();assert.equal(h.state.delegating,false);
   });
   test(`${kind} lost Allow and history Unknown stay absorbing despite known native final and Revoke`,async()=>{
-    const h=await forCli(kind),p=permission(h,kind),selection=h.controller.agentSelection(kind);
+    const h=await forCli(kind),p=await permission(h,kind),selection=h.controller.agentSelection(kind);
     p.controller.acknowledge(true);const work=p.controller.allow();p.last('allow').reject(new Error('INERT private'));await work;
     h.emit(nativeFinal(kind));await h.controller.checkStatus();assert.equal(h.state.uncertain,true);assert.equal(h.state.delegating,true);assert.equal(p.controller.getSnapshot().unknown,true);
     const revoke=p.controller.revoke();p.last('revoke').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await revoke;
@@ -253,7 +254,7 @@ for(const kind of ['setup-publish','setup-reconcile']) {
   });
 }
 test('reconcile unused permission requires genuine returned revoke/check plus a later same-row Status; no fabricated Consent',async()=>{
-  const h=await forCli('setup-reconcile'),p=permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
+  const h=await forCli('setup-reconcile'),p=await permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
   const revoke=p.controller.revoke();p.last('revoke').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await revoke;
   await h.controller.checkStatus();assert.equal(h.state.delegating,true);
   const check=p.controller.check();p.last('access').resolve(cliAccess(selection,null,{enabled:false,remainingMs:0}));await check;
@@ -262,7 +263,7 @@ test('reconcile unused permission requires genuine returned revoke/check plus a 
 });
 test('publication handoff latches before reentrant peer/source changes and performs no Allow or duplicate native action',async()=>{
   for(const kind of ['setup-publish','setup-reconcile']) {
-    const h=await forCli(kind),p=permission(h,kind);p.controller.acknowledge(true);let once=false;
+    const h=await forCli(kind),p=await permission(h,kind);p.controller.acknowledge(true);let once=false;
     h.controller.subscribe(()=>{if(!once&&h.state.delegating){once=true;p.peer('Other owner');h.controller.beforeWorkspaceAction();}});
     assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.equal(h.count('publish'),0);assert.equal(h.count('reconcile'),0);assert.equal(h.controller.agentSelection(kind),null);
     if(kind==='setup-publish'){h.respond('discard',operation('prepare','settled',4));await flush();}
@@ -270,9 +271,9 @@ test('publication handoff latches before reentrant peer/source changes and perfo
   }
 });
 test('reconcile final must match original operation and full effect; late equal row or foreign final never releases it',async()=>{
-  const h=await forCli('setup-reconcile'),p=permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
+  const h=await forCli('setup-reconcile'),p=await permission(h,'setup-reconcile'),selection=await grant(h,p,'setup-reconcile');
   const foreign=nativeFinal('setup-reconcile');foreign.operation.id='github-publication-43';h.emit(foreign);await sharedFinal(p,selection);await h.controller.checkStatus();assert.equal(h.state.delegating,true);
-  const b=await forCli('setup-reconcile'),q=permission(b,'setup-reconcile'),s=await grant(b,q,'setup-reconcile');
+  const b=await forCli('setup-reconcile'),q=await permission(b,'setup-reconcile'),s=await grant(b,q,'setup-reconcile');
   b.emit(nativeFinal('setup-reconcile'));await sharedFinal(q,s,cliStatus(s,{state:'unknown',settlement:'unknown',reason:'history-unavailable'}));
   await b.controller.checkStatus();assert.equal(b.state.uncertain,true);assert.equal(b.state.delegating,true);
 });

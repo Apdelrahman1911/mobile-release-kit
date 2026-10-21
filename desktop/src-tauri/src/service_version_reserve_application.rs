@@ -41,6 +41,15 @@ impl ApplicationService {
         }
         Ok(())
     }
+    pub(super) fn service_version_reserve_review(&self,client:&ClientSession,input:crate::service_version_reserve_review_protocol::Request)->Result<p::ResponseBody,Error>{
+        let started=Instant::now(); // BEFORE service/Store wait, never reset at MAIN.
+        input.validate()?;
+        let state=self.lock()?;
+        self.authorize_build_client(&state,client,&input.origin.project_id)?;
+        let saved=Self::identity_point(&state,&input.origin.project_id)?;
+        let read=live_grant(&state)?.reserve_read.clone();
+        self.version_reserve_requests.enqueue_review(input,crate::service_version_reserve_review_requests::Scope{saved,read},started).map(p::ResponseBody::VersionReserveReview)
+    }
     pub(super) fn service_version_reserve_submit(
         &self,
         client: &ClientSession,
@@ -67,10 +76,9 @@ impl ApplicationService {
         let state = self.lock()?;
         self.authorize_build_client(&state, client, &q.project_id)?;
         Self::identity_point(&state, &q.project_id)?;
-        let result = self
-            .version_reserve_requests
-            .query(q, cancel)
-            .map(p::ResponseBody::VersionReserveRequest);
+        let result = if self.version_reserve_requests.review_kind(q)?{
+            self.version_reserve_requests.review_status(Some(q),cancel)?.ok_or(Error::Conflict).map(p::ResponseBody::VersionReserveReview)
+        }else{self.version_reserve_requests.query(q,cancel).map(p::ResponseBody::VersionReserveRequest)};
         drop(state);
         result
     }

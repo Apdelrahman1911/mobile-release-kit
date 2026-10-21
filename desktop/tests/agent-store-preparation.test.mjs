@@ -47,9 +47,9 @@ const review=()=>({reviewId:A,operation:{operationId:A,ownerGeneration:B,statusR
 const stageReview=kind=>{const operationId=(storePreparationStage(kind)==='production-submit'?PRODUCTION:EXTERNAL).replaceAll('-','');return{reviewId:operationId,operation:{operationId,ownerGeneration:B,statusRevision:3}};};
 const origin=()=>({projectId:P,serviceInstance:S,requestId:Q});
 const status=(kind='android-access',more={})=>{const r=storePreparationStage(kind)?stageReview(kind):review();return{schemaVersion:1,origin:origin(),prepareGrantId:G,selectionId:R,revision:4,selection:storePreparationSelection(input(kind)),phase:'prepared',settlement:'pending',reason:'none',prepared:r,operation:r.operation,startGrantId:null,prepareReturned:true,startSubmitted:false,outcome:null,result:null,doNotReplay:true,...more};};
-const empty=()=>({schemaVersion:1,serviceInstance:null,projectId:null,permission:null,grantId:null,reviewId:null,selection:null,requestId:null,enabled:false,consumed:false,pending:false,unknown:false,remainingMs:0,status:null});
-const granted=(kind='android-access')=>({schemaVersion:1,serviceInstance:S,projectId:P,permission:'prepare',grantId:G,reviewId:R,selection:storePreparationSelection(input(kind)),requestId:null,enabled:true,consumed:false,pending:false,unknown:false,remainingMs:290000,status:null});
-function observed(s,armed=false){return {schemaVersion:1,serviceInstance:S,projectId:P,permission:s.startGrantId?'start':'prepare',grantId:s.startGrantId??G,reviewId:s.startGrantId?s.prepared.reviewId:R,selection:s.selection,requestId:s.origin.requestId,enabled:armed,consumed:s.startGrantId?s.startSubmitted:true,pending:s.settlement!=='settled',unknown:s.phase==='unknown',remainingMs:armed?280000:0,status:s};}
+const empty=()=>({permissionRevision:'0',schemaVersion:1,serviceInstance:null,projectId:null,permission:null,grantId:null,reviewId:null,selection:null,requestId:null,enabled:false,consumed:false,pending:false,unknown:false,remainingMs:0,status:null});
+const granted=(kind='android-access')=>({permissionRevision:'1',schemaVersion:1,serviceInstance:S,projectId:P,permission:'prepare',grantId:G,reviewId:R,selection:storePreparationSelection(input(kind)),requestId:null,enabled:true,consumed:false,pending:false,unknown:false,remainingMs:290000,status:null});
+function observed(s,armed=false){return {permissionRevision:s.startGrantId?'2':'1',schemaVersion:1,serviceInstance:S,projectId:P,permission:s.startGrantId?'start':'prepare',grantId:s.startGrantId??G,reviewId:s.startGrantId?s.prepared.reviewId:R,selection:s.selection,requestId:s.origin.requestId,enabled:armed,consumed:s.startGrantId?s.startSubmitted:true,pending:s.settlement!=='settled',unknown:s.phase==='unknown',remainingMs:armed?280000:0,status:s};}
 const ios=()=>({observation:'observed',coverage:'asc-ios-current-inventory/1',revision:H,counts:{builds:0,buildUploads:0,appStoreVersions:1},maxBuild:0,marketingVersion:'2.0.0',historicalUniqueness:'not-established'});
 const android=()=>({observation:'observed',coverage:'play-android-current-inventory/1',revision:H,counts:{tracks:2,releases:2,versionCodes:3,bundles:0,apks:1},maxBuild:40,marketingVersion:null,temporaryEdit:'deleted',historicalUniqueness:'not-established'});
 const result=(kind='android-access')=>kind.endsWith('-versions')?{kind:'current-versions',inventory:kind==='paired-versions'?{platform:'both',android:android(),ios:ios()}:kind==='ios-versions'?{platform:'ios',current:ios()}:{platform:'android',current:android()}}:{kind:'ordinary',report:{kind:'access-check',findings:[{check:'store-access',status:'FAIL'}],limitations:['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic']}};
@@ -66,7 +66,7 @@ function harness(kind='android-access') {
  const controller=new StorePreparationController({current:()=>context,now:()=>now});controller.choose(kind);
  return {controller,calls,port,set:v=>context={...context,...v},time:v=>now=v,last:k=>calls.filter(v=>v.kind===k).at(-1)};
 }
-async function allow(h,kind='android-access'){assert.equal(h.controller.acknowledge(true),true);const p=h.controller.allow();h.last('prepare').resolve(granted(kind));await p;}
+async function allow(h,kind='android-access'){if(!h.controller.getSnapshot().access)await check(h,empty());assert.equal(h.controller.acknowledge(true),true);const p=h.controller.allow();h.last('prepare').resolve(granted(kind));await p;}
 async function check(h,v){const p=h.controller.status();h.last('status').resolve(v);await p;}
 
 test('seven inputs use actual saved request parsers; Both requires same live two-record context',()=>{
@@ -81,8 +81,8 @@ test('seven inputs use actual saved request parsers; Both requires same live two
 });
 test('fixed port emits only original typed Prepare and a later separately consented Start',async()=>{
  const calls=[],p=createStorePreparationPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
- await p.allowPrepare(input('paired-versions'));assert.equal(calls[0][0],'allow_agent_store_prepare');assert.equal(calls[0][1].consentVersion,'agent-store-native-prepare-once-v1');assert.deepEqual(calls[0][1].prepare,clone(input('paired-versions').prepare));
- await p.allowStart(status('paired-versions'));assert.equal(calls[1][0],'allow_agent_store_preparation_start');assert.equal(calls[1][1].consentVersion,'agent-paired-current-versions-edit-once-v1');assert.deepEqual(Object.keys(calls[1][1]).sort(),['consentVersion','origin','review']);
+ await p.allowPrepare(input('paired-versions'),'0');assert.equal(calls[0][0],'allow_agent_store_prepare');assert.equal(calls[0][1].consentVersion,'agent-store-native-prepare-once-v1');assert.deepEqual(calls[0][1].prepare,clone(input('paired-versions').prepare));
+ await p.allowStart(status('paired-versions'),'1');assert.equal(calls[1][0],'allow_agent_store_preparation_start');assert.equal(calls[1][1].consentVersion,'agent-paired-current-versions-edit-once-v1');assert.deepEqual(Object.keys(calls[1][1]).sort(),['consentVersion','expectedPermissionRevision','origin','review']);
  await assert.rejects(p.allowStart(status('paired-versions',{prepareReturned:false})));await assert.rejects(p.allowStart(status('paired-versions',{startGrantId:START})));assert.equal(calls.length,2);
 });
 test('required-null closure and exact permission phase/grant correlations reject cross-use',()=>{
@@ -100,7 +100,7 @@ test('current summaries are typed DATA; inconclusive complete is not fabricated 
  const failedFinding=parseStorePreparationStatus(final());assert.equal(failedFinding.result.report.findings[0].status,'FAIL');
 });
 test('Prepare permission alone never starts or manufactures a returned native Prepared',async()=>{
- const h=harness();await allow(h);assert.equal(h.calls.length,1);assert.ok(h.controller.allowReason());
+ const h=harness();await allow(h);assert.deepEqual(h.calls.map(v=>v.kind),['status','prepare']);assert.ok(h.controller.allowReason());
  await check(h,observed(status('android-access',{phase:'preparing',prepareReturned:false})));assert.ok(h.controller.consentReason());assert.equal(await h.controller.allow(),false);
  await check(h,observed(status('android-access',{revision:5})));assert.equal(h.controller.consentReason(),null);assert.equal(h.controller.acknowledge(true),true);
  const p=h.controller.allow();assert.equal(h.last('start').args[0].prepared.reviewId,A);assert.equal(h.calls.filter(c=>c.kind==='prepare').length,1);
@@ -111,23 +111,23 @@ test('cold status cannot recreate Start authority even with identical prepared I
  const h=harness();await check(h,observed(status()));assert.match(h.controller.consentReason(),/not the current returned preparation/);assert.equal(h.controller.acknowledge(true),false);assert.equal(await h.controller.allow(),false);
 });
 test('original Allow return is retained through native-looking status and disposal',async()=>{
- const h=harness();h.controller.acknowledge(true);const p=h.controller.allow();let returned=false;const wait=h.controller.whenSettled().then(()=>returned=true);
+ const h=harness();await check(h,empty());h.controller.acknowledge(true);const p=h.controller.allow();let returned=false;const wait=h.controller.whenSettled().then(()=>returned=true);
  assert.equal(await h.controller.status(),false);await flush();assert.equal(returned,false);assert.ok(h.controller.ownerReason());
- h.controller.dispose();h.last('prepare').resolve(observed(status()));await p;await wait;assert.equal(returned,true);assert.equal(h.controller.getSnapshot().access,null);assert.equal(h.calls.length,1);
+ h.controller.dispose();h.last('prepare').resolve(observed(status()));await p;await wait;assert.equal(returned,true);assert.equal(h.controller.getSnapshot().access.grantId,null);assert.deepEqual(h.calls.map(v=>v.kind),['status','prepare']);
 });
 test('listener reentry before invocation prevents a stale Prepare or Start',async()=>{
- for(const start of [false,true]){const h=harness();if(start){await allow(h);await check(h,observed(status()));}
+ for(const start of [false,true]){const h=harness();if(start){await allow(h);await check(h,observed(status()));}else await check(h,empty());
   h.controller.acknowledge(true);const remove=h.controller.subscribe(()=>{if(h.controller.getSnapshot().pending)h.set({epoch:{}});});
   assert.equal(await h.controller.allow(),false);remove();assert.equal(h.calls.filter(c=>c.kind=== (start?'start':'prepare')).length,start?0:0);
  }
 });
 test('lost Prepare/Start replies retain original IDs and forbid replay despite later success DATA',async()=>{
- for(const start of [false,true]){const h=harness();if(start){await allow(h);await check(h,observed(status()));}h.controller.acknowledge(true);const p=h.controller.allow();h.last(start?'start':'prepare').reject(Error('inert lost original reply'));await p;
+ for(const start of [false,true]){const h=harness();if(start){await allow(h);await check(h,observed(status()));}else await check(h,empty());h.controller.acknowledge(true);const p=h.controller.allow();h.last(start?'start':'prepare').reject(Error('inert lost original reply'));await p;
   assert.equal(h.controller.getSnapshot().unknown,true);await check(h,observed(final()));assert.equal(h.controller.getSnapshot().unknown,true);assert.equal(await h.controller.allow(),false);
  }
 });
 test('Revoke can run while Allow returns but its generation prevents late rearming',async()=>{
- const h=harness();h.controller.acknowledge(true);const p=h.controller.allow(),stop=h.controller.revoke();let finished=false;const wait=h.controller.whenSettled().then(()=>finished=true);
+ const h=harness();await check(h,empty());h.controller.acknowledge(true);const p=h.controller.allow(),stop=h.controller.revoke();let finished=false;const wait=h.controller.whenSettled().then(()=>finished=true);
  h.last('revoke').resolve({...granted(),enabled:false,remainingMs:0});await stop;await flush();assert.equal(finished,false);
  h.last('prepare').resolve(granted());await p;await wait;assert.equal(h.controller.getSnapshot().access.enabled,false);assert.equal(h.controller.peer(),null);assert.ok(h.controller.consentReason());
 });
@@ -141,7 +141,7 @@ test('equal original countdown only decreases and old grant/status cannot reopen
 });
 test('real final triple-cut projection permits a new explicit Prepare, not automatic replay',async()=>{
  const h=harness();await allow(h);await check(h,observed(status()));await check(h,observed(final()));assert.equal(h.controller.ownerReason(),null);assert.equal(h.calls.filter(c=>c.kind==='prepare').length,1);
- assert.equal(h.controller.acknowledge(true),true);const p=h.controller.allow();h.last('prepare').resolve({...granted(),grantId:id('7'),reviewId:id('8')});await p;assert.equal(h.controller.getSnapshot().unknown,false);assert.equal(h.calls.filter(c=>c.kind==='prepare').length,2);
+ assert.equal(h.controller.acknowledge(true),true);const p=h.controller.allow();h.last('prepare').resolve({...granted(),permissionRevision:'3',grantId:id('7'),reviewId:id('8')});await p;assert.equal(h.controller.getSnapshot().unknown,false);assert.equal(h.calls.filter(c=>c.kind==='prepare').length,2);
 });
 
 async function mounted(kind='android-access'){
@@ -238,9 +238,9 @@ test('four later Start consents remain separate fixed calls and cannot borrow an
  const calls=[],port=createStorePreparationPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
  const consents=new Set();
  for(const kind of STAGES){
-  await port.allowPrepare(input(kind));assert.equal(calls.at(-1)[0],'allow_agent_store_prepare');assert.equal(calls.at(-1)[1].consentVersion,'agent-store-native-prepare-once-v1');
-  await port.allowStart(status(kind));assert.equal(calls.at(-1)[0],'allow_agent_store_preparation_start');assert.equal(calls.at(-1)[1].consentVersion,storePreparationConsent(kind));
-  assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(),['consentVersion','origin','review']);consents.add(calls.at(-1)[1].consentVersion);
+  await port.allowPrepare(input(kind),'0');assert.equal(calls.at(-1)[0],'allow_agent_store_prepare');assert.equal(calls.at(-1)[1].consentVersion,'agent-store-native-prepare-once-v1');
+  await port.allowStart(status(kind),'1');assert.equal(calls.at(-1)[0],'allow_agent_store_preparation_start');assert.equal(calls.at(-1)[1].consentVersion,storePreparationConsent(kind));
+  assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(),['consentVersion','expectedPermissionRevision','origin','review']);consents.add(calls.at(-1)[1].consentVersion);
   const noReturn=status(kind,{prepareReturned:false});await assert.rejects(port.allowStart(noReturn));
  }
  assert.equal(consents.size,4);assert.equal(calls.length,8);
@@ -265,4 +265,20 @@ test('later same-original two-controller flow preserves GUI exclusion and supple
  assert.deepEqual(clone(storePreparationSelection(changed)),clone(storePreparationSelection(input('ios-production-submit'))));
  h.set({input:changed});h.controller.syncContext();assert.ok(h.controller.consentReason());assert.equal(h.controller.acknowledge(true),false);assert.equal(await h.controller.allow(),false);
  assert.equal(h.calls.filter(c=>c.kind==='start').length,0);h.controller.dispose();
+});
+
+test('shared Store revision pins original returned Prepare and Start permission separately with no implicit Check',async()=>{
+ const h=harness('ios-production-submit');
+ assert.equal(h.controller.acknowledge(true),false);assert.equal(await h.controller.allow(),false);assert.equal(h.calls.length,0);
+ await check(h,{...empty(),permissionRevision:'7'});assert.equal(h.controller.acknowledge(true),true);
+ const prepare=h.controller.allow();assert.equal(h.last('prepare').args[1],'7');h.last('prepare').resolve({...granted('ios-production-submit'),permissionRevision:'8'});await prepare;
+ await check(h,{...observed(status('ios-production-submit')),permissionRevision:'8'});assert.equal(h.controller.acknowledge(true),true);
+ const start=h.controller.allow();assert.equal(h.last('start').args[1],'8');h.last('start').resolve({...observed(status('ios-production-submit',{revision:5,startGrantId:START}),true),permissionRevision:'9'});await start;
+ assert.equal(h.controller.getSnapshot().unknown,false);assert.deepEqual(h.calls.map(v=>v.kind),['status','prepare','status','start']);h.controller.dispose();
+ const calls=[],p=createStorePreparationPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return empty();});
+ for(const revision of [undefined,null,0,'00','1\n','18446744073709551616']){
+  assert.equal(parseStorePreparationAccess({...empty(),permissionRevision:revision}),null);
+  await assert.rejects(p.allowPrepare(input(),revision));await assert.rejects(p.allowStart(status(),revision));
+ }
+ await p.allowPrepare(input(),'7');await p.allowStart(status(),'8');assert.deepEqual(calls.map(v=>v[1].expectedPermissionRevision),['7','8']);
 });

@@ -50,7 +50,7 @@ fn allow_codec_requires_exact_local_action_consent_and_null_only_for_init() {
     assert!(decode_repository_empty(b"{\"root\":\"forged\"}").is_err());
     assert!(decode_repository_empty(&vec![b' '; 1024]).is_err());
     assert!(decode_repository_empty(b"").is_err());
-    let value = json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":null,
+    let value = json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":null,
         "action":{"kind":"initialize"},"consentVersion":repository::CONSENT});
     assert!(decode_repository_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
     for field in ["readOperationId", "action", "consentVersion"] {
@@ -199,10 +199,10 @@ fn dormant_status_or_foreign_window_cannot_initialize_host_read_or_git() {
         "/inert/git-repository-never-opened",
     )));
     let doc = DocumentBinding::new(bridge.clone());
-    assert!(!doc.agent_git_repository_access(MAIN).unwrap().enabled);
+    assert!(!doc.agent_git_repository_access(MAIN).unwrap().access.enabled);
     assert!(doc.agent_git_repository_access("foreign").is_err());
-    assert!(!doc.revoke_agent_git_repository(MAIN).unwrap().enabled);
-    let args = decode_repository_allow(&serde_json::to_vec(&json!({"projectId":"project-1", "expectedDocumentRevision":1,
+    assert!(!doc.revoke_agent_git_repository(MAIN).unwrap().access.enabled);
+    let args = decode_repository_allow(&serde_json::to_vec(&json!({"projectId":"project-1", "expectedDocumentRevision":1,"expectedPermissionRevision":"0",
         "readOperationId":null,"action":{"kind":"initialize"},"consentVersion":repository::CONSENT})).unwrap()).unwrap();
     assert!(doc.allow_agent_git_repository("foreign", args).is_err());
     doc.service_git_index_tick(Path::new("/inert/no-io"));

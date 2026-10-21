@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 pub(super) mod agent;
 
 struct Review {
+    delegated: Option<Arc<agent::review::Link>>,
     identity: Arc<()>,
     id: String,
     input: p::Review,
@@ -312,12 +313,17 @@ impl DocumentBinding {
         &self,
         input: p::Review,
     ) -> Result<p::Status, BridgeError> {
+        self.review_version_reservation_linked(input,None).await
+    }
+    pub(super) async fn review_version_reservation_linked(
+        &self, input:p::Review, delegated:Option<Arc<agent::review::Link>>,
+    )->Result<p::Status,BridgeError>{
         if !input.valid() {
             return Err(p::not_started(BridgeError::invalid()));
         }
         {
             let state = self.lock();
-            agent::gui_current(&state).map_err(p::not_started)?;
+            if let Some(link)=&delegated {agent::review::admission(&state,link)}else{agent::gui_current(&state)}.map_err(p::not_started)?;
             if state
                 .version_reserve
                 .lane
@@ -327,12 +333,10 @@ impl DocumentBinding {
                 return Err(p::not_started(p::refused()));
             }
         }
-        let id = crate::service_protocol::Id::random()
-            .map_err(|_| p::not_started(p::unavailable()))?
-            .as_str()
-            .to_owned();
+        let id = match &delegated {Some(link)=>link.id.clone(),None=>crate::service_protocol::Id::random()
+            .map_err(|_| p::not_started(p::unavailable()))?.as_str().to_owned()};
         let reading =
-            match self.start_version_allocation_source(&input.project_id, &input.reference) {
+            match self.start_version_allocation_source_linked(&input.project_id, &input.reference, delegated.clone()) {
                 Ok(original) => original,
                 Err(error) => {
                     // A pre-admission refusal is not an unknown operation. Never
@@ -345,7 +349,7 @@ impl DocumentBinding {
                     });
                 }
             };
-        {
+        if delegated.is_none() {
             let mut state = self.lock();
             state.version_reserve.review = None;
             state.version_reserve.reading = Some((id.clone(), reading.clone()));
@@ -437,8 +441,12 @@ impl DocumentBinding {
                 new_candidate: input.new_candidate,
                 future_tag: input.future_tag.clone(),
             };
+            let end=Instant::now().checked_add(Duration::from_secs(120)).ok_or_else(p::refused)?;
+            let end=delegated.as_ref().map_or(end,|l|end.min(l.entry.scope.read.end()));
+            if Instant::now()>=end{return Err(p::refused())}
             state.version_reserve.reading = None;
             state.version_reserve.review = Some(Review {
+                delegated:delegated.clone(),
                 identity: Arc::new(()),
                 id: id.clone(),
                 input,
@@ -447,7 +455,7 @@ impl DocumentBinding {
                 native: original.input.clone(),
                 store,
                 registration,
-                end: Instant::now() + Duration::from_secs(120),
+                end,
                 previous,
             });
             state.version_reserve.view.review = Some(view);
@@ -456,6 +464,12 @@ impl DocumentBinding {
             state.version_reserve.view.reason = "none";
             state.version_reserve.view.reservation = None;
             state.version_reserve.bump();
+            if let Some(link)=&delegated {
+                let review=state.version_reserve.review.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                if link.entry.native_ready(&id,state.version_reserve.view.revision,&review.identity,review.end).is_err(){
+                    link.entry.unknown();return Err(BridgeError::cleanup_unknown())
+                }
+            }
             Ok(state.version_reserve.current_view())
         })();
         if reviewed.is_err() {
@@ -517,6 +531,7 @@ impl DocumentBinding {
                 r.id == review_id && r.input.project_id == project && Instant::now() < r.end
             })
             .ok_or_else(p::refused)?;
+        if review.delegated.as_ref().is_some_and(|v|!v.entry.ready_current(&review.identity,Instant::now())) {return Err(p::refused())}
         if let Some(link) = &agent { agent::admission(&state,review,link)?; }
         let (registration, root) = self
             .inner
@@ -590,6 +605,7 @@ impl DocumentBinding {
             .and_then(|n| n.checked_add(input.retained_bytes()? + 32 * 1024))
             .ok_or_else(p::unavailable)?;
         let observation = review.store.clone();
+        let reviewed_read=review.delegated.as_ref().map(|v|(v.entry.clone(),review.identity.clone()));
         let pins = state.github.begin_version_reserve(
             project,
             registration,
@@ -626,6 +642,7 @@ impl DocumentBinding {
                 result: Mutex::new(None),
                 reservation_bytes: quote,
                 reserve: Some(reserve),
+                review: None,
             }
         });
         let lane = source
@@ -633,6 +650,13 @@ impl DocumentBinding {
             .as_ref()
             .expect("closed reserve constructor")
             .clone();
+        if let Some((entry,identity))=reviewed_read {
+            if entry.consume_review(&identity).is_err(){
+                // Same begun original still publishes and is returned to its
+                // original caller for cleanup. Never strand a pre-GO control.
+                entry.unknown();lane.control.unknown();
+            }
+        }
         agent::bind(&mut state,&lane); // Before Review take/publication/GO; no fallible work follows.
         state.version_reserve.review.take();
         state.version_reserve.lane = Some(lane.clone());

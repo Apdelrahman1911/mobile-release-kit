@@ -15,6 +15,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[path = "agent_build_permission.rs"]
+mod permission;
+pub(crate) use permission::{permission_next, permission_revision, MainAccess};
+
 pub const LIMIT: usize = 32;
 pub const START_WINDOW: Duration = Duration::from_secs(900);
 // ONE shared32-row allocation (not32 per family). The full terminal report is
@@ -50,41 +54,46 @@ pub(crate) enum Family {
 pub(crate) enum Review {
     Android(android::Review),
     Ios(ios::Review),
+    IosRecovery(ios::recovery::Review),
 }
 impl Review {
     pub(crate) fn family(&self) -> Family {
         match self {
             Self::Android(_) => Family::AndroidInspect,
-            Self::Ios(_) => Family::IosArchive,
+            Self::Ios(_) | Self::IosRecovery(_) => Family::IosArchive,
         }
     }
     fn valid(&self) -> bool {
         match self {
             Self::Android(v) => v.valid(),
             Self::Ios(v) => v.valid(),
+            Self::IosRecovery(v) => v.valid(),
         }
     }
     fn capacity_valid(&self) -> bool {
-        self.config().sha256.capacity() <= 64
-            && self.version().sha256.capacity() <= 64
-            && self.version().name.capacity() <= 64
-            && match self {
-                Self::Android(v) => v.tools.record_sha256.capacity() <= 64
-                    && v.tools.instance.retained_bytes() <= ID_HEAP_BYTES,
-                Self::Ios(_) => true,
-            }
-    }
-    pub(crate) fn config(&self) -> &Config {
+        let saved = |config: &Config, version: &android::Version| config.sha256.capacity() <= 64
+            && version.sha256.capacity() <= 64 && version.name.capacity() <= 64;
         match self {
-            Self::Android(v) => &v.saved_config,
-            Self::Ios(v) => &v.saved_config,
+            Self::Android(v) => saved(&v.saved_config, &v.saved_version) && v.tools.record_sha256.capacity() <= 64
+                && v.tools.instance.retained_bytes() <= ID_HEAP_BYTES
+                && v.signing.as_ref().is_none_or(android::signed::Selection::capacity_valid)
+                && v.upload_certificate_sha256.as_ref().is_none_or(|s| s.capacity() <= 64),
+            Self::Ios(v) => saved(&v.saved_config, &v.saved_version) && v.signing.as_ref().is_none_or(ios::signed::Review::capacity_valid),
+            Self::IosRecovery(v) => v.capacity_valid(),
         }
     }
-    pub(crate) fn version(&self) -> &android::Version {
+    pub(crate) fn requires_original_read(&self) -> bool {
         match self {
-            Self::Android(v) => &v.saved_version,
-            Self::Ios(v) => &v.saved_version,
+            Self::Android(r) => r.mode == android::Mode::SavedAndroidLocalUploadKeySign,
+            Self::Ios(r) => r.mode == ios::Mode::SavedIosSignedExport,
+            Self::IosRecovery(_) => true,
         }
+    }
+    fn saved_config(&self) -> Option<&Config> {
+        match self { Self::Android(v) => Some(&v.saved_config), Self::Ios(v) => Some(&v.saved_config), Self::IosRecovery(_) => None }
+    }
+    pub(crate) fn ios_recovery(&self) -> Option<&ios::recovery::Review> {
+        if let Self::IosRecovery(v) = self { Some(v) } else { None }
     }
     pub(crate) fn android(&self) -> Option<&android::Review> {
         if let Self::Android(v) = self {
@@ -111,62 +120,60 @@ impl From<ios::Review> for Review {
         Self::Ios(v)
     }
 }
+impl From<ios::recovery::Review> for Review { fn from(v: ios::recovery::Review) -> Self { Self::IosRecovery(v) } }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Operation {
     Android(android::Operation),
     Ios(ios::Operation),
+    IosRecovery(ios::recovery::Operation),
 }
 impl Operation {
     pub(crate) fn family(&self) -> Family {
         match self {
             Self::Android(_) => Family::AndroidInspect,
-            Self::Ios(_) => Family::IosArchive,
+            Self::Ios(_) | Self::IosRecovery(_) => Family::IosArchive,
         }
     }
     pub(crate) fn operation_id(&self) -> &Id {
         match self {
             Self::Android(v) => &v.operation_id,
             Self::Ios(v) => &v.operation_id,
+            Self::IosRecovery(v) => &v.operation_id,
         }
     }
     pub(crate) fn owner_generation(&self) -> &Id {
         match self {
             Self::Android(v) => &v.owner_generation,
             Self::Ios(v) => &v.owner_generation,
+            Self::IosRecovery(v) => &v.owner_generation,
         }
     }
     pub(crate) fn status_revision(&self) -> u32 {
         match self {
             Self::Android(v) => v.status_revision,
             Self::Ios(v) => v.status_revision,
+            Self::IosRecovery(v) => v.status_revision,
         }
     }
     pub(crate) fn state(&self) -> OperationState {
         match self {
             Self::Android(v) => v.state.clone(),
             Self::Ios(v) => v.state.clone(),
+            Self::IosRecovery(v) => v.state.clone(),
         }
     }
     pub(crate) fn settlement(&self) -> Settlement {
         match self {
             Self::Android(v) => v.settlement.clone(),
             Self::Ios(v) => v.settlement.clone(),
+            Self::IosRecovery(v) => v.settlement.clone(),
         }
     }
     fn valid_for(&self, review: &Review) -> bool {
         match (self, review) {
-            (Self::Android(o), Review::Android(r)) => {
-                o.valid()
-                    && o.result.as_ref().is_none_or(|v| {
-                        v.used_config == r.saved_config && v.used_version == r.saved_version
-                    })
-            }
-            (Self::Ios(o), Review::Ios(r)) => {
-                o.valid()
-                    && o.result.as_ref().is_none_or(|v| {
-                        v.used_config == r.saved_config && v.used_version == r.saved_version
-                    })
-            }
+            (Self::Android(o), Review::Android(r)) => o.valid_for(r),
+            (Self::Ios(o), Review::Ios(r)) => o.valid_for(r),
+            (Self::IosRecovery(o), Review::IosRecovery(r)) => o.valid_for(r),
             _ => false,
         }
     }
@@ -181,12 +188,14 @@ impl Operation {
                     .checked_add(r.artifact.sha256.capacity())?
                     .checked_add(r.findings.capacity().checked_mul(std::mem::size_of::<android::Finding>())?)?
                     .checked_add(SUMMARY_HEAP_BYTES)?;
+                if let Some(s) = &r.signing { n = n.checked_add(s.upload_certificate_sha256.capacity())?; }
             },
             Self::Ios(o) => if let Some(r) = &o.result {
                 n = n.checked_add(r.used_config.sha256.capacity())?
                     .checked_add(r.used_version.sha256.capacity())?
                     .checked_add(r.used_version.name.capacity())?;
             },
+            Self::IosRecovery(o) => if let Some(r) = &o.report { n = n.checked_add(r.heap_bytes()?)?; },
         }
         Some(n)
     }
@@ -206,6 +215,7 @@ impl Operation {
                 compact_string(&mut r.used_config.sha256);
                 compact_version(&mut r.used_version);
                 compact_string(&mut r.artifact.sha256);
+                if let Some(s) = &mut r.signing { compact_string(&mut s.upload_certificate_sha256); }
                 r.findings = std::mem::take(&mut r.findings).into_boxed_slice().into_vec();
                 r.summary.counts = std::mem::take(&mut r.summary.counts).into_iter().collect();
             },
@@ -213,10 +223,12 @@ impl Operation {
                 compact_string(&mut r.used_config.sha256);
                 compact_version(&mut r.used_version);
             },
+            Self::IosRecovery(o) => if let Some(r) = &mut o.report { r.compact(); },
         }
-        // Three Query IDs and the unchanged maximum five-heap Review coexist
+        // Three Query IDs and the exact closed Review (including signing) coexist
         // with the public operation. Inline enums/DTOs are charged separately.
-        if self.heap_bytes().and_then(|n| n.checked_add(8 * ID_HEAP_BYTES))
+        if self.heap_bytes().is_none_or(|n| n > OPERATION_HEAP_CEILING)
+            || self.heap_bytes().and_then(|n| n.checked_add(3 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING))
             .is_none_or(|n| n > STATUS_HEAP_BYTES)
         {
             return Err(Error::StateUnknown);
@@ -230,9 +242,9 @@ impl Operation {
             _ => panic!("wrong fixed test family"),
         }
     }
-    fn prepared(family: Family, operation: Id, generation: Id, revision: u32) -> Self {
-        match family {
-            Family::AndroidInspect => Self::Android(android::Operation {
+    fn prepared(review: &Review, operation: Id, generation: Id, revision: u32) -> Self {
+        match review {
+            Review::Android(_) => Self::Android(android::Operation {
                 operation_id: operation,
                 owner_generation: generation,
                 status_revision: revision,
@@ -244,7 +256,7 @@ impl Operation {
                 disposition: None,
                 result: None,
             }),
-            Family::IosArchive => Self::Ios(ios::Operation {
+            Review::Ios(_) => Self::Ios(ios::Operation {
                 operation_id: operation,
                 owner_generation: generation,
                 status_revision: revision,
@@ -255,6 +267,11 @@ impl Operation {
                 stage: None,
                 disposition: None,
                 result: None,
+            }),
+            Review::IosRecovery(_) => Self::IosRecovery(ios::recovery::Operation {
+                operation_id: operation, owner_generation: generation, status_revision: revision,
+                state: OperationState::Prepared, settlement: Settlement::Pending, outcome: None,
+                reason: ios::recovery::Reason::None, stage: None, report: None,
             }),
         }
     }
@@ -269,6 +286,7 @@ impl From<ios::Operation> for Operation {
         Self::Ios(v)
     }
 }
+impl From<ios::recovery::Operation> for Operation { fn from(v: ios::recovery::Operation) -> Self { Self::IosRecovery(v) } }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Prepare {
@@ -367,6 +385,7 @@ impl Snapshot {
             || self.history_available && self.operation.is_none()
             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
             || self.start_state != StartState::NotRequested && self.operation.is_none()
+                && self.request_state != RequestState::AdmissionUnknown
         {
             Err(Error::StateUnknown)
         } else {
@@ -374,6 +393,9 @@ impl Snapshot {
         }
     }
 }
+/// Configless recovery is a closed source, not absent saved-data wildcards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeInput { Saved { draft_revision: u32, baseline_generation: u32 }, Recovery }
 /// Native constructor input only. CLI deserialization never constructs this.
 pub(crate) struct NativeScope {
     pub(crate) project_id: Id,
@@ -386,27 +408,42 @@ pub(crate) struct NativeScope {
     pub(crate) document: Weak<()>,
     pub(crate) observation_revision: u64,
     pub(crate) review: Review,
-    pub(crate) draft_revision: u32,
-    pub(crate) baseline_generation: u32,
+    pub(crate) read: Option<Arc<crate::service_version_reserve_requests::ReadPermission>>,
+    pub(crate) input: NativeInput,
     pub(crate) changes: tokio::sync::watch::Sender<u32>,
 }
 impl NativeScope {
     fn valid(&self) -> bool {
         self.review.valid()
             && self.review.capacity_valid()
+            && self.read.is_some() == self.review.requires_original_read()
+            && self.read.as_ref().is_none_or(|r| matches!(r.stop(Instant::now()), Ok(None)))
             && self.observation_revision != 0
             && self.inode != 0
             && self.registration != 0
             && self.input_revision != u64::MAX
             && self.document.strong_count() != 0
-            && self.draft_revision < u32::MAX
-            && self.baseline_generation < u32::MAX
+            && match (&self.input, &self.review) {
+                (NativeInput::Recovery, Review::IosRecovery(_)) => true,
+                (NativeInput::Saved { draft_revision, baseline_generation }, Review::Android(_) | Review::Ios(_)) =>
+                    *draft_revision < u32::MAX && *baseline_generation < u32::MAX,
+                _ => false,
+            }
             && (1..=64).contains(&self.runtime_id.len())
             && self.project_id.retained_bytes() <= ID_HEAP_BYTES
             && self.runtime_id.capacity() <= 64
             && self.root.is_absolute()
             && self.root.as_os_str().len() <= 4096
             && self.root.capacity() <= ROOT_HEAP_BYTES
+    }
+    pub(crate) fn saved_inputs(&self) -> Option<(u32, u32)> {
+        match self.input { NativeInput::Saved { draft_revision, baseline_generation } => Some((draft_revision, baseline_generation)), NativeInput::Recovery => None }
+    }
+    pub(crate) fn matches_read(&self, read: &Arc<crate::service_version_reserve_requests::ReadPermission>) -> bool {
+        match &self.read {
+            Some(original) => Arc::ptr_eq(original, read) && matches!(original.stop(Instant::now()), Ok(None)),
+            None => !self.review.requires_original_read(),
+        }
     }
     pub(crate) fn matches(&self, point: &crate::agent_local_checks::SavedPoint) -> bool {
         self.project_id == point.project_id
@@ -416,7 +453,11 @@ impl NativeScope {
             && self.inode == point.inode
             && self.observation_revision == point.revision
             && point.fresh
-            && point.config.as_ref() == Some(self.review.config())
+            && match (&self.input, &self.review) {
+                (NativeInput::Recovery, Review::IosRecovery(_)) => true,
+                (NativeInput::Saved { .. }, Review::Android(_) | Review::Ios(_)) => point.config.as_ref() == self.review.saved_config(),
+                _ => false,
+            }
     }
 }
 struct Lease {
@@ -429,6 +470,13 @@ struct Lease {
 impl Lease {
     fn stop_at(&self, now: Instant, consumed: bool) -> Option<Instant> {
         let mut at = self.revoked.get().copied();
+        if let Some(read) = &self.scope.read {
+            match read.stop(now) {
+                Ok(Some((_, stop))) => at = Some(at.map_or(stop, |v| v.min(stop))),
+                Ok(None) => {},
+                Err(_) => at = Some(at.unwrap_or(now)),
+            }
+        }
         if !consumed && now >= self.expires {
             at = Some(at.map_or(self.expires, |old| old.min(self.expires)));
         }
@@ -457,6 +505,7 @@ struct Original {
 }
 struct Publication {
     acknowledged: Option<u32>,
+    visible: Option<Arc<Operation>>,
     claim: Option<Arc<Operation>>,
     failed: bool,
 }
@@ -464,6 +513,8 @@ pub(crate) struct Entry {
     input: Prepare,
     lease: Arc<Lease>,
     phase: AtomicU8,
+    prepare_returned: AtomicBool,
+    start_returned: AtomicBool,
     original: OnceLock<Original>,
     start: AtomicU8,
     start_at: OnceLock<Instant>,
@@ -472,26 +523,44 @@ pub(crate) struct Entry {
     latest: Mutex<Option<Arc<Operation>>>,
     publication: Mutex<Publication>,
 }
-// Include two scalar operation cells but only one full terminal report graph.
+// Include three scalar operation cells but only one full terminal report graph.
 // Actual monotone publish rejects every changed successor of a terminal value.
 // Scope capacities are checked BEFORE Allow; compact report/public DTO bounds
 // include all hashes/IDs/version text and the freshly rebuilt nine-entry map.
-const REVIEW_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES;
+const REVIEW_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES + android::signed::SELECTION_HEAP + 64;
 const SCOPE_HEAP_CEILING: usize = ROOT_HEAP_BYTES + 2 * ID_HEAP_BYTES
     + REVIEW_HEAP_CEILING;
-const PUBLIC_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
-    + 4 * 64 + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
+// One retained terminal payload, not a second copy of the complete public
+// Status (whose query IDs and Review are already charged in Scope/Entry).
+const OPERATION_HEAP_CEILING: usize = 2 * ID_HEAP_BYTES + 5 * 64
+    + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
+const PUBLIC_HEAP_CEILING: usize = 3 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
+    + OPERATION_HEAP_CEILING;
+// Each genuine current signing approval/pin is capacity-checked in its native
+// child. Conservatively allow all four ancillary holders for BOTH platforms.
+pub(crate) const SIGNED_BINDING_BYTES: usize = 2 * 1024;
+pub(crate) const RECOVERY_BINDING_BYTES: usize = 1024;
+const SIGNED_BINDINGS_BACKING: usize = 4 * (SIGNED_BINDING_BYTES + SIGNED_BINDING_BYTES);
+// The nine standalone ID heaps are Prepare3 + Original2 + the two extra
+// nonterminal Operation cells2*2. The remaining Operation's IDs/report are in
+// OPERATION_HEAP_CEILING; Scope/Review heaps are counted separately in full.
 const ROW_CEILING: usize = std::mem::size_of::<Entry>()
     + std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
-    + 2 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
-    + 8 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
-    + SCOPE_HEAP_CEILING + STATUS_HEAP_BYTES;
+    + 3 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
+    + std::mem::size_of::<crate::service_version_reserve_requests::ReadPermission>()
+    + 10 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
+    + SCOPE_HEAP_CEILING + OPERATION_HEAP_CEILING;
 const ANCILLARY_CEILING: usize = std::mem::size_of::<Inbox>()
     + std::mem::size_of::<Book>() + 2 * LIMIT * std::mem::size_of::<Arc<Entry>>()
     + 4 * (std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
         + SCOPE_HEAP_CEILING + 512)
-    + 8 * (std::mem::size_of::<Access>() + ID_HEAP_BYTES) + 4096;
+    + 8 * (std::mem::size_of::<MainAccess>() + ID_HEAP_BYTES + 32) + 4096
+    + SIGNED_BINDINGS_BACKING
+    + 4 * RECOVERY_BINDING_BYTES
+    + 8 * (std::mem::size_of::<ios::recovery::AcknowledgedInspection>() + 5 * ID_HEAP_BYTES);
 const _: () = {
+    assert!(3 * 32 <= REVIEW_HEAP_CEILING); // exact recovery session + displayed pair
+    assert!(2 * ID_HEAP_BYTES + 2 * 32 <= OPERATION_HEAP_CEILING);
     assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
     assert!(ROW_CEILING <= ROW_BACKING);
     assert!(ANCILLARY_CEILING <= ANCILLARY_BACKING);
@@ -514,9 +583,26 @@ impl Entry {
             .get()
             .map_or(self.lease.expires, |o| o.expires.min(self.lease.expires))
     }
+    pub(crate) fn read_end(&self) -> Option<Instant> { self.scope().read.as_ref().map(|r| r.end()) }
+    pub(crate) fn read_stop(&self, now: Instant) -> Result<Option<Instant>, Error> {
+        match &self.scope().read {
+            Some(read) => read.stop(now).map(|v| v.map(|(_, at)| at)),
+            None if !self.scope().review.requires_original_read() => Ok(None),
+            None => Err(Error::StateUnknown),
+        }
+    }
+    pub(crate) fn control_poll(&self) -> Option<Duration> {
+        (self.scope().read.is_some() || self.scope().review.requires_original_read())
+            .then_some(Duration::from_millis(5))
+    }
     pub(crate) fn stop_at(&self, now: Instant) -> Option<Instant> {
         let consumed = self.start.load(Ordering::Acquire) == START_CONSUMED;
         let mut at = self.lease.stop_at(now, consumed);
+        match self.read_stop(now) {
+            Ok(Some(read_at)) => at = Some(at.map_or(read_at, |v| v.min(read_at))),
+            Ok(None) => {},
+            Err(_) => { self.unconfirmed(); at = Some(at.unwrap_or(now)); },
+        }
         if !consumed && now >= self.start_deadline() {
             at = Some(at.map_or(self.start_deadline(), |v| v.min(self.start_deadline())));
         }
@@ -551,20 +637,52 @@ impl Entry {
         self.phase.store(UNKNOWN, Ordering::Release);
         self.cancel();
     }
+    fn callers_returned(&self) -> bool {
+        self.prepare_returned.load(Ordering::Acquire)
+            && (self.start.load(Ordering::Acquire) == NO_START
+                || self.start_returned.load(Ordering::Acquire))
+    }
     fn occupies(&self) -> bool {
         if self.phase.load(Ordering::Acquire) == QUEUED && self.stop_at(Instant::now()).is_some() {
-            let _ =
-                self.phase
-                    .compare_exchange(QUEUED, EXPIRED, Ordering::AcqRel, Ordering::Acquire);
+            let _ = self.phase.compare_exchange(QUEUED, EXPIRED, Ordering::AcqRel, Ordering::Acquire);
         }
         match self.phase.load(Ordering::Acquire) {
             QUEUED | PREPARING | UNKNOWN => true,
-            BOUND => self.latest.lock().map_or(true, |v| {
-                v.as_ref()
-                    .is_none_or(|v| v.settlement() != Settlement::Settled)
-            }),
+            BOUND => {
+                // Native retirement alone never releases a retained relay
+                // Claim, nor a pending/failed original history write.
+                let latest = match self.latest.lock() {
+                    Ok(v) => v.clone(), Err(_) => return true,
+                };
+                let Some(latest) = latest else { return true; };
+                let acknowledged = self.publication.lock().is_ok_and(|p| {
+                    !p.failed && p.claim.is_none() && p.visible.as_ref()
+                        .is_some_and(|v| Arc::ptr_eq(v, &latest))
+                });
+                latest.settlement() != Settlement::Settled || !acknowledged
+                    || !self.callers_returned() || self.phase.load(Ordering::Acquire) == UNKNOWN
+            }
             _ => false,
         }
+    }
+    /// A known candidate becomes public only after its actual writer ACK.
+    /// Uncertainty bypasses that gate immediately and can never expose the
+    /// previous Prepared/Complete as current usable authority.
+    fn public_operation(&self) -> Result<(Option<Arc<Operation>>, bool, RequestState, StartState), Error> {
+        let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+        let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+        let request_state = self.observed_request_state();
+        let start_state = self.observed_start_state();
+        if p.failed || request_state == RequestState::AdmissionUnknown
+            || latest.as_ref().is_some_and(|o| o.settlement() == Settlement::Unknown)
+        {
+            return Ok((latest.filter(|o| o.settlement() == Settlement::Unknown), false,
+                RequestState::AdmissionUnknown, start_state));
+        }
+        let request_state = if request_state == RequestState::OriginalAvailable && p.visible.is_none() {
+            RequestState::Preparing
+        } else { request_state };
+        Ok((p.visible.clone(), p.visible.is_some(), request_state, start_state))
     }
     fn observed_request_state(&self) -> RequestState {
         let request_state = match self.phase.load(Ordering::Acquire) {
@@ -591,22 +709,15 @@ impl Entry {
     pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
         use crate::service_request_catalogue as data;
         self.occupies();
-        let operation = {
-            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
-            latest.as_ref().map(|value| data::Operation {
-                operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
-                status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
-            })
-        }; // Never invert the existing latest -> publication order.
-        let request_state = self.observed_request_state();
-        let start_state = self.observed_start_state();
+        let (visible, history_available, request_state, start_state) = self.public_operation()?;
+        let operation = visible.as_ref().map(|value| data::Operation {
+            operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
+            status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
+        });
         let progress = match self.family() {
             Family::AndroidInspect => data::Progress::AndroidBuild { request_state, start_state },
             Family::IosArchive => data::Progress::IosArchive { request_state, start_state },
         };
-        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
-        let history_available = !history.failed && operation.as_ref()
-            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
         let row = data::Request {
             request_id: self.input.request_id.clone(),
             expected_observation_revision: self.input.expected_observation_revision,
@@ -617,23 +728,13 @@ impl Entry {
     }
     pub(crate) fn status(&self) -> Result<Snapshot, Error> {
         self.occupies();
-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?
-            .as_deref().cloned();
-        let request_state = self.observed_request_state();
-        let start_state = self.observed_start_state();
-        let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+        let (visible, history_available, request_state, start_state) = self.public_operation()?;
+        let operation = visible.as_deref().cloned();
         let result = Snapshot {
             origin: self.input.query(),
             expected_observation_revision: self.input.expected_observation_revision,
-            request_state,
-            start_state,
-            review: self.scope().review.clone(),
-            history_available: !p.failed
-                && operation
-                    .as_ref()
-                    .is_some_and(|o| p.acknowledged == Some(o.status_revision())),
-            operation,
-            do_not_replay: true,
+            request_state, start_state,
+            review: self.scope().review.clone(), history_available, operation, do_not_replay: true,
         };
         result.validate()?;
         Ok(result)
@@ -668,12 +769,15 @@ impl Entry {
             entry: self.clone(),
             identity,
         });
-        let op = Operation::prepared(family, operation, generation, revision);
+        let op = Operation::prepared(&self.scope().review, operation, generation, revision);
         if link.publish(op).is_err() {
             self.unconfirmed();
             return Err(Error::StateUnknown);
         }
-        self.phase.store(BOUND, Ordering::Release);
+        if self.phase.compare_exchange(PREPARING, BOUND, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            self.unconfirmed();
+            return Err(Error::StateUnknown);
+        }
         Ok(link)
     }
     fn request_start(&self, input: &Start) -> Result<Snapshot, Error> {
@@ -698,10 +802,13 @@ impl Entry {
             return Err(Error::Expired);
         }
         {
-            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
-            if latest.as_ref().is_none_or(|v| {
-                v.state() != OperationState::Prepared || v.settlement() != Settlement::Pending
-            }) {
+            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+            let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+            if !self.prepare_returned.load(Ordering::Acquire) || p.failed
+                || latest.as_ref().is_none_or(|v| {
+                    v.state() != OperationState::Prepared || v.settlement() != Settlement::Pending
+                        || p.visible.as_ref().is_none_or(|a| !Arc::ptr_eq(a, v))
+                }) {
                 return Err(Error::Conflict);
             }
         }
@@ -725,8 +832,14 @@ impl Entry {
             return Ok(None);
         }
         if p.claim.is_some() {
+            p.failed = true;
+            drop(p);
+            self.unconfirmed();
             return Err(Error::StateUnknown);
         }
+        if latest.settlement() != Settlement::Unknown
+            && (!self.callers_returned() || self.phase.load(Ordering::Acquire) == UNKNOWN)
+        { return Ok(None); }
         if p.acknowledged == Some(latest.status_revision()) {
             return Ok(None);
         }
@@ -740,20 +853,30 @@ impl Entry {
         result: Result<(), Error>,
     ) -> Result<(), Error> {
         let mut p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
-        if p.claim
+        if p.failed || p.claim
             .as_ref()
             .is_none_or(|c| c.status_revision() != revision)
         {
             p.failed = true;
+            drop(p);
+            self.unconfirmed();
             return Err(Error::StateUnknown);
         }
         if let Err(e) = result {
             p.failed = true;
+            drop(p);
+            self.unconfirmed();
             return Err(e);
         }
-        p.claim = None;
+        p.visible = p.claim.take(); // SAME immutable claim, after actual writer return.
         p.acknowledged = Some(revision);
+        drop(p);
+        self.scope().changes.send_modify(|_| {});
         Ok(())
+    }
+    pub(crate) fn history_lost(&self) {
+        if let Ok(mut p) = self.publication.lock() { p.failed = true; }
+        self.unconfirmed(); // Claim remains retained; loss is never a returned write.
     }
 }
 /// Original Prepared -> SAME Session. A weak identity disappearing is NEVER
@@ -836,12 +959,11 @@ impl NativeLink {
             }
         }
         let data = data.compact()?;
-        // Actual same-owner retirement can resolve lost admission ACK, never
-        // a native UNKNOWN. It cannot make the one-use Start available again.
-        if data.settlement() == Settlement::Settled {
-            self.entry.phase.store(BOUND, Ordering::Release);
-        }
+        let unknown = data.settlement() == Settlement::Unknown;
         *latest = Some(Arc::new(data));
+        drop(latest);
+        if unknown { self.entry.unconfirmed(); }
+        // A known late native return cannot heal a lost caller/history cut.
         self.entry.scope().changes.send_modify(|_| {});
         Ok(())
     }
@@ -865,24 +987,23 @@ impl Claim {
     }
     pub(crate) fn returned(mut self, ok: bool) {
         self.returned = true;
-        if ok && self.entry.original.get().is_some() {
+        let flag = match self.kind {
+            ClaimKind::Prepare => &self.entry.prepare_returned,
+            ClaimKind::Start => &self.entry.start_returned,
+        };
+        if flag.swap(true, Ordering::AcqRel) {
+            self.entry.unconfirmed();
             return;
         }
         if self.entry.original.get().is_none() && !ok {
-            let _ = self.entry.phase.compare_exchange(
-                PREPARING,
-                REFUSED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-        } else if self.entry.latest.lock().is_ok_and(|v| {
-            v.as_ref()
-                .is_some_and(|o| o.settlement() == Settlement::Settled)
-        }) {
-            self.entry.phase.store(BOUND, Ordering::Release);
-        } else {
+            let _ = self.entry.phase.compare_exchange(PREPARING, REFUSED, Ordering::AcqRel, Ordering::Acquire);
+        } else if !(ok && self.entry.original.get().is_some())
+            && !self.entry.latest.lock().is_ok_and(|v| v.as_ref()
+                .is_some_and(|o| o.settlement() == Settlement::Settled))
+        {
             self.entry.unconfirmed();
         }
+        self.entry.scope().changes.send_modify(|_| {});
     }
 }
 impl Drop for Claim {
@@ -996,6 +1117,14 @@ impl Inbox {
         input: Prepare,
         point: &crate::agent_local_checks::SavedPoint,
     ) -> Result<Snapshot, Error> {
+        self.prepare_bound_read(family, input, point, None)
+    }
+    pub(crate) fn prepare_ios_read(&self, input: Prepare, point: &crate::agent_local_checks::SavedPoint,
+        read: &Arc<crate::service_version_reserve_requests::ReadPermission>) -> Result<Snapshot, Error> {
+        self.prepare_bound_read(Family::IosArchive, input, point, Some(read))
+    }
+    fn prepare_bound_read(&self, family: Family, input: Prepare, point: &crate::agent_local_checks::SavedPoint,
+        read: Option<&Arc<crate::service_version_reserve_requests::ReadPermission>>) -> Result<Snapshot, Error> {
         input.validate()?;
         let mut b = self.lock()?;
         if input.service_instance != self.instance {
@@ -1029,6 +1158,7 @@ impl Inbox {
             || input.project_id != lease.scope.project_id
             || input.expected_observation_revision != lease.scope.observation_revision
             || !lease.scope.matches(point)
+            || lease.scope.review.ios_recovery().is_some() && read.is_none_or(|r| !lease.scope.matches_read(r))
         {
             return Err(Error::Conflict);
         }
@@ -1036,6 +1166,8 @@ impl Inbox {
             input,
             lease: lease.clone(),
             phase: AtomicU8::new(QUEUED),
+            prepare_returned: AtomicBool::new(false),
+            start_returned: AtomicBool::new(false),
             original: OnceLock::new(),
             start: AtomicU8::new(NO_START),
             start_at: OnceLock::new(),
@@ -1044,6 +1176,7 @@ impl Inbox {
             latest: Mutex::new(None),
             publication: Mutex::new(Publication {
                 acknowledged: None,
+                visible: None,
                 claim: None,
                 failed: false,
             }),
@@ -1068,7 +1201,19 @@ impl Inbox {
     }
     pub(crate) fn start(&self, family: Family, input: &Start) -> Result<Snapshot, Error> {
         let b = self.lock()?;
-        self.find(family, &b, &input.origin)?.request_start(input)
+        let entry=self.find(family, &b, &input.origin)?;
+        if entry.scope().review.ios_recovery().is_some() && entry.start.load(Ordering::Acquire)==NO_START { return Err(Error::AccessDenied); }
+        entry.request_start(input)
+    }
+    pub(crate) fn start_ios_read(&self, input: &Start, point: &crate::agent_local_checks::SavedPoint,
+        read: &Arc<crate::service_version_reserve_requests::ReadPermission>) -> Result<Snapshot, Error> {
+        let b = self.lock()?;
+        let entry = self.find(Family::IosArchive, &b, &input.origin)?;
+        // Already-submitted IDs only observe their ORIGINAL. Own consume made
+        // the point stale and must not be mistaken for permission to requeue.
+        if entry.scope().review.ios_recovery().is_some() && entry.start.load(Ordering::Acquire) == NO_START
+            && (!entry.scope().matches(point) || !entry.scope().matches_read(read)) { return Err(Error::Conflict); }
+        entry.request_start(input)
     }
     pub(crate) fn query(
         &self,

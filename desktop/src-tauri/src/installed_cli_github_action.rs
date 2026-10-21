@@ -117,6 +117,13 @@ fn output(
             status.effect
         ));
         match status.review.kind() {
+            github::Kind::ActivityOverview => {
+                text.push_str("One historical Activity overview; no write, automatic refresh, current-head/CI proof, jobs, logs or artifacts.
+");
+                if let Some(snapshot) = &status.snapshot {
+                    text.push_str(&format!("Observed {} · account {} · repository {}. Use --json for all compact PR/run IDs and states.\n", snapshot.observed_at, snapshot.account_id, snapshot.repository_id));
+                }
+            }
             github::Kind::SetupReconcile => text.push_str("This GET-only check observes the exact original setup intent. It sends no new publication request and cannot prove that an uncertain original was never sent.\n"),
             github::Kind::SetupPublish => text.push_str("This request uses the reviewed five-file setup only. A sent create/PR request can trigger repository CI; STOP does not undo it. Counter setup is not included.\n"),
             _ => {}

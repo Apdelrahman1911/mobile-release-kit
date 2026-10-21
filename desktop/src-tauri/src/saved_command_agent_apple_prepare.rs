@@ -462,7 +462,7 @@ mod tests {
             projection.phase = Phase::AwaitingConsent;
             projection.intent_usable = false;
             let prepared = Prepared {
-                agent_store_preparation: None,
+                agent_history:None, agent_store_preparation: None,
                 agent_store: None,
                 store_witness: None,
                 agent_build: None,

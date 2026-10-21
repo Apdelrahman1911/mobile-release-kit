@@ -1,3 +1,6 @@
+import type { GithubActionDelegate, GithubActionSelection } from './agentGithubActionAccess.ts';
+import { sameGithubActivitySelection } from './githubActivityDelegation.ts';
+import type { GithubActivitySelection } from './githubActivityDelegation.ts';
 // Presentation only. The retained native Connection/Setup owner supplies every
 // result, cancellation and join; navigation never starts a remote read.
 import { browserRequestReturned, browserFailure, BROWSER_HELP } from './githubPullRequestManagement.ts';
@@ -102,6 +105,32 @@ export class GitHubActivityController {
     const failed=()=>{o.fresh=false;this.update({error:'response-invalid',uncertain:this.attempt!==null||this.unknown});};
     try{const promise=o.port.status();if(!(promise instanceof Promise))throw new Error('Original status not retained');w.promise=promise;
       void promise.then(v=>{this.receive(o,v);},failed).finally(()=>this.finish(w));}catch{failed();this.finish(w);}
+  }
+  /** Comparison only. No fake Prepare or own Read attempt is created. */
+  agentSelection():GithubActivitySelection|null {
+    const o=this.original,c=context(this.connection()),s=o?.status,connection=this.connection();
+    if(this.disposed||this.unknown||this.ownerReason()||!o?.live||o.port!==this.desired||!o.unlisten||!o.fresh||!s?.available||!c||connection.observing||s.sessionId!==c.sessionId||!connection.status)return null;
+    return Object.freeze({kind:'activity-overview',sessionId:c.sessionId,expectedRevision:s.revision,expectedConnectionRevision:connection.status.revision});
+  }
+  delegateOverview(selected:GithubActionSelection):GithubActionDelegate|null {
+    const current=this.agentSelection(),o=this.original,epoch=this.epoch,c=context(this.connection());
+    if(selected.kind!=='activity-overview'||!current||!sameGithubActivitySelection(current,selected)||!o||!c)return null;
+    let returned=false,released=false,unknown=false;
+    const exact=()=>!this.disposed&&!this.unknown&&!unknown&&this.original===o&&o.live&&o.port===this.desired&&epoch===this.epoch&&same(c,context(this.connection()));
+    return {
+      current:()=>exact()&&!!this.agentSelection()&&sameGithubActivitySelection(this.agentSelection()!,selected),
+      allowReturned:()=>{returned=true;},
+      observe:s=>{
+        if(!returned||s.review.kind!=='activity-overview'||!sameGithubActivitySelection(s.review,selected)||s.settlement==='unknown'){unknown=true;return;}
+        // The SAME permission controller calls this only after its original
+        // authenticated Query returned. Activity has NO GUI Read Attempt here:
+        // release only this presentation link, not a fabricated GUI promise or
+        // BoundResult. A later/coalesced Activity view cannot strand this row.
+        if(s.settlement==='settled')released=true;
+      },
+      unusedReturned:()=>{if(returned)released=true;},
+      notSubmitted:()=>{released=true;},uncertain:()=>{unknown=true;},released:()=>released&&!unknown,
+    };
   }
   currentResult():ActivityObservation|null{
     const r=this.result,o=this.original;return r&&!this.disposed&&!this.unknown&&r.owner===o&&o.live&&o.port===this.desired&&o.fresh&&r.epoch===this.epoch&&

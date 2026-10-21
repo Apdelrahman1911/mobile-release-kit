@@ -243,6 +243,7 @@ impl ConnectionState {
                     stamp: edit.stamp()?,
                     end: read.end,
                     data,
+                    activity: None,
                 })
             }
             _ => Err(refused(p::Reason::InvalidInput)),

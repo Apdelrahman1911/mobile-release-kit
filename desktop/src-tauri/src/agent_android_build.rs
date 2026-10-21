@@ -10,6 +10,9 @@ use std::time::Duration;
 use std::{sync::Arc, time::Instant};
 
 
+#[path = "agent_android_signed.rs"]
+pub mod signed;
+
 pub const CONSENT: &str = "agent-saved-android-build-inspect-v1";
 pub const LIMIT: usize = crate::agent_build_requests::LIMIT;
 pub const START_WINDOW: Duration = crate::agent_build_requests::START_WINDOW;
@@ -59,6 +62,7 @@ impl Tools {
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     SavedAndroidBuildStructureAndVersion,
+    SavedAndroidLocalUploadKeySign,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -67,10 +71,19 @@ pub struct Review {
     pub saved_config: Config,
     pub saved_version: Version,
     pub tools: Tools,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub signing: Option<signed::Selection>,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub upload_certificate_sha256: Option<String>,
 }
 impl Review {
     pub fn valid(&self) -> bool {
         self.saved_config.valid() && self.saved_version.valid() && self.tools.valid()
+            && match self.mode {
+                Mode::SavedAndroidBuildStructureAndVersion => self.signing.is_none() && self.upload_certificate_sha256.is_none(),
+                Mode::SavedAndroidLocalUploadKeySign => self.signing.as_ref().is_some_and(signed::Selection::valid)
+                    && self.upload_certificate_sha256.as_ref().is_some_and(|v| hash(v)),
+            }
     }
 }
 pub use crate::agent_build_requests::{Prepare, Query, Start, RequestState, StartState};
@@ -114,6 +127,11 @@ pub enum Reason {
     ResultLimit,
     WorkRetained,
     CleanupUnknown,
+    SigningInputMissing,
+    SigningInputInvalid,
+    SigningValidationFailed,
+    SigningCommandFailed,
+    BuildInputsUnrestored,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -124,6 +142,9 @@ pub enum Stage {
     Capturing,
     Inspecting,
     DisposingWork,
+    ValidatingSigning,
+    Signing,
+    RestoringInputs,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -148,6 +169,7 @@ pub enum Check {
     VersionName,
     ReleaseFlags,
     Signer,
+    Signature,
     CoreLifecycle,
     OtherCoreFinding,
 }
@@ -186,6 +208,8 @@ pub struct Report {
     pub findings: Vec<Finding>,
     pub summary: Summary,
     pub artifact: Artifact,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub signing: Option<signed::Report>,
 }
 impl Report {
     pub fn valid(&self) -> bool {
@@ -193,6 +217,9 @@ impl Report {
             && self.used_version.valid()
             && (1..=1024 * 1024 * 1024).contains(&self.artifact.size)
             && hash(&self.artifact.sha256)
+            && self.signing.as_ref().is_none_or(signed::Report::valid)
+            && (self.signing.is_none() || self.findings.iter().filter(|r| r.check == Check::Signature && r.status == FindingStatus::Pass).count() == 1
+                && self.findings.iter().filter(|r| r.check == Check::Signer && r.status == FindingStatus::Pass).count() == 1)
             && self.findings.len() <= 128
             && self.summary.shown as usize == self.findings.len()
             && self.summary.shown == self.summary.total
@@ -207,7 +234,8 @@ impl Report {
                 == Some(self.summary.total)
             && self.findings.iter().enumerate().all(|(n, row)| {
                 row.ordinal == n as u32
-                    && (row.check != Check::Signer || row.status == FindingStatus::Skip)
+                    && if self.signing.is_some() { matches!(row.status, FindingStatus::Pass | FindingStatus::NotApplicable) }
+                        else { row.check != Check::Signature && (row.check != Check::Signer || row.status == FindingStatus::Skip) }
             })
             && self.summary.counts.iter().all(|(status, n)| {
                 self.findings
@@ -318,6 +346,20 @@ impl Operation {
         }
     }
 }
+impl Operation {
+    pub(crate) fn valid_for(&self, review: &Review) -> bool {
+        let signed = review.mode == Mode::SavedAndroidLocalUploadKeySign;
+        self.valid() && review.valid()
+            && (signed || !matches!(self.reason, Reason::SigningInputMissing | Reason::SigningInputInvalid
+                | Reason::SigningValidationFailed | Reason::SigningCommandFailed | Reason::BuildInputsUnrestored))
+            && (signed || !matches!(self.stage, Some(Stage::ValidatingSigning | Stage::Signing | Stage::RestoringInputs)))
+            && self.result.as_ref().is_none_or(|r| {
+                r.used_config == review.saved_config && r.used_version == review.saved_version
+                    && r.signing.is_some() == signed
+                    && r.signing.as_ref().is_none_or(|s| Some(&s.upload_certificate_sha256) == review.upload_certificate_sha256.as_ref())
+            })
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Status {
@@ -335,16 +377,11 @@ impl Status {
         if self.expected_observation_revision == 0
             || !self.do_not_replay
             || !self.review.valid()
-            || self.operation.as_ref().is_some_and(|o| {
-                !o.valid()
-                    || o.result.as_ref().is_some_and(|r| {
-                        r.used_config != self.review.saved_config
-                            || r.used_version != self.review.saved_version
-                    })
-            })
+            || self.operation.as_ref().is_some_and(|o| !o.valid_for(&self.review))
             || self.history_available && self.operation.is_none()
             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
             || self.start_state != StartState::NotRequested && self.operation.is_none()
+                && self.request_state != RequestState::AdmissionUnknown
         {
             Err(Error::InvalidRequest)
         } else {

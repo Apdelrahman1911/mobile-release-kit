@@ -403,7 +403,7 @@ mod tests {
             operation: wire::Operation::LocalProjectChecks,
             platform: wire::Platform::Android,
         });
-        let prepared = Prepared { agent_store_preparation:None, agent_store:None, store_witness:None,
+        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
             agent_build: None, agent_local_check: Some(link.clone()),
             upload_key_preparation: None,
             upload_key: None,

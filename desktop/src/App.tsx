@@ -1,3 +1,5 @@
+import { AgentLocalHistory } from './components/AgentLocalHistory.tsx';
+import { AgentLocalHistoryController } from './agentLocalHistoryController.ts';
 import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
 import { StorePreparationController } from './agentStorePreparationController.ts';
 import { storePreparationInput, storePreparationPeerReason, storePreparationPreparesIntent } from './agentStorePreparation.ts';
@@ -90,6 +92,7 @@ import { gitReadPathOrder } from './gitReadProtocol.ts';
 import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
 import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
 import { AgentIOSArchivePermission } from './agentIOSArchive.ts';
+import { AgentIOSRecoveryAccess } from './components/AgentIOSRecoveryAccess.tsx';
 import { AgentIOSArchiveAccess } from './components/AgentIOSArchiveAccess.tsx';
 import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { VersionEnrollmentController } from './versionEnrollmentController.ts';
@@ -97,11 +100,14 @@ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx'
 import { VersionReserveController } from './versionReserveController.ts';
 import { versionReserveProjectIssue } from './versionReserve.ts';
 import { VersionReservePanel } from './components/VersionReservePanel.tsx';
-import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
+import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus, parseAgentIdentityCheck } from './projectIdentityNative.ts';
+import { emptyIdentityPermission, observedIdentityPermission, acknowledgeIdentityPermission, consumeIdentityPermission,
+  identityPermissionChecked, identityPermissionAcknowledged } from './agentIdentityPermission.ts';
+import type { IdentityPermission, IdentityPermissionContext } from './agentIdentityPermission.ts';
 import { AgentIdentityActionController } from './agentIdentityActions.ts';
 import type { AgentIdentityActionView } from './agentIdentityActions.ts';
 import { AgentIdentityAction } from './components/AgentIdentityAction.tsx';
-import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
+import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus, AgentIdentityApi } from './projectIdentityNative.ts';
 import { ProjectIdentityController } from './projectIdentityController.ts';
 import type { ProjectIdentityUiState } from './projectIdentityController.ts';
 import { parseIdentityContext } from './projectIdentity.ts';
@@ -197,6 +203,8 @@ import { GitHub } from './pages/GitHub.tsx';
 
 interface IdentityInput { platform: 'android' | 'ios'; target: string }
 interface IdentityBinding { service: object; native: ProjectIdentityNativeController; ui: ProjectIdentityController; rebindFailed: boolean; proposal: AgentIdentityProposal | null; proposalSeeded: boolean; actions: AgentIdentityActionController | null }
+interface IdentityPermissionOrigin { service: object; api: AgentIdentityApi }
+interface IdentityPermissionWork { promise: Promise<unknown> | null; superseded: boolean; origin: IdentityPermissionOrigin }
 const emptyIdentitySubscribe = () => () => {};
 const emptyIdentitySnapshot = () => null;
 
@@ -270,6 +278,7 @@ export function App() {
   const localHistoryControllerRef = useRef<LocalReleaseHistoryController | null>(null);
   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
+  const agentLocalHistoryRef=useRef<AgentLocalHistoryController|null>(null);
   const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
   const storePreparationControllerRef=useRef<StorePreparationController|null>(null);
   const agentToolSetupRef=useRef<AgentToolSetupController|null>(null);
@@ -341,7 +350,10 @@ export function App() {
   const [agentObserved, setAgentObserved] = useState<{ service: object; value: AgentIdentityGuiStatus } | null>(null);
   const [agentMessage, setAgentMessage] = useState<{ service: object; text: string } | null>(null);
   const [agentRequestPending, setAgentRequestPending] = useState(false);
-  const agentRequestWork = useRef<{ normal: { promise: Promise<unknown> | null; superseded: boolean } | null; revoke: { promise: Promise<unknown> | null; superseded: boolean } | null; epoch: number }>({ normal: null, revoke: null, epoch: 0 });
+  const [agentProposalAcknowledged, setAgentProposalAcknowledged] = useState(false);
+  const agentRequestWork = useRef<{ normal: IdentityPermissionWork | null; revoke: IdentityPermissionWork | null; epoch: number;
+    original: IdentityPermissionOrigin | null; permission: IdentityPermission; uncertain: boolean }>(
+    { normal: null, revoke: null, epoch: 0, original: null, permission: emptyIdentityPermission, uncertain: false });
   const identityInputs = useRef(new Map<string, IdentityInput>());
   const identityTexts = useRef(new Map<string, string>());
   const [, updateIdentityInputs] = useState(0);
@@ -351,6 +363,8 @@ export function App() {
     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
     : identityRef.current?.actions?.pendingReason() ?? identityRef.current?.native.ownerReason() ?? null, []);
   const retireIdentity = useCallback(() => {
+    agentRequestWork.current.permission = emptyIdentityPermission;
+    setAgentProposalAcknowledged(false);
     versionEnrollmentRef.current?.beforeContextIntent();
     versionReserveRef.current?.beforeContextIntent();
     repositoryCreateRef.current?.beforeWorkspaceAction();
@@ -403,7 +417,7 @@ export function App() {
     if (next !== pathPickerRef.current) publishPathPicker(next);
   }, [publishPathPicker]);
   const artifactBusy = useCallback(() => artifactInspectionControllerRef.current ? artifactInspectionOwnerReason(artifactInspectionControllerRef.current.getSnapshot()) : null, []);
-  const localHistoryBusy = useCallback(() => localHistoryControllerRef.current ? localHistoryOwnerReason(localHistoryControllerRef.current.getSnapshot()) : null, []);
+  const localHistoryBusy = useCallback(() => agentLocalHistoryRef.current?.ownerReason() ?? (localHistoryControllerRef.current ? localHistoryOwnerReason(localHistoryControllerRef.current.getSnapshot()) : null), []);
   const storePrepareBusy = useCallback(() => localStorePrepareControllerRef.current ? localStorePrepareOwnerReason(localStorePrepareControllerRef.current.getSnapshot()) : null, []);
   const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
@@ -630,12 +644,12 @@ export function App() {
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
-    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
-    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
+    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
+    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
     current:()=>{const service=pathService.current;return {
       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
-      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
+      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
       blockedReason:agentGithubActionAdmission.current(),
     };},
   }));
@@ -798,6 +812,7 @@ export function App() {
     const service = pathService.current, selected = workspaceRef.current.selectedId;
     return { port: service.api?.mode === 'native' ? service.api.versionReserve ?? null : null,
       cliAccessPort: service.api?.mode === 'native' ? service.api.agentVersionReserveAccess ?? null : null,
+      reviewPort:service.api?.mode==='native'?service.api.versionReserveReview??null:null,
       nativeSession: service.api?.mode === 'native' ? service : null,
       projectId: selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? selected : null,
       preview: service.api?.mode === 'preview', blockedReason: versionReserveAdmission.current(), editor: versionEditControllerRef.current };
@@ -1107,10 +1122,25 @@ export function App() {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId]?.project.id ?? null : null;
     },
+    delegationReason: () => agentLocalHistoryRef.current?.ownerReason()??null,
     otherOperationReason: () => storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localHistoryControllerRef.current = localHistory;
   const localHistoryState = useSyncExternalStore(localHistory.subscribe, localHistory.getSnapshot, localHistory.getSnapshot);
+  const [agentLocalHistory]=useState(()=>new AgentLocalHistoryController({delegate:r=>localHistory.delegatePrepared(r),current:()=>{
+    const service=cliService.current,w=workspaceRef.current;
+    const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
+    const r=localHistory.delegationReview();
+    // Exclude only this exact controller's retained Prepared. The delegate
+    // method independently pins its private Attempt across all publications.
+    return {port:service.api?.mode==='native'?service.api.agentLocalHistory??null:null,nativeSession:service.api?.mode==='native'?service:null,
+      projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',reviews:r?[r]:[],
+      blockedReason:storeBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+  }}));
+  agentLocalHistoryRef.current=agentLocalHistory;
+  useSyncExternalStore(agentLocalHistory.subscribe,agentLocalHistory.getSnapshot,agentLocalHistory.getSnapshot);
+  useEffect(()=>{agentLocalHistory.syncContext();});
+  useEffect(()=>()=>agentLocalHistory.dispose(),[agentLocalHistory]);
   const [localStorePrepare] = useState(() => new LocalStorePrepareController({
     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
@@ -1272,39 +1302,102 @@ export function App() {
     const change = binding.proposal.request.change;
     if (binding.ui.setIntent(change.identityIntent) && change.identityIntent === 'new-application') binding.ui.setDesiredIdentity(change.desiredIdentity);
   }, [identityBinding, identityUi]);
+  const agentPermissionContext = useCallback((): IdentityPermissionContext => {
+    const service = pathService.current;
+    return { service, api: service.api?.mode === 'native' ? service.api.agentIdentity ?? null : null,
+      projectId: workspaceRef.current.selectedId, epoch: identityEpoch.current };
+  }, []);
+  const agentPermissionBlocked = useCallback(() => !workspaceRef.current.selectedId || !!(playCleanupBusy() || actionsRetryBusy() ||
+    pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy()),
+    [playCleanupBusy, actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
+  const acknowledgeAgentProposals = useCallback((value: boolean) => {
+    const book = agentRequestWork.current, context = agentPermissionContext();
+    const usable = !book.normal && !book.revoke && !book.uncertain && !agentPermissionBlocked() &&
+      (!book.original || book.original.api === context.api && book.original.service === context.service);
+    book.permission = acknowledgeIdentityPermission(book.permission, value && usable, context);
+    setAgentProposalAcknowledged(identityPermissionAcknowledged(book.permission, context));
+  }, [agentPermissionContext, agentPermissionBlocked]);
   const agentRequestAction = useCallback(async (action: 'status' | 'allow' | 'revoke' | 'decline', intentId?: string) => {
     // The existing retained native service keeps Revoke usable during a failed
     // reconnect. New Allow/status never borrows that old service binding.
-    const service = action === 'revoke' ? cliService.current : pathService.current;
-    const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
-    const project = workspaceRef.current.selectedId;
-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || playCleanupBusy() || actionsRetryBusy() || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
+    const fallback = action === 'revoke' ? cliService.current : pathService.current;
+    // An unrelated Check on a replacement service cannot steal the old
+    // permission's STOP target. First Allow already latches its original here.
+    const retained = action === 'revoke' ? book.original ?? book.normal?.origin : null;
+    const service = retained?.service ?? fallback;
+    const port = retained?.api ?? (fallback.api?.mode === 'native' ? fallback.api.agentIdentity : null);
+    const context = agentPermissionContext(), project = context.projectId;
+    if (!port || book[slot] || action !== 'revoke' && book.revoke) return;
+    if (action === 'allow' && (agentPermissionBlocked() || book.uncertain ||
+        book.original !== null && (book.original.api !== port || book.original.service !== service) ||
+        !identityPermissionAcknowledged(book.permission, context))) {
+      book.permission = emptyIdentityPermission; setAgentProposalAcknowledged(false);
+      setAgentMessage({ service, text: 'Check request permission, then confirm this project. Revoke any uncertain original permission first.' }); return;
+    }
     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
+    const expected = action === 'allow' ? consumeIdentityPermission(book.permission, context).expectedPermissionRevision : null;
+    if (action === 'allow' && expected === null) return;
+    book.permission = emptyIdentityPermission;
     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
     // Bound normal+revoke slots; revoke remains available during first Allow.
     // Original promise completion is not a project operation/finality receipt.
-    const work = { promise: null as Promise<unknown> | null, superseded: false };
+    const origin = { service, api: port };
+    const work: IdentityPermissionWork = { promise: null, superseded: false, origin };
+    const allow = port.allow, revoke = port.revoke, decline = port.decline, status = port.status;
+    const stillCurrent = () => {
+      const current = agentPermissionContext();
+      return current.service === service && current.api === port && current.projectId === project && current.epoch === context.epoch;
+    };
+    if (action === 'allow') book.original = origin;
     // Stop stays usable even if the display epoch saturates. Its original
     // native revoke still runs; no late normal result may overwrite it.
     if (action === 'revoke' && book.normal) book.normal.superseded = true;
     book[slot] = work; // Latch BEFORE a native invocation or reentrant listener.
-    setAgentRequestPending(true); setAgentMessage(null);
+    setAgentProposalAcknowledged(false); setAgentRequestPending(true); setAgentMessage(null);
     try {
-      work.promise = action === 'allow' ? port.allow(project!) : action === 'revoke' ? port.revoke() : action === 'decline' ? port.decline(intentId!) : port.status();
+      // Keep the existing two slots. Reentrant Stop or selection/owner changes
+      // can happen after publication but may not dispatch behind that Stop.
+      if (book[slot] !== work || work.superseded || book.epoch !== epoch || action !== 'revoke' &&
+          (book.revoke !== null || !stillCurrent()) || action === 'allow' && agentPermissionBlocked()) return;
+      work.promise = action === 'allow' ? allow.call(port, project!, expected!) : action === 'revoke' ? revoke.call(port) :
+        action === 'decline' ? decline.call(port, intentId!) : status.call(port);
       const value = await work.promise;
-      if (work.superseded || (action === 'revoke' ? cliService.current : pathService.current) !== service || book.epoch !== epoch) return;
-      const parsed = parseAgentIdentityGuiStatus(value);
+      if (work.superseded || book[slot] !== work || book.epoch !== epoch) return;
+      if (action !== 'revoke' && !stillCurrent()) {
+        if (action === 'allow') { book.uncertain = true; setAgentMessage({ service, text: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' }); }
+        return;
+      }
+      const checked = action === 'status' ? parseAgentIdentityCheck(value) : null;
+      const parsed = action === 'status' ? checked : parseAgentIdentityGuiStatus(value);
       if (!parsed) throw new Error('unconfirmed');
+      if (work.superseded || book[slot] !== work || book.epoch !== epoch) return;
+      if (action !== 'revoke' && !stillCurrent()) {
+        if (action === 'allow') { book.uncertain = true; setAgentMessage({ service, text: 'Selection changed while permission was pending. Revoke the original permission before allowing again.' }); }
+        return;
+      }
+      if (action === 'revoke') {
+        if (parsed.lease.enabled) throw new Error('unconfirmed revoke');
+        book.original = null; book.uncertain = false;
+      } else if (action === 'status') {
+        if (parsed.lease.enabled && book.original === null) book.original = origin;
+        if (checked && !book.uncertain && (!book.original || book.original.api === port && book.original.service === service)) {
+          book.permission = observedIdentityPermission(context, checked.permissionRevision);
+        }
+      }
       setAgentObserved({ service, value: parsed });
-      setAgentMessage(action === 'allow' ? { service, text: 'Identity proposals are allowed for 15 minutes. Each still needs your separate native source review and exact-change approval.' } : null);
+      setAgentMessage(book.uncertain ? { service, text: 'Permission remains uncertain. Revoke the original permission before a fresh Check and confirmation.' } :
+        action === 'allow' && parsed.lease.enabled ? { service, text: 'Identity proposals were observed allowed for up to 15 minutes. Each still needs separate native source review and exact-change approval.' } : null);
     } catch {
-      if (!work.superseded && (action === 'revoke' ? cliService.current : pathService.current) === service && book.epoch === epoch) setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke; do not replay an edit.' });
+      if (!work.superseded && book[slot] === work && book.epoch === epoch) {
+        if (action === 'allow' || action === 'revoke') { book.uncertain = true; book.original = origin; }
+        setAgentMessage({ service, text: 'The request permission/status could not be confirmed. Check again or revoke the original; do not replay an edit.' });
+      }
     } finally {
       if (book[slot] === work) book[slot] = null;
       setAgentRequestPending(book.normal !== null || book.revoke !== null);
     }
-  }, [playCleanupBusy, actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
+  }, [agentPermissionContext, agentPermissionBlocked]);
   identityInvalidation.current = (projectId) => {
     snapshotIntentBatch(projectId);
     dispatch({ type: 'project-identity-intent', projectId });
@@ -1470,14 +1563,17 @@ export function App() {
     };
   }));
   useEffect(() => { agentAndroidBuild.syncContext(); });
-  const [agentIOSArchive] = useState(() => new AgentIOSArchivePermission(() => {
+  const [agentIOSArchive] = useState(() => {
+    const permission: AgentIOSArchivePermission = new AgentIOSArchivePermission(() => {
     const service = cliService.current;
     return { api: service.api?.mode === 'native' ? service.api.agentIOSArchive ?? null : null,
-      project: iosArchiveControllerRef.current?.agentArchiveApproval() ?? null,
+      project: iosArchiveControllerRef.current?.agentArchiveApproval(permission.acknowledgedInspection()) ?? null,
       blocked: service !== pathService.current || connectionPicking.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ??
         externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
     };
-  }));
+    });
+    return permission;
+  });
   useEffect(() => { agentIOSArchive.syncContext(); });
   const [externalObserver] = useState(() => new ExternalProjectObservationController({
     current: () => {
@@ -2248,6 +2344,7 @@ export function App() {
       <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
+        <AgentLocalHistory controller={agentLocalHistory} onShow={()=>navigate('releases')}/>
         <AgentStoreAccess controller={agentStoreAccess}/>
         <AgentStorePreparation controller={storePreparationAccess}/>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
@@ -2438,7 +2535,12 @@ export function App() {
               <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. Proposal permission alone cannot Apply. Read the saved source and acknowledge a new app when applicable, then continue here or explicitly delegate that exact change once to the agent.</p>
               <p>Current observation: {agentRequests ? agentRequests.lease.enabled ? 'request permission was observed enabled' : 'request permission was observed disabled' : 'not checked'}. Status is not an approval or completed edit.</p>
               {agentRequestMessage && <p role="status" className="review-caution">{agentRequestMessage}</p>}
-              <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || identityBusy() !== null}
+              <label><input type="checkbox" checked={agentProposalAcknowledged}
+                disabled={agentRequestPending || agentRequestWork.current.uncertain || agentPermissionBlocked() ||
+                  !identityPermissionChecked(agentRequestWork.current.permission, agentPermissionContext())}
+                onChange={(event) => acknowledgeAgentProposals(event.target.checked)} /> After checking, allow proposals for this selected project. This does not approve an edit.</label>
+              <div className="button-row"><button type="button" className="button secondary" disabled={!session || !pathService.current.api?.agentIdentity || agentRequestPending || agentPermissionBlocked() ||
+                agentRequestWork.current.uncertain || !agentProposalAcknowledged || !identityPermissionAcknowledged(agentRequestWork.current.permission, agentPermissionContext())}
                 onClick={() => void agentRequestAction('allow')}>Allow identity proposals · 15 minutes</button>
                 <button type="button" className="button secondary" disabled={agentRequestWork.current.revoke !== null}
                   onClick={() => void agentRequestAction('revoke')}>Revoke proposals and request original stop</button>
@@ -2561,7 +2663,7 @@ export function App() {
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></section>} />}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} archive={iosArchiveState} /></section>} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
@@ -2572,7 +2674,8 @@ export function App() {
           attention={retainedEditAttention(workspace.projects, saveState.recoveryProjects, workflowState.recoveryProjects, metadataState.edit.recoveryProjects, versionEditState.edit.recoveryProjects, initializationState.recoveryProjects)}
           choosingProject={choosing} onOpenProject={showRetainedEditProject} onHelp={setHelp} />
           <IOSRecovery state={iosArchiveState} controller={iosArchive} projectName={session?.project.name ?? null}
-            operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} onHelp={setHelp} /></>}
+            operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} onHelp={setHelp} />
+          <AgentIOSRecoveryAccess state={iosArchiveState} controller={iosArchive} permission={agentIOSArchive} /></>}
         <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
       </main>
     </div>

@@ -1,3 +1,4 @@
+import { validStorePermissionRevision } from './agentStorePermissionRevision.ts';
 // Comparison DATA and fixed RAW calls only. No native receipt, credential or
 // inventory-to-allocation conversion exists in this renderer facet.
 import {copyBoundedComparisonData,sameOfflineData} from './offlinePreflightProtocol.ts';
@@ -35,10 +36,11 @@ export interface PreparationStatus {
  readonly result:{readonly kind:'ordinary';readonly report:Readonly<Record<string,unknown>>}|{readonly kind:'current-versions';readonly inventory:CurrentInventory}|{readonly kind:'stage-prepare';readonly report:StoreStageReport}|null;readonly doNotReplay:true;
 }
 export interface StorePreparationAccess {
+ readonly permissionRevision:string; // MAIN only; CLI Status is unchanged.
  readonly schemaVersion:1;readonly serviceInstance:string|null;readonly projectId:string|null;readonly permission:'prepare'|'start'|null;readonly grantId:string|null;readonly reviewId:string|null;
  readonly selection:StoreSelection|null;readonly requestId:string|null;readonly enabled:boolean;readonly consumed:boolean;readonly pending:boolean;readonly unknown:boolean;readonly remainingMs:number;readonly status:PreparationStatus|null;
 }
-export interface StorePreparationPort {status():Promise<unknown>;allowPrepare(input:StorePreparationInput):Promise<unknown>;allowStart(status:PreparationStatus):Promise<unknown>;revoke():Promise<unknown>}
+export interface StorePreparationPort {status():Promise<unknown>;allowPrepare(input:StorePreparationInput,expectedPermissionRevision:string):Promise<unknown>;allowStart(status:PreparationStatus,expectedPermissionRevision:string):Promise<unknown>;revoke():Promise<unknown>}
 const id=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{32}$/.test(v)&&v!=='0'.repeat(32);
 const sha=(v:unknown)=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
 const n=(v:unknown,min:number,max:number):v is number=>typeof v==='number'&&Number.isSafeInteger(v)&&!Object.is(v,-0)&&v>=min&&v<=max;
@@ -97,7 +99,7 @@ function status(v:unknown):v is PreparationStatus{
 export function parseStorePreparationStatus(raw:unknown):PreparationStatus|null{try{const v=copyBoundedComparisonData(raw,8192,400);return status(v)?freeze(v):null;}catch{return null;}}
 export function parseStorePreparationAccess(raw:unknown):StorePreparationAccess|null{try{
  const v=copyBoundedComparisonData(raw,16384,512);
- if(!keys(v,['schemaVersion','serviceInstance','projectId','permission','grantId','reviewId','selection','requestId','enabled','consumed','pending','unknown','remainingMs','status'])||v.schemaVersion!==1||!['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean')||!n(v.remainingMs,0,300000)||!(v.requestId===null||id(v.requestId)))return null;
+ if(!keys(v,['permissionRevision','schemaVersion','serviceInstance','projectId','permission','grantId','reviewId','selection','requestId','enabled','consumed','pending','unknown','remainingMs','status'])||!validStorePermissionRevision(v.permissionRevision)||v.schemaVersion!==1||!['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean')||!n(v.remainingMs,0,300000)||!(v.requestId===null||id(v.requestId)))return null;
  if(v.permission===null)return ['serviceInstance','projectId','grantId','reviewId','selection','requestId','status'].every(k=>v[k]===null)&&!v.enabled&&!v.consumed&&!v.pending&&!v.unknown&&v.remainingMs===0?freeze(v) as unknown as StorePreparationAccess:null;
  if(!one(v.permission,['prepare','start'])||!id(v.serviceInstance)||!id(v.projectId)||!id(v.grantId)||!id(v.reviewId)||!selection(v.selection)||v.enabled!==(v.remainingMs>0)||v.enabled&&(v.consumed||v.unknown)||!(v.status===null||status(v.status))||(v.requestId===null)!==(v.status===null))return null;
  if(v.status!==null){const s=v.status as unknown as PreparationStatus;
@@ -139,9 +141,9 @@ export const storePreparationConsent=(k:PreparationKind)=>({
 }[k]);
 export function createStorePreparationPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):StorePreparationPort{
  const send=(name:string,body:object)=>{const b=new TextEncoder().encode(JSON.stringify(body));return b.length<=8192?invoke(name,b):Promise.reject({code:'invalid-input'});};
- return Object.freeze({status:()=>send('agent_store_preparation_access',{}),revoke:()=>send('revoke_agent_store_preparation',{}),allowPrepare:(raw:StorePreparationInput)=>{
-  const v=parseStorePreparationInput(raw);return v?send('allow_agent_store_prepare',{...v,consentVersion:'agent-store-native-prepare-once-v1'}):Promise.reject({code:'invalid-input'});
- },allowStart:(raw:PreparationStatus)=>{const s=parseStorePreparationStatus(raw);return s?.prepared&&s.prepareReturned&&s.phase==='prepared'&&!s.startSubmitted&&!s.startGrantId?send('allow_agent_store_preparation_start',{origin:s.origin,review:s.prepared,consentVersion:storePreparationConsent(s.selection.kind)}):Promise.reject({code:'invalid-input'});}});
+ return Object.freeze({status:()=>send('agent_store_preparation_access',{}),revoke:()=>send('revoke_agent_store_preparation',{}),allowPrepare:(raw:StorePreparationInput,expectedPermissionRevision:string)=>{
+  const v=parseStorePreparationInput(raw);return v&&validStorePermissionRevision(expectedPermissionRevision)?send('allow_agent_store_prepare',{...v,expectedPermissionRevision,consentVersion:'agent-store-native-prepare-once-v1'}):Promise.reject({code:'invalid-input'});
+ },allowStart:(raw:PreparationStatus,expectedPermissionRevision:string)=>{const s=parseStorePreparationStatus(raw);return validStorePermissionRevision(expectedPermissionRevision)&&s?.prepared&&s.prepareReturned&&s.phase==='prepared'&&!s.startSubmitted&&!s.startGrantId?send('allow_agent_store_preparation_start',{expectedPermissionRevision,origin:s.origin,review:s.prepared,consentVersion:storePreparationConsent(s.selection.kind)}):Promise.reject({code:'invalid-input'});}});
 }
 export function storePreparationCommands(a:StorePreparationAccess|null):readonly string[]{if(!a?.projectId||!a.serviceInstance)return[];const base=`${a.projectId} ${a.serviceInstance}`,out:string[]=[];
  if(a.requestId)out.push(`mrk store-status ${base} ${a.requestId} --json`,`mrk store-cancel ${base} ${a.requestId} --json`);

@@ -215,9 +215,17 @@ impl AndroidBuildOwner {
         self.saved.agent_android_build_approval_current(approval, document)
     }
     pub(crate) fn prepare_agent_android_build(&self, entry: std::sync::Arc<crate::agent_android_build::Entry>, approval: std::sync::Arc<crate::saved_command_owner::AgentAndroidBuildApproval>,
-        registration: u32, root: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> { self.saved.prepare_agent_android_build(entry, approval, registration, root, gate) }
-    pub(crate) fn start_agent_android_build(&self, entry: &std::sync::Arc<crate::agent_android_build::Entry>, registered: Option<(u32, RegisteredRoot)>, gate: Availability)
-        -> Result<Admitted, BridgeError> { self.saved.start_agent_android_build(entry, registered, gate) }
+        registration: u32, root: RegisteredRoot, gate: Availability,
+        material: Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>) -> Result<Status, BridgeError> {
+        self.saved.prepare_agent_android_build(entry, approval, registration, root, gate, material)
+    }
+    pub(crate) fn agent_android_build_material(&self, entry: &std::sync::Arc<crate::agent_android_build::Entry>)
+        -> Result<Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>, BridgeError> {
+        self.saved.agent_android_build_material(entry)
+    }
+    pub(crate) fn start_agent_android_build(&self, entry: &std::sync::Arc<crate::agent_android_build::Entry>, registered: Option<(u32, RegisteredRoot)>, gate: Availability,
+        material: Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>)
+        -> Result<Admitted, BridgeError> { self.saved.start_agent_android_build(entry, registered, gate, material) }
     pub(crate) fn installation_source_custody_empty(&self) -> bool {
         self.saved.installation_source_custody_empty()
     }

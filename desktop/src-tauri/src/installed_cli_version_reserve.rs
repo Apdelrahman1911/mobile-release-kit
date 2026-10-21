@@ -3,12 +3,17 @@
 use super::*;
 use crate::service_version_reserve_protocol as reserve;
 
-pub(super) const COMMANDS: [&str; 3] = [
+#[path="installed_cli_version_reserve_review.rs"]
+mod source_review;
+
+pub(super) const COMMANDS: [&str; 4] = [
     "version-reserve-submit",
     "version-reserve-status",
     "version-reserve-cancel",
+    "version-reserve-review",
 ];
 enum Command {
+    Review{project:Id,instance:Id},
     Submit {
         project: Id,
         instance: Id,
@@ -40,6 +45,7 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         words.pop();
     }
     let command = match words.as_slice() {
+        ["version-reserve-review",project,instance,"--stdin"]=>Command::Review{project:Id::parse(project)?,instance:Id::parse(instance)?},
         ["version-reserve-submit", project, instance, grant, review, "--reviewed"] => {
             Command::Submit {
                 project: Id::parse(project)?,
@@ -95,6 +101,7 @@ fn output(
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
     }
+    if matches!(&response.response,p::ResponseBody::VersionReserveReview(_)) && submitted.is_none(){return source_review::output(response,q,json)}
     let p::ResponseBody::VersionReserveRequest(status) = &response.response else {
         return Err(Error::StateUnknown);
     };
@@ -152,6 +159,13 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let (q, submitted, body) = match options.command {
+            Command::Review{project,instance}=>{
+                let options=source_review::stdin_options()?;
+                let q=reserve::Query{project_id:project,service_instance:instance,request_id:Id::random()?};
+                let input=crate::service_version_reserve_review_protocol::Request{origin:q.clone(),options};input.validate()?;
+                std::io::stderr().write_all(receipt(&q).as_bytes()).map_err(|_|Error::Unavailable)?;
+                (q,None,p::RequestBody::VersionReserveReview(input))
+            },
             Command::Submit {
                 project,
                 instance,
@@ -193,6 +207,9 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                 request: body,
             };
             let response = rt.block_on(crate::installed_cli_ipc::request(&path, &request))?;
+            if let p::RequestBody::VersionReserveReview(input)=&request.request{
+                if !matches!(&response.response,p::ResponseBody::VersionReserveReview(s) if s.options==input.options){return Err(Error::StateUnknown)}
+            }
             output(
                 &response,
                 &q,

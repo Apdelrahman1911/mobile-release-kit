@@ -932,6 +932,8 @@ struct ArchiveProjectionWire {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RecoveryProjectionWire {
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    agent_ios_archive: Option<crate::agent_ios_archive::Query>,
     operation_id: String, owner_generation: String, context: Context, phase: Phase, intent_usable: bool,
     #[serde(deserialize_with = "nullable")] outcome: Option<Outcome>, reason: Reason,
     #[serde(deserialize_with = "nullable")] stage: Option<Stage>, #[serde(deserialize_with = "nullable")] activity: Option<Activity>,
@@ -939,10 +941,10 @@ struct RecoveryProjectionWire {
 }
 impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
     fn try_from(value: ProjectionWire) -> Result<Self, Self::Error> { match value {
-        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || v.context.operation==Operation::IOSUnsignedArchive) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
+        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || matches!(v.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport)) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
             activity: v.activity, disposition: v.disposition, result: v.result, report: None }),
-        ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { agent_ios_archive:None, operation_id: v.operation_id, owner_generation: v.owner_generation,
+        ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { agent_ios_archive:v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
             activity: v.activity, disposition: None, result: None, report: v.report }),
         _ => Err("wrong iOS status mode"),
@@ -950,10 +952,10 @@ impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
 }
 impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::Error;
-    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return Err(S::Error::custom("wrong agent archive mode"));}
+    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSLocalRecovery) {return Err(S::Error::custom("wrong agent archive mode"));}
     if self.context.recovery() {
         if self.disposition.is_some() || self.result.is_some() { return Err(S::Error::custom("wrong recovery status fields")); }
-        RecoveryProjectionWire { operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
+        RecoveryProjectionWire { agent_ios_archive:self.agent_ios_archive.clone(), operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
             phase: self.phase, intent_usable: self.intent_usable, outcome: self.outcome, reason: self.reason, stage: self.stage,
             activity: self.activity.clone(), report: self.report.clone() }.serialize(serializer)
     } else {
@@ -964,7 +966,7 @@ impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serial
     }
 } }
 impl Projection { fn valid(&self) -> bool {
-    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return false;}
+    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSLocalRecovery) {return false;}
     if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
         ||self.context.candidate()&&!crate::android_build_protocol::candidate_id(&self.operation_id)
         || self.stage.is_some_and(|stage| !stage.valid(&self.context))
@@ -1142,7 +1144,7 @@ pub(crate) mod tests {
                 {"kind":"apple-profile","recordId":"2".repeat(32),"recordRevision":2,"contextRevision":3}]});
         let selected = Context::deserialize(&value).unwrap(); assert!(selected.valid()); selected
     }
-    fn signed_complete() -> Value {
+    pub(crate) fn signed_complete() -> Value {
         let selected = signed_context(); let mut value = complete();
         value["context"] = json!(selected);
         value["activity"]["commands"]["export"] = json!({"outcome":"exited","exitCode":0});
@@ -1484,6 +1486,26 @@ pub(crate) mod tests {
         let encoded = status_bytes(&status).unwrap(); let data: Value = serde_json::from_slice(&encoded).unwrap();
         assert!(!data["operation"].as_object().unwrap().contains_key("result"));
         assert!(!data["operation"].as_object().unwrap().contains_key("disposition"));
+        // The optional original CLI address is comparison DATA, never a
+        // recovery report or an IOSRecoveryObservation constructor. Both
+        // serialization and decoding preserve the closed recovery branch.
+        let mut delegated=status.clone();
+        delegated.operation.as_mut().unwrap().agent_ios_archive=Some(crate::agent_ios_archive::Query {
+            project_id:crate::service_protocol::Id::parse(&"d".repeat(32)).unwrap(),
+            service_instance:crate::service_protocol::Id::parse(&"e".repeat(32)).unwrap(),
+            request_id:crate::service_protocol::Id::parse(&"f".repeat(32)).unwrap(),
+        });
+        let encoded=status_bytes(&delegated).unwrap();
+        assert_eq!(serde_json::from_slice::<Status>(&encoded).unwrap(),delegated);
+        let mut bad:Value=serde_json::from_slice(&encoded).unwrap();
+        bad["operation"]["agentIosArchive"]=Value::Null;
+        assert!(serde_json::from_value::<Status>(bad).is_err());
+        let mut bad:Value=serde_json::from_slice(&encoded).unwrap();
+        bad["operation"]["result"]=Value::Null;
+        assert!(serde_json::from_value::<Status>(bad).is_err());
+        let mut bad:Value=serde_json::from_slice(&encoded).unwrap();
+        bad["operation"]["context"]=serde_json::to_value(signed_context()).unwrap();
+        assert!(serde_json::from_value::<Status>(bad).is_err());
         let mut early = status.clone(); early.operation.as_mut().unwrap().phase = Phase::Running;
         assert!(status_bytes(&early).is_err());
     }

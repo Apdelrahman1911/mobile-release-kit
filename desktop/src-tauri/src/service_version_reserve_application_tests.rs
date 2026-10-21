@@ -8,6 +8,9 @@ use crate::application_service::tests::{
 use crate::application_state_store::Fixture;
 use std::{sync::mpsc, thread};
 
+#[path = "service_version_reserve_review_application_tests.rs"]
+mod source_review;
+
 const OBSERVER_BOUND: Duration = Duration::from_secs(5);
 
 fn setup() -> (

@@ -439,6 +439,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+  readonly versionReserveReview?: import('./versionReserveReview.ts').ReserveReviewPort | null;
   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
   readonly agentGithubAction?: import('./agentGithubActionAccess.ts').AgentGithubActionPort | null;
@@ -446,6 +447,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
   readonly agentToolSetup?: import('./agentToolSetup.ts').AgentToolSetupPort | null;
   readonly agentStorePreparation?: import('./agentStorePreparation.ts').StorePreparationPort | null;
+  readonly agentLocalHistory?: import('./agentLocalHistoryProtocol.ts').AgentLocalHistoryPort | null;
   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;

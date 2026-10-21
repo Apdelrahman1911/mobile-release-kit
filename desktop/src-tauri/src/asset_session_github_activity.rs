@@ -3,9 +3,15 @@ use super::*;
 use crate::{github_activity_protocol as p, github_connection_session::activity as s};
 
 pub(crate) struct GitHubActivityGoGate {
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     inner: Weak<Inner>,
 }
 impl GitHubActivityGoGate {
+    pub(crate) fn agent(&self) -> Option<&Arc<crate::service_github_action_requests::Entry>> { self.agent.as_ref() }
+    pub(crate) fn agent_entering(&self) -> Result<(), BridgeError> {
+        if let Some(e) = &self.agent { e.entering().map_err(application_service::public_error)?; }
+        Ok(())
+    }
     pub(crate) fn claim(
         &self,
         id: &str,
@@ -73,7 +79,9 @@ impl GitHubActivityGoGate {
             &root,
             &edit,
             Instant::now(),
-            claim,
+            || { let claimed = claim(); if claimed { if let Some(e) = &self.agent {
+                if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; }
+            }} claimed },
         )
     }
 }
@@ -135,6 +143,10 @@ impl DocumentBinding {
     ) -> Result<p::Status, BridgeError> {
         let command =
             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_activity_execute(command, None)
+    }
+    pub(super) fn github_activity_execute(&self, command: p::Command,
+        agent: Option<Arc<crate::service_github_action_requests::Entry>>) -> Result<p::Status, BridgeError> {
         if matches!(command, p::Command::Status) {
             return Ok(self.github_activity_status());
         }
@@ -200,7 +212,12 @@ impl DocumentBinding {
                     p::Reason::Busy
                 })
             })?;
+        if let Some(e) = &agent {
+            let p::Command::Read(args) = &command else { return Err(BridgeError::invalid()); };
+            state.github.github_activity_agent_current(e, args, generation, &root, &edit)?;
+        }
         let gate = GitHubActivityGoGate {
+            agent,
             inner: Arc::downgrade(&self.inner),
         };
         let supervisor = &self.inner.bridge.supervisor;

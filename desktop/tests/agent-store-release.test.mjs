@@ -28,8 +28,8 @@ function result(r) {
   target:storeReleaseTarget(mode,r.platform),result:r.kind==='execute'?'accepted':mode==='external-readiness'?'ready':'reconciled',
   state:mode==='external-testing'||mode==='external-readiness'?'available-to-testers':mode==='production-submit'?(r.platform==='android'?'draft':'pending-developer-release'):null,limitations:[...storeReleaseLimitations(mode)]}};
 }
-const empty=()=>({serviceInstance:null,projectId:null,grantId:null,reviewId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,requestId:null,status:null});
-const access=r=>({serviceInstance:S,projectId:P,grantId:G,reviewId:R,review:clone(r),enabled:true,remainingMs:200000,consumed:false,pending:false,unknown:false,requestId:null,status:null});
+const empty=()=>({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,reviewId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,requestId:null,status:null});
+const access=r=>({permissionRevision:'1',serviceInstance:S,projectId:P,grantId:G,reviewId:R,review:clone(r),enabled:true,remainingMs:200000,consumed:false,pending:false,unknown:false,requestId:null,status:null});
 function completed(r,patch={}) {
  const status={origin:{projectId:P,serviceInstance:S,requestId:Q},grantId:G,reviewId:R,revision:8,review:clone(r),state:'complete',settlement:'settled',reason:'none',operation:{operationId:A,ownerGeneration:B,statusRevision:4},outcome:'complete',result:result(r),...patch};
  return {...access(r),enabled:false,remainingMs:0,consumed:true,requestId:Q,pending:status.settlement!=='settled',unknown:status.state==='unknown',status};
@@ -41,7 +41,7 @@ test('all ten exact mode/platform reviews and unique consents retain one three-c
  for(const [kind,platform,mode] of cases()) {
   const r=parseStoreReview(review(kind,platform,mode));assert.ok(r,`${kind}/${platform}/${mode}`);assert.ok(Object.isFrozen(r.release));
   const consent=storeConsent(r);assert.equal(consent,`agent-${platform}-store-${kind}-${mode}-once-v1`);assert.ok(!consents.has(consent));consents.add(consent);
-  await port.allow(r);const [name,body]=calls.at(-1);assert.equal(name,'allow_agent_store');assert.deepEqual(Object.keys(body),['kind','operationId','ownerGeneration','expectedStatusRevision','consentVersion']);assert.equal(body.consentVersion,consent);
+  await port.allow(r,'0');const [name,body]=calls.at(-1);assert.equal(name,'allow_agent_store');assert.deepEqual(Object.keys(body),['expectedPermissionRevision','kind','operationId','ownerGeneration','expectedStatusRevision','consentVersion']);assert.equal(body.consentVersion,consent);
   assert.deepEqual(storeCommands(access(r)),[`mrk store-submit ${P} ${S} ${G} ${R} --reviewed`]);
  }
  assert.equal(calls.length,10);await port.status();await port.revoke();assert.deepEqual(calls.slice(-2),[['agent_store_access',{}],['revoke_agent_store',{}]]);
@@ -132,13 +132,13 @@ async function original(kind='execute',platform='android',mode='candidate-upload
   changed:()=>{i.project.draftRevision++;ctl.syncProject();},latest:()=>clone(latest),setStore:v=>store=v,
   close:async()=>{unlisten();await ctl.cancel();ctl.dispose();permission.dispose();await flush();}};
 }
-async function prepare(h){await h.ctl.prepare();h.permission.syncContext();const r=h.permission.getSnapshot().review;assert.ok(r);return r;}
+async function prepare(h){await h.ctl.prepare();await h.permission.status();h.permission.syncContext();const r=h.permission.getSnapshot().review;assert.ok(r);return r;}
 
 test('real original controllers reach all ten modes and one actual Allow despite own Prepared busy',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
  for(const row of cases()) {const h=await original(...row);try{
   const r=await prepare(h);assert.equal(r.release.mode,row[2]);assert.ok(h.reason());assert.equal(h.permission.consentReason(),null);
-  assert.equal(h.permission.acknowledge(true),true);assert.equal(await h.permission.allow(),true);assert.deepEqual(h.calls,['prepare','allow']);
+  assert.equal(h.permission.acknowledge(true),true);assert.equal(await h.permission.allow(),true);assert.deepEqual(h.calls,['prepare','status','allow']);
   assert.equal(h.ctl.getSnapshot().consentUntil,null);assert.equal(storeReviewFromState(h.ctl.getSnapshot(),row[0],'p1'),null);
   assert.equal(h.permission.choose(row[0]==='execute'?'reconcile':'execute'),false);assert.equal(await h.permission.allow(),false);assert.equal(h.calls.filter(x=>x==='allow').length,1);
   if(row[2]==='external-testing'&&row[1]==='android')assert.equal(h.ctl.getSnapshot().prepared.destination.channel,'qa-beta');
@@ -149,25 +149,25 @@ test('returned Prepare promise, not early event or consent publication, authoriz
  for(const kind of ['execute','reconcile']) {const h=await original(kind,'android',kind==='execute'?'candidate-upload':'current-internal');try{
   const d=h.defer(),p=h.ctl.prepare();await flush();assert.equal(h.latest().operation.phase,'awaiting-consent');assert.equal(h.ctl.agentPreparedMatches({operationId:A,ownerGeneration:B},h.latest().statusRevision),false);assert.equal(h.permission.acknowledge(true),false);
   let reentrant=0;const off=h.ctl.subscribe(()=>{if(h.ctl.getSnapshot().consentUntil!==null&&h.ctl.getSnapshot().pending){reentrant++;assert.equal(h.ctl.delegatePrepared({operationId:A,ownerGeneration:B},h.latest().statusRevision),null);}});
-  d.resolve();await p;off();assert.ok(reentrant>0);h.permission.syncContext();assert.equal(h.permission.acknowledge(true),true);assert.equal(await h.permission.allow(),true);
+  d.resolve();await p;off();assert.ok(reentrant>0);h.permission.syncContext();await h.permission.status();assert.equal(h.permission.acknowledge(true),true);assert.equal(await h.permission.allow(),true);
  }finally{await h.close();}}
 });
 test('delegated timer and hidden tab cannot stop native running work; context still stops same original',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
  for(const kind of ['execute','reconcile']) {const h=await original(kind,'ios',kind==='execute'?'candidate-upload':'current-internal');try{
   await prepare(h);h.permission.acknowledge(true);assert.equal(await h.permission.allow(),true);h.running();h.ctl.setVisible(false);h.time(70000);t.mock.timers.tick(70000);await flush();
-  h.ctl.acknowledge(true);await h.ctl.start();assert.deepEqual(h.calls,['prepare','allow']);h.changed();await flush();assert.deepEqual(h.calls,['prepare','allow','cancel']);
+  h.ctl.acknowledge(true);await h.ctl.start();assert.deepEqual(h.calls,['prepare','status','allow']);h.changed();await flush();assert.deepEqual(h.calls,['prepare','status','allow','cancel']);
  }finally{await h.close();}}
 });
 test('ordinary unstarted reviews retain timer and tab-hidden cancellation',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
  for(const kind of ['execute','reconcile'])for(const cut of ['timer','hide']) {const h=await original(kind,'android',kind==='execute'?'candidate-upload':'current-internal');try{
-  await prepare(h);if(cut==='timer'){h.time(70000);t.mock.timers.tick(70000);}else h.ctl.setVisible(false);await flush();assert.deepEqual(h.calls,['prepare','cancel']);assert.equal(h.permission.acknowledge(true),false);
+  await prepare(h);if(cut==='timer'){h.time(70000);t.mock.timers.tick(70000);}else h.ctl.setVisible(false);await flush();assert.deepEqual(h.calls,['prepare','status','cancel']);assert.equal(h.permission.acknowledge(true),false);
  }finally{await h.close();}}
 });
 test('an actual conflicting Prepared or unknown peer is never hidden by selected-kind exemption',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});const selected=await original(),peer=await original('reconcile','android','current-internal');
- try{await prepare(selected);await prepare(peer);selected.busy(peer.reason);assert.ok(selected.permission.consentReason());assert.equal(selected.permission.acknowledge(true),false);assert.equal(await selected.permission.allow(),false);peer.bad();await flush();assert.ok(selected.permission.consentReason());assert.deepEqual(selected.calls,['prepare']);}
+ try{await prepare(selected);await prepare(peer);selected.busy(peer.reason);assert.ok(selected.permission.consentReason());assert.equal(selected.permission.acknowledge(true),false);assert.equal(await selected.permission.allow(),false);peer.bad();await flush();assert.ok(selected.permission.consentReason());assert.deepEqual(selected.calls,['prepare','status']);}
  finally{await selected.close();await peer.close();}
 });
 test('post-delegation listeners recheck original context, revoke generation and every peer before sole Allow',async t=>{

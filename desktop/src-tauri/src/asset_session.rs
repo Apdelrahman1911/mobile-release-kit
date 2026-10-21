@@ -38,6 +38,8 @@ mod version_reserve;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use version_reserve::ReservedVersionEditGate;
 #[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::agent::review::{start_request as decode_agent_version_reserve_review_start,status_request as decode_agent_version_reserve_review_status};
+#[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agent_version_reserve_allow,decode_empty as decode_agent_version_reserve_empty};
 #[path = "asset_session_version_enrollment.rs"]
 mod version_enrollment;
@@ -68,6 +70,9 @@ pub(crate) mod agent_ios_archive;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_agent_store.rs"]
 pub(crate) mod agent_store;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_local_history.rs"]
+pub(crate) mod agent_local_history;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_agent_tool_setup.rs"]
 pub(crate) mod agent_tool_setup;
@@ -893,6 +898,8 @@ struct DocumentState {
     agent_store_grant:Option<Arc<agent_store::Grant>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_preparation:Option<Arc<agent_store::preparation::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_local_history:Option<Arc<agent_local_history::Grant>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_apple:apple_provisioning::agent::State,
     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2280,7 +2287,7 @@ mod lookup_memory {
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(agent_tool_setup::retained_bytes(state).ok_or(Problem::Capacity)?)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
-            self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+            {if !agent_local_history::native_backing_fits(){return Err(Problem::Capacity);}self.add(crate::service_store_requests::history::retained_document_backing().ok_or(Problem::Capacity)?)?;} // SAME Store32/2MiB, including the closed History sibling; original material remains charged.
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/history; IPC-only replies are in the SAME8 pool.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
@@ -3099,6 +3106,8 @@ impl DocumentBinding {
                 agent_store_grant:None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8670,6 +8679,8 @@ pub(crate) fn assert_project_path_document_contracts() {
                 agent_store_grant:None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8814,6 +8825,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 agent_store_grant:None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8921,6 +8934,8 @@ mod tests {
                 agent_store_grant:None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_preparation:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_local_history:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,

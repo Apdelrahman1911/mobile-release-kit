@@ -2,18 +2,14 @@
 //! original runtime, Prepared/Session, native jobs and final observer are used.
 use super::*;
 use crate::{agent_ios_archive as agent, service_protocol as service};
+#[path = "saved_command_agent_ios_signed_export.rs"]
+mod signed_export;
 
 fn failure() -> BridgeError {
     BridgeError::new("agent_ios_archive_unavailable", "This original IOS build request cannot proceed. Inspect its exact request; do not replay it.")
 }
 pub(super) fn fixed(input: &ios_wire::Prepare) -> bool {
-    input.signing.is_none()
-        && input.recovery.is_none()
-        && input.action.is_none()
-        && input.draft_revision.is_some()
-        && input.baseline_generation.is_some()
-        && input.saved_config.is_some()
-        && input.saved_version.is_some()
+    signed_export::mode(&input.context()).is_some()
 }
 
 fn version(v: &ios_wire::SavedVersion) -> agent::Version {
@@ -40,6 +36,13 @@ impl Approval {
     pub(crate) fn review(&self) -> &agent::Review {
         &self.review
     }
+    pub(crate) fn signing_backing_bytes(&self) -> Option<usize> {
+        signed_export::approval_backing(&self.input, &self.review)
+    }
+    #[cfg(test)]
+    pub(crate) fn signing_backing_data(input: &ios_wire::Prepare) -> Option<usize> {
+        signed_export::approval_backing(input, &signed_export::review(&input.context()).ok()?)
+    }
     fn current(&self, inner: &Arc<Inner>, _r: &Registry) -> bool {
         self.owner.as_ptr() == Arc::as_ptr(inner)
             && self.document.strong_count() != 0
@@ -63,13 +66,9 @@ fn same_context(
     let Some(review) = s.review.ios() else {
         return false;
     };
-    c.operation == ios_wire::Operation::IOSUnsignedArchive
-        && c.signing.is_none()
-        && c.recovery.is_none()
-        && c.action.is_none()
+    signed_export::review(c).is_ok_and(|current| &current == review)
         && c.project_id == s.runtime_id
-        && c.draft_revision == Some(s.draft_revision)
-        && c.baseline_generation == Some(s.baseline_generation)
+        && s.saved_inputs() == c.draft_revision.zip(c.baseline_generation) && s.saved_inputs().is_some()
         && c.saved_config.as_ref().is_some_and(|v| {
             v.bytes == review.saved_config.bytes && v.sha256 == review.saved_config.sha256
         })
@@ -138,28 +137,6 @@ fn copy<T: serde::de::DeserializeOwned, V: serde::Serialize>(value: &V) -> Resul
     serde_json::from_value(serde_json::to_value(value).map_err(|_| failure())?)
         .map_err(|_| failure())
 }
-fn report(value: &ios_wire::ResultValue) -> Result<agent::Report, BridgeError> {
-    // The original native terminal validated this exact unsigned shape. Copy
-    // only real counts and saved comparisons, not a path, BundleID or digest.
-    let v = value.ordinary_build().ok_or_else(failure)?;
-    if v.ipa.is_some() || v.ipa_bytes.is_some() || v.pairing.is_some() {
-        return Err(failure());
-    }
-    let result = agent::Report {
-        scope: agent::Scope::LocalUnsignedIosArchiveObservation,
-        used_config: agent::Config {
-            bytes: v.used_config.bytes,
-            sha256: v.used_config.sha256.clone(),
-        },
-        used_version: version(&v.used_version),
-        entries: v.entries,
-        bytes: v.bytes,
-    };
-    if !result.valid() {
-        return Err(failure());
-    }
-    Ok(result)
-}
 fn disposition(v: &ios_wire::Disposition) -> Result<agent::Disposition, BridgeError> {
     Ok(agent::Disposition {
         snapshot: copy(&v.snapshot)?,
@@ -176,11 +153,7 @@ fn projection(
     let Context::IOSArchive(c) = &p.context else {
         return Err(failure());
     };
-    if c.operation != ios_wire::Operation::IOSUnsignedArchive
-        || c.signing.is_some()
-        || c.recovery.is_some()
-        || c.action.is_some()
-    {
+    if signed_export::mode(c).is_none() {
         return Err(failure());
     }
     let unknown = p.phase == Phase::Unknown;
@@ -209,7 +182,7 @@ fn projection(
             Some(Terminal::IOSArchive(t)) => (
                 t.disposition.as_ref().map(disposition).transpose()?,
                 if outcome == agent::Outcome::Complete {
-                    Some(report(t.result.as_ref().ok_or_else(failure)?)?)
+                    Some(signed_export::report(c,t.result.as_ref().ok_or_else(failure)?)?)
                 } else {
                     None
                 },
@@ -262,7 +235,7 @@ fn projection(
         disposition,
         result,
     };
-    if !output.valid() {
+    if !output.valid_for(&signed_export::review(c)?) {
         return Err(failure());
     }
     Ok(output)
@@ -315,25 +288,19 @@ impl SavedCommandOwner {
         document: &Arc<()>,
     ) -> Result<Arc<Approval>, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
-        let input = ios_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
+        let mut input = ios_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
+        signed_export::compact_policy(&mut input);
         if !fixed(&input) {
             return Err(failure());
         }
         let r = self.inner.lock();
         if !self.inner.ios_installed_selected()
+            || !self.inner.ios_mode_qualified(&Context::IOSArchive(input.context()), None)
             || self.inner.availability(&r, Availability::Available) != Availability::Available
         {
             return Err(failure());
         }
-        let config = input.saved_config.as_ref().ok_or_else(failure)?;
-        let review = agent::Review {
-            mode: agent::Mode::SavedIosUnsignedArchive,
-            saved_config: agent::Config {
-                bytes: config.bytes,
-                sha256: config.sha256.clone(),
-            },
-            saved_version: version(input.saved_version.as_ref().ok_or_else(failure)?),
-        };
+        let review = signed_export::review(&input.context())?;
         if !review.valid() {
             return Err(failure());
         }
@@ -351,6 +318,7 @@ impl SavedCommandOwner {
         registration: u32,
         root: RegisteredRoot,
         gate: ios_wire::Availability,
+        material: Option<Arc<IOSSigningMaterial>>,
     ) -> Result<ios_wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
         self.prepare_bound_requests(
@@ -358,7 +326,7 @@ impl SavedCommandOwner {
             registration,
             root,
             Availability::from_ios(gate),
-            None,
+            material.map(PrivateSigningMaterial::IOS),
             None,
             None,
             Some(agent_build::Preparation::Ios(Preparation {
@@ -368,11 +336,22 @@ impl SavedCommandOwner {
         )?
         .ios()
     }
+    pub(crate) fn agent_ios_archive_prepared_material(&self, entry: &Arc<agent::Entry>) -> Result<Option<Arc<IOSSigningMaterial>>, BridgeError> {
+        self.require_domain(SavedCommandDomain::IOSArchive)?;
+        let r = self.inner.lock();
+        let p = r.prepared.as_ref().filter(|p| start_matches(p, Some(entry))).ok_or_else(failure)?;
+        match &p.material {
+            None => Ok(None),
+            Some(PrivateSigningMaterial::IOS(original)) => Ok(Some(original.clone())),
+            _ => Err(failure()),
+        }
+    }
     pub(crate) fn start_agent_ios_archive(
         &self,
         entry: &Arc<agent::Entry>,
         registered: Option<(u32, RegisteredRoot)>,
         gate: ios_wire::Availability,
+        material: Option<Arc<IOSSigningMaterial>>,
     ) -> Result<crate::ios_archive_owner::Admitted, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
         let input = {
@@ -393,7 +372,7 @@ impl SavedCommandOwner {
             at,
             registered,
             Availability::from_ios(gate),
-            None,
+            material.map(PrivateSigningMaterial::IOS),
             None,
             None,
             None,
@@ -416,7 +395,7 @@ mod tests {
             "savedConfig":{"bytes":123,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":32,"sha256":"b".repeat(64),"name":"1.2.3","build":7}})).unwrap()
     }
     #[test]
-    fn fixed_archive_cannot_borrow_signing_candidate_recovery_or_partial_inputs() {
+    fn fixed_archive_and_export_cannot_borrow_candidate_recovery_or_partial_inputs() {
         let original = input();
         assert!(fixed(&original));
         for action in [
@@ -433,7 +412,10 @@ mod tests {
             distribution_certificate_sha256: "f".repeat(64),
             assignments: vec![],
         });
-        assert!(!fixed(&signed));
+        // The ordinary native decoder still rejects malformed private policy.
+        assert!(ios_wire::prepare(&serde_json::to_value(&signed).unwrap()).is_err());
+        signed.signing = ios_wire::tests::signed_context().signing;
+        assert!(fixed(&signed));
         let mut v = original.clone();
         v.saved_version = None;
         assert!(!fixed(&v));
@@ -501,11 +483,12 @@ mod tests {
             input_revision: 0,
             document: Arc::downgrade(&document),
             observation_revision: 2,
-            draft_revision: input.draft_revision.unwrap(),
-            baseline_generation: input.baseline_generation.unwrap(),
+            read: None,
+            input: crate::agent_build_requests::NativeInput::Saved { draft_revision: input.draft_revision.unwrap(), baseline_generation: input.baseline_generation.unwrap() },
             changes,
             review: agent::Review {
                 mode: agent::Mode::SavedIosUnsignedArchive,
+                signing: None,
                 saved_config: agent::Config {
                     bytes: input.saved_config.as_ref().unwrap().bytes,
                     sha256: input.saved_config.as_ref().unwrap().sha256.clone(),
@@ -534,7 +517,7 @@ mod tests {
                     inode: 2,
                     revision: 2,
                     fresh: true,
-                    config: Some(scope.review.config().clone()),
+                    config: Some(scope.review.ios().unwrap().saved_config.clone()),
                 },
             )
             .unwrap();
@@ -545,6 +528,9 @@ mod tests {
             .bind(agent::FAMILY, id('a'), id('b'), 1, expires)
             .unwrap();
         preparing.returned(true);
+        let (_, prepared_data) = link.entry().claim_history().unwrap().unwrap();
+        // Inert publication bookkeeping only: no native grant/IO was produced.
+        link.entry().history_returned(prepared_data.status_revision(), Ok(())).unwrap();
         let owner =
             SavedCommandOwner::ios_archive(RuntimeConfig::packaged("/unopened-ios-runtime".into()));
         let root = RegisteredRoot {
@@ -553,7 +539,7 @@ mod tests {
                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
             ),
         };
-        let prepared = Prepared { agent_store_preparation:None, agent_store:None, store_witness:None,
+        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
             agent_build: Some(link.clone()),
             agent_local_check: None,
             upload_key_preparation: None,
@@ -626,7 +612,8 @@ mod tests {
             .start_agent_ios_archive(
                 starting.entry(),
                 Some((1, root.clone())),
-                ios_wire::Availability::RuntimeUnqualified
+                ios_wire::Availability::RuntimeUnqualified,
+                None,
             )
             .is_err());
         assert!(owner.inner.lock().prepared.is_some());
@@ -647,6 +634,7 @@ mod tests {
                 starting.entry(),
                 Some((1, root)),
                 ios_wire::Availability::RuntimeUnqualified,
+                None,
             )
             .unwrap()
             .release();
@@ -654,7 +642,14 @@ mod tests {
             let r = owner.inner.lock();
             assert!(r.prepared.is_none() && r.active.is_none());
         }
-        let result = starting.entry().status().unwrap();
+        let entry = starting.entry().clone();
+        assert!(entry.claim_history().unwrap().is_none());
+        assert!(entry.status().unwrap().operation.as_ref().is_some_and(|o|
+            o.settlement() == service::Settlement::Pending));
+        starting.returned(true);
+        let (_, refused_data) = entry.claim_history().unwrap().unwrap();
+        entry.history_returned(refused_data.status_revision(), Ok(())).unwrap();
+        let result = entry.status().unwrap();
         assert_eq!(result.start_state, agent::StartState::Consumed);
         let operation = result.operation.unwrap();
         let crate::agent_build_requests::Operation::Ios(result) = operation else {
@@ -664,7 +659,6 @@ mod tests {
             (result.outcome, result.settlement),
             (Some(agent::Outcome::Refused), service::Settlement::Settled)
         );
-        starting.returned(true);
         assert!(inbox.claim(agent::FAMILY).unwrap().is_none());
     }
 
@@ -699,7 +693,7 @@ mod tests {
         let context = ios_wire::tests::context();
         let terminal =
             ios_wire::terminal(&ios_wire::tests::complete(), &context, &"a".repeat(32)).unwrap();
-        let result = report(terminal.result.as_ref().unwrap()).unwrap();
+        let result = signed_export::report(&context,terminal.result.as_ref().unwrap()).unwrap();
         assert!(result.valid());
         assert_eq!((result.entries, result.bytes), (10, 1000));
         let value = serde_json::to_value(result).unwrap();

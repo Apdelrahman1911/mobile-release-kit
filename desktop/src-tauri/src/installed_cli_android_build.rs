@@ -35,7 +35,12 @@ pub(super) fn human(s: &build::Status) -> String {
         s.review.saved_version.build,
         s.review.saved_version.sha256
     );
-    text.push_str("Scope: existing Android build + structure/version inspection. Project code may read/write files, use network or sign itself; no toolkit signing, credentials, Store upload or release approval is granted.\n");
+    text.push_str(match s.review.mode {
+        build::Mode::SavedAndroidBuildStructureAndVersion => "Scope: existing Android build + structure/version inspection. Project code may read/write files, use network or sign itself; no toolkit signing credentials are supplied.\n",
+        build::Mode::SavedAndroidLocalUploadKeySign => "Scope: one local signed Android build with the Desktop's explicitly assigned existing upload key. Private key/password inputs never cross CLI. Original READ expiry/revoke still stops work; no key generation or rotation.\n",
+    });
+    text.push_str("No Store upload, release approval or automatic recovery is granted.\n");
+    if let Some(hash) = &s.review.upload_certificate_sha256 { text.push_str(&format!("Reviewed upload certificate SHA-256: {hash}\n")); }
     if let Some(op) = &s.operation {
         text.push_str(&format!(
             "Operation {} / {} · {:?} · {:?}\nStart: {:?}\n",
@@ -55,6 +60,9 @@ pub(super) fn human(s: &build::Status) -> String {
         }
         if let Some(result) = &op.result {
             text.push_str(&format!("Historical artifact observation: {} bytes / {}\n{} findings (completion is not PASS or release readiness).\n", result.artifact.size, result.artifact.sha256, result.summary.total));
+            if let Some(signing) = &result.signing {
+                text.push_str(&format!("Returned signature: {:?}; signer: {:?}; upload certificate SHA-256 {}\n", signing.signature, signing.signer, signing.upload_certificate_sha256));
+            }
             for (status, count) in &result.summary.counts {
                 text.push_str(&format!("{status:?}: {count}\n"));
             }
@@ -115,4 +123,22 @@ mod tests {
         .unwrap();
         assert!(p::encode_request(&frame).unwrap().len() <= p::REQUEST_BYTES);
     }
+    #[test]
+    fn signed_scope_is_explicit_but_unknown_never_prints_start_or_private_assignment() {
+        let value=serde_json::json!({"origin":{"projectId":"a".repeat(32),"serviceInstance":"b".repeat(32),"requestId":"c".repeat(32)},
+            "expectedObservationRevision":1,"requestState":"preparing","startState":"not-requested","operation":null,"historyAvailable":false,"doNotReplay":true,
+            "review":{"mode":"saved-android-local-upload-key-sign","savedConfig":{"bytes":123,"sha256":"d".repeat(64)},
+                "savedVersion":{"bytes":32,"sha256":"e".repeat(64),"name":"1.2.3","build":7},
+                "tools":{"instance":"f".repeat(32),"catalogGeneration":1,"recordSha256":"a".repeat(64)},
+                "signing":{"mode":"local-upload-key","assignments":[{"kind":"android-keystore","recordId":"d".repeat(32),"recordRevision":1,"contextRevision":2}]},
+                "uploadCertificateSha256":"b".repeat(64)}});
+        let mut status:build::Status=serde_json::from_value(value).unwrap();status.validate().unwrap();
+        let text=human(&status);assert!(text.contains("explicitly assigned existing upload key"));
+        assert!(text.contains("no key generation or rotation"));
+        assert!(text.contains("No Store upload, release approval or automatic recovery"));
+        assert!(!text.contains("mrk android-build-start")&&!text.contains("recordRevision")&&!text.contains("storePassword"));
+        status.request_state=build::RequestState::AdmissionUnknown;status.start_state=build::StartState::Consumed;
+        status.validate().unwrap();assert!(!human(&status).contains("Start once"));
+    }
+
 }

@@ -45,7 +45,7 @@ fn only_current_successful_observe_data_is_even_eligible_for_native_consent() {
 }
 #[test]
 fn native_consent_codec_rejects_paths_outside_exact_selected_roster() {
-    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"readOperationId":"git-read-1","action":"stage","paths":["app/a"],"consentVersion":wire::CONSENT});
+    let value = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,"expectedPermissionRevision":"0","readOperationId":"git-read-1","action":"stage","paths":["app/a"],"consentVersion":wire::CONSENT});
     assert!(decode_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
     for key in ["window", "root", "nativeReceipt", "command", "reviewId"] {
         let mut bad = value.clone();
@@ -111,9 +111,9 @@ fn dormant_document_or_nonmain_caller_never_starts_a_host_or_native_reader() {
         "/inert/git-index-never-opened",
     )));
     let doc = DocumentBinding::new(bridge.clone());
-    assert!(!doc.agent_git_index_access(MAIN).unwrap().enabled);
+    assert!(!doc.agent_git_index_access(MAIN).unwrap().access.enabled);
     assert!(doc.agent_git_index_access("foreign").is_err());
-    assert!(!doc.revoke_agent_git_index(MAIN).unwrap().enabled);
+    assert!(!doc.revoke_agent_git_index(MAIN).unwrap().access.enabled);
     doc.service_git_index_tick(Path::new("/inert/no-io"));
     doc.drain_git_index_for_exit();
     assert!(!bridge.application_service.status().unwrap().enabled);

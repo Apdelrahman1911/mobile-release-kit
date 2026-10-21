@@ -92,7 +92,8 @@ fn lost_ack_keeps_exact_public_request_and_catalogue_stays_bounded_without_readi
     assert!(bytes.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let catalog: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let cap = &catalog["versionReservation"];
-    assert_eq!(cap["commands"].as_array().unwrap().len(), 3);
+    assert_eq!(cap["commands"].as_array().unwrap().len(), 4);
+    assert_eq!(&COMMANDS[..3], &["version-reserve-submit", "version-reserve-status", "version-reserve-cancel"]);
     for field in [
         "defaultEnabled",
         "readGrantAuthorizesReserve",

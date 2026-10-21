@@ -8,6 +8,7 @@ use crate::service_git_commit_protocol::{self as commit, Draft, Family};
 pub(crate) struct CommitAllow {
     project_id: String,
     expected_document_revision: u32,
+    expected_permission_revision: PermissionRevision,
     read_operation_id: String,
     message: String,
     author_name: String,
@@ -37,20 +38,24 @@ impl DocumentBinding {
     pub(crate) fn agent_git_commit_access(
         &self,
         window: &str,
-    ) -> Result<commit::Access, BridgeError> {
+    ) -> Result<MainAccess<commit::Access>, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
-        match self.git_index_service()? {
-            Some(s) => s.git_index_requests().commit_access().map_err(public),
-            None => Ok(commit::Access::empty()),
-        }
+        let _state = self.lock();
+        let book = self.inner.agent_git_index.book.lock()
+            .map_err(|_| public(Error::StateUnknown))?;
+        let access = match self.git_index_service()? {
+            Some(s) => s.git_index_requests().commit_access().map_err(public)?,
+            None => commit::Access::empty(),
+        };
+        Ok(MainAccess::new(access, book.permission_revision()))
     }
     pub(crate) fn allow_agent_git_commit(
         &self,
         window: &str,
         args: CommitAllow,
-    ) -> Result<commit::Access, BridgeError> {
+    ) -> Result<MainAccess<commit::Access>, BridgeError> {
         let draft =
             Draft::new(args.message, args.author_name, args.author_email).map_err(public)?;
         let value = self.allow_agent_git_files(
@@ -58,6 +63,7 @@ impl DocumentBinding {
             Allow {
                 project_id: args.project_id,
                 expected_document_revision: args.expected_document_revision,
+                expected_permission_revision: args.expected_permission_revision,
                 read_operation_id: args.read_operation_id,
                 action: wire::Action::Commit,
                 paths: Vec::new(),
@@ -65,16 +71,16 @@ impl DocumentBinding {
             },
             Some(draft),
         )?;
-        let value = commit::Access(value);
-        value.validate().map_err(public)?;
+        let value = value.map_access(commit::Access);
+        value.access.validate().map_err(public)?;
         Ok(value)
     }
     pub(crate) fn revoke_agent_git_commit(
         &self,
         window: &str,
-    ) -> Result<commit::Access, BridgeError> {
+    ) -> Result<MainAccess<commit::Access>, BridgeError> {
         self.revoke_agent_git_files(window, Family::Commit)
-            .map(commit::Access)
+            .map(|value| value.map_access(commit::Access))
     }
 }
 

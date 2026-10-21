@@ -12,6 +12,7 @@ pub(crate) struct Review {
     pub(crate) stamp: SavedEditStamp,
     pub(crate) end: Instant,
     pub(crate) data: p::Review,
+    pub(crate) activity: Option<super::activity::delegation::Capture>,
 }
 struct Hash {
     sha: Sha256,
@@ -51,6 +52,7 @@ pub(super) fn review<T: Serialize>(
         stamp,
         end,
         data,
+        activity: None,
     })
 }
 pub(super) fn origin(scope: &Option<Weak<r::NativeScope>>, entry: Option<&Arc<r::Entry>>) -> bool {

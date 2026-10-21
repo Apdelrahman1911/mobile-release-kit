@@ -88,6 +88,9 @@ mod agent_tool_setup;
 mod store_preparation;
 #[path="service_store_application.rs"]
 mod agent_store;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_local_history_application.rs"]
+mod local_history;
 #[path="service_apple_provisioning_application.rs"]
 mod agent_apple_provisioning;
 #[path = "application_service_agent_ios_archive.rs"]
@@ -466,6 +469,10 @@ impl ApplicationService {
                 p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
                 p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
                 p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
+                p::RequestBody::LocalHistoryScope(q)=>return self.service_local_history_scope(client,&q.project_id),
+                p::RequestBody::LocalHistorySubmit(v)=>return self.service_local_history_submit(client,v.clone()),
+                p::RequestBody::LocalHistoryStatus(q)=>return self.service_local_history_query(client,q,false),
+                p::RequestBody::LocalHistoryCancel(q)=>return self.service_local_history_query(client,q,true),
                 p::RequestBody::StorePrepare(v)=>return self.service_store_preparation(client,v.clone(),false),
                 p::RequestBody::StoreStart(v)=>return self.service_store_preparation(client,v.clone(),true),
                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
@@ -479,6 +486,7 @@ impl ApplicationService {
                 p::RequestBody::VersionEditPrepare(v)=>return self.service_version_edit_prepare(client,v.clone()),
                 p::RequestBody::VersionEditStatus(q)=>return self.service_version_edit_query(client,q,false),
                 p::RequestBody::VersionEditCancel(q)=>return self.service_version_edit_query(client,q,true),
+                p::RequestBody::VersionReserveReview(v)=>return self.service_version_reserve_review(client,v.clone()),
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
                 p::RequestBody::GitHubActionSubmit(v)=>return self.service_github_action_submit(client,v.clone()),
                 p::RequestBody::GitHubActionStatus(q)=>return self.service_github_action_query(client,q,false),
@@ -553,11 +561,12 @@ impl ApplicationService {
                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
+                p::RequestBody::LocalHistoryScope(_)|p::RequestBody::LocalHistorySubmit(_)|p::RequestBody::LocalHistoryStatus(_)|p::RequestBody::LocalHistoryCancel(_)|
                 p::RequestBody::StorePrepare(_) | p::RequestBody::StoreStart(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
                 p::RequestBody::AppleProvisioningPrepare(_) | p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
                 p::RequestBody::VersionEditPrepare(_) | p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
-                p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                p::RequestBody::VersionReserveReview(_) | p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |
                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)

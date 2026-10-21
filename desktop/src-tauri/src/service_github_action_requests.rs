@@ -12,6 +12,8 @@ use std::{
 };
 #[path = "service_github_action_memory.rs"]
 mod memory;
+#[path = "service_github_activity_requests.rs"]
+mod activity;
 pub(crate) use memory::retained_document_backing;
 
 pub(crate) struct NativeScope {
@@ -186,6 +188,7 @@ struct Row {
     history_claim: Option<Fact>,
     unknown: Option<p::Reason>,
     observed_stop: Option<p::Reason>,
+    snapshot: Option<Arc<p::activity::Snapshot>>,
 }
 pub(crate) struct Entry {
     input: p::Submit,
@@ -328,7 +331,11 @@ impl Entry {
     }
     // ONLY the original typed Connection accept_* tail invokes this. Its actual
     // Supervisor receipt has returned; public status cannot call this method.
-    pub(crate) fn returned_native(&self, id: &str, reason: p::Reason, mut effect: p::Effect) {
+    pub(crate) fn returned_native(&self, id: &str, reason: p::Reason, effect: p::Effect) {
+        self.returned_native_snapshot(id, reason, effect, None)
+    }
+    fn returned_native_snapshot(&self, id: &str, reason: p::Reason, mut effect: p::Effect,
+        snapshot: Option<Arc<p::activity::Snapshot>>) {
         let Ok(mut r) = self.lock() else { return };
         if r.unknown.is_some() {
             return;
@@ -338,6 +345,8 @@ impl Entry {
                 .as_ref()
                 .is_none_or(|f| f.admission != Admission::Running)
             || !effect.valid_for(self.scope.review.kind())
+            || !activity::snapshot_for(&self.scope.review, reason, snapshot.as_deref())
+            || self.scope.review.kind() == p::Kind::ActivityOverview && reason == p::Reason::None && !r.go
             || matches!(
                 reason,
                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
@@ -358,6 +367,7 @@ impl Entry {
             self.unknown(p::Reason::CleanupUnknown);
             return;
         }
+        r.snapshot = snapshot;
         self.scope.retired.store(true, Ordering::Release);
     }
     fn never_admitted(&self, why: p::Reason) -> Result<(), Error> {
@@ -486,6 +496,7 @@ impl Entry {
             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
                 && state != p::State::Unknown,
             do_not_replay: true,
+            snapshot: if state == p::State::Complete { r.snapshot.as_deref().cloned() } else { None },
         };
         s.validate().map_err(|_| Error::StateUnknown)?;
         Ok(s)
@@ -659,6 +670,7 @@ impl Inbox {
                 history_claim: None,
                 unknown: None,
                 observed_stop: None,
+                snapshot: None,
             }),
         });
         l.entry = Some(Arc::downgrade(&e));

@@ -1,3 +1,4 @@
+import { agentAndroidBuildContext } from './agentAndroidSigned.ts';
 import { sameAgentAndroidBuildOrigin, validAgentAndroidBuildOrigin } from './agentAndroidBuildOrigin.ts';
 import { candidateInputs, LOCAL_CANDIDATE_CONSENT as ANDROID_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
 import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
@@ -361,7 +362,7 @@ function operation(value: unknown): value is AndroidBuildOperation {
         (value.context.operation === 'android-candidate-inputs' ? candidateResult(value.result, value.operationId) : result(value.result)))) return false;
   const op = value as unknown as AndroidBuildOperation;
   if (Object.hasOwn(value, 'agentAndroidBuild') && (!validAgentAndroidBuildOrigin(value.agentAndroidBuild) ||
-      op.context.operation !== 'android-build-inspect' || op.context.artifactValidation.mode !== 'structure-and-version')) return false;
+      !agentAndroidBuildContext(op.context))) return false;
   const candidate = op.context.operation === 'android-candidate-inputs';
   if (candidate ? !/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(op.operationId) :
       ['journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'].includes(op.reason)) return false;

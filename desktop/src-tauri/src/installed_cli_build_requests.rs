@@ -139,11 +139,11 @@ fn output(
                 android_build::human(s),
             )
         }
-        (p::ResponseBody::IosArchiveRequest(s), Family::IosArchive) if s.origin == *query => {
+        (p::ResponseBody::IosArchiveRequest(s), Family::IosArchive) if s.origin() == query => {
             s.validate()?;
             (
-                s.request_state,
-                s.operation.as_ref().map(|o| (o.state, o.settlement)),
+                s.request_state(),
+                s.native(),
                 ios_archive::human(s),
             )
         }

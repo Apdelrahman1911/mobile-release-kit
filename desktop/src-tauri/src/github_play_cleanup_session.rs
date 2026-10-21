@@ -93,6 +93,7 @@ pub(super) struct State {
     pub(crate) service: Option<Weak<crate::application_service::ApplicationService>>,
 }
 impl State {
+    pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
     pub(super) fn new() -> Self {
         Self {
             view: p::Status {

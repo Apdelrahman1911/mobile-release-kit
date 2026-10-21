@@ -1378,3 +1378,17 @@ test('unused CLI copy restores only the same retained earlier native review, not
   h.controller.cancelToolRegistration();const cancel=h.registrationCalls.at(-1);
   if(cancel?.kind==='cancel'){h.replyRegistration(cancel,discardedSourceReview({...native,statusRevision:2}));await flush();}
 });
+
+
+test('agent signed approval reuses actual saved policy and assigned key without GUI Prepare or automatic Start', async (t) => {
+  const h=harness(t,{initialCatalog:readyCatalog({selected:TOOL_A}),initialAssets:signingAssets()});
+  await savedSigningPolicy(h); h.controller.setBuildMode('signed');
+  const approved=h.controller.agentBuildApproval();assert.ok(approved,h.controller.prepareReason());
+  assert.equal(approved.input.artifactValidation.mode,'upload-signature');
+  assert.deepEqual(clone(approved.input.signing.assignments),[{kind:'android-keystore',recordId:OTHER,recordRevision:1,contextRevision:2}]);
+  assert.equal(h.state.consent,null);
+  const changed=signingAssets();changed.status.records[0].revision++;h.setAssets(changed);
+  assert.equal(h.controller.agentBuildApproval(),null);
+  h.setAssets(signingAssets());h.controller.setRetainCandidateInputs(true);
+  assert.equal(h.controller.agentBuildApproval(),null);
+});

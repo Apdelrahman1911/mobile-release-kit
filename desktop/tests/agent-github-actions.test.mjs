@@ -63,17 +63,17 @@ function requestStatus(h,patch={}){
   return {origin:{projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')},grantId:hex('3'),review:{kind:h.kind,sessionId:'session-a',consentId,expectedRevision:3,preparedSha256:hex('c',64)},revision:7,state:'complete',settlement:'settled',operationId:prefixes[h.kind]+'2',reason:'none',effect:h.kind==='failed-jobs-retry'?'accepted':'created-observed',neverAdmitted:false,doNotReplay:true,...patch};
 }
 function access(h,status=null,patch={}){
-  return {serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:requestStatus(h).review,enabled:status===null,remainingMs:status===null?100000:0,consumed:status!==null,pending:status!==null&&status.settlement!=='settled',unknown:status?.state==='unknown',status,...patch};
+  return {permissionRevision:'1',serviceInstance:hex('2'),projectId:hex('1'),grantId:hex('3'),review:requestStatus(h).review,enabled:status===null,remainingMs:status===null?100000:0,consumed:status!==null,pending:status!==null&&status.settlement!=='settled',unknown:status?.state==='unknown',status,...patch};
 }
-function permission(h){
-  const calls=[],native={};for(const name of ['access','allow','request','revoke'])native[name]=arg=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg)});calls.push(d);h.calls.push(d);return d.promise;};
+async function permission(h){
+  const calls=[],native={};for(const name of ['access','allow','request','revoke'])native[name]=(arg,revision)=>{const d=deferred();Object.assign(d,{kind:'permission-'+name,args:copy(arg),revision});calls.push(d);h.calls.push(d);return d.promise;};
   let peer=null,epoch={},c;
   c=new AgentGithubActionAccessController({current:()=>({port:native,nativeSession:h,projectId:'project-a',epoch,preview:false,
     blockedReason:peer??(c?.peerSelection()&&h.controller.agentSelected(c.peerSelection())?null:h.controller.ownerReason()),reviews:[h.controller.agentSelection()].filter(Boolean)}),
     syncOriginal:()=>h.controller.syncContext(),delegate:r=>h.controller.delegatePrepared(r)});
   if(h.kind!=='repository-create')c.choose(h.kind);c.syncContext();
   const p={controller:c,calls,last:k=>calls.filter(x=>x.kind==='permission-'+k).at(-1),count:k=>calls.filter(x=>x.kind==='permission-'+k).length,peer(v){peer=v;c.syncContext();},move(){epoch={};c.syncContext();}};
-  h.permission=p;return p;
+  h.permission=p;const check=c.check();p.last('access').resolve({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,status:null});await check;return p;
 }
 test.afterEach(async()=>{for(const h of retained.splice(0)){for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();h.permission?.controller.dispose();h.controller.dispose();for(const call of h.calls)if(!call.ended)call.reject({code:'fixture-ended'});await flush();}});
 
@@ -88,10 +88,10 @@ test('closed codec keeps kind-specific effects, exact IDs/nulls and bounded no-r
 test('actual composed bridge has four raw metadata-only methods and no preview capability',async()=>{
   const calls=[],api=createNativeApi('native',async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;},async()=>()=>{});
   const s={kind:'repository-create',sessionId:'session-a',consentId,expectedRevision:3},q={projectId:hex('1'),serviceInstance:hex('2'),requestId:hex('4')};
-  await api.agentGithubAction.access();await api.agentGithubAction.allow(s);await api.agentGithubAction.request(q);await api.agentGithubAction.revoke();
+  await api.agentGithubAction.access();await api.agentGithubAction.allow(s,'0');await api.agentGithubAction.request(q);await api.agentGithubAction.revoke();
   assert.deepEqual(calls.map(c=>c[0]),['agent_github_action_access','allow_agent_github_action','agent_github_action_request_status','revoke_agent_github_action']);
-  assert.equal(calls[1][1].consentVersion,'agent-repository-create-once-v1');
-  assert.throws(()=>api.agentGithubAction.allow({...s,url:'https://example.invalid'}));
+  assert.equal(calls[1][1].consentVersion,'agent-repository-create-once-v1');assert.equal(calls[1][1].expectedPermissionRevision,'0');
+  assert.throws(()=>api.agentGithubAction.allow({...s,url:'https://example.invalid'},'0'));
   assert.equal(createNativeApi('preview',()=>assert.fail(),null).agentGithubAction,null);
   assert.equal(calls.length,4);
 });
@@ -102,7 +102,7 @@ for(const kind of ['repository-create','draft-pr-create','failed-jobs-retry']){
     h.respond('prepare',h.data.review());await flush();assert.ok(h.controller.agentSelection());
   });
   test(`${kind}: Allow calls once after exact own-review exemption; ordinary GUI mutation remains unavailable`,async()=>{
-    const h=await fixture(kind),p=permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
+    const h=await fixture(kind),p=await permission(h);assert.equal(p.controller.consentReason(),null);assert.equal(p.controller.acknowledge(true),true);
     const promise=p.controller.allow();assert.equal(p.count('allow'),1);assert.equal(h.controller.agentSelection(),null);
     h.controller.setConfirmed(true);if(kind==='failed-jobs-retry')h.controller.retry();else h.controller.create();
     assert.equal(h.calls.filter(x=>['create','start'].includes(x.kind)).length,0);assert.ok(h.controller.canDiscard());
@@ -111,48 +111,48 @@ for(const kind of ['repository-create','draft-pr-create','failed-jobs-retry']){
   });
 }
 test('conflicting peer veto performs zero Allow, without creating permission or dropping the review',async()=>{
-  const h=await fixture(),p=permission(h);p.peer('Other original native work is still pending');assert.ok(p.controller.consentReason());assert.equal(p.controller.acknowledge(true),false);
+  const h=await fixture(),p=await permission(h);p.peer('Other original native work is still pending');assert.ok(p.controller.consentReason());assert.equal(p.controller.acknowledge(true),false);
   assert.equal(await p.controller.allow(),false);assert.equal(p.count('allow'),0);assert.ok(h.controller.agentSelection());
 });
 test('synchronous delegation listener changing peer closes exact unsubmitted original; never rewinds it',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);let changed=false;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);let changed=false;
   const stop=h.controller.subscribe(()=>{if(!changed&&h.controller.agentSelection()===null){changed=true;p.peer('A conflicting peer appeared');}});
   assert.equal(await p.controller.allow(),false);stop();assert.equal(p.count('allow'),0);assert.equal(h.calls.filter(x=>x.kind==='discard').length,1);
   h.respond('discard',{...h.data.review(),revision:4,consent:null});await flush();assert.equal(h.controller.agentSelection(),null);assert.equal(h.controller.ownerReason(),null);
 });
 test('late successful Allow cannot resurrect a pre-call Revoke; no second origin replaces outstanding callers',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();const revoke=p.controller.revoke();
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();const revoke=p.controller.revoke();
   assert.equal(p.count('allow'),1);assert.equal(p.count('revoke'),1);assert.equal(await p.controller.allow(),false);
   p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
   p.last('allow').resolve(access(h));await allow;assert.equal(p.controller.getSnapshot().access.enabled,false);assert.equal(p.controller.getSnapshot().withdrawn,true);
   assert.ok(h.controller.ownerReason());
 });
 test('lost Allow remains absorbing through known Revoke/readback and never exposes ordinary Create',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(new Error('INERT private detail'));await allow;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').reject(new Error('INERT private detail'));await allow;
   assert.equal(p.controller.getSnapshot().unknown,true);assert.equal(await p.controller.allow(),false);assert.equal(h.controller.agentSelection(),null);
   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,null,{enabled:false,remainingMs:0}));await revoke;
   assert.equal(p.controller.getSnapshot().unknown,true);assert.ok(h.controller.ownerReason());assert.equal(p.count('allow'),1);
 });
 test('service final before native Check return never releases original; reconnect uses exact retained Query not latest lease',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
   const progress=requestStatus(h,{revision:5,state:'running',settlement:'pending',effect:'potentially-applied'});
   const first=p.controller.check();p.last('access').resolve(access(h,progress));await flush();p.last('request').resolve(progress);await first;
   h.emit(h.data.final());const final=requestStatus(h);h.deferStatus=true;
-  const check=p.controller.check();assert.equal(p.count('access'),1);assert.deepEqual(p.last('request').args,final.origin);p.last('request').resolve(final);await check;
+  const check=p.controller.check();assert.equal(p.count('access'),2);assert.deepEqual(p.last('request').args,final.origin);p.last('request').resolve(final);await check;
   assert.ok(h.controller.ownerReason());assert.equal(h.calls.filter(x=>x.kind==='status'&&!x.ended).length,1);
   const revoke=p.controller.revoke();p.last('revoke').resolve(access(h,final));await revoke;
   h.respond('status',h.data.final());await flush();assert.equal(h.controller.ownerReason(),null);assert.equal(p.controller.ownerReason(),null);
-  assert.equal(p.count('allow'),1);assert.equal(p.count('access'),1);
+  assert.equal(p.count('allow'),1);assert.equal(p.count('access'),2);
 });
 test('pre-arm NeverAdmitted requires original Close plus joined native Check; no fabricated mutation retirement',async()=>{
-  const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+  const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
   const final=requestStatus(h,{state:'refused',reason:'native-refused',operationId:null,effect:'not-sent',neverAdmitted:true});
   const check=p.controller.check();p.last('access').resolve(access(h,final));await flush();p.last('request').resolve(final);await check;await flush();assert.ok(h.controller.ownerReason());
   h.controller.discardReview();h.respond('discard',{...h.data.review(),revision:4,consent:null});await flush();h.controller.checkStatus();await flush();
   assert.equal(h.controller.ownerReason(),null);assert.equal(h.calls.filter(x=>x.kind==='create').length,0);
 });
 test('service history Unknown and foreign final cannot clear retained original even with a native final event',async()=>{
-  for(const malformed of [false,true]){const h=await fixture(),p=permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
+  for(const malformed of [false,true]){const h=await fixture(),p=await permission(h);p.controller.acknowledge(true);const allow=p.controller.allow();p.last('allow').resolve(access(h));await allow;
     h.emit(h.data.final());const bad=malformed?requestStatus(h,{grantId:hex('9')}):requestStatus(h,{state:'unknown',settlement:'unknown',reason:'history-unavailable'});
     const check=p.controller.check();p.last('access').resolve(access(h,bad));await check;
     assert.equal(p.controller.getSnapshot().unknown,true);assert.ok(h.controller.ownerReason());assert.equal(await p.controller.allow(),false);

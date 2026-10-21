@@ -15,6 +15,8 @@ use std::{
 #[path = "service_store_prepare_requests.rs"]
 pub(crate) mod preparation;
 use preparation::{PreparationLease, StoredEntry};
+#[path="service_local_history_requests.rs"]
+pub(crate) mod history;
 
 pub(crate) struct Control {
     stop: Mutex<Option<(p::Reason, Instant)>>,
@@ -163,6 +165,7 @@ struct Book {
     lease: Option<Arc<Lease>>,
     entries: Vec<StoredEntry>,
     preparation: Option<Arc<PreparationLease>>,
+    history: Option<Arc<history::Lease>>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -553,6 +556,7 @@ impl Inbox {
             book: Mutex::new(Book {
                 lease: None,
                 preparation: None,
+                history: None,
                 entries: Vec::with_capacity(p::REQUEST_LIMIT),
                 closed: false,
             }),
@@ -574,6 +578,7 @@ impl Inbox {
             return Err(Error::Unavailable);
         }
         if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
+        if b.history.as_ref().is_some_and(|l|l.occupied()){return Err(Error::Busy);}
         if b.entries.len() >= p::REQUEST_LIMIT
             || b.entries.iter().any(|e| e.pending())
             || b.lease.as_ref().is_some_and(|l| {
@@ -594,6 +599,7 @@ impl Inbox {
             return Err(Error::Unavailable);
         }
         if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
+        if b.history.as_ref().is_some_and(|l|l.occupied()){return Err(Error::Busy);}
         if b.entries.len() >= p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
             return Err(Error::Busy);
         }
@@ -635,6 +641,7 @@ impl Inbox {
             return Err(Error::AccessDenied);
         }
         if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
+        if b.history.as_ref().is_some_and(|l|l.occupied()){return Err(Error::Busy);}
         if b.entries.len() >= p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
             return Err(Error::Busy);
         }
@@ -766,6 +773,7 @@ impl Inbox {
             l.scope.control.stop(reason, at);
         }
         if let Some(l) = &b.preparation { l.scope.control.stop(reason, at); }
+        if let Some(l)=&b.history{l.scope.control.stop(reason,at);}
         for e in &b.entries {
             if e.pending() {
                 e.cancel(reason, at);
@@ -792,6 +800,7 @@ impl Inbox {
             l.scope.control.unknown(at);
         }
         if let Some(l) = &b.preparation { l.scope.control.unknown(at); }
+        if let Some(l)=&b.history{l.scope.control.unknown(at);}
         for e in &b.entries {
             e.unknown(p::Reason::HistoryUnavailable);
         }
@@ -809,7 +818,7 @@ impl Inbox {
             .iter()
             .filter(|e| &e.origin().project_id == project)
             .map(|e| crate::service_request_catalogue::AdditionalRequest {
-                family: crate::service_request_catalogue::AdditionalFamily::Store,
+                family: if matches!(e,StoredEntry::LocalHistory(_)){crate::service_request_catalogue::AdditionalFamily::LocalHistory}else{crate::service_request_catalogue::AdditionalFamily::Store},
                 request_id: e.origin().request_id.clone(),
             })
             .collect())
