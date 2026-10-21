@@ -2293,7 +2293,7 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
 
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
-    fn durable_gate(&self, state: &DocumentState, write: bool) -> Result<(), AssetError> {
+    pub(in crate::asset_session) fn durable_gate(&self, state: &DocumentState, write: bool) -> Result<(), AssetError> {
         self.durable_gate_selected(state, write, Qualification::Ordinary, QualifiedAction::Open, None)
     }
     fn durable_gate_selected(&self, state: &DocumentState, write: bool, selection: Qualification,

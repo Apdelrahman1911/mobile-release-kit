@@ -549,31 +549,16 @@ jobs:
           export npm_config_cache="$WORK_ROOT/npm-cache"
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           if [[ "$APP_CHECKS" == automation-contracts ]]; then
-            # Compile and run only the new/affected library contracts first:
-            # DATA and isolated private Store fixtures, not provider/native work.
-            # Then check the current shipping, CLI and observer feature graphs
-            # with real frontend assets; no app launch, packaging or signing.
+            # Reuse 93 unaffected passes from run 39576057474 and the two
+            # corrected regression passes from run 39580082728. This successor
+            # only corrects a Mac sibling's visibility/import; no predicate or
+            # runtime contract changed. Complete the three remaining graphs.
+            # No app launch, provider operations, packaging or signing.
             export CARGO_BUILD_JOBS=1
-            automation_home=$(/usr/bin/mktemp -d "$HOME/.mrka.XXXXXX")
-            trap 'status=$?; if ! /bin/rmdir "$automation_home"; then printf "%s\n" "Automation fixture retained for disposable-host teardown." >&2; test "$status" -ne 0 || status=1; fi; exit "$status"' EXIT
-            # Run 39576057474 executed the full affected selection: 93 passed.
-            # This successor changes only the two failing regressions and the
-            # private Device decoder they cover. Reuse the unaffected results;
-            # all three app graphs below are still required (not previously run).
-            tests=(
-              edit_owner::agent_configuration::memory::tests::entire_active_checkout_plus_prepared_is_bounded_before_status_clone
-              github_device_protocol::tests::private_terminal_correlation_and_mixed_reply_refuse_before_consumption
-            )
-            (
-              cd "$automation_home"
-              HOME="$automation_home" rustup run 1.98.1 cargo test --locked --no-default-features \
-                --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --lib -- \
-                "${tests[@]}" --exact --test-threads=1 --nocapture | tee "$WORK_ROOT/automation-contracts.log"
-            )
-            grep -Eq "^test result: ok\. ${#tests[@]} passed; 0 failed; 0 ignored;" "$WORK_ROOT/automation-contracts.log"
             # generate_context! embeds ../dist in the actual shell graph.
-            # Reuse the normal frontend build and existing app-typecheck checks;
-            # do not build another app binary or enable observation in shipping.
+            # Generate the required assets on this new runner; prior successful
+            # frontend validation is not a retained dist artifact. Do not build
+            # another app binary or enable observation in the shipping graph.
             npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
             npm --prefix desktop run build
             rustup run 1.98.1 cargo check --locked --lib \

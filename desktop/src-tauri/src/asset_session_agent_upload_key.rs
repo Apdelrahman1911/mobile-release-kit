@@ -487,7 +487,7 @@ impl DocumentBinding {
                     )
                 })
                 .ok_or_else(|| public(Error::Busy))?;
-            if live > vault::store::RESIDENT_BYTES {
+            if live > crate::vault_store::RESIDENT_BYTES {
                 return Err(public(Error::Busy));
             }
             let epoch = state
