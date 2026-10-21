@@ -77,16 +77,17 @@ struct Known {
     source_generation: u32,
     registration_generation: u32,
 }
+enum KnownFailure { Invalid, CatalogueRequired }
 impl Known {
-    fn capture(binding: &Binding) -> Option<Self> {
-        let document = binding.document.upgrade()?;
+    fn capture(binding: &Binding) -> Result<Self, KnownFailure> {
+        let document = binding.document.upgrade().ok_or(KnownFailure::Invalid)?;
         if !binding
             .android
             .android_original_document_matches(Some(&document))
         {
-            return None;
+            return Err(KnownFailure::Invalid);
         }
-        let r = binding.android.registry.try_lock().ok()?;
+        let r = binding.android.registry.try_lock().map_err(|_| KnownFailure::Invalid)?;
         if r.active.is_some()
             || r.prepared.is_some()
             || r.disabled
@@ -97,14 +98,17 @@ impl Known {
             || binding.android.android_registration_control.owns_work()
             || binding.android.android_registration_control.is_unknown()
         {
-            return None;
+            return Err(KnownFailure::Invalid);
         }
-        let sources = r.android_sources.acquisition_snapshot()?;
-        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android)?;
+        let sources = r.android_sources.acquisition_snapshot().ok_or(KnownFailure::Invalid)?;
         let registration_generation = r
             .android_registration
-            .tool_acquisition_generation()?;
-        Some(Self {
+            .tool_acquisition_generation().ok_or(KnownFailure::Invalid)?;
+        let catalog = reuse::CatalogLoan::capture(&r.android_catalog, &binding.android).ok_or_else(|| {
+            if r.android_catalog.tool_acquisition_check_required(&binding.android) { KnownFailure::CatalogueRequired }
+            else { KnownFailure::Invalid }
+        })?;
+        Ok(Self {
             android: binding.android.clone(),
             document: binding.document.clone(),
             catalog,
@@ -354,7 +358,32 @@ impl SavedCommandOwner {
         &self,
         document: &Arc<()>,
     ) -> Result<Census, BridgeError> {
+        self.tool_acquisition_census_inner(document, false)
+    }
+    /// Only Document Prepare may expose a known missing prerequisite. Start
+    /// keeps the old generic failure and its original retained intent.
+    pub(crate) fn tool_acquisition_prepare_census(
+        &self,
+        document: &Arc<()>,
+    ) -> Result<Census, BridgeError> {
+        self.tool_acquisition_census_inner(document, true)
+    }
+    fn tool_acquisition_census_inner(
+        &self,
+        document: &Arc<()>,
+        before_prepare: bool,
+    ) -> Result<Census, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
+        if before_prepare {
+            // Drop THIS registry before checking the Android original; no
+            // new lock order or exemption for live/unknown work is introduced.
+            let r = self.inner.registry.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if self.inner.availability(&r, Availability::Available) != Availability::Available
+                || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
+                || r.tool_acquisition.generation == u32::MAX {
+                return Err(wire::invalid());
+            }
+        }
         let binding = self
             .inner
             .tool_acquisition
@@ -363,7 +392,22 @@ impl SavedCommandOwner {
         if binding.document.as_ptr() != Arc::as_ptr(document) {
             return Err(wire::invalid());
         }
-        let known = Arc::new(Known::capture(binding).ok_or_else(wire::invalid)?);
+        let known = Arc::new(match Known::capture(binding) {
+            Ok(known) => known,
+            Err(KnownFailure::CatalogueRequired) if before_prepare => {
+                let r = self.inner.registry.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                if self.inner.availability(&r, Availability::Available) != Availability::Available
+                    || r.tool_acquisition.producers.len() >= MAX_PRODUCERS
+                    || r.tool_acquisition.generation == u32::MAX { return Err(wire::invalid()); }
+                // An unrelated retained source/producer uncertainty must not
+                // be hidden by this diagnostic. Traverse the SAME originals;
+                // no census or authority is returned on the refused path.
+                retained_bytes(&self.inner, &r, document, &mut picked::PickerOriginals::new())
+                    .ok_or_else(wire::invalid)?;
+                return Err(wire::prerequisite::Required::Catalogue.error());
+            }
+            Err(_) => return Err(wire::invalid()),
+        });
         let future = picked::future_bytes(&known).ok_or_else(wire::invalid)?;
         let r = self
             .inner
@@ -1561,6 +1605,20 @@ mod tests {
         assert!(status.operation.is_none());
         let resources = Resources::default();
         assert!(!resources.selected && !resources.runtime_joined() && !resources.tail_joined());
+    }
+    #[test]
+    fn unqualified_prepare_census_is_not_a_resumable_missing_prerequisite() {
+        let owner = SavedCommandOwner::tool_acquisition(RuntimeConfig::packaged(
+            "/never-opened-prerequisite-runtime".into(),
+        ));
+        let document = Arc::new(());
+        let error = owner.tool_acquisition_prepare_census(&document).err().unwrap();
+        assert_eq!(error.code, wire::invalid().code);
+        assert_ne!(error.code, wire::prerequisite::Required::Catalogue.error().code);
+        assert_ne!(error.code, wire::prerequisite::Required::SavedInputs.error().code);
+        let r = owner.inner.registry.try_lock().unwrap();
+        assert!(r.active.is_none() && r.prepared.is_none() && r.last.is_none());
+        assert_eq!(r.revision, 0);
     }
     #[test]
     fn fixed_acquisition_deadline_and_buffers_are_not_renewed_by_later_phases() {

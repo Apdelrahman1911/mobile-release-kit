@@ -13,6 +13,8 @@ import { stagedMatchesComponents } from './toolAcquisitionComponents.ts';
 import { PreparedToolSourceHandoff } from './toolAcquisitionSourcePicker.ts';
 import type { PreparedToolFolders, PreparedToolSourcePick, ToolSourceFolderContext } from './toolAcquisitionSourcePicker.ts';
 import type { AndroidToolSourceRole } from './androidToolSources.ts';
+import { toolAcquisitionPrerequisite, TOOL_ACQUISITION_PREREQUISITE_TEXT } from './toolAcquisitionPrerequisite.ts';
+import type { ToolAcquisitionPrerequisite } from './toolAcquisitionPrerequisite.ts';
 
 interface Source {
   selectedProject(): ProjectSession | null;
@@ -27,6 +29,7 @@ interface Witness {
 }
 interface Attempt {
   witness: Witness; epoch: number; context: ToolAcquisitionContext; after: number; previous: ToolAcquisitionIdentity | null;
+  beforeStatus: ToolAcquisitionStatus; refusedBeforeAdmission: ToolAcquisitionPrerequisite | null; notAdmitted: boolean;
   identity: ToolAcquisitionIdentity | null; prepareSent: boolean; prepareJoined: boolean; prepareAccepted: boolean;
   startClaimed: boolean; startSent: boolean; startJoined: boolean; retired: boolean; unconfirmed: boolean;
   terminalRead: boolean; cancelRequested: boolean; cancelSent: boolean;
@@ -39,6 +42,7 @@ export interface ToolAcquisitionState {
   pending: 'inspect' | 'review' | 'download' | null; requestPending: boolean; cancelPending: boolean;
   projectId: string | null; status: ToolAcquisitionStatus | null; issue: Issue | null; historical: boolean;
   inspection: ToolRequirementsObservation | null;
+  prerequisite: ToolAcquisitionPrerequisite | null;
   consent: (ToolAcquisitionIdentity & { acknowledged: boolean }) | null;
   presentation: StagedToolPresentation; preparedFolders: PreparedToolFolders | null; cancelRequested: boolean; cancelSent: boolean;
   checkReason: string | null; reviewReason: string | null; downloadReason: string | null;
@@ -132,6 +136,7 @@ export class ToolAcquisitionController {
       requestPending: this.preparing || this.starting, cancelPending: this.cancelling, projectId: this.projectId(), status: this.status,
       issue: this.issue, historical: !!op && !current, inspection: this.inspection && this.current(this.inspection) ? this.inspection.result :
         current ? a.requirements : null,
+      prerequisite: this.currentPrerequisite(),
       consent, presentation, preparedFolders: this.sourceFolders.preview(this.folderContext(),op,presentation), cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
       cancelSent: a?.cancelSent ?? this.cancelIdentity !== null, checkReason: this.checkReason(), reviewReason: this.reviewReason(),
       downloadReason: this.downloadReason(), canRead: !!this.api && !this.reading && !this.subscribing,
@@ -147,7 +152,7 @@ export class ToolAcquisitionController {
     this.inspection = null; this.consentOpen = false; this.acknowledged = false;
     if (this.attempt) {
       this.attempt.retired = true;
-      if (!this.attempt.startSent) this.attempt.cancelRequested = true;
+      if (!this.attempt.startSent && !this.attempt.notAdmitted) this.attempt.cancelRequested = true;
     }
     this.publish(); this.cancelRetired();
   }
@@ -197,7 +202,7 @@ export class ToolAcquisitionController {
     if (this.issue) return attention;
     if (this.action || this.preparing || this.starting || this.cancelling || this.reading || this.subscribing)
       return 'A tool request is still finishing. Its original status and cancel control remain available.';
-    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead)
+    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
       return 'Finish or cancel the original tool preparation before starting another task.';
     return null;
   }
@@ -214,9 +219,17 @@ export class ToolAcquisitionController {
     return this.other();
   }
   checkReason(): string | null {
-    return this.newWorkReason() ?? (this.action || this.preparing || this.starting || this.cancelling || this.reading ?
-      'Wait for the current tool request to finish.' : active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead ?
-        'Finish or cancel the original tool request first.' : null);
+    const reason = this.newWorkReason(); if (reason) return reason;
+    if (this.action || this.preparing || this.starting || this.cancelling || this.reading)
+      return 'Wait for the current tool request to finish.';
+    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
+      return 'Finish or cancel the original tool request first.';
+    const prerequisite = this.currentPrerequisite();
+    return prerequisite ? TOOL_ACQUISITION_PREREQUISITE_TEXT[prerequisite] : null;
+  }
+  private currentPrerequisite(): ToolAcquisitionPrerequisite | null {
+    const a = this.attempt;
+    return !this.issue && a?.notAdmitted && !a.retired && this.current(a) ? a.refusedBeforeAdmission : null;
   }
   reviewReason(): string | null {
     const reason = this.checkReason(); if (reason) return reason;
@@ -289,9 +302,12 @@ export class ToolAcquisitionController {
     }
     if (before && s.statusRevision === before.statusRevision && !sameToolAcquisitionData(before, s) ||
         p && op && sameToolAcquisitionIdentity(p, op) && !toolAcquisitionProgress(p, op)) { this.fail('protocol'); return null; }
-    const candidate = a?.prepareSent && op && s.statusRevision > a.after && !sameToolAcquisitionIdentity(a.previous, op) &&
+    if (a?.refusedBeforeAdmission && !a.notAdmitted && !sameToolAcquisitionData(a.beforeStatus, s)) {
+      this.fail('protocol'); return null; // Never promote a refusal into an entered or different original.
+    }
+    const candidate = a?.prepareSent && !a.notAdmitted && op && s.statusRevision > a.after && !sameToolAcquisitionIdentity(a.previous, op) &&
       sameToolAcquisitionData(a.context, op.context);
-    if (a?.prepareSent) {
+    if (a?.prepareSent && !a.notAdmitted) {
       if (a.identity ? !sameToolAcquisitionIdentity(a.identity, op) : op && !sameToolAcquisitionIdentity(a.previous, op) && !candidate) {
         this.fail('protocol'); return null;
       }
@@ -327,7 +343,14 @@ export class ToolAcquisitionController {
         const s = this.receive(await api.status(), 'read');
         if (!s || api !== this.api) return null;
         const op = s.operation;
-        if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
+        if (a?.refusedBeforeAdmission && !a.notAdmitted && afterInvoke) {
+          if (a === this.attempt && barrier === this.mutation && !this.issue && !a.unconfirmed && !a.retired && this.current(a) &&
+              this.other() === null && a.prepareJoined && !a.identity && !a.prepareAccepted && !a.startSent && !active(op) &&
+              sameToolAcquisitionData(a.beforeStatus, s) && s.statusRevision === a.after &&
+              (a.previous === null ? op === null : sameToolAcquisitionIdentity(a.previous, op))) {
+            a.notAdmitted = true; // A joined refused call, NOT a terminal operation or a native finality receipt.
+          } else { a.unconfirmed = true; this.fail('unconfirmed'); }
+        } else if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
           a.terminalRead = true; a.unconfirmed = false;
           if (this.issue === 'unconfirmed') this.issue = null;
           if (!this.issue && a.startSent && !a.retired && this.current(a) && a.context.action === 'inspect' &&
@@ -353,6 +376,7 @@ export class ToolAcquisitionController {
     const context: ToolAcquisitionContext = freeze({ ...witness.context, action, review: action === 'acquire' ?
       { ...inspected!.identity, requirementsSha256: inspected!.result.requirements.sourcesSha256 } : null });
     const a: Attempt = { witness, epoch: this.epoch, context, after: this.status.statusRevision,
+      beforeStatus: this.status, refusedBeforeAdmission: null, notAdmitted: false,
       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
       startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
       requirements: action === 'acquire' ? inspected!.result : null };
@@ -369,9 +393,20 @@ export class ToolAcquisitionController {
         const s = this.receive(await api.prepare(context), 'reply');
         a.prepareAccepted = !!s && sameToolAcquisitionIdentity(a.identity, s.operation) && s.operation?.phase === 'awaiting-consent' && s.operation.intentUsable;
         if (!s) { a.unconfirmed = true; this.fail('unconfirmed'); }
-      } catch { a.unconfirmed = true; this.fail('unconfirmed'); }
+      } catch (error) {
+        const prerequisite = toolAcquisitionPrerequisite(error);
+        if (prerequisite && (a.identity || a.prepareAccepted || a.startSent)) {
+          a.unconfirmed = true; this.fail('protocol'); // Contradicts an already observed admission.
+        } else if (prerequisite && a.prepareSent && !this.issue && !a.unconfirmed && !a.retired && this.current(a))
+          a.refusedBeforeAdmission = prerequisite;
+        else { a.unconfirmed = true; this.fail('unconfirmed'); }
+      }
       finally { a.prepareJoined = true; this.preparing = false; this.publish(); }
       const read = await this.checkStatus(true);
+      if (a.refusedBeforeAdmission) {
+        if (!a.notAdmitted) { a.unconfirmed = true; this.fail('unconfirmed'); }
+        return; // Explicit catalogue/saved read then a NEW user check; never Start or retry this call.
+      }
       if (!read || !this.usable(a)) { a.retired = true; a.cancelRequested = true; return; }
       if (action === 'inspect') {
         // Only this explicit Check click may chain its own INSPECT intent.

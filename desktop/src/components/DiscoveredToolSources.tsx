@@ -14,7 +14,7 @@ export function DiscoveredToolSources({ folders, busy, checkReason, chooseFound,
 }) {
   return <div className="notice notice-info"><div>
     <strong>Found existing tools</strong>
-    <p>These folders contain checked matching components. Keep them unchanged. Use the normal folder picker to select them, then check any remaining tools. Nothing has been downloaded or registered.</p>
+    <p>These folders contain checked matching components. Keep them unchanged. Finish selecting the folders you want with the normal picker before checking remaining tools. If requested, check the protected catalogue and read saved inputs using the controls here; your choices stay selected. Nothing has been downloaded or registered.</p>
     <div className="button-row">{folders.roles.map((role) => <button type="button" className="button primary" key={role}
       disabled={busy || folders.waiting} onClick={() => void chooseFound(role)}>Use found {label(role)}…</button>)}</div>
     {folders.waiting && <p role="status">Finish the current folder selection using its original controls below.</p>}

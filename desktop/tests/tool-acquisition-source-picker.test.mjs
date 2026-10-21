@@ -7,6 +7,7 @@ import { ToolAcquisitionController } from '../src/toolAcquisitionController.ts';
 import { AndroidBuildController, androidBuildOwnerReason } from '../src/androidBuild.ts';
 import { encodeAndroidToolSourcesRequest } from '../src/androidToolSources.ts';
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
+import { ReleaseVersionController } from '../src/releaseVersion.ts';
 
 const OP = 'a'.repeat(32), GEN = 'b'.repeat(32), INSPECT = 'c'.repeat(32), INSPECT_GEN = 'd'.repeat(32), SHA = 'e'.repeat(64);
 const clone = (v) => structuredClone(v);
@@ -121,8 +122,8 @@ async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk',
     root: '/never-opened-tools', config: { path: 'release/mobile-release.json', state: 'format-valid', data: { android: { enabled: true, module: ':app' } },
       content: { bytes: 120, sha256: SHA }, issues: [] }, discovery: { hints: {} }, issues: [] } });
   let tools, native = { schemaVersion: 1, statusRevision: 0, availability: 'available', operation: null }, sources = clone(initialSources);
-  let catalogStatus = catalog(), registrationStatus = registration();
-  const calls = [], observers = [];
+  let catalogStatus = catalog(), registrationStatus = registration(), prerequisites = false, needsSavedInputs = false;
+  const calls = [], observers = [], prerequisiteCalls = [], catalogCalls = [];
   const listen = (kind, callback) => { const entry = { kind, callback, closed: false }; observers.push(entry); return () => { entry.closed = true; }; };
   const project = () => ws.projects[ws.selectedId];
   const android = new AndroidBuildController({ selectedProject: project, releaseVersion: () => null, otherOperationReason: () => tools?.ownerReason() ?? null });
@@ -139,16 +140,27 @@ async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk',
     subscribeAndroidToolSources: async (receive) => listen('sources', receive), androidToolSourcesStatus: async () => clone(sources),
     chooseAndroidToolSource: (input) => { const call = { kind: 'choose', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
     cancelAndroidToolSource: (input) => { const call = { kind: 'cancel', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
-    refreshAndroidToolchainCatalog: async () => { throw new Error('not this action'); }, prepareAndroidBuild: async () => { throw new Error('not this action'); } };
+    refreshAndroidToolchainCatalog: () => {
+      const call = deferred(); catalogCalls.push(call);
+      return call.promise.then((value) => { catalogStatus = clone(value); return clone(value); });
+    }, prepareAndroidBuild: async () => { throw new Error('not this action'); } };
   android.syncProject(); await android.connect(androidApi);
   tools = new ToolAcquisitionController({ selectedProject: project, otherOperationReason: () => androidBuildOwnerReason(android.getSnapshot()),
     knownTools: () => { const s = android.getSnapshot(); return [s.catalogStatus, s.toolSources, s.toolRegistration]; } });
   const toolApi = { mode: 'native', subscribe: async (receive) => listen('tools', receive), status: async () => clone(native),
     prepare: async (input) => {
+      if (prerequisites) {
+        prerequisiteCalls.push({ kind: 'prepare', input: clone(input) });
+        // Deliberately inert native ports. These codes test UI control flow,
+        // never fabricate a native catalogue loan or saved-input authority.
+        if (catalogStatus.phase !== 'ready') throw { code: 'tool_acquisition_catalog_required' };
+        if (needsSavedInputs) throw { code: 'tool_acquisition_saved_inputs_required' };
+      }
       native = { schemaVersion: 1, statusRevision: native.statusRevision + 1, availability: 'busy', operation: {
         operationId: input.action === 'inspect' ? INSPECT : OP, ownerGeneration: input.action === 'inspect' ? INSPECT_GEN : GEN,
         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
     }, start: async () => {
+      if (prerequisites) prerequisiteCalls.push({ kind: 'start', action: native.operation.context.action });
       const op = native.operation;
       const requirements = { ...(discovered ? {discoveredSources:discovered} : {}), kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
         compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((part) => !missing.includes(part)) }, requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
@@ -169,7 +181,9 @@ async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk',
     if (kind === 'catalog') catalogStatus = clone(value); else registrationStatus = clone(value);
     observers.find((entry) => entry.kind === kind && !entry.closed)?.callback(clone(value));
   };
-  return { tools, android, calls,
+  return { tools, android, calls, project, prerequisiteCalls, catalogCalls,
+    requirePrerequisites() { prerequisites = true; needsSavedInputs = true; },
+    savedReadReturned() { needsSavedInputs = false; },
     peer,
     choose(role) { return tools.choosePreparedSource(role, (selected, pick) => android.chooseToolSource(selected, pick)); },
     emit(value) { sources = clone(value); observers.find((entry) => entry.kind === 'sources' && !entry.closed)?.callback(clone(value)); },
@@ -377,4 +391,63 @@ test('SDKMAN v2 result uses only the original Gradle picker and preserves chosen
   assert.equal(h.android.getSnapshot().toolSources.protectedCopy,'not-created');
   assert.equal(h.tools.getSnapshot().presentation,'stale');
   assert.equal(h.calls.length,1); // No download, Inspect, Register or build is automatic.
+});
+
+test('explicit existing catalogue and saved-input reads resume a refused check without losing selected folders or approving a download', async (t) => {
+  const h = await controllers(t);
+  const picking = h.choose('gradle'), chosen = source(1, 'gradle');
+  h.reply(h.calls[0], chosen); await picking;
+  const selected = clone(h.android.getSnapshot().toolSources.selections);
+  h.requirePrerequisites();
+  await h.tools.inspect();
+  assert.equal(h.tools.getSnapshot().prerequisite, 'catalogue');
+  assert.equal(h.tools.ownerReason(), null);
+  assert.deepEqual(h.prerequisiteCalls.map((call) => call.kind), ['prepare']);
+
+  // Same explicit App handoff to the already-existing Android controller.
+  h.tools.toolInputsIntent();
+  const refreshing = h.android.refreshCatalog();
+  assert.equal(h.catalogCalls.length, 1);
+  await h.tools.inspect(); assert.equal(h.prerequisiteCalls.length, 1);
+  const before = h.android.getSnapshot().catalogStatus;
+  h.catalogCalls[0].resolve({ ...catalog(before.statusRevision + 1), catalogGeneration: before.catalogGeneration + 1,
+    operationId: '1'.repeat(32) });
+  await refreshing;
+  assert.equal(h.android.getSnapshot().catalogUnconfirmed, false);
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
+  assert.equal(h.prerequisiteCalls.length, 1); // Refresh never chains Inspect/Acquire/Register.
+
+  await h.tools.inspect();
+  assert.equal(h.tools.getSnapshot().prerequisite, 'saved-inputs');
+  assert.equal(h.tools.ownerReason(), null);
+  const reads = [], saved = new ReleaseVersionController(h.project, () => false, () => h.tools.ownerReason() ?? androidBuildOwnerReason(h.android.getSnapshot()));
+  saved.setConnection({ mode: 'native', observeReleaseVersion: (projectId) => {
+    const call = deferred(); reads.push({ projectId, ...call });
+    return call.promise.then((value) => { h.savedReadReturned(); return value; });
+  } }, { runtime: { state: 'available', mode: 'development', reason: null }, capabilities: {
+    methods: [{ method: 'release.version.observe', available: true, reason: '' }] } });
+  saved.syncProject(); t.after(() => saved.dispose());
+  assert.equal(saved.startReason(), null); // The refused Prepare no longer permanently blocks this existing reader.
+  h.tools.versionIntent(); h.android.versionIntent();
+  const reading = saved.read();
+  assert.deepEqual(reads.map((read) => read.projectId), ['p1']);
+  assert.equal(h.prerequisiteCalls.length, 2);
+  reads[0].resolve({ schemaVersion: 2, source: 'release/version.properties', version: { name: '1.0.0', build: 1 },
+    savedConfig: { bytes: 120, sha256: SHA }, savedVersion: { bytes: 32, sha256: '2'.repeat(64) },
+    observationScope: 'single-request-non-atomic', assurance: { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false,
+      credentialsRead: false, gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' } });
+  await reading;
+  assert.equal(saved.getSnapshot().error, null); assert.notEqual(saved.getSnapshot().result, null);
+  assert.equal(saved.passiveBusyReason(), null);
+  assert.equal(h.prerequisiteCalls.length, 2); // Read also requires a separate next user Check.
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
+
+  await h.tools.inspect();
+  assert.deepEqual(h.prerequisiteCalls.map((call) => call.kind), ['prepare', 'prepare', 'prepare', 'start']);
+  assert.equal(h.prerequisiteCalls.at(-1).action, 'inspect');
+  assert.equal(h.tools.getSnapshot().prerequisite, null); assert.equal(h.tools.getSnapshot().issue, null);
+  assert.equal(h.tools.getSnapshot().inspection?.kind, 'tool-requirements-observation');
+  assert.equal(h.tools.getSnapshot().consent, null); assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections, selected);
+  assert.equal(h.android.getSnapshot().toolRegistration.phase, 'idle');
 });

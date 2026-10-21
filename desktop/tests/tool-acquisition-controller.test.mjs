@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { ToolAcquisitionController } from '../src/toolAcquisitionController.ts';
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
 import { TOOL_ACQUISITION_CONSENT } from '../src/toolAcquisitionProtocol.ts';
+import { toolAcquisitionPrerequisite } from '../src/toolAcquisitionPrerequisite.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), ACQUIRE = 'c'.repeat(32), ACQUIRE_OWNER = 'd'.repeat(32);
 const SHA = 'e'.repeat(64), CONTENT = { bytes: 120, sha256: SHA };
@@ -444,4 +445,150 @@ test('SDKMAN compatible Gradle observation prevents a duplicate download until a
   assert.equal(h.state.consent,null);
   h.known(); await h.controller.reviewDownload();
   assert.equal(h.state.inspection,null); assert.equal(h.calls.length,2);
+});
+
+const prerequisiteError = (kind) => ({ code: kind === 'catalogue' ? 'tool_acquisition_catalog_required' : 'tool_acquisition_saved_inputs_required',
+  message: 'Inert fixed pre-admission refusal', retryable: false });
+
+test('prerequisite: only the two own data error codes describe prerequisites; generic errors and getters do not', () => {
+  for (const kind of ['catalogue', 'saved-inputs']) assert.equal(toolAcquisitionPrerequisite(prerequisiteError(kind)), kind);
+  for (const code of ['tool_acquisition_invalid', 'release_version_changed', 'tool_acquisition_busy', 'cleanup_unknown', 'protocol_error',
+    'runtime_unavailable', 'shutting_down']) assert.equal(toolAcquisitionPrerequisite({ code }), null);
+  let called = 0;
+  const getter = Object.defineProperty({}, 'code', { get() { called++; return prerequisiteError('catalogue').code; } });
+  for (const value of [null, undefined, 'tool_acquisition_catalog_required', [], getter,
+    Object.create(prerequisiteError('catalogue'))]) assert.equal(toolAcquisitionPrerequisite(value), null);
+  assert.equal(called, 0);
+});
+
+for (const kind of ['catalogue', 'saved-inputs']) {
+  test(`prerequisite: ${kind} refusal waits for its original rejected call and a fresh unchanged status, not a terminal receipt`, async (t) => {
+    const h = harness(t); await h.ready;
+    const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
+    h.emit(status()); await h.controller.checkStatus(); // Both occur before the actual Prepare return.
+    assert.equal(h.state.prerequisite, null); assert.equal(h.state.requestPending, true);
+    h.readQueue.push(read); prepare.reject(prerequisiteError(kind)); await flush();
+    assert.equal(h.state.requestPending, false); assert.equal(h.state.reading, true);
+    assert.equal(h.state.prerequisite, null); assert.notEqual(h.controller.ownerReason(), null);
+    await h.controller.inspect(); assert.equal(h.calls.length, 1);
+    read.resolve(status()); await flow;
+    assert.equal(h.state.issue, null); assert.equal(h.state.prerequisite, kind);
+    assert.equal(h.state.status.operation, null); assert.equal(h.state.status.statusRevision, 1);
+    assert.equal(h.state.inspection, null); assert.equal(h.state.consent, null);
+    assert.notEqual(h.state.presentation, 'current-staged'); assert.equal(h.controller.ownerReason(), null);
+    assert.match(h.state.checkReason, kind === 'catalogue' ? /protected tool catalogue/ : /saved project inputs/);
+    await h.controller.inspect(); assert.equal(h.calls.length, 1); // No repeated preparation/download.
+    h.controller.toolInputsIntent(); // Explicit existing Check catalogue / Read saved inputs action.
+    assert.equal(h.state.prerequisite, null); assert.equal(h.state.checkReason, null);
+    assert.equal(h.calls.length, 1); // The hint and its dismissal execute nothing.
+    // Once nonentry was proved, later peer/status revisions are new facts,
+    // not an unreturned tool invocation to revive or poison.
+    h.emit(status(2, null, 'busy')); assert.equal(h.state.issue, null);
+    assert.notEqual(h.state.checkReason, null);
+    h.emit(status(3)); assert.equal(h.state.issue, null); assert.equal(h.state.prerequisite, null);
+    const next = h.controller.inspect(); assert.equal(h.calls.length, 2);
+    h.calls.at(-1).reject(prerequisiteError(kind)); await next;
+    assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'prepare']);
+  });
+}
+
+test('prerequisite: known pre-admission refusal preserves an older terminal identity and result as history, not the new check', async (t) => {
+  const h = harness(t); await inspected(h);
+  const original = h.state.status, flow = h.controller.inspect(); // Keep the original immutable parsed prototype too.
+  h.calls.at(-1).reject(prerequisiteError('saved-inputs')); await flow;
+  assert.deepEqual(h.state.status, original); assert.equal(h.state.historical, true);
+  assert.equal(h.state.prerequisite, 'saved-inputs'); assert.equal(h.state.inspection, null);
+  assert.equal(h.state.consent, null); assert.equal(h.controller.ownerReason(), null);
+  assert.notEqual(h.state.presentation, 'current-staged');
+  assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'start', 'prepare']);
+});
+
+test('prerequisite: generic invalid, busy, poison, lost and unsupported Prepare failures remain unconfirmed despite unchanged status', async (t) => {
+  for (const code of ['tool_acquisition_invalid', 'release_version_changed', 'tool_acquisition_busy', 'cleanup_unknown', 'runtime_unavailable', 'shutting_down', 'lost-reply']) {
+    const h = harness(t); await h.ready;
+    const flow = h.controller.inspect(); h.calls.at(-1).reject({ code }); await flow;
+    await h.controller.checkStatus(true); h.controller.toolInputsIntent(); await h.controller.inspect();
+    assert.equal(h.state.issue, 'unconfirmed', code); assert.equal(h.state.prerequisite, null);
+    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.canRead, true);
+    assert.equal(h.calls.length, 1); assert.equal(h.state.consent, null);
+  }
+});
+
+test('prerequisite: new revision, foreign identity or cleanup-unknown after a typed refusal never becomes resumable', async (t) => {
+  for (const cut of ['revision', 'identity', 'unknown']) {
+    const h = harness(t); await h.ready;
+    const flow = h.controller.inspect(), prepare = h.calls.at(-1);
+    const next = cut === 'identity' ? status(2, operation(prepare.request)) : status(2, null, cut === 'unknown' ? 'cleanup-unknown' : 'available');
+    h.native(next); prepare.reject(prerequisiteError('catalogue')); await flow;
+    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
+    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.inspection, null);
+    await h.controller.inspect(); assert.equal(h.calls.length, 1);
+    h.native(status()); await h.controller.checkStatus(true); // A later equal-looking status cannot repair the contradiction.
+    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
+  }
+});
+
+test('prerequisite: typed refusal contradicting an observed admission retains that original and its cancel route', async (t) => {
+  const h = harness(t); await h.ready;
+  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
+  h.emit(status(2, op)); prepare.reject(prerequisiteError('saved-inputs')); await flush();
+  assert.equal(h.state.issue, 'protocol'); assert.equal(h.state.prerequisite, null);
+  const cancel = h.calls.at(-1); assert.equal(cancel.kind, 'cancel');
+  h.reply(cancel, status(3, terminal(op, 'cancelled'))); await flow; await flush();
+  assert.equal(h.state.issue, 'protocol'); assert.equal(h.state.prerequisite, null);
+  assert.deepEqual(h.calls.map((call) => call.kind), ['prepare', 'cancel']);
+});
+
+test('prerequisite: context ABA, saved snapshot replacement and peer work during the rejected call prevent resume hints', async (t) => {
+  for (const cut of ['aba', 'snapshot', 'peer']) {
+    const h = harness(t); await h.ready;
+    const flow = h.controller.inspect(), prepare = h.calls.at(-1);
+    if (cut === 'aba') { h.controller.selectionIntent(); h.controller.selectionIntent(); h.controller.syncProject(); }
+    else if (cut === 'snapshot') h.replace({ snapshot: clone(h.project.snapshot) });
+    else h.other('The original peer is still running.');
+    prepare.reject(prerequisiteError('catalogue')); await flow;
+    h.other(null); h.controller.syncProject(); await h.controller.checkStatus(true);
+    assert.equal(h.state.prerequisite, null); assert.notEqual(h.controller.ownerReason(), null);
+    await h.controller.inspect(); assert.equal(h.calls.length, 1);
+  }
+});
+
+test('prerequisite: reentrant currentness loss while publishing the fresh refusal status cannot release the attempt', async (t) => {
+  const h = harness(t); await h.ready;
+  const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
+  h.readQueue.push(read); prepare.reject(prerequisiteError('saved-inputs')); await flush();
+  let once = true;
+  const off = h.controller.subscribe(() => {
+    if (once && h.state.reading) { once = false; h.controller.toolInputsIntent(); }
+  });
+  read.resolve(status()); await flow; off();
+  assert.equal(once, false); assert.equal(h.state.prerequisite, null);
+  assert.notEqual(h.state.issue, null); assert.notEqual(h.controller.ownerReason(), null);
+});
+
+test('prerequisite: lost fresh status or connection retirement after typed rejection stays unknown on later equal status', async (t) => {
+  for (const cut of ['read-loss', 'connection']) {
+    const h = harness(t); await h.ready;
+    const flow = h.controller.inspect(), prepare = h.calls.at(-1), read = deferred();
+    h.readQueue.push(read); prepare.reject(prerequisiteError('saved-inputs')); await flush();
+    if (cut === 'connection') { assert.equal(h.controller.beginConnection(), false); read.resolve(status()); }
+    else read.reject(new Error('Inert lost status'));
+    await flow; await h.controller.checkStatus(true);
+    assert.equal(h.state.prerequisite, null); assert.notEqual(h.state.issue, null);
+    assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.calls.length, 1);
+  }
+});
+
+test('prerequisite: the same prerequisite-shaped error from an entered Start is never a not-admitted Prepare', async (t) => {
+  const h = harness(t); await h.ready;
+  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
+  h.reply(prepare, status(2, op)); await flush();
+  const start = h.calls.at(-1); assert.equal(start.kind, 'start');
+  h.native(status(3, running(op))); start.reject(prerequisiteError('catalogue')); await flow;
+  assert.equal(h.state.issue, 'unconfirmed'); assert.equal(h.state.prerequisite, null);
+  assert.equal(h.state.canCancel, true); assert.equal(h.state.status.operation.phase, 'running');
+  assert.notEqual(h.controller.ownerReason(), null); assert.equal(h.state.consent, null);
+  const stop = h.controller.cancel(), cancel = h.calls.at(-1);
+  h.reply(cancel, status(4, terminal(op, 'cancelled'))); await stop;
+  assert.equal(h.state.prerequisite, null); // Only the original real terminal status can settle this entered work.
 });

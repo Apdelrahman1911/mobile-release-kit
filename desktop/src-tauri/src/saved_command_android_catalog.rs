@@ -273,6 +273,22 @@ impl Catalog {
             && self.published.as_ref().is_some_and(|current|Arc::ptr_eq(current,&selected.produced))
             && selected.tool_preparation_versions(inner).is_some()
     }
+    /// Missing prerequisite DATA only. Never turn failed, pending, lost or
+    /// fabricated catalogue history into permission to run another operation.
+    pub(super) fn tool_acquisition_check_required(&self, inner:&Inner)->bool {
+        if self.active.is_some() || self.selected.is_some() || self.generation==u32::MAX { return false; }
+        if self.generation==0 {
+            return self.published.is_none() && self.last.is_none() && self.retired.is_none();
+        }
+        let positive = |original:&Arc<Operation>| original.generation==self.generation
+            && original.final_seen.load(Ordering::SeqCst) && original.accepted_final.load(Ordering::SeqCst)
+            && original.original_matches(inner) && original.known_originals() && original.failure().is_none();
+        match (&self.published,&self.last,self.retired) {
+            (Some(p),Some(last),None) => !p.entries.is_empty() && Arc::ptr_eq(&p.original,last) && positive(last),
+            (None,Some(last),Some(wire::Reason::CatalogChanged)) => positive(last),
+            _ => false,
+        }
+    }
     pub(super) fn empty_acquisition_loan(&self)->Option<EmptyLoan>{
         if self.generation==0||self.active.is_some()||self.selected.is_some()||self.retired.is_some(){return None;}
         let published=self.published.as_ref().filter(|p|p.entries.is_empty())?.clone();
@@ -782,12 +798,28 @@ mod tests {
         assert!(Arc::ptr_eq(registry.android_catalog.active.as_ref().unwrap(),&original));
         assert!(registry.android_catalog.selected.is_none());
         assert!(registry.android_catalog.published.is_none());
+        assert!(!registry.android_catalog.tool_acquisition_check_required(&app.inner));
     }
 }
 
 #[cfg(test)]
 mod frozen_row_data_tests {
     use super::*;
+    #[test]
+    fn missing_catalogue_hint_needs_pristine_state_or_actual_positive_originals() {
+        let owner=SavedCommandOwner::new(RuntimeConfig::packaged("/never-opened-catalogue-prerequisite".into()),SavedCommandDomain::AndroidBuild);
+        let mut catalogue=Catalog::default();
+        assert!(catalogue.tool_acquisition_check_required(&owner.inner));
+        assert!(catalogue.empty_acquisition_loan().is_none()); // A hint is not a loan.
+        catalogue.retired=Some(wire::Reason::CatalogChanged);
+        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
+        catalogue.generation=1;
+        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
+        catalogue.retired=None;
+        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
+        catalogue.generation=u32::MAX;
+        assert!(!catalogue.tool_acquisition_check_required(&owner.inner));
+    }
     fn entry()->wire::Entry{
         wire::Entry{selection:android_wire::MacToolchainSelection{instance:"a".repeat(32),owner_uid:501,catalog_generation:2,
             record_sha256:"b".repeat(64),inventory_sha256:"c".repeat(64),os_provider_sha256:"d".repeat(64)},

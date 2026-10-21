@@ -31,6 +31,8 @@ pub(crate) mod components;
 pub(crate) mod sdk;
 #[path = "tool_source_discovery.rs"]
 pub(crate) mod discovery;
+#[path = "tool_acquisition_prerequisite.rs"]
+pub(crate) mod prerequisite;
 use components::Partition;
 pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
 pub(crate) const FIXED: [&str; 7] = [

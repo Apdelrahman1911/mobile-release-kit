@@ -362,13 +362,24 @@ impl DocumentBinding {
             .inner
             .bridge
             .tool_acquisition
-            .tool_acquisition_census(&self.inner.session_identity)?;
+            .tool_acquisition_prepare_census(&self.inner.session_identity)?;
         let edit = self
             .inner
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
-        let saved = self.tool_acquisition_saved_lane(&state, &input, &edit, registration, &root)?;
+        let saved = match self.tool_acquisition_saved_lane(&state, &input, &edit, registration, &root) {
+            Ok(saved) => saved,
+            Err(error) => {
+                // This exact check precedes owner.prepare. It is NOT a map
+                // for generic invalid, busy, unknown or a Start rejection.
+                drop(edit);
+                if error.code != "release_version_changed" { return Err(error); }
+                let gate = self.tool_acquisition_gate(&state);
+                if gate != wire::Availability::Available { return Err(admission_error(gate)); }
+                return Err(wire::prerequisite::Required::SavedInputs.error());
+            }
+        };
         let original = Arc::new(ToolAcquisitionDocumentInput {
             document: Arc::downgrade(&self.inner),
             context: input.clone(),

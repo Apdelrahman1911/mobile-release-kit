@@ -6,6 +6,7 @@ import { DiscoveredToolSources } from './DiscoveredToolSources.tsx';
 import { foundToolRoles, TOOL_DISCOVERY_HELP } from '../toolSourceDiscovery.ts';
 import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
 import { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } from '../toolAcquisitionComponents.ts';
+import { TOOL_ACQUISITION_PREREQUISITE_TEXT } from '../toolAcquisitionPrerequisite.ts';
 
 export interface PrepareBuildEnvironmentProps {
   state: ToolAcquisitionState;
@@ -17,6 +18,8 @@ export interface PrepareBuildEnvironmentProps {
   chooseSource(role: AndroidToolSourceRole): void | Promise<void>;
   choosePreparedSource(role: AndroidToolSourceRole): void | Promise<void>;
   refreshCatalog(): void | Promise<void>;
+  readSavedInputs(): void | Promise<void>;
+  readSavedInputsReason: string | null;
   openRegistration(): void;
 }
 const hint = (value: ToolRequirementHint) => value.state === 'literal' ? value.value :
@@ -24,7 +27,7 @@ const hint = (value: ToolRequirementHint) => value.state === 'literal' ? value.v
 
 /** Controlled view: mounting, navigation and checkbox rendering do no work. */
 export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource, choosePreparedSource,
-  refreshCatalog, openRegistration }: PrepareBuildEnvironmentProps) {
+  refreshCatalog, readSavedInputs, readSavedInputsReason, openRegistration }: PrepareBuildEnvironmentProps) {
   const op = state.status?.operation;
   const active = op && op.phase !== 'terminal';
   const attention = !!state.issue || op?.phase === 'unknown';
@@ -67,6 +70,15 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
   return <section className="card" aria-label="Prepare Android build environment" aria-busy={state.pending !== null || state.requestPending}>
     <div className="section-heading"><div><h2>{title}</h2><p>Reuse compatible tools first. Downloads are optional and always need your approval.</p></div></div>
     {problem && <p className="notice notice-warning" role="status">{problem}</p>}
+    {state.prerequisite && <div className="notice notice-info"><div>
+      <p role="status">{TOOL_ACQUISITION_PREREQUISITE_TEXT[state.prerequisite]}</p>
+      <div className="button-row">{state.prerequisite === 'catalogue' ? <>
+        <button type="button" className="button primary" disabled={busy} onClick={() => void refreshCatalog()}>Check existing protected tools</button>
+        <button type="button" className="button secondary" onClick={openRegistration}>Open tool recovery &amp; choice</button>
+      </> : <button type="button" className="button primary" disabled={busy || readSavedInputsReason !== null}
+        onClick={() => void readSavedInputs()}>Read saved inputs</button>}</div>
+      {state.prerequisite === 'saved-inputs' && readSavedInputsReason && <p className="save-note">{readSavedInputsReason}</p>}
+    </div></div>}
     {!state.preparedFolders && !consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
       <div className="button-row">
         <button type="button" className="button primary" disabled={checkReason !== null} onClick={() => void controller.inspect()}>
@@ -115,8 +127,9 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
     {originalControls}
     <details><summary>Existing tools &amp; manual setup</summary>
-      <p>Keep your working JDK, Android SDK and Gradle installation. Choose the folders you already have, then use Check existing protected tools and Check required tools again. Refresh the saved project if requested. Inspect and approve the protected copy in Set up build tools below.</p>
+      <p>Keep your working JDK, Android SDK and Gradle installation. Finish choosing the folders you need, then check existing protected tools and read saved inputs before checking required tools again. These checks keep your folder choices and do not approve a download or protected copy. Inspect and approve the protected copy in Set up build tools below.</p>
       <div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => void refreshCatalog()}>Check existing protected tools</button>
+        <button type="button" className="button secondary" disabled={busy || readSavedInputsReason !== null} onClick={() => void readSavedInputs()}>Read saved inputs</button>
         {(['jdk', 'sdk', 'gradle'] as const).map((role) => <button type="button" className="button secondary" key={role} disabled={busy}
           onClick={() => void chooseSource(role)}>Choose {role === 'jdk' ? 'JDK' : role === 'sdk' ? 'Android SDK' : 'Gradle'}</button>)}
         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
