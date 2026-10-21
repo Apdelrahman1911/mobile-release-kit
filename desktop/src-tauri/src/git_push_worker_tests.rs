@@ -97,7 +97,7 @@ fn decode(r: &Request, v: &Value, c: Option<&Candidate>) -> Result<Terminal, Bri
     r.terminal(&raw, c)
 }
 #[test]
-fn push_200_quote_adds_real_remote_and_body_backing_without_borrowing_old_caps() {
+fn push_quote_preserves_shared_data_writer_remote_and_code_bounds() {
     const M: usize = 1024 * 1024;
     let code = crate::macos_history_inventory::CODE_CONTROL_RESERVE;
     assert_eq!(BODY_CALLS * BODY_CALL_BYTES + BODY_REMAINDER, 14_385_152);
@@ -106,7 +106,10 @@ fn push_200_quote_adds_real_remote_and_body_backing_without_borrowing_old_caps()
         admission_bytes(16 * M, code + 16 * M + REMOTE_BACKING),
         Some(code + 72 * M)
     );
-    assert_eq!(admission_bytes(16 * M + 1, code + REMOTE_BACKING), None);
+    assert_eq!(admission_bytes(48 * M, code + 16 * M + REMOTE_BACKING), Some(232 * M));
+    assert_eq!(admission_bytes(64 * M, code + REMOTE_BACKING), Some(232 * M));
+    assert_eq!(admission_bytes(48 * M + 1, code + 16 * M + REMOTE_BACKING), None);
+    assert_eq!(admission_bytes(64 * M + 1, code + REMOTE_BACKING), None);
     assert_eq!(admission_bytes(0, code + 16 * M + REMOTE_BACKING + 1), None);
     assert_eq!(admission_bytes(0, code + REMOTE_BACKING - 1), None);
     assert_eq!(admission_bytes(usize::MAX, usize::MAX), None);

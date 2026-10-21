@@ -30,18 +30,17 @@ pub(crate) const DATA_BACKING: usize = read::DATA_BACKING + 1024 * 1024;
 // each retain 64KiB beside a 256KiB diff, plus Values/strings/stamp backing.
 pub(crate) const REVIEW_BACKING: usize = 1024 * 1024;
 
-/// GitLocal-only storage arithmetic. The actual Document census includes the
-/// retained read/preparer/review; none is presumed discarded before admission.
-/// The writer independently includes its complete original code reservation.
-/// This is not a process RSS bound, a source grant, or credit for another lane.
+/// Keep the writer's original 16MiB ceiling, but charge Document and writer
+/// together against the shared 64MiB DATA allowance. Code remains separate;
+/// Fetch/Push additionally retain their own unchanged 24/40MiB remote bounds.
+/// Nothing is discarded, and this is not a process RSS or credential allowance.
 pub(crate) fn admission_bytes(document: usize, future: usize) -> Option<usize> {
-    const DOCUMENT_BACKING: usize = 16 * 1024 * 1024;
     const WRITER_BACKING: usize = 16 * 1024 * 1024;
     let code = crate::macos_history_inventory::CODE_CONTROL_RESERVE;
     let writer = future.checked_sub(code)?;
     let total = document.checked_add(future)?;
-    let limit = code.checked_add(DOCUMENT_BACKING)?.checked_add(WRITER_BACKING)?;
-    if document > DOCUMENT_BACKING || writer > WRITER_BACKING || total > limit { return None; }
+    if writer > WRITER_BACKING
+        || document.checked_add(writer)? > crate::macos_history_inventory::SHARED_DATA_LIMIT { return None; }
     Some(total)
 }
 

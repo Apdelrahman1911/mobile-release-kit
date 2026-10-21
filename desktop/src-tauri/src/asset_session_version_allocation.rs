@@ -338,7 +338,7 @@ impl DocumentBinding {
         {
             // Actual same-Document census before EditGuard (its traversal can
             // consult the original Edit registry). Code remains its existing
-            // separate128MiB partition; source/control use the unchanged16MiB.
+            // separate128MiB partition; Document/source/control share64MiB.
             let document = lookup_memory::retained_document_bytes(&self.inner, &state)
                 .map_err(|_| busy())?
                 .checked_add(installation_memory::additional_document_bytes(self, &state).map_err(|_| busy())?)

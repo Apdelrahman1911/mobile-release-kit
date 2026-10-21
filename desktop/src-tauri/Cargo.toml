@@ -25,8 +25,8 @@ name = "mobile-release-kit-desktop"
 path = "src/main.rs"
 required-features = ["desktop-shell"]
 
-# Installed read-only agent transport. It does not start another release engine
-# or link a WebView; the current Desktop's explicit grant remains necessary.
+# Same signed CLI: ordinary client commands plus explicit foreground cached
+# history. No WebView, extra executable, autostart or release engine.
 [[bin]]
 name = "mrk"
 path = "src/installed_cli_main.rs"
@@ -90,7 +90,7 @@ required-features = ["desktop-shell", "custom-protocol"]
 
 [features]
 default = []
-installed-cli = []
+installed-cli = ["tokio/signal"]
 desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk", "mrk-windows-installed-native/desktop-ui-dialogs"]
 custom-protocol = ["tauri/custom-protocol"]
 development-runtime = []

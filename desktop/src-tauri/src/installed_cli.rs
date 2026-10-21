@@ -1,6 +1,7 @@
 //! Installed agent CLI frontend. No Python/Rust installation is needed by the
-//! installed binary. Read access is separate from the single named local-check
-//! execution permission. Both use the running Desktop's original owners.
+//! installed binary. Read and action grants remain separate. Ordinary actions
+//! use the running Desktop; explicit foreground history uses the same Service
+//! without fresh observations, documents or execution authority.
 use crate::service_protocol as p;
 use p::{Error, Id};
 use std::{ffi::OsString, io::Write, path::PathBuf};
@@ -83,9 +84,10 @@ Usage:\n\
   mrk ios-archive-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
   mrk ios-archive-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk ios-archive-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk serve-history --project ABSOLUTE_PATH --allow-history-read-seconds 1..3600\n\
   mrk --help\n\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
-For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
+Client commands normally need Desktop agent read access. On macOS, explicit foreground serve-history also serves status/projects/observe/operations/operation, always stale and read-only.\n\
 Reads return observations; they do not rerun actions or validate a release.\n\
 requests lists retained local-check/build, Git, identity and version request IDs in this Desktop instance, not complete history or replay permission.\n\
 android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
@@ -137,49 +139,49 @@ struct CommandCapability {
     description: &'static str,
 }
 const READ_COMMANDS: [CommandCapability; 8] = [
-    CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
-    CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
-    CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
-    CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
-    CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover retained local-check/build, Git, identity and version request IDs; not history or replay permission." },
-    CommandCapability { command: "repository", arguments: &["PROJECT_ID"], description: "Read historical Desktop Git counts; local refs only, no inspection or fetch." },
-    CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
-    CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
+    CommandCapability { command: "status", arguments: &[], description: "Read current service access." },
+    CommandCapability { command: "projects", arguments: &[], description: "List READ-granted projects." },
+    CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read saved, possibly stale setup/observation DATA." },
+    CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical tool labels; no inspection." },
+    CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover retained IDs; no history/replay." },
+    CommandCapability { command: "repository", arguments: &["PROJECT_ID"], description: "Read saved local-Git counts." },
+    CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation DATA." },
+    CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read saved DATA, not finality." },
 ];
 const LOCAL_CHECK_COMMANDS: [CommandCapability; 3] = [
-    CommandCapability { command: "local-check", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Use one separately allowed saved local-project check; configured code may have effects." },
-    CommandCapability { command: "local-check-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same request and original operation without reexecution." },
-    CommandCapability { command: "local-check-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request STOP of the same original; cancellation is not settlement." },
+    CommandCapability { command: "local-check", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Run one approved saved check." },
+    CommandCapability { command: "local-check-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Observe original; no replay." },
+    CommandCapability { command: "local-check-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "STOP is not settlement." },
 ];
 const ANDROID_BUILD_COMMANDS: [CommandCapability; 4] = [
-    CommandCapability { command: "android-build-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved Android build; no Start or GO." },
-    CommandCapability { command: "android-build-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
-    CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
-    CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
+    CommandCapability { command: "android-build-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview saved inputs; no GO." },
+    CommandCapability { command: "android-build-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start original once." },
+    CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Observe original; no replay." },
+    CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "STOP is not settlement." },
 ];
 const GIT_INDEX_COMMANDS: [CommandCapability;5] = [
-    CommandCapability {command:"git-index-scope",arguments:&["PROJECT_ID"],description:"Read the exact native Desktop-selected Stage/Unstage permission, not a fresh Git inspection."},
-    CommandCapability {command:"git-index-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","GRANT_ID"],description:"Use one explicit Desktop selection to prepare the original local Git review; no Apply."},
-    CommandCapability {command:"git-index-start",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID","PREPARE_OPERATION_ID","REVIEW_ID"],description:"Apply that exact native Stage/Unstage review once; never commit, switch, push or run arbitrary commands."},
-    CommandCapability {command:"git-index-status",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Inspect the same original request without replay; history is not finality."},
-    CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Request STOP of the same original; no cleanup is inferred."},
+    CommandCapability {command:"git-index-scope",arguments:&["PROJECT_ID"],description:"Read selected grant; no Git IO."},
+    CommandCapability {command:"git-index-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","GRANT_ID"],description:"Preview selected review; no Apply."},
+    CommandCapability {command:"git-index-start",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID","PREPARE_OPERATION_ID","REVIEW_ID"],description:"Apply selected index once."},
+    CommandCapability {command:"git-index-status",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Observe original; no replay."},
+    CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"STOP is not cleanup."},
 ];
 const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
-    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved iOS unsigned archive; no Start or GO." },
-    CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
-    CommandCapability { command: "ios-archive-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
-    CommandCapability { command: "ios-archive-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
+    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview unsigned archive; no GO." },
+    CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start original once." },
+    CommandCapability { command: "ios-archive-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Observe original; no replay." },
+    CommandCapability { command: "ios-archive-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "STOP is not settlement." },
 ];
 const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
-    CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose an identity change for explicit Desktop review; this does not apply an edit." },
-    CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
+    CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose for Desktop review; no Apply." },
+    CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Observe proposal, not its operation." },
 ];
 
 const IDENTITY_ACTION_COMMANDS: [CommandCapability; 4] = [
-    CommandCapability { command: "identity-prepare", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Preview the exact already-read identity proposal explicitly delegated in Desktop, once." },
-    CommandCapability { command: "identity-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID", "SESSION_ID", "OWNER_GENERATION", "REVISION", "PLAN_TOKEN", "--reviewed"], description: "Apply that exact original preview, once; never repeat after an unconfirmed acknowledgement." },
-    CommandCapability { command: "identity-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Read the same original delegated edit; history remains separate." },
-    CommandCapability { command: "identity-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Request STOP on that original edit; acknowledgement is not completed cleanup." },
+    CommandCapability { command: "identity-prepare", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Preview delegated, source-read proposal." },
+    CommandCapability { command: "identity-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID", "SESSION_ID", "OWNER_GENERATION", "REVISION", "PLAN_TOKEN", "--reviewed"], description: "Apply once; never replay lost ACK." },
+    CommandCapability { command: "identity-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Observe edit, not saved history." },
+    CommandCapability { command: "identity-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "STOP ACK is not cleanup." },
 ];
 
 /// A bounded description of this compiled interface, never a live ServiceInfo
@@ -195,6 +197,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "supportsExactDelegatedIdentityEdits": true,
             "supportsNamedProjectExecution": true,
             "operationsRequire": {"runningDesktop": true, "projectReadGrant": true},
+            "foregroundHistory": {"command":"serve-history", "platform":"macos", "autostart":false,
+                "freshReads":false, "commands":["status","projects","observe","operations","operation"]},
             "observationScope": "saved-data-not-live-validation-or-native-authority",
             "idFormat": "32 lowercase hexadecimal characters; all-zero IDs are invalid",
             "jsonOption": "--json (last argument)",
@@ -271,7 +275,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         })).map_err(|_| Error::StateUnknown)?
     } else {
         let mut text = String::from("Compiled CLI capabilities (Desktop availability not checked).\n\
-            Reads require a running Desktop and an explicit project read grant.\n\
+            Reads require explicit consent: Desktop, or foreground mrk serve-history on macOS for the five cached-history commands only.\n\
             Saved observations are not live validation or native operation authority.\n\
             Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
             Arbitrary edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
@@ -365,6 +369,7 @@ fn human(response: &p::ResponseBody) -> String {
         format!("{}  {state}{} (reported observation, not authority)\n", operation.operation_id.as_str(), if operation.stale { "; stale" } else { "" })
     }
     match response {
+        p::ResponseBody::Info(info) if info.read_only && !info.requires_running_desktop => "Connected to foreground cached history. No fresh reads, actions or restored grants; observations remain stale.\n".to_owned(),
         p::ResponseBody::Info(_) => "Connected to Desktop. The read grant cannot execute checks; execution needs a separate one-use grant. Saved observations are not release validation.\n".to_owned(),
         p::ResponseBody::Projects(projects) => if projects.is_empty() { "No projects are allowed for this read session.\n".to_owned() } else { projects.iter().map(project).collect() },
         p::ResponseBody::Observation(value) => {
@@ -572,6 +577,9 @@ mod tests {
         assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
         assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
+        assert_eq!(value["foregroundHistory"]["commands"], serde_json::json!(["status","projects","observe","operations","operation"]));
+        assert_eq!(value["foregroundHistory"]["autostart"], false);
+        assert_eq!(value["foregroundHistory"]["freshReads"], false);
         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
         let commands = value["commands"].as_array().unwrap();
         assert_eq!(commands.len(), 8);

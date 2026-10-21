@@ -1,0 +1,547 @@
+diff --git a/desktop/src-tauri/Cargo.toml b/desktop/src-tauri/Cargo.toml
+--- a/desktop/src-tauri/Cargo.toml
++++ b/desktop/src-tauri/Cargo.toml
+@@ -25,8 +25,8 @@
+ path = "src/main.rs"
+ required-features = ["desktop-shell"]
+
+-# Installed read-only agent transport. It does not start another release engine
+-# or link a WebView; the current Desktop's explicit grant remains necessary.
++# Same signed CLI: ordinary client commands plus explicit foreground cached
++# history. No WebView, extra executable, autostart or release engine.
+ [[bin]]
+ name = "mrk"
+ path = "src/installed_cli_main.rs"
+@@ -90,7 +90,7 @@
+
+ [features]
+ default = []
+-installed-cli = []
++installed-cli = ["tokio/signal"]
+ desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk", "mrk-windows-installed-native/desktop-ui-dialogs"]
+ custom-protocol = ["tauri/custom-protocol"]
+ development-runtime = []
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -1,7 +1,8 @@
+ //! Shared saved observations, explicit read consent and durable project IDs.
+ //!
+-//! The running GUI remains the genuine native host in this first slice. It
+-//! publishes only after original owners return. This module never constructs
++//! Desktop publishes only after original owners return. The separately
++//! consented foreground HISTORY mode never publishes fresh observations.
++//! This module never constructs
+ //! DocumentBinding, substitutes a window ID, launches an engine, accesses a
+ //! credential, or derives operation finality from a cached response.
+ use crate::{application_state_store::{Namespace, PrivateStateDirectory, Revision}, service_protocol as p};
+@@ -10,6 +11,10 @@
+ use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
+
+ const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);
++
++#[path = "application_service_history_policy.rs"]
++mod history_policy;
++pub(crate) use history_policy::{HistoryLease, HISTORY_STARTUP_WORK};
+
+ /// PRIVATE native preference binding, never accepted by the service protocol.
+ /// Actual RegisteredRoot/held native descriptors remain operation authority.
+@@ -85,6 +90,7 @@
+ mod agent_play_cleanup;
+
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
++    history_lease: Option<Arc<HistoryLease>>,
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+@@ -126,7 +132,7 @@
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -184,7 +190,9 @@
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+         if self.state.is_poisoned() { self.fence_native_history(); }
+-        if self.native_history_fenced.load(Ordering::Acquire) { Err(Error::StateUnknown) } else { Ok(()) }
++        if self.native_history_fenced.load(Ordering::Acquire) { return Err(Error::StateUnknown); }
++        if let Some(lease) = &self.history_lease { lease.current()?; }
++        Ok(())
+     }
+     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| { self.fence_native_history(); Error::StateUnknown }) }
+     fn check(&self, state: &State) -> Result<(), Error> {
+@@ -242,6 +250,7 @@
+     /// A redacted projection of the exact ORIGINAL completed passive response.
+     /// No arbitrary payload or diagnostic from that response is persisted.
+     pub(crate) fn publish_passive_snapshot(&self, runtime_id: &str, snapshot: &serde_json::Value) -> Result<p::ProjectObservation, Error> {
++        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
+         let mut state = self.lock()?; self.check(&state)?;
+         let project_id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?.clone();
+         let index = state.saved.projects.iter().position(|p| p.binding.project_id == project_id).ok_or(Error::Conflict)?;
+@@ -333,23 +342,33 @@
+     }
+
+     pub(crate) fn allow_agent_read(&self, projects: Vec<Id>, lifetime: Duration) -> Result<ReadAccessStatus, Error> {
++        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
++        self.allow_read_inner(projects, Some(lifetime))
++    }
++    fn allow_read_inner(&self, projects: Vec<Id>, lifetime: Option<Duration>) -> Result<ReadAccessStatus, Error> {
+         let intent_at = Instant::now();
+-        self.native_history_current()?;
++        self.read_publication_current()?;
+         let read_epoch = self.version_reserve_requests.read_permission_epoch()?;
+-        if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_zero() || lifetime > MAX_ACCESS { return Err(Error::InvalidRequest); }
++        if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_some_and(|life| life.is_zero() || life > MAX_ACCESS) { return Err(Error::InvalidRequest); }
+         let mut state = self.lock()?; self.check(&state)?;
+         let selected: BTreeSet<_> = projects.into_iter().collect();
+         if selected.iter().any(|id| !state.runtime_aliases.values().any(|registered| registered == id)) { return Err(Error::Conflict); }
+-        let expires = Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)?;
++        let expires = match (&self.history_lease, lifetime) {
++            (None, Some(life)) => Instant::now().checked_add(life).ok_or(Error::InvalidRequest)?,
++            (Some(original), None) => { original.publication_current()?; original.expires() },
++            _ => return Err(Error::AccessDenied),
++        };
+         let next = Grant { id: Id::random()?, projects: selected, expires,
+             reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)) };
+         // Reject a revoke which overtook original validation/IO. On failure
+         // next drops (revoking only itself); the old Grant remains untouched.
++        self.read_publication_current()?;
+         self.version_reserve_requests.publish_read_permission(&next.reserve_read, read_epoch)?;
++        self.read_publication_current()?;
+         if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); }
+         state.grant = Some(next);
+         let status = access_status(&state);
+-        self.native_history_current()?; Ok(status)
++        self.read_publication_current()?; Ok(status)
+     }
+     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
+         let at = Instant::now();
+@@ -390,6 +409,9 @@
+         let result = (|| {
+             self.native_history_current()?;
+             if request.version != p::VERSION { return Err(Error::InvalidRequest); }
++            if self.history_lease.is_some() && !history_policy::history_request(&request.request) {
++                return Err(Error::AccessDenied);
++            }
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
+@@ -459,7 +481,7 @@
+                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
+                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
+                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),
+-                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: false, read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: true,
++                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: self.history_lease.is_some(), read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: self.history_lease.is_none(),
+                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
+                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
+                 p::RequestBody::Observe(query) => { allowed(&query.project_id)?; p::ResponseBody::Observation(project(&query.project_id)?) }
+diff --git a/desktop/src-tauri/src/application_service_host.rs b/desktop/src-tauri/src/application_service_host.rs
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -1,8 +1,9 @@
+ //! Retained, default-dormant host of the existing read-only application service.
+ //!
+-//! The real DocumentBinding supplies/rechecks native facts under its original
+-//! admission lock. This module never calls back into that document, accepts a
+-//! renderer root, constructs an engine, or settles an independent core action.
++//! Desktop admission uses the real DocumentBinding under its original lock.
++//! Explicit foreground history instead obtains its own genuine SourceBook
++//! PRE/exclusion/POST, never a synthetic Document. Neither origin constructs
++//! an engine or settles an independent core action.
+ use crate::{
+     asset_commands::Reason,
+     asset_source::{self, ApplicationDirectoryExclusion, ProjectProbe, RegisteredRoot, SourceBook},
+@@ -31,11 +32,14 @@
+
+ #[path = "application_service_upload_key.rs"]
+ mod upload_key;
++#[path = "application_service_headless.rs"]
++mod headless;
++use headless::StartupRef;
+
+ const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
+ // Work admission is not the user lease. Bounded synchronous native calls have
+ // checkpoints; this does not claim that a stalled kernel call is preemptible.
+-const STARTUP_WORK: Duration = Duration::from_secs(30);
++const STARTUP_WORK: Duration = crate::application_service::HISTORY_STARTUP_WORK;
+
+ /// Native-only facts, not an admission witness. Construct and compare these
+ /// ONLY inside the genuine DocumentBinding admission callback, including its
+@@ -193,10 +197,13 @@
+     service: Option<Arc<ApplicationService>>,
+     server: Option<ServerHandle>,
+     shutdown: Option<HostShutdownReport>,
++    headless_sources: Option<headless::Sources>,
+ }
+
+ pub(crate) struct ApplicationHost {
+     identity: Arc<()>, control: Mutex<Control>, originals: AsyncMutex<Originals>,
++    history_lease: Option<Arc<crate::application_service::HistoryLease>>,
++    history_started: std::sync::atomic::AtomicBool,
+     history: Arc<identity_history::History>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+@@ -204,7 +211,7 @@
+ impl ApplicationHost {
+     /// No path lookup, directory, reservation, socket or background task.
+     pub(crate) fn new() -> Self {
+-        Self { identity: Arc::new(()), control: Mutex::new(Control {
++        Self { identity: Arc::new(()), history_lease: None, history_started: std::sync::atomic::AtomicBool::new(false), control: Mutex::new(Control {
+             phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None, prepared_binding: None,
+             native_location: None, native_roots: Vec::new(), store: None, service: None,
+             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
+@@ -356,6 +363,7 @@
+     }
+     fn begin_start(&self, original: NativeProject, revoke_read: bool,
+         work_end: Option<Instant>) -> Result<AllowTicket, Error> {
++        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
+         let mut state = if revoke_read { self.lock()? } else { self.try_native_lock()? };
+         state.available()?;
+         if state.phase == Phase::Starting { return Err(Error::Busy); }
+@@ -392,10 +400,10 @@
+     /// retained in the same poll, before any subsequent suspension. An observer
+     /// cancelled waiting for this async book has not begun construction.
+     pub(crate) async fn prepare(&self, ticket: &AllowTicket, app_data: &Path) -> Result<(), Error> {
+-        self.prepare_storage(ticket, app_data, true).await
++        self.prepare_storage(StartupRef::Document(ticket), app_data, true).await
+     }
+     pub(crate) async fn prepare_native_state(&self, ticket: &NativeStateTicket, app_data: &Path) -> Result<(), Error> {
+-        self.prepare_storage(&ticket.0, app_data, false).await
++        self.prepare_storage(StartupRef::Document(&ticket.0), app_data, false).await
+     }
+     fn startup_current(&self, ticket: &AllowTicket) -> Result<(), Error> {
+         let state = self.lock()?;
+@@ -407,18 +415,18 @@
+         if let Ok(mut state) = self.lock() { state.fail(failure); }
+         failure.code
+     }
+-    async fn prepare_storage(&self, ticket: &AllowTicket, app_data: &Path, start_agent_endpoint: bool) -> Result<(), Error> {
++    async fn prepare_storage(&self, ticket: StartupRef<'_>, app_data: &Path, start_agent_endpoint: bool) -> Result<(), Error> {
+         let mut originals = self.originals.lock().await;
+         let roots = {
+             let mut state = self.lock()?;
+-            self.check_startup(&state, ticket)?;
++            ticket.check(self, &state)?;
+             if state.phase == Phase::Starting { return Err(Error::Busy); }
+             if state.native_location.as_deref() != Some(app_data)
+-                || overlap(&ticket.original.canonical_root, app_data) {
++                || overlap(ticket.path(), app_data) {
+                 return Err(Error::Conflict);
+             }
+             if originals.location.as_ref().is_some_and(|location| location != app_data) { return Err(Error::Conflict); }
+-            if originals.source_epoch == Some(ticket.epoch) { return Err(Error::Conflict); }
++            if originals.source_epoch == Some(ticket.epoch()) { return Err(Error::Conflict); }
+             if originals.source.as_ref().is_some_and(|book| !book.not_started() && !book.settled()) {
+                 state.fail(HostFailure::simple(HostStage::ProbeSources, Error::StateUnknown)); return Err(Error::StateUnknown);
+             }
+@@ -427,7 +435,7 @@
+             // The original book is retained BEFORE native entry. A panic or
+             // cancellation cannot erase its original acquisition/close facts.
+             // Only explicit native setup/Allow replaces a KNOWN closed book.
+-            originals.source_epoch = Some(ticket.epoch);
++            originals.source_epoch = Some(ticket.epoch());
+             originals.source = Some(SourceBook::new()); originals.exclusion = None;
+             state.native_roots.clone()
+         };
+@@ -437,7 +445,7 @@
+         // fences changes to the complete native roster until this job returns.
+         let result = async {
+             let result = asset_source::probe_application_directory_exclusion(originals.source.as_mut().unwrap(),
+-                app_data, &roots, &mut || self.startup_current(ticket).is_err());
++                app_data, &roots, &mut || self.startup_current_origin(ticket).is_err());
+             match result {
+                 Ok(proof) => originals.exclusion = Some(proof),
+                 Err(reason) => {
+@@ -448,7 +456,8 @@
+             if !originals.source.as_ref().is_some_and(SourceBook::settled) {
+                 return Err(self.startup_failure(HostFailure::simple(HostStage::CloseSources, Error::StateUnknown)));
+             }
+-            self.startup_current(ticket)?;
++            self.history_source_bound(&originals)?;
++            self.startup_current_origin(ticket)?;
+             let exclusion = originals.exclusion.as_ref().ok_or(Error::StateUnknown)?;
+             let (parent, existing) = exclusion.store_expectation(app_data, &roots).map_err(source_error)?;
+             let metadata = |(device, inode, mode, uid, gid)| ApplicationDirectoryIdentity { device, inode, mode, uid, gid };
+@@ -456,7 +465,7 @@
+             let excluded_projects: Vec<_> = roots.iter().map(|root| root.identity.posix()
+                 .map(|id| id.service_identity()).map_err(source_error)).collect::<Result<_, _>>()?;
+             if originals.store.is_none() {
+-                let store = match PrivateStateDirectory::open_after_exclusion(app_data, &excluded_projects, expected, ticket.startup_expires) {
++                let store = match PrivateStateDirectory::open_after_exclusion(app_data, &excluded_projects, expected, ticket.deadline()) {
+                     Ok(store) => Arc::new(store),
+                     Err(error) => return Err(self.startup_failure(HostFailure::storage(HostStage::OpenStore, error))),
+                 };
+@@ -466,34 +475,38 @@
+             } else if let Err(error) = originals.store.as_ref().unwrap().check_application_exclusion(expected) {
+                 return Err(self.startup_failure(HostFailure::storage(HostStage::Register, error)));
+             }
+-            self.startup_current(ticket)?;
++            self.startup_current_origin(ticket)?;
+             let store = originals.store.as_ref().ok_or(Error::StateUnknown)?.clone();
+             for (device, inode) in excluded_projects {
+                 if let Err(error) = store.excludes_project(device, inode) {
+                     return Err(self.startup_failure(HostFailure::storage(HostStage::Register, error)));
+                 }
+             }
+-            self.startup_current(ticket)?;
++            self.startup_current_origin(ticket)?;
+             // The service is the existing local project/history owner, not an
+             // agent grant. Native setup needs its stable IDs without an IPC
+             // listener; later explicit Allow reuses these same originals.
+             if originals.service.is_none() {
+-                let service = match ApplicationService::open_with_observations(store.clone(), self.android_tools.clone(), self.repository_summary.clone()) {
++                let opened = match &self.history_lease {
++                    Some(lease) => ApplicationService::open_history(store.clone(), lease.clone()),
++                    None => ApplicationService::open_with_observations(store.clone(), self.android_tools.clone(), self.repository_summary.clone()),
++                };
++                let service = match opened {
+                     Ok(service) => Arc::new(service),
+                     Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::OpenService, error))),
+                 };
+                 originals.service = Some(service.clone());
+                 self.lock()?.service = Some(service);
+             }
+-            self.startup_current(ticket)?;
++            self.startup_current_origin(ticket)?;
+             let service = originals.service.as_ref().ok_or(Error::StateUnknown)?;
+-            let binding = service.register_native(&ticket.original.runtime_id, &ticket.original.canonical_root,
+-                ticket.original.device, ticket.original.inode)
++            let (device, inode) = ticket.identity()?;
++            let binding = service.register_native(ticket.alias(), ticket.path(), device, inode)
+                 .map_err(|error| self.startup_failure(HostFailure::simple(HostStage::Register, error)))?;
+             {
+                 let mut state = self.lock()?;
+-                self.check_startup(&state, ticket)?;
+-                state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
++                ticket.check(self, &state)?;
++                ticket.register(&mut state);
+                 state.prepared_binding = Some(binding);
+             }
+             if start_agent_endpoint && originals.server.is_none() {
+@@ -503,7 +516,7 @@
+                     Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::Start, error))),
+                 }
+             }
+-            self.startup_current(ticket)?;
++            self.startup_current_origin(ticket)?;
+             Ok(())
+         }.await;
+         let mut state = self.lock()?;
+@@ -514,8 +527,8 @@
+                 else if originals.store.is_some() { Phase::Ready } else { Phase::Dormant };
+         }
+         result?;
+-        self.check_startup(&state, ticket)?;
+-        state.prepared = Some(ticket.epoch);
++        ticket.check(self, &state)?;
++        state.prepared = Some(ticket.epoch());
+         Ok(())
+     }
+     pub(crate) fn finish_native_state(&self, ticket: NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
+@@ -655,6 +668,7 @@
+     /// Accepted exit/document retirement only. A cancelled quit does not call
+     /// this method, and therefore does not silently destroy existing consent.
+     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
++        self.stop_history(); // Immediate history fence; never waits behind Store/control IO.
+         self.repository_summary.retire(); // SAME relay DATA, no late publication after retirement.
+         self.android_tools.unavailable(); // Memory-only; no late relay publication can revive it.
+         self.history.retire_capture(); // Memory-only barrier before existing Host/Service work.
+@@ -681,6 +695,12 @@
+         };
+         if let Some(error) = retire_error { remember(&mut failures, HostFailure::simple(HostStage::Revoke, error)); }
+         let mut originals_closed = true;
++        if let Some(sources) = originals.headless_sources.as_mut() {
++            if !sources.retire() {
++                originals_closed = false;
++                remember(&mut failures, HostFailure::simple(HostStage::CloseSources, Error::StateUnknown));
++            }
++        }
+         if let Some(source) = originals.source.as_mut() {
+             if !source.retire_application_probe() {
+                 originals_closed = false;
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -1,6 +1,7 @@
+ //! Installed agent CLI frontend. No Python/Rust installation is needed by the
+-//! installed binary. Read access is separate from the single named local-check
+-//! execution permission. Both use the running Desktop's original owners.
++//! installed binary. Read and action grants remain separate. Ordinary actions
++//! use the running Desktop; explicit foreground history uses the same Service
++//! without fresh observations, documents or execution authority.
+ use crate::service_protocol as p;
+ use p::{Error, Id};
+ use std::{ffi::OsString, io::Write, path::PathBuf};
+@@ -83,9 +84,10 @@
+   mrk ios-archive-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
+   mrk ios-archive-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk ios-archive-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk serve-history --project ABSOLUTE_PATH --allow-history-read-seconds 1..3600\n\
+   mrk --help\n\n\
+ Capabilities describe this CLI without opening Desktop or reading project data.\n\
+-For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
++Client commands normally need Desktop agent read access. On macOS, explicit foreground serve-history also serves status/projects/observe/operations/operation, always stale and read-only.\n\
+ Reads return observations; they do not rerun actions or validate a release.\n\
+ requests lists retained local-check/build, Git, identity and version request IDs in this Desktop instance, not complete history or replay permission.\n\
+ android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
+@@ -137,7 +139,7 @@
+     description: &'static str,
+ }
+ const READ_COMMANDS: [CommandCapability; 8] = [
+-    CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
++    CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop or foreground history service access status." },
+     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
+     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
+     CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
+@@ -195,6 +197,8 @@
+             "supportsExactDelegatedIdentityEdits": true,
+             "supportsNamedProjectExecution": true,
+             "operationsRequire": {"runningDesktop": true, "projectReadGrant": true},
++            "foregroundHistory": {"command":"serve-history", "platform":"macos", "autostart":false,
++                "freshReads":false, "commands":["status","projects","observe","operations","operation"]},
+             "observationScope": "saved-data-not-live-validation-or-native-authority",
+             "idFormat": "32 lowercase hexadecimal characters; all-zero IDs are invalid",
+             "jsonOption": "--json (last argument)",
+@@ -271,7 +275,7 @@
+         })).map_err(|_| Error::StateUnknown)?
+     } else {
+         let mut text = String::from("Compiled CLI capabilities (Desktop availability not checked).\n\
+-            Reads require a running Desktop and an explicit project read grant.\n\
++            Reads require explicit consent: Desktop, or foreground mrk serve-history on macOS for the five cached-history commands only.\n\
+             Saved observations are not live validation or native operation authority.\n\
+             Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
+             Arbitrary edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+@@ -365,6 +369,7 @@
+         format!("{}  {state}{} (reported observation, not authority)\n", operation.operation_id.as_str(), if operation.stale { "; stale" } else { "" })
+     }
+     match response {
++        p::ResponseBody::Info(info) if info.read_only && !info.requires_running_desktop => "Connected to foreground cached history. No fresh reads, actions or restored grants; observations remain stale.\n".to_owned(),
+         p::ResponseBody::Info(_) => "Connected to Desktop. The read grant cannot execute checks; execution needs a separate one-use grant. Saved observations are not release validation.\n".to_owned(),
+         p::ResponseBody::Projects(projects) => if projects.is_empty() { "No projects are allowed for this read session.\n".to_owned() } else { projects.iter().map(project).collect() },
+         p::ResponseBody::Observation(value) => {
+@@ -572,6 +577,9 @@
+         assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
+         assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
+         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
++        assert_eq!(value["foregroundHistory"]["commands"], serde_json::json!(["status","projects","observe","operations","operation"]));
++        assert_eq!(value["foregroundHistory"]["autostart"], false);
++        assert_eq!(value["foregroundHistory"]["freshReads"], false);
+         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
+         let commands = value["commands"].as_array().unwrap();
+         assert_eq!(commands.len(), 8);
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -105,8 +105,9 @@
+     }
+ }
+
+-/// Call inside the application's existing async runtime, never a CLI-created
+-/// native host. Construction does not grant access; owner consent is separate.
++/// Called by the same original Host: Desktop or the explicitly consented
++/// foreground history entry. No listener construction grants access by itself;
++/// there is no automatic CLI startup, alternate endpoint or action executor.
+ pub(crate) async fn start(service: Arc<ApplicationService>) -> Result<ServerHandle, Error> {
+     service.state_directory().begin_endpoint().map_err(|e| e.code)?;
+     let prepared = bind(&service);
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -1,5 +1,6 @@
+-//! Separate, transport-only installed CLI executable. This entry does not link
+-//! DesktopBridge, native helpers, a WebView, or the release execution owners.
++//! Same signed installed CLI. Default commands remain the closed transport
++//! client. Only explicit serve-history enters the original shared Host library;
++//! it never creates a WebView, document, release engine or background daemon.
+ #![forbid(unsafe_code)]
+
+ mod service_protocol;
+@@ -34,5 +35,12 @@
+ mod installed_cli;
+
+ fn main() -> std::process::ExitCode {
+-    std::process::ExitCode::from(installed_cli::run(std::env::args_os().skip(1)))
++    let mut args = std::env::args_os().skip(1).peekable();
++    let code = if args.peek().is_some_and(|word| word == "serve-history") {
++        args.next();
++        mobile_release_desktop::run_history_service(args)
++    } else {
++        installed_cli::run(args)
++    };
++    std::process::ExitCode::from(code)
+ }
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -154,6 +154,13 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod installed_cli_ipc;
+ mod installed_cli;
++#[cfg(any(feature = "installed-cli", test))]
++mod installed_history_service;
++/// Fixed same-binary foreground history entry; no owner or grant is returned.
++#[cfg(feature = "installed-cli")]
++pub fn run_history_service(args: impl IntoIterator<Item = std::ffi::OsString>) -> u8 {
++    installed_history_service::run(args)
++}
+ mod environment;
+ mod installation;
+ mod release_version_protocol;
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -56,9 +56,9 @@
+     pub fn message(self) -> &'static str {
+         match self {
+             Self::InvalidRequest => "The service request is invalid or unsupported.",
+-            Self::Unavailable => "Open Mobile Release Kit Desktop and enable agent read access in Settings.",
+-            Self::AccessDenied => "Enable agent read access for this project in Desktop Settings.",
+-            Self::Expired => "Agent read access expired. Enable it again in Desktop Settings.",
++            Self::Unavailable => "Enable Desktop agent read access, or explicitly start mrk serve-history for cached reads only.",
++            Self::AccessDenied => "This host or grant does not allow the request. Actions require separate Desktop permission; serve-history allows only five cached reads.",
++            Self::Expired => "Read access expired. Explicitly allow it in Desktop or start a new foreground history invocation; access is not renewed automatically.",
+             Self::Busy => "The application service is busy. Try again after current work settles.",
+             Self::Conflict => "Saved service state changed. Reopen Desktop and inspect the conflict; do not replace the state files.",
+             Self::RecoveryRequired => "Application service state needs recovery. Preserve its files; it has not been reset.",
+@@ -398,7 +398,8 @@
+                 return Err(Error::InvalidRequest);
+             }
+         },
+-        ResponseBody::Info(info) if info.read_only || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || !info.requires_running_desktop || info.cached_observations_are_authority
++        ResponseBody::Info(info) if !matches!((info.read_only, info.requires_running_desktop), (false, true) | (true, false))
++            || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || info.cached_observations_are_authority
+             || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
+         ResponseBody::Projects(rows) => {
+             if rows.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
+@@ -477,6 +478,27 @@
+         let valid = format!(r#"{prefix}{{"method":"projects.list","params":{{}}}}}}"#);
+         assert!(decode_request(valid.as_bytes()).is_ok());
+         assert!(decode_request(valid.replace("\"version\":1", "\"version\":1,\"version\":1").as_bytes()).is_err());
++    }
++    #[test]
++    fn service_info_accepts_only_desktop_or_foreground_history_tuple() {
++        let request_id = Id::parse(&"1".repeat(32)).unwrap();
++        let instance = Id::parse(&"2".repeat(32)).unwrap();
++        for read_only in [false, true] { for requires_running_desktop in [false, true] {
++            let info = ServiceInfo { read_only, requires_running_desktop, read_grant_authorizes_execution: false,
++                local_checks_require_separate_grant: true, cached_observations_are_authority: false, remaining_access_ms: 30_000 };
++            let response = Response { version: VERSION, request_id: request_id.clone(), service_instance: instance.clone(),
++                client_id: Id::parse(&"3".repeat(32)).unwrap(), session_id: Id::parse(&"4".repeat(32)).unwrap(),
++                response: ResponseBody::Info(info.clone()) };
++            if read_only == requires_running_desktop { assert!(encode_response(&response).is_err()); continue; }
++            let bytes = encode_response(&response).unwrap();
++            assert_eq!(decode_response(&bytes, &request_id, &instance).unwrap(), response);
++            for changed in [ServiceInfo { read_grant_authorizes_execution: true, ..info.clone() },
++                ServiceInfo { local_checks_require_separate_grant: false, ..info.clone() },
++                ServiceInfo { cached_observations_are_authority: true, ..info.clone() },
++                ServiceInfo { remaining_access_ms: 3_600_001, ..info }] {
++                assert!(encode_response(&Response { response: ResponseBody::Info(changed), ..response.clone() }).is_err());
++            }
++        }}
+     }
+     #[test]
+     fn bounded_identifiers_and_credential_generations() {

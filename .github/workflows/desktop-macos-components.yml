@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-native-tests, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
         description: Architecture for app-typecheck/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
@@ -438,8 +438,8 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.apple_key_component || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
-    name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.apple_key_component || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'automation-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
+    name: ${{ inputs.component == 'automation-contracts' && 'Test affected automation and Mac admission contracts' || inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     permissions:
@@ -450,10 +450,10 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON((inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
+        include: ${{ fromJSON((inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'automation-contracts') && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
     steps:
       - name: Require the explicit ARM-only focused selection
-        if: inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests'
+        if: inputs.apple_key_component || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'automation-contracts'
         shell: bash
         env:
           SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
@@ -462,7 +462,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
-            printf '%s\n' 'app-typecheck/app-native-tests require architecture=arm64; no other architecture was compiled.' >&2
+            printf '%s\n' 'app-typecheck/app-native-tests/automation-contracts require architecture=arm64; no other architecture was compiled.' >&2
             exit 1
           fi
           if [[ "$APPLE_KEY_REQUESTED" == true && "$SELECTED_COMPONENT" != app-typecheck ]]; then
@@ -489,7 +489,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B desktop/tools/prepare_ci_xcode.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests'
+        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests' && inputs.component != 'automation-contracts'
         with:
           node-version: '24.20.0'
       - name: Allocate task-owned app compiler directory
@@ -533,7 +533,7 @@ jobs:
           # Exact SDK/Rust/profile/dependency key only. Source changes still
           # run Cargo, including build.rs SOURCE/release env invalidation.
           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
-      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+      - name: ${{ inputs.component == 'automation-contracts' && 'Run only affected memory, cleanup and foreground-history contracts' || inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -548,6 +548,72 @@ jobs:
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
           export npm_config_cache="$WORK_ROOT/npm-cache"
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$APP_CHECKS" == automation-contracts ]]; then
+            # Linux production/CLI compilation ran locally. Its full libtest
+            # graph exceeds the VPS RAM reserve; this same focused Mac batch
+            # also exercises the real Darwin quotes and SourceBook/IPC paths.
+            # No frontend, app launch, signing, notarization or provider calls.
+            export CARGO_BUILD_JOBS=1
+            automation_home=$(/usr/bin/mktemp -d "$HOME/.mrka.XXXXXX")
+            trap 'status=$?; if ! /bin/rmdir "$automation_home"; then printf "%s\n" "Automation fixture retained for disposable-host teardown." >&2; test "$status" -ne 0 || status=1; fi; exit "$status"' EXIT
+            tests=(
+              macos_history_inventory::tests::original_backing_and_full_control_reservations_stay_separate
+              git_local_protocol::tests::local_admission_keeps_writer_bound_with_shared_document_data_and_full_code
+              git_local_protocol::fetch_worker::tests::remote_quote_preserves_shared_data_writer_remote_and_code_bounds
+              git_local_protocol::push_worker::tests::push_quote_preserves_shared_data_writer_remote_and_code_bounds
+              asset_session::tool_memory::tests::public_partition_preserves_document_cap_future_reserve_and_checked_totals
+              asset_session::lookup_memory::local_execute_census_remaining_has_no_overflow_or_added_credit
+              asset_session::shared_memory_tests::actual_document_and_retained_capacity_obey_shared_admission
+              asset_session::shared_memory_tests::actual_document_plus_apple_future_fits_original_session_limit
+              asset_session::shared_memory_tests::actual_mac_native_quotes_fit_current_document_before_any_runtime_is_opened
+              github_play_cleanup_protocol::tests::advanced_dispatch_head_is_separate_from_original_source_and_alias_safe_once_key
+              github_play_cleanup_protocol::tests::acknowledgement_and_absent_later_journal_are_never_cleanup_success
+              github_play_cleanup_protocol::tests::worker_refusal_has_exact_correlation_and_no_public_consent_or_private_field
+              github_play_cleanup_protocol::tests::explicit_closed_command_does_not_accept_desktop_release_markers_or_auto_confirm
+              github_play_cleanup_protocol::tests::exact_fixed_allowances_use_checked_remaining_document_budget
+              service_play_cleanup_protocol::tests::closed_request_accepts_only_three_ids_and_consent_not_provider_material
+              service_play_cleanup_protocol::tests::nullable_fields_and_acknowledgement_cannot_fabricate_cleanup_finality
+              service_play_cleanup_protocol::tests::response_rematches_instance_and_fixed_small_bound
+              service_play_cleanup_requests::tests::consumed_access_is_not_revoked_scope_and_exact_retry_never_remints_claim
+              service_play_cleanup_requests::tests::original_earliest_stop_and_later_unknown_do_not_renew_watchdog_or_revisions
+              service_play_cleanup_requests::tests::original_native_go_and_unknown_are_immediate_monotone_facts_not_join_or_retry_authority
+              service_play_cleanup_requests::tests::known_refusal_without_go_is_not_sent_and_a_later_reply_cannot_erase_original_go
+              service_play_cleanup_requests::tests::prearm_review_expiry_uses_original_end_and_postarm_does_not_renew_read_permission
+              service_play_cleanup_requests::tests::dropped_claim_close_and_context_loss_are_not_native_settlement
+              service_play_cleanup_requests::tests::known_preinsertion_refusal_keeps_tombstone_and_capacity_does_not_evict_it
+              service_play_cleanup_requests::tests::poisoned_or_fenced_original_inbox_invalidates_already_claimed_link
+              application_service::agent_play_cleanup::tests::actual_read_and_cleanup_scopes_both_required_reconnect_and_presend_rematch
+              application_service::agent_play_cleanup::tests::original_grant_clone_drop_and_renewal_do_not_rebind_old_cleanup_scope
+              application_service::agent_play_cleanup::tests::before_allow_revocation_and_claim_watchdog_do_not_wait_for_service_io_mutex
+              application_service::agent_play_cleanup::tests::unobserved_service_poison_fences_claim_without_second_service_lock
+              asset_session::play_cleanup::tests::default_document_fits_cleanup_but_real_retained_buffers_refuse_without_quota_change
+              github_connection_session::play_cleanup::tests::access_countdown_is_data_but_disable_or_replacement_advances_original_revision
+              github_connection_session::play_cleanup::tests::stale_or_unknown_data_without_original_consent_never_gains_agent_review
+              supervisor::play_cleanup::tests::delayed_agent_stop_uses_original_failure_plus_two_and_never_supplies_management_join
+              installed_cli::play_cleanup::tests::original_argument_collector_accepts_exact_reviewed_submit_and_rejects_extras
+              installed_cli::play_cleanup::tests::lost_reply_preserves_original_ids_and_ack_is_not_cleanup_in_human_or_json
+              installed_cli::play_cleanup::tests::actual_capability_catalogue_keeps_fixed_limit_and_separate_mutating_consent
+              application_service::history_policy::tests::original_history_lease_never_renews_or_rearms
+              application_service::history_policy::service_tests::history_allowlist_precedes_every_dispatch_family_and_service_lock
+              application_service::history_policy::service_tests::history_reload_is_stale_and_never_restores_alias_grant_or_execution
+              application_service::history_policy::service_tests::history_stop_overtakes_blocked_grant_publication_without_timer_renewal
+              application_service_host::headless::tests::history_startup_deadline_and_stop_refuse_before_source_without_rearming
+              installed_history_service::tests::serve_history_requires_exact_foreground_consent_and_bounded_native_path
+              service_protocol::tests::service_info_accepts_only_desktop_or_foreground_history_tuple
+              application_service_host::headless::tests::macos::history_native_original_sources_join_before_grant_and_restart_does_not_restore_it
+              application_service_host::headless::tests::macos::history_concurrent_host_is_busy_and_cannot_take_over_or_delete_original_endpoint
+              application_service_host::headless::tests::macos::history_stopped_joined_startup_grants_nothing_and_saved_path_cannot_adopt_replacement
+              installed_cli::tests::capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals
+            )
+            (
+              cd "$automation_home"
+              HOME="$automation_home" rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --lib -- \
+                "${tests[@]}" --exact --test-threads=1 --nocapture | tee "$WORK_ROOT/automation-contracts.log"
+            )
+            grep -Eq '^test result: ok\. 47 passed; 0 failed; 0 ignored;' "$WORK_ROOT/automation-contracts.log"
+            exit 0
+          fi
           if [[ "$APP_CHECKS" != app-contracts && "$APP_CHECKS" != local-keychain-contracts && "$APP_CHECKS" != app-native-tests ]]; then
             npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
             npm --prefix desktop run build
@@ -705,7 +771,7 @@ jobs:
                 application_service::git_index::tests::original_service_requires_both_grants_and_preserves_request_across_client_reconnect \
                 application_service::git_index::commit::tests::same_service_requires_read_and_commit_grants_and_reconnect_cannot_replay \
                 git_local_protocol::tests::strict_local_commands_have_no_provider_or_serialized_plan_route \
-                git_local_protocol::tests::local_admission_keeps_document_writer_and_full_code_partitions_independent \
+                git_local_protocol::tests::local_admission_keeps_writer_bound_with_shared_document_data_and_full_code \
                 git_local_state::tests::pending_and_unknown_restart_rows_never_authorize_retry \
                 git_local_state::init_tests::init_schema_seven_is_actual_reservation_only_and_old_rows_remain_canonical \
                 supervisor::git_local::tests::local_clock_is_one_original_45_55_with_earliest_failure \
@@ -731,7 +797,7 @@ jobs:
                 git_push_protocol::tests::review_binds_exact_upstream_oids_commit_set_and_no_message_author_payload \
                 git_push_protocol::tests::candidate_binds_complete_review_not_only_new_oid_and_does_not_mean_sent \
                 git_push_protocol::tests::journal_keeps_same_review_and_refuses_candidate_replacement_or_unbound_finality \
-                git_local_protocol::push_worker::tests::push_200_quote_adds_real_remote_and_body_backing_without_borrowing_old_caps \
+                git_local_protocol::push_worker::tests::push_quote_preserves_shared_data_writer_remote_and_code_bounds \
                 git_local_protocol::push_worker::tests::original_request_binds_attached_head_and_review_account_while_go_is_private \
                 git_local_protocol::push_worker::tests::exact_candidate_ack_once_revision_has_no_fetch_keep_or_mutable_body_permission \
                 git_local_protocol::push_worker::tests::review_dry_run_accepts_only_exact_no_transmission_result_and_no_child_authority \
@@ -1407,7 +1473,7 @@ jobs:
             desktop/.ci-component-cargo/target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: Remove only this job's app compiler and frontend outputs
-        if: always() && steps.work.outputs.root != ''
+        if: always() && inputs.component != 'automation-contracts' && steps.work.outputs.root != ''
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}

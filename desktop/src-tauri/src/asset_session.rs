@@ -1735,6 +1735,13 @@ mod lookup_memory {
 
     const WORKING_BYTES: usize = 96 * 1024 * 1024;
     pub(super) fn execute_remaining(actual:usize)->Option<usize>{WORKING_BYTES.checked_sub(actual)}
+    // store_preflight_admission_bytes includes the complete fixed installed
+    // code. Keep that debit separate from Execute's 96MiB working headroom.
+    pub(super) fn execute_remaining_from_admitted_total(total:usize,extra:usize)->Option<usize>{
+        let working=total.checked_sub(crate::macos_install_record::CONTROL_LIMIT)?;
+        total.checked_add(extra)?; // The combined representation must also fit.
+        execute_remaining(working.checked_add(extra)?)
+    }
     #[test]
     fn local_execute_census_remaining_has_no_overflow_or_added_credit(){
         assert_eq!(execute_remaining(WORKING_BYTES),Some(0));
@@ -1742,6 +1749,13 @@ mod lookup_memory {
         assert_eq!(execute_remaining(WORKING_BYTES+1),None);
         assert_eq!(execute_remaining(usize::MAX),None);
         assert_eq!(WORKING_BYTES,96*1024*1024);assert_eq!(SESSION_BYTES,64*1024*1024);
+        let code=crate::macos_install_record::CONTROL_LIMIT;
+        assert_eq!(execute_remaining_from_admitted_total(code+SESSION_BYTES,64),Some(WORKING_BYTES-SESSION_BYTES-64));
+        assert_eq!(execute_remaining_from_admitted_total(code+WORKING_BYTES,0),Some(0));
+        assert_eq!(execute_remaining_from_admitted_total(code+WORKING_BYTES,1),None);
+        assert_eq!(execute_remaining_from_admitted_total(code-1,0),None);
+        assert_eq!(execute_remaining_from_admitted_total(code,usize::MAX),None);
+        assert_eq!(execute_remaining_from_admitted_total(usize::MAX,1),None);
     }
 
     const IDENTITIES: usize = 128;
@@ -2218,9 +2232,9 @@ mod lookup_memory {
         census.add(std::mem::size_of::<Census<'_>>())?;
         // Includes native source reservation, raw saved config and the fixed
         // simultaneous framing/receipt/Status-copy term. Not a process RSS claim.
-        // Only this Mac History path replaces its old48MiB code partition with
-        // the full128MiB installed-runtime reservation. The original16MiB for
-        // Document, source and every other retained/future copy stays unchanged.
+        // The full128MiB installed-runtime reservation is separate from the
+        // shared64MiB Document/source/owner/framing allowance. All conservative
+        // service/history debits above remain charged, including future replies.
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         { crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity) }
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
@@ -9850,6 +9864,10 @@ fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle()
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installation::{ReadObservation as InstallationReadObservation, OriginalFacts as InstallationOriginalFacts};
+
+#[cfg(all(test, any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+#[path="asset_session_memory_tests.rs"]
+mod shared_memory_tests;
 
 #[cfg(test)]
 pub(crate) fn assert_installation_owner_contracts() { installation::assert_owner_contracts(); }

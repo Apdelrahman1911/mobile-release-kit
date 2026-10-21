@@ -1,7 +1,8 @@
 //! Shared saved observations, explicit read consent and durable project IDs.
 //!
-//! The running GUI remains the genuine native host in this first slice. It
-//! publishes only after original owners return. This module never constructs
+//! Desktop publishes only after original owners return. The separately
+//! consented foreground HISTORY mode never publishes fresh observations.
+//! This module never constructs
 //! DocumentBinding, substitutes a window ID, launches an engine, accesses a
 //! credential, or derives operation finality from a cached response.
 use crate::{application_state_store::{Namespace, PrivateStateDirectory, Revision}, service_protocol as p};
@@ -10,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
 
 const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);
+
+#[path = "application_service_history_policy.rs"]
+mod history_policy;
+pub(crate) use history_policy::{HistoryLease, HISTORY_STARTUP_WORK};
 
 /// PRIVATE native preference binding, never accepted by the service protocol.
 /// Actual RegisteredRoot/held native descriptors remain operation authority.
@@ -85,6 +90,7 @@ mod agent_version_reserve;
 mod agent_play_cleanup;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+    history_lease: Option<Arc<HistoryLease>>,
     git_index_requests: Arc<crate::service_git_requests::Inbox>,
     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
@@ -126,7 +132,7 @@ impl ApplicationService {
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -184,7 +190,9 @@ impl ApplicationService {
         // Nonblocking: an old facet must not survive an unobserved state
         // poison while another caller still has not attempted lock().
         if self.state.is_poisoned() { self.fence_native_history(); }
-        if self.native_history_fenced.load(Ordering::Acquire) { Err(Error::StateUnknown) } else { Ok(()) }
+        if self.native_history_fenced.load(Ordering::Acquire) { return Err(Error::StateUnknown); }
+        if let Some(lease) = &self.history_lease { lease.current()?; }
+        Ok(())
     }
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| { self.fence_native_history(); Error::StateUnknown }) }
     fn check(&self, state: &State) -> Result<(), Error> {
@@ -242,6 +250,7 @@ impl ApplicationService {
     /// A redacted projection of the exact ORIGINAL completed passive response.
     /// No arbitrary payload or diagnostic from that response is persisted.
     pub(crate) fn publish_passive_snapshot(&self, runtime_id: &str, snapshot: &serde_json::Value) -> Result<p::ProjectObservation, Error> {
+        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
         let mut state = self.lock()?; self.check(&state)?;
         let project_id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?.clone();
         let index = state.saved.projects.iter().position(|p| p.binding.project_id == project_id).ok_or(Error::Conflict)?;
@@ -333,23 +342,33 @@ impl ApplicationService {
     }
 
     pub(crate) fn allow_agent_read(&self, projects: Vec<Id>, lifetime: Duration) -> Result<ReadAccessStatus, Error> {
+        if self.history_lease.is_some() { return Err(Error::AccessDenied); }
+        self.allow_read_inner(projects, Some(lifetime))
+    }
+    fn allow_read_inner(&self, projects: Vec<Id>, lifetime: Option<Duration>) -> Result<ReadAccessStatus, Error> {
         let intent_at = Instant::now();
-        self.native_history_current()?;
+        self.read_publication_current()?;
         let read_epoch = self.version_reserve_requests.read_permission_epoch()?;
-        if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_zero() || lifetime > MAX_ACCESS { return Err(Error::InvalidRequest); }
+        if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_some_and(|life| life.is_zero() || life > MAX_ACCESS) { return Err(Error::InvalidRequest); }
         let mut state = self.lock()?; self.check(&state)?;
         let selected: BTreeSet<_> = projects.into_iter().collect();
         if selected.iter().any(|id| !state.runtime_aliases.values().any(|registered| registered == id)) { return Err(Error::Conflict); }
-        let expires = Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)?;
+        let expires = match (&self.history_lease, lifetime) {
+            (None, Some(life)) => Instant::now().checked_add(life).ok_or(Error::InvalidRequest)?,
+            (Some(original), None) => { original.publication_current()?; original.expires() },
+            _ => return Err(Error::AccessDenied),
+        };
         let next = Grant { id: Id::random()?, projects: selected, expires,
             reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)) };
         // Reject a revoke which overtook original validation/IO. On failure
         // next drops (revoking only itself); the old Grant remains untouched.
+        self.read_publication_current()?;
         self.version_reserve_requests.publish_read_permission(&next.reserve_read, read_epoch)?;
+        self.read_publication_current()?;
         if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); }
         state.grant = Some(next);
         let status = access_status(&state);
-        self.native_history_current()?; Ok(status)
+        self.read_publication_current()?; Ok(status)
     }
     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
         let at = Instant::now();
@@ -390,6 +409,9 @@ impl ApplicationService {
         let result = (|| {
             self.native_history_current()?;
             if request.version != p::VERSION { return Err(Error::InvalidRequest); }
+            if self.history_lease.is_some() && !history_policy::history_request(&request.request) {
+                return Err(Error::AccessDenied);
+            }
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
@@ -459,7 +481,7 @@ impl ApplicationService {
                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),
-                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: false, read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: true,
+                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: self.history_lease.is_some(), read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: self.history_lease.is_none(),
                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
                 p::RequestBody::Observe(query) => { allowed(&query.project_id)?; p::ResponseBody::Observation(project(&query.project_id)?) }

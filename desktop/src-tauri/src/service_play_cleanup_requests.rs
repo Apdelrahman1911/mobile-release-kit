@@ -576,7 +576,8 @@ impl Inbox {
             && original.stop(Instant::now(), false)?.is_none())
     }
     pub(crate) fn access(&self) -> Result<Option<p::Access>, Error> {
-        self.access_locked(&self.lock()?)
+        let book = self.lock()?;
+        self.access_locked(&book)
     }
     pub(crate) fn submit(&self, input: p::Submit) -> Result<p::Status, Error> {
         let mut book = self.lock()?;

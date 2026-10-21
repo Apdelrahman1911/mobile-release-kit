@@ -105,8 +105,9 @@ impl Drop for ServerHandle {
     }
 }
 
-/// Call inside the application's existing async runtime, never a CLI-created
-/// native host. Construction does not grant access; owner consent is separate.
+/// Called by the same original Host: Desktop or the explicitly consented
+/// foreground history entry. No listener construction grants access by itself;
+/// there is no automatic CLI startup, alternate endpoint or action executor.
 pub(crate) async fn start(service: Arc<ApplicationService>) -> Result<ServerHandle, Error> {
     service.state_directory().begin_endpoint().map_err(|e| e.code)?;
     let prepared = bind(&service);

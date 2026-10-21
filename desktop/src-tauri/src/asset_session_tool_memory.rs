@@ -3,9 +3,10 @@
 use super::*;
 use crate::saved_command_owner::ToolAcquisitionCensus;
 
-// Keep the stricter original Mac History document backing for this new slice.
-// Other domains' SESSION_BYTES and credential budgets remain unchanged.
-const DOCUMENT_BACKING: usize = 16 * 1024 * 1024;
+// Shared Document backing is separate from the fixed public download/parser
+// buffers. Keep those at 96MiB and installed code at 128MiB: at most 288MiB
+// accounted representations, not RSS or extra private credential capacity.
+const DOCUMENT_BACKING: usize = SESSION_BYTES;
 
 pub(crate) struct ToolAcquisitionMemoryAdmission<'a> {
     remaining: usize,
@@ -23,10 +24,12 @@ impl ToolAcquisitionMemoryAdmission<'_> {
 fn remaining(document: usize, retained: usize, admission: usize, public: usize,
     future: usize, code: usize) -> Option<usize> {
     if document > DOCUMENT_BACKING { return None; }
-    let live = document.checked_add(retained)?.checked_add(admission)?;
+    let live = retained.checked_add(admission)?;
     // The installed-code reservation is charged once, separately. It cannot
     // increase the public partition or conceal overflow in the combined bound.
-    if live.checked_add(future)?.checked_add(code)? > public.checked_add(code)? { return None; }
+    let total = document.checked_add(live)?.checked_add(future)?.checked_add(code)?;
+    let limit = DOCUMENT_BACKING.checked_add(public)?.checked_add(code)?;
+    if total > limit { return None; }
     let available = public.checked_sub(live)?;
     (future <= available).then_some(available)
 }
@@ -62,10 +65,10 @@ mod tests {
     #[test]
     fn public_partition_preserves_document_cap_future_reserve_and_checked_totals() {
         const M: usize = 1024 * 1024;
-        assert_eq!(remaining(M, 2*M, 64, 96*M, 82*M, 128*M), Some(93*M-64));
-        assert_eq!(remaining(14*M, 0, 0, 96*M, 82*M, 128*M), Some(82*M));
-        assert_eq!(remaining(14*M, 1, 0, 96*M, 82*M, 128*M), None);
-        assert_eq!(remaining(16*M+1, 0, 0, 96*M, 0, 128*M), None);
+        assert_eq!(remaining(M, 2*M, 64, 96*M, 82*M, 128*M), Some(94*M-64));
+        assert_eq!(remaining(64*M, 14*M, 0, 96*M, 82*M, 128*M), Some(82*M));
+        assert_eq!(remaining(64*M, 14*M, 1, 96*M, 82*M, 128*M), None);
+        assert_eq!(remaining(64*M+1, 0, 0, 96*M, 0, 128*M), None);
         assert_eq!(remaining(0, 0, 0, 96*M, 96*M+1, 128*M), None);
         assert_eq!(remaining(1, usize::MAX, 0, 96*M, 82*M, 128*M), None);
         assert_eq!(remaining(0, 0, 0, 96*M, 82*M, usize::MAX), None);

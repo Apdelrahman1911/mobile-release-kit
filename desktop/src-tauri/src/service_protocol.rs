@@ -56,9 +56,9 @@ impl Error {
     pub fn message(self) -> &'static str {
         match self {
             Self::InvalidRequest => "The service request is invalid or unsupported.",
-            Self::Unavailable => "Open Mobile Release Kit Desktop and enable agent read access in Settings.",
-            Self::AccessDenied => "Enable agent read access for this project in Desktop Settings.",
-            Self::Expired => "Agent read access expired. Enable it again in Desktop Settings.",
+            Self::Unavailable => "Enable Desktop agent read access, or explicitly start mrk serve-history for cached reads only.",
+            Self::AccessDenied => "This host or grant does not allow the request. Actions require separate Desktop permission; serve-history allows only five cached reads.",
+            Self::Expired => "Read access expired. Explicitly allow it in Desktop or start a new foreground history invocation; access is not renewed automatically.",
             Self::Busy => "The application service is busy. Try again after current work settles.",
             Self::Conflict => "Saved service state changed. Reopen Desktop and inspect the conflict; do not replace the state files.",
             Self::RecoveryRequired => "Application service state needs recovery. Preserve its files; it has not been reset.",
@@ -398,7 +398,8 @@ fn validate_response(response: &Response) -> Result<(), Error> {
                 return Err(Error::InvalidRequest);
             }
         },
-        ResponseBody::Info(info) if info.read_only || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || !info.requires_running_desktop || info.cached_observations_are_authority
+        ResponseBody::Info(info) if !matches!((info.read_only, info.requires_running_desktop), (false, true) | (true, false))
+            || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || info.cached_observations_are_authority
             || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
         ResponseBody::Projects(rows) => {
             if rows.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
@@ -477,6 +478,27 @@ mod tests {
         let valid = format!(r#"{prefix}{{"method":"projects.list","params":{{}}}}}}"#);
         assert!(decode_request(valid.as_bytes()).is_ok());
         assert!(decode_request(valid.replace("\"version\":1", "\"version\":1,\"version\":1").as_bytes()).is_err());
+    }
+    #[test]
+    fn service_info_accepts_only_desktop_or_foreground_history_tuple() {
+        let request_id = Id::parse(&"1".repeat(32)).unwrap();
+        let instance = Id::parse(&"2".repeat(32)).unwrap();
+        for read_only in [false, true] { for requires_running_desktop in [false, true] {
+            let info = ServiceInfo { read_only, requires_running_desktop, read_grant_authorizes_execution: false,
+                local_checks_require_separate_grant: true, cached_observations_are_authority: false, remaining_access_ms: 30_000 };
+            let response = Response { version: VERSION, request_id: request_id.clone(), service_instance: instance.clone(),
+                client_id: Id::parse(&"3".repeat(32)).unwrap(), session_id: Id::parse(&"4".repeat(32)).unwrap(),
+                response: ResponseBody::Info(info.clone()) };
+            if read_only == requires_running_desktop { assert!(encode_response(&response).is_err()); continue; }
+            let bytes = encode_response(&response).unwrap();
+            assert_eq!(decode_response(&bytes, &request_id, &instance).unwrap(), response);
+            for changed in [ServiceInfo { read_grant_authorizes_execution: true, ..info.clone() },
+                ServiceInfo { local_checks_require_separate_grant: false, ..info.clone() },
+                ServiceInfo { cached_observations_are_authority: true, ..info.clone() },
+                ServiceInfo { remaining_access_ms: 3_600_001, ..info }] {
+                assert!(encode_response(&Response { response: ResponseBody::Info(changed), ..response.clone() }).is_err());
+            }
+        }}
     }
     #[test]
     fn bounded_identifiers_and_credential_generations() {

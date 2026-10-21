@@ -154,6 +154,13 @@ mod application_service_host;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod installed_cli_ipc;
 mod installed_cli;
+#[cfg(any(feature = "installed-cli", test))]
+mod installed_history_service;
+/// Fixed same-binary foreground history entry; no owner or grant is returned.
+#[cfg(feature = "installed-cli")]
+pub fn run_history_service(args: impl IntoIterator<Item = std::ffi::OsString>) -> u8 {
+    installed_history_service::run(args)
+}
 mod environment;
 mod installation;
 mod release_version_protocol;

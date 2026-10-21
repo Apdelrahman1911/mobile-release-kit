@@ -141,7 +141,7 @@ fn malformed_duplicate_oversize_and_extended_failure_cutoff_never_settle() {
 }
 
 #[test]
-fn local_admission_keeps_document_writer_and_full_code_partitions_independent() {
+fn local_admission_keeps_writer_bound_with_shared_document_data_and_full_code() {
     let mib=1024*1024;
     let code=crate::macos_history_inventory::CODE_CONTROL_RESERVE;
     assert_eq!(code,128*mib);
@@ -150,7 +150,10 @@ fn local_admission_keeps_document_writer_and_full_code_partitions_independent() 
         (16*mib,code,Some(144*mib)),
         (0,code+16*mib,Some(144*mib)),
         (16*mib,code+16*mib,Some(160*mib)),
-        (16*mib+1,code,None),
+        (48*mib,code+16*mib,Some(192*mib)),
+        (48*mib+1,code+16*mib,None),
+        (64*mib,code,Some(192*mib)),
+        (64*mib+1,code,None),
         (0,code+16*mib+1,None),
         (0,code-1,None),
         (16*mib,0,None),

@@ -3,18 +3,21 @@
 use crate::macos_install_record as data;
 
 pub(crate) const CODE_CONTROL_RESERVE: usize = data::CONTROL_LIMIT;
-const ORIGINAL_CODE_CONTROL: usize = 48 * 1024 * 1024;
-const DOCUMENT_BACKING: usize = 64 * 1024 * 1024 - ORIGINAL_CODE_CONTROL;
+// The shared application service is now included in every Document census.
+// Its retained rows/reply reservations are not spare space in the historical
+// 64MiB-minus-48MiB code partition. Keep code independent and use the existing
+// complete 64MiB session allowance for Document plus this operation's DATA.
+// This is a finite representation bound (192MiB including code), not RSS.
+pub(crate) const SHARED_DATA_LIMIT: usize = 64 * 1024 * 1024;
 const TREE_CONTROL_LIMIT: usize = 88 * 1024 * 1024;
 const PARSE_CONTROL_LIMIT: usize = 64 * 1024 * 1024;
 const NAME_COPIES: usize = 7;
 
-/// Original Document/source/owner/framing backing remains 16MiB. The future
-/// debit must contain the complete fixed code reservation; it cannot supply
-/// partial credit or enlarge a credential/session quota.
+/// Charge every retained Document/source/owner/frame byte, with the complete
+/// fixed code reservation separate. No private credential quota is enlarged.
 pub(crate) fn admission_bytes(document: usize, future: usize) -> Option<usize> {
     let other = future.checked_sub(CODE_CONTROL_RESERVE)?;
-    if document.checked_add(other)? > DOCUMENT_BACKING { return None; }
+    if document.checked_add(other)? > SHARED_DATA_LIMIT { return None; }
     document.checked_add(future)
 }
 
@@ -151,11 +154,11 @@ mod tests {
 
     #[test]
     fn original_backing_and_full_control_reservations_stay_separate() {
-        assert_eq!(DOCUMENT_BACKING, 16 * 1024 * 1024);
-        let peak = 144 * 1024 * 1024;
-        for extra in [0, 1, 512 * 1024, DOCUMENT_BACKING] {
+        assert_eq!(SHARED_DATA_LIMIT, 64 * 1024 * 1024);
+        let peak = 192 * 1024 * 1024;
+        for extra in [0, 1, 512 * 1024, SHARED_DATA_LIMIT] {
             let future = CODE_CONTROL_RESERVE + extra;
-            let backing = DOCUMENT_BACKING - extra;
+            let backing = SHARED_DATA_LIMIT - extra;
             assert_eq!(admission_bytes(backing, future), Some(peak));
             if backing > 0 { assert_eq!(admission_bytes(backing - 1, future), Some(peak - 1)); }
             assert!(admission_bytes(backing + 1, future).is_none());

@@ -56,8 +56,7 @@ impl DocumentBinding {
             let future=crate::saved_command_owner::store_execute_document_backing_bytes().ok_or_else(crate::local_store_execute_owner::unavailable)?;
             let actual=lookup_memory::store_preflight_admission_bytes(&self.inner,state,loan,future)
                 .map_err(|_|crate::local_store_execute_owner::unavailable())?;
-            let remaining=lookup_memory::execute_remaining(actual.checked_add(std::mem::size_of::<ExecuteMemoryAdmission<'_>>())
-                .ok_or_else(crate::local_store_execute_owner::unavailable)?)
+            let remaining=lookup_memory::execute_remaining_from_admitted_total(actual,std::mem::size_of::<ExecuteMemoryAdmission<'_>>())
                 .ok_or_else(crate::local_store_execute_owner::unavailable)?;
             Ok(ExecuteMemoryAdmission{remaining,material:loan,_state:state})
         }

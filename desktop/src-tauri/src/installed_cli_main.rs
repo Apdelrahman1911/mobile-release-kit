@@ -1,5 +1,6 @@
-//! Separate, transport-only installed CLI executable. This entry does not link
-//! DesktopBridge, native helpers, a WebView, or the release execution owners.
+//! Same signed installed CLI. Default commands remain the closed transport
+//! client. Only explicit serve-history enters the original shared Host library;
+//! it never creates a WebView, document, release engine or background daemon.
 #![forbid(unsafe_code)]
 
 mod service_protocol;
@@ -34,5 +35,12 @@ mod installed_cli_ipc;
 mod installed_cli;
 
 fn main() -> std::process::ExitCode {
-    std::process::ExitCode::from(installed_cli::run(std::env::args_os().skip(1)))
+    let mut args = std::env::args_os().skip(1).peekable();
+    let code = if args.peek().is_some_and(|word| word == "serve-history") {
+        args.next();
+        mobile_release_desktop::run_history_service(args)
+    } else {
+        installed_cli::run(args)
+    };
+    std::process::ExitCode::from(code)
 }

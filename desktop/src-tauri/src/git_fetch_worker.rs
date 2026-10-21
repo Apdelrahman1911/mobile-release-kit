@@ -501,14 +501,16 @@ impl Request {
 mod tests {
     use super::*;
     #[test]
-    fn remote_quote_preserves_both_independent_old_caps_and_code_minimum() {
+    fn remote_quote_preserves_shared_data_writer_remote_and_code_bounds() {
         const M: usize = 1024 * 1024;
         let c = crate::macos_history_inventory::CODE_CONTROL_RESERVE;
         assert_eq!(
             admission_bytes(16 * M, c + 16 * M + REMOTE_BACKING),
             Some(c + 56 * M)
         );
-        assert_eq!(admission_bytes(16 * M + 1, c + REMOTE_BACKING), None);
+        assert_eq!(admission_bytes(48 * M, c + 16 * M + REMOTE_BACKING), Some(216 * M));
+        assert_eq!(admission_bytes(48 * M + 1, c + 16 * M + REMOTE_BACKING), None);
+        assert_eq!(admission_bytes(64 * M + 1, c + REMOTE_BACKING), None);
         assert_eq!(admission_bytes(0, c + 16 * M + REMOTE_BACKING + 1), None);
         assert_eq!(admission_bytes(0, c + REMOTE_BACKING - 1), None);
         assert_eq!(admission_bytes(0, REMOTE_BACKING - 1), None);
