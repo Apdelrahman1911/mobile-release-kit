@@ -46,6 +46,8 @@ pub(super) struct Invocation {
     pub(super) observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_fetch::Control>>,
     fetch_joined:Arc<std::sync::OnceLock<fetch::JoinedControl>>,
     push_go_claimed:AtomicBool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) push_observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_push::Control>>,
     push_joined:Arc<std::sync::OnceLock<push::JoinedControl>>,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) sources:Arc<Mutex<crate::asset_source::GitLocalSources>>,
@@ -194,7 +196,8 @@ impl GitLocalAdmission {
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
                 fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:std::sync::OnceLock::new(),fetch_joined:Arc::new(std::sync::OnceLock::new()),
-                push_go_claimed:AtomicBool::new(false),push_joined:Arc::new(std::sync::OnceLock::new()),
+                push_go_claimed:AtomicBool::new(false),
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:std::sync::OnceLock::new(),push_joined:Arc::new(std::sync::OnceLock::new()),
                 sources:Arc::new(Mutex::new(crate::asset_source::GitLocalSources::new())),slots:slots.clone(),clock:Mutex::new(None)},
                 endpoints,slots})
         }
@@ -256,6 +259,8 @@ fn state_error(error:StateError)->BridgeError {
 impl Invocation {
     fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=self.push_observation.get(){return c.stderr_allowed(id,bytes)}
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if let Some(c)=self.observation.get(){return c.stderr_allowed(id,bytes)}
         let _=id;bytes.is_empty()
     }
@@ -292,6 +297,9 @@ impl Invocation {
         };
         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=self.push_observation.get(){match self.request(){Ok(r)=>c.retired(&r,&receipt),Err(_)=>c.fail()}}
+
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if let Some(c)=self.observation.get(){match self.request(){Ok(r)=>c.retired(&r,&receipt),Err(_)=>c.fail()}}
 
         #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
@@ -314,6 +322,15 @@ impl Invocation {
                 self.observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;
                 self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?
                     .configure_fetch_observation(c).map_err(source_error)?;
+            }
+        }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.action.kind()==wire::Kind::Push {
+            if let Some(c)=runtime.push_observation()? {
+                if !self.gate.push_observation_matches(&c){return Err(BridgeError::invalid())}
+                self.push_observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;
+                self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?
+                    .configure_push_observation(c).map_err(source_error)?;
             }
         }
         let review=self.gate.review();
@@ -359,6 +376,8 @@ impl Invocation {
         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if self.observation.get().is_some_and(|c|!c.observed(&request)){return Err(BridgeError::invalid())}
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.push_observation.get().is_some_and(|c|!c.observed(&request)){return Err(BridgeError::invalid())}
         *slot=Some(request);*bridge=Some(clock);drop(bridge);drop(slot);
         self.gate.check_current(&owner.id)?;Ok(selected)
     }

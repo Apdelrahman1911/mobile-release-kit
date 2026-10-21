@@ -51,6 +51,8 @@ pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, 
 #[derive(Clone)]
 pub struct RuntimeConfig { bundle_root: PathBuf,
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_push_observation: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_push::Control>>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     git_fetch_observation: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>,
     // Clones share one Android owner claim. Neither a second constructor nor
     // an observer can reset it after an unavailable or dead first original.
@@ -85,6 +87,10 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 #[path="runtime_git_fetch_observation.rs"]
 pub(crate) mod fetch_observation;
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="runtime_git_push_observation.rs"]
+pub(crate) mod push_observation;
+
 // App-M2 census of this retained RuntimeConfig only, not process/framework RSS.
 // No installed/native probes and no capability, one-use claim or weak binding
 // mutation. The original Arc cells remain charged after their claims are spent.
@@ -118,6 +124,11 @@ impl RuntimeConfig {
         {
             bytes=bytes.checked_add(arc::<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>()?)?;
             if let Some(c)=self.git_fetch_observation.get(){bytes=bytes.checked_add(c.upgrade()?.retained_bytes()?)?;}
+        }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        {
+            bytes=bytes.checked_add(arc::<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_push::Control>>>()?)?;
+            if let Some(c)=self.git_push_observation.get(){bytes=bytes.checked_add(c.upgrade()?.retained_bytes()?)?;}
         }
         Some(bytes)
     }
@@ -339,11 +350,15 @@ impl ConfigurationInstalledProfile {
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct GitHubReadOnlyInstalledProfile { _private: (),
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    push_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_push::Control>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl GitHubReadOnlyInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=&self.push_observation{if self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,true)}
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if let Some(c)=&self.observation{return fetch_observation::selection(c,true)}
         if !macos_bindings() { return Err(unavailable()); }
@@ -410,6 +425,8 @@ impl GitReadInstalledProfile {
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct GitLocalInstalledProfile { _private: (), kind:crate::git_local_protocol::Kind,
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    push_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_push::Control>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -420,7 +437,11 @@ impl GitLocalInstalledProfile {
             if let Some(c)=&self.observation{return fetch_observation::selection(c,false)}
             return git_fetch::selection();
         }
-        if self.kind==crate::git_local_protocol::Kind::Push {return git_push::selection();}
+        if self.kind==crate::git_local_protocol::Kind::Push {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            if let Some(c)=&self.push_observation{if self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+            return git_push::selection();
+        }
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_local_bootstrap.py"),
@@ -496,7 +517,7 @@ pub(crate) fn macos_github_readonly_profile_contract() {
     let profile = runtime.github_readonly_installed_profile();
     assert_eq!(runtime.github_readonly_installed_profile_available(), expected);
     assert_eq!(profile.is_ok(), expected);
-    assert_eq!(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:None }.selection().is_ok(), expected);
+    assert_eq!(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:None, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:None }.selection().is_ok(), expected);
     assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
     // Other families require their own compiled publisher binding; the
     // read-only selection above supplies neither action grant.
@@ -1480,6 +1501,8 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_push_observation: std::sync::Arc::new(std::sync::OnceLock::new()),
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     git_fetch_observation: std::sync::Arc::new(std::sync::OnceLock::new()),
         android_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         diagnostics_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1851,7 +1874,7 @@ impl RuntimeConfig {
     }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
-        if macos_bindings() { Ok(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()? }) } else { Err(unavailable()) }
+        if macos_bindings() { Ok(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? }) } else { Err(unavailable()) }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
@@ -1924,6 +1947,8 @@ impl RuntimeConfig {
         self.resolve_git_local_installed_for(crate::git_local_protocol::Kind::Stage,originals,end,stop)
     }
     pub(crate) fn git_push_profile_available(&self)->bool {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {git_push::available()}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
@@ -1943,7 +1968,7 @@ impl RuntimeConfig {
         if !self.git_local_profile_available()
             || kind==crate::git_local_protocol::Kind::Fetch&&!self.git_fetch_profile_available()
             || kind==crate::git_local_protocol::Kind::Push&&!self.git_push_profile_available(){return Err(unavailable())}
-        originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()? },end,stop)
+        originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? },end,stop)
     }
     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

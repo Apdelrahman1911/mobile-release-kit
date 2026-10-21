@@ -39,12 +39,14 @@ pub(crate) mod checks;
 pub(crate) mod tool_setup;
 #[path="installed_shell_observation_macos_git_fetch.rs"]
 pub(crate) mod git_fetch;
+#[path="installed_shell_observation_macos_git_push.rs"]
+pub(crate) mod git_push;
 pub(crate) use session::Command as SessionCommand;
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
 const FAILURE_REASONS: &[&str] = &[
-    "git-fetch-original-contract", "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
+    "git-push-original-contract", "git-fetch-original-contract", "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
     "identity-original-contract", "tool-setup-original-contract",
     "local-edits-original-contract", "local-edits-dom-contract", "local-edits-fixture-contract",
     "local-checks-original-contract", "local-checks-dom-contract", "local-checks-fixture-contract",
@@ -259,9 +261,10 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case) }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case), GitPush(git_push::Case) }
 impl Case {
     fn name(self) -> &'static str { match self {
+        Self::GitPush(case) => case.name(),
         Self::GitFetch(case) => case.name(),
         Self::ToolSetup(case) => case.name(),
         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
@@ -302,7 +305,7 @@ impl Case {
     } }
     fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) | Self::GitFetch(_) => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) | Self::GitFetch(_) | Self::GitPush(_) => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -315,7 +318,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
-    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step), Identity(identity::Step), ToolSetup(tool_setup::Step), GitFetch(git_fetch::Step),
+    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step), Identity(identity::Step), ToolSetup(tool_setup::Step), GitFetch(git_fetch::Step), GitPush(git_push::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -852,6 +855,7 @@ struct Fixture {
     ios: Option<ios::Fixture>, project_fields: Option<project_fields::Fixture>, recovery: Option<recovery::Fixture>, local_edits: Option<local_edits::Fixture>, checks: Option<checks::Fixture>, identity: Option<identity::Fixture>,
     tools: Option<tool_setup::Fixture>,
     git_fetch:Option<git_fetch::Fixture>,
+    git_push:Option<git_push::Fixture>,
     written: bool, mutated: bool,
 }
 impl Fixture {
@@ -861,54 +865,60 @@ impl Fixture {
         if mutated { bytes.extend_from_slice(STALE_MARKER); } bytes
     }
     fn capture(root: PathBuf, uid: u32, case: Case) -> Result<Self, ()> {
+        if let Case::GitPush(case)=case {
+            let f=git_push::Fixture::capture(&root,uid,case)?;
+            return Ok(Self{root,uid,root_identity:f.root_identity(),app_identity:Some(f.app()),untouched:None,
+                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,
+                local_edits:None,checks:None,identity:None,tools:None,git_fetch:None,git_push:Some(f),written:false,mutated:false});
+        }
         if let Case::GitFetch(case)=case {
             let f=git_fetch::Fixture::capture(&root,uid,case)?;
             return Ok(Self{root,uid,root_identity:f.root_identity(),app_identity:Some(f.app()),untouched:None,
                 ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,
-                local_edits:None,checks:None,identity:None,tools:None,git_fetch:Some(f),written:false,mutated:false});
+                local_edits:None,checks:None,identity:None,tools:None,git_fetch:Some(f),git_push:None,written:false,mutated:false});
         }
         if let Case::ToolSetup(case)=case {
             let f=tool_setup::Fixture::capture(&root,uid,case)?;
             return Ok(Self{root,uid,root_identity:f.root_identity(),app_identity:Some(f.app()),untouched:None,
-                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:None,tools:Some(f),git_fetch:None,written:false,mutated:false});
+                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:None,tools:Some(f),git_fetch:None,git_push:None,written:false,mutated:false});
         }
         if let Case::Identity(case)=case {
             let fixture=identity::Fixture::capture(&root,uid,case)?;
             return Ok(Self {root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),untouched:None,
                 ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
-                ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),tools:None,git_fetch:None,written:false,mutated:false});
+                ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),tools:None,git_fetch:None,git_push:None,written:false,mutated:false});
         }
         if let Case::Checks(case)=case {
             let fixture=checks::Fixture::capture(&root,uid,case)?;
             return Ok(Self {root,uid,root_identity:fixture.dir(".").ok_or(())?,app_identity:fixture.dir("app"),
                 untouched:None,ignore:fixture.file(".gitignore").ok_or(())?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
-                ios:None,project_fields:None,recovery:None,local_edits:None,checks: Some(fixture), identity: None,tools:None,git_fetch:None,written:false,mutated:false});
+                ios:None,project_fields:None,recovery:None,local_edits:None,checks: Some(fixture), identity: None,tools:None,git_fetch:None,git_push:None,written:false,mutated:false});
         }
         if let Case::LocalEdits(case)=case {
             let fixture=local_edits::Fixture::capture(&root,uid,case)?;
             return Ok(Self { root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),
                 untouched:None,ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
-                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks: None, identity: None,tools:None,git_fetch:None,written:false,mutated:false });
+                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks: None, identity: None,tools:None,git_fetch:None,git_push:None,written:false,mutated:false });
         }
         if case == Case::PendingRecovery {
             let fixture = recovery::Fixture::capture(&root, uid)?;
             return Ok(Self { root, uid, root_identity: fixture.root_identity(), app_identity: None, untouched: None,
                 ignore: fixture.ignore(), config: None, release: None, ios: None, project_fields: None,
-                recovery: Some(fixture), local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+                recovery: Some(fixture), local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,git_push:None,written: false, mutated: false });
         }
         if let Case::Ios(case) = case {
             let fixture = ios::Fixture::capture(&root, uid, case)?;
             let root_identity = directory(&root, uid, 0o700, &fixture.root_entries())?;
             return Ok(Self { root, uid, root_identity, app_identity: fixture.source_identity(), untouched: None,
                 ignore: fixture.ignore(), config: fixture.config(), release: fixture.release_identity(),
-                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,git_push:None,written: false, mutated: false });
         }
         if case == Case::ProjectFields {
             let fixture = project_fields::Fixture::capture(&root, uid)?;
             return Ok(Self { root, uid, root_identity: fixture.dir(".").ok_or(())?,
                 app_identity: fixture.dir("app"), untouched: None, ignore: fixture.file(".gitignore").ok_or(())?,
                 config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
-                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,git_push:None,written: false, mutated: false });
         }
         let saved = case == Case::NoopStale || matches!(case,Case::Vault(vault::Case::UploadKey(_)));
         let root_identity = directory(&root, uid, 0o700, if saved {
@@ -921,12 +931,12 @@ impl Fixture {
         let (config, release) = if saved { (Some(file_fact(&root.join("release/mobile-release.json"), CONFIG, uid)?),
             Some(directory(&root.join("release"), uid, 0o755, &["mobile-release.json"])?)) } else { (None, None) };
         Ok(Self { root, uid, root_identity, app_identity: Some(app_identity), untouched: Some(untouched), ignore, config, release,
-            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false })
+            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,git_push:None,written: false, mutated: false })
     }
     fn verify(&self, saved: bool) -> Result<(), ()> {
         // Tool fixtures are verified outside Record on the SAME relay, not
         // through the unrelated config-save fixture branch below.
-        if self.tools.is_some()||self.git_fetch.is_some() {return Err(());}
+        if self.tools.is_some()||self.git_fetch.is_some()||self.git_push.is_some() {return Err(());}
         if let Some(fixture)=&self.identity{return fixture.verify(&self.root,self.uid);}
         if let Some(fixture)=&self.checks{return fixture.verify(&self.root,self.uid);}
         if let Some(fixture)=&self.local_edits{return fixture.verify(&self.root,self.uid);}
@@ -1038,7 +1048,7 @@ struct Record {
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
     ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
-    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>, git_fetch:Option<git_fetch::Record>,
+    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>, git_fetch:Option<git_fetch::Record>, git_push:Option<git_push::Record>,
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
@@ -1349,6 +1359,7 @@ pub(crate) struct Observation {
     recovery: Option<Arc<recovery::Control>>, ios: Option<Arc<ios::Control>>, project_fields: Option<Arc<project_fields::Control>>, vault: Option<Arc<vault::Control>>,
     tool_setup: Option<Arc<tool_setup::Control>>,
     git_fetch:Option<Arc<git_fetch::Control>>,
+    git_push:Option<Arc<git_push::Control>>,
     failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
@@ -1356,7 +1367,7 @@ impl Observation {
         let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let started = Instant::now();
-        let end = started + Duration::from_secs(if matches!(case,Case::GitFetch(_)){git_fetch::SECONDS}else if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let end = started + Duration::from_secs(if matches!(case,Case::GitPush(_)){git_push::SECONDS}else if matches!(case,Case::GitFetch(_)){git_fetch::SECONDS}else if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -1364,6 +1375,7 @@ impl Observation {
         let vault = if let Case::Vault(c) = case { Some(vault::Control::new(c, &project_path, fixture.uid)?) } else { None };
         let tool_setup=if let Case::ToolSetup(c)=case{Some(tool_setup::Control::new(c,&project_path,fixture.uid)?)}else{None};
         let git_fetch=if let Case::GitFetch(c)=case{Some(git_fetch::Control::new(c,&project_path,fixture.uid)?)}else{None};
+        let git_push=if let Case::GitPush(c)=case{Some(git_push::Control::new(c,&project_path,fixture.uid)?)}else{None};
         let input_paths = if let Case::Ios(c) = case { session::targets(&project_path, c).ok_or(())? } else { Vec::new() };
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
@@ -1398,12 +1410,13 @@ impl Observation {
                 identity: if let Case::Identity(c)=case{Some(identity::Record::new(c))}else{None},
                 tool_setup: tool_setup.as_ref().map(|_|tool_setup::Record::default()),
                 git_fetch:git_fetch.as_ref().map(|_|git_fetch::Record::default()),
+                git_push:git_push.as_ref().map(|_|git_push::Record::default()),
                 panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
                 field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
             });
         let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
         Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
-            project_path, input_paths, field_paths, base, ios, project_fields, vault, recovery, tool_setup,git_fetch,
+            project_path, input_paths, field_paths, base, ios, project_fields, vault, recovery, tool_setup,git_fetch,git_push,
             failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
@@ -2043,6 +2056,10 @@ impl Observation {
                     }
                     r.cancel_settled = true; r.step = Step::ReadCancelled; return;
                 },
+                Step::Snapshot if matches!(self.case,Case::GitPush(_)) => {
+                    if r.snapshot_pending||r.snapshots!=1{return;}
+                    r.step=Step::GitPush(git_push::Step::Connect);return;
+                },
                 Step::Snapshot if matches!(self.case,Case::GitFetch(_)) => {
                     if r.snapshot_pending||r.snapshots!=1{return;}
                     r.step=Step::GitFetch(git_fetch::Step::Connect);return;
@@ -2074,7 +2091,7 @@ impl Observation {
                         self.fail_with("native-completion-selection"); return;
                     }
                     r.project_witness = Some(witness); r.project_settled = true;
-                    if (self.case.inputs() || self.case == Case::ProjectFields || matches!(self.case,Case::ToolSetup(_)|Case::GitFetch(_))) && !r.retain_open(self.case.selected_id()) {
+                    if (self.case.inputs() || self.case == Case::ProjectFields || matches!(self.case,Case::ToolSetup(_)|Case::GitFetch(_)|Case::GitPush(_))) && !r.retain_open(self.case.selected_id()) {
                         self.fail_with(if self.case == Case::ProjectFields { "project-fields-original-contract" } else { "session-original-contract" }); return;
                     }
                     r.step = Step::Snapshot; return;
@@ -3216,6 +3233,7 @@ impl Observation {
                 session.as_ref().is_some_and(|s| record.final_originals(s)))
             || self.vault.as_ref().is_some_and(|control| !r.vault_record.as_mut().is_some_and(|record|
                 vault_snapshot.as_ref().is_some_and(|s|record.final_originals(s, control))))
+            || self.git_push.as_ref().is_some_and(|c|!r.git_push.as_mut().is_some_and(|v|v.final_originals(c,self.quit_id(),finality)))
             || self.git_fetch.as_ref().is_some_and(|c|!r.git_fetch.as_mut().is_some_and(|v|v.final_originals(c,self.quit_id(),finality)))
             || self.tool_setup.as_ref().is_some_and(|c|!r.tool_setup.as_mut().is_some_and(|v|v.final_originals(c,self.quit_id(),finality)))
             || self.checks_case()&&!r.checks.as_ref().zip(r.fixture.checks.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
@@ -3257,6 +3275,11 @@ impl Observation {
             && (self.case == Case::FirstSave || r.panel_attached == (if self.case == Case::Installation { [false,true,false,false] } else { [true,true,false,false] }))
             && r.project_calls == (if self.case == Case::Installation { 0 } else if self.case == Case::FirstSave { 2 } else { 1 });
         let specific = match self.case {
+            Case::GitPush(_) => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
+                &&r.native_actions_returned==[false,true,false,true]&&r.sessions.is_empty()
+                &&r.git_push.as_ref().zip(self.git_push.as_ref()).is_some_and(|(v,c)|v.report(c).is_some())
+                &&r.panel_history.len()==1&&r.panel_history.iter().all(|p|p.sample.id==1&&p.sample.succeeded()
+                    &&p.progress.snapshot().state=="retired"&&p.identity.input_bound(1)&&p.completion.succeeded(1)),
             Case::GitFetch(_) => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
                 &&r.native_actions_returned==[false,true,false,true]&&r.sessions.is_empty()
                 &&r.git_fetch.as_ref().zip(self.git_fetch.as_ref()).is_some_and(|(v,c)|v.report(c).is_some())
@@ -3350,6 +3373,7 @@ impl Observation {
                 "secondStarted":r.loss_seen,"originalLossSettled":r.loss_settled,"webProcessCrashTested":false},
             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
             "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
+        if let Some(c)=&self.git_push {report["gitPush"]=r.git_push.as_ref()?.report(c)?;}
         if let Some(c)=&self.git_fetch {report["gitFetch"]=r.git_fetch.as_ref()?.report(c)?;}
         if let Some(c)=&self.tool_setup {report["toolSetup"]=r.tool_setup.as_ref()?.report(c)?;}
         if self.checks_case(){report["localChecks"]=r.checks.as_ref()?.report(r.fixture.checks.as_ref()?)?;}
@@ -3938,7 +3962,10 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let upload_suffix;
     let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
-    let root = if matches!(case,Case::GitFetch(_)) {
+    let root = if matches!(case,Case::GitPush(_)) {
+        let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+        if user.uid.as_raw()!=uid{return None}git_push::fixture_root(&user.dir)?
+    } else if matches!(case,Case::GitFetch(_)) {
         let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
         if user.uid.as_raw()!=uid{return None}git_fetch::fixture_root(&user.dir)?
     } else if let Case::ToolSetup(tool_case) = case {
@@ -3946,7 +3973,9 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         if user.uid.as_raw() != uid { return None; }
         tool_setup::fixture_root(&user.dir, tool_case)?
     } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
-    if matches!(case,Case::GitFetch(_)){
+    if matches!(case,Case::GitPush(_)){
+        directory(&root,uid,0o700,&[git_push::NAMES[0],git_push::NAMES[1],git_push::NAMES[2],"state"]).ok()?;
+    } else if matches!(case,Case::GitFetch(_)){
         directory(&root,uid,0o700,&[git_fetch::NAMES[0],git_fetch::NAMES[1],git_fetch::NAMES[2],git_fetch::NAMES[3],"state"]).ok()?;
     } else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
         directory(&root,uid,0o700,&[tool_setup::Case::ServicePreparation.name(),"state"]).ok()?;
@@ -4701,6 +4730,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(v) if v.to_str().and_then(checks::Case::parse).is_some()=>Case::Checks(checks::Case::parse(v.to_str().expect("fixed checks selector")).expect("exact checks selector")),
         Some(v) if v.to_str().and_then(identity::Case::parse).is_some()=>Case::Identity(identity::Case::parse(v.to_str().expect("fixed ASCII identity selector")).expect("exact identity selector")),
         Some(v) if v.to_str().and_then(local_edits::Case::parse).is_some()=>Case::LocalEdits(local_edits::Case::parse(v.to_str().expect("fixed ASCII local selector")).expect("exact local selector")),
+        Some(v) if git_push::Case::parse(v).is_some()=>Case::GitPush(git_push::Case::parse(v).expect("exact Push case")),
         Some(v) if git_fetch::Case::parse(v).is_some()=>Case::GitFetch(git_fetch::Case::parse(v).expect("exact fetch case")),
         Some(v) if tool_setup::Case::parse(v).is_some()=>Case::ToolSetup(tool_setup::Case::parse(v).expect("exact tool case")),
         Some(v) if vault::Case::parse(v).is_some() => Case::Vault(vault::Case::parse(v).expect("exact vault selector")),

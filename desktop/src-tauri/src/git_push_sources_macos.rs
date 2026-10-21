@@ -119,7 +119,10 @@ impl GitLocalSources {
             return Err(Reason::SourceChanged);
         }
         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
-        if !crate::runtime::git_push::matches_tool(&native.tool) {
+        let mut nominated=crate::runtime::git_push::matches_tool(&native.tool);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        {if self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
+        if !nominated {
             return Err(Reason::SourceRefused);
         }
         let bin = self.book.child(0, b"bin", false, stop)?;

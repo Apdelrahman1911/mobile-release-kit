@@ -342,6 +342,12 @@ impl Observation {
     /// Called by the SAME existing Relay task. An async native startup/saved
     /// observation is awaited by that original; there is no new unjoined task.
     pub(crate) async fn tick_original(self: &Arc<Self>, app: &tauri::AppHandle) {
+        let push=self.record().and_then(|r|match r.step {super::super::Step::GitPush(step)=>Some(step),_=>None});
+        if let Some(step)=push {
+            if !self.timely(){self.tick(app);return;}
+            let Some(state)=app.try_state::<crate::shell::ShellState>()else{self.fail_with("git-push-original-contract");return};
+            self.git_push_tick(app,&state.document,step).await;return;
+        }
         let fetch=self.record().and_then(|r|match r.step {super::super::Step::GitFetch(step)=>Some(step),_=>None});
         if let Some(step)=fetch {
             if !self.timely(){self.tick(app);return;}

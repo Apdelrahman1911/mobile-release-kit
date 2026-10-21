@@ -47,6 +47,7 @@ impl DocumentBinding {
             vault: None,
             tool_setup: None,
             git_fetch: Some(control),
+            git_push: None,
         });
         Ok(())
     }
