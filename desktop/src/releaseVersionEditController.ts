@@ -272,7 +272,8 @@ export class ReleaseVersionEditController {
     return this.proposalServiceMatches(binding) && this.proposalDraftMatches() && hostedImportGitUnchanged(this.proposal!.git, this.hostedGit());
   }
   private refuseProposal(message: string): void {
-    if (this.proposal?.binding === this.state.edit.attempt?.binding) this.proposal.retired = true;
+    const proposal = this.proposal;
+    if (proposal && proposal.binding === this.state.edit.attempt?.binding) proposal.retired = true;
     this.publish({ ...this.state, hostedImportIssue: message });
     // A bad pasted comparison is not a malformed native result. Keep original
     // work/drafts and request its ordinary Close; never poison native integrity.
