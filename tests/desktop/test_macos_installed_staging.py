@@ -6851,25 +6851,25 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 changed[index]["package_id"] = changed[index]["package_id"].rsplit("@", 1)[0] + "@" + version
                 with self.subTest(target=selected, versionRow=index), self.assertRaises(module.Refused):
                     module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.3")
-            # The two validators agree on the one Intel resident shared-package override.
+            # Both targets agree on the resident-only shared-package override.
             _, binary, _, body = normal_cargo_fixture(target, role="resident", checkout=checkout, build_target=selected)
             with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
                 self.assertEqual(TOOL.image_cargo_artifact(self.encoded(paired), binary, target, body,
                                                          "resident", target=selected, package_version="0.1.2")["target"], selected)
-                for index, wrong in ((0, "2"), (1, "2"), (1, "3" if selected == module.INTEL_TARGET else "1"), (2, "2")):
+                for index, wrong in ((0, "1"), (0, "2"), (1, "0"), (1, "2"), (1, "3"), (2, "1"), (2, "2")):
                     changed = copy.deepcopy(paired); changed[index]["profile"]["opt_level"] = wrong
                     with self.subTest(target=selected, profileRow=index), self.assertRaises(module.Refused):
                         module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.2")
                     with self.assertRaises(TOOL.Refused):
                         TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected, package_version="0.1.2")
-                if selected == module.INTEL_TARGET:
-                    # The ordinary Intel Desktop must still require shared release3.
-                    _, desktop_binary, desktop_rows, desktop_body = normal_cargo_fixture(
-                        target, role="desktop", checkout=checkout, build_target=selected)
-                    desktop_messages = desktop_rows + [{"reason": "build-finished", "success": True}]
-                    self.assertEqual(TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
-                        target, desktop_body, "desktop", target=selected, package_version="0.1.2")["imageRole"], "desktop")
-                    desktop_messages[1]["profile"]["opt_level"] = "2"
+                # Ordinary Desktop images keep shared release3 on both targets.
+                _, desktop_binary, desktop_rows, desktop_body = normal_cargo_fixture(
+                    target, role="desktop", checkout=checkout, build_target=selected)
+                desktop_messages = desktop_rows + [{"reason": "build-finished", "success": True}]
+                self.assertEqual(TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
+                    target, desktop_body, "desktop", target=selected, package_version="0.1.2")["imageRole"], "desktop")
+                for wrong in ("1", "2"):
+                    desktop_messages[1]["profile"]["opt_level"] = wrong
                     with self.assertRaises(TOOL.Refused):
                         TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
                             target, desktop_body, "desktop", target=selected, package_version="0.1.2")
@@ -6879,6 +6879,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with self.subTest(invalid=repr(invalid)), self.assertRaisesRegex(module.Refused, "^closed-build-target$"):
                 module.artifact(self.encoded(rows), checkout, target, build_target=invalid, package_version="0.1.2")
 
+    def test_separate_producer_and_removal_graphs_preserve_their_own_bindings(self):
+        module = ANDROID_HELPER
+        checkout, target = Path("/inert/source"), Path("/inert/work/android-helper-target")
         # Bind the real headless workspace too: a copied UI lock plus a new
         # helper root can satisfy every synthetic compiler-artifact assertion.
         source = Path(__file__).absolute().parents[2]
@@ -7683,12 +7686,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
                     self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
                 self.assertEqual("--offline" in build_argv, bool(build_index))
-                self.assertEqual(build_argv.count("--config"), build_index)
-                if build_index:
-                    self.assertEqual(build_argv[build_argv.index("--config") + 1],
-                                     "profile.release.package.mobile-release-kit-desktop.opt-level=1")
-                    self.assertEqual(module.RESIDENT_CARGO_OVERRIDE,
-                                     "profile.release.package.mobile-release-kit-desktop.opt-level=1")
+                self.assertEqual(build_argv.count("--config"), 1)
+                self.assertEqual(build_argv[build_argv.index("--config") + 1],
+                                 "profile.release.package.mobile-release-kit-desktop.opt-level=1")
+                self.assertEqual(module.RESIDENT_CARGO_OVERRIDE,
+                                 "profile.release.package.mobile-release-kit-desktop.opt-level=1")
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
@@ -7756,6 +7758,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual([row[0][1] for row in observations], ["fetch", "build"])
             self.assertFalse((work / module.RESIDENT_IMAGE).exists())
 
+    def test_python_copy_and_producer_paths_retire_their_owned_targets(self):
+        module = ANDROID_HELPER
         # Same actual filesystem copy/POST/retirement path, with only original
         # native return values doubled. No signature/kernel behavior is claimed.
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
@@ -18093,7 +18097,7 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
-            "profile": dict(profile, opt_level="1" if role == "resident" and build_target == "x86_64-apple-darwin"
+            "profile": dict(profile, opt_level="1" if role == "resident"
                             and package == "mobile-release-kit-desktop" else "3"),
             "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
             "executable": None, "fresh": False})

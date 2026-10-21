@@ -2376,7 +2376,7 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
                        else ["android-registration-helper", "default", "resident-image"])
     cargo_library(records, DESKTOP / "src-tauri", "mobile-release-kit-desktop",
                   "mobile_release_desktop", app_features, test=False,
-                  opt_level="1" if role == "resident" and target == INTEL_TARGET else "3", package_version=package_version)
+                  opt_level="1" if role == "resident" else "3", package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
                   "mrk_macos_installed_native", native_features, test=False, package_version="0.1.0")
     need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])

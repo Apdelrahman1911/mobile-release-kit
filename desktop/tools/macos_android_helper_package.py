@@ -72,7 +72,7 @@ INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
 # Only nonshipping producer graphs use this opt0 override.
 PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
-# Intel alone uses this fixed shared-package release optimization.
+# Both resident-image targets use this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release1.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=1"
 # Bounded SOURCE input, not an exact historical implementation length. Keep
@@ -1438,7 +1438,7 @@ def artifact(messages, checkout, target, *, package_version, build_target=ARM_TA
              and "executable" in library and library["executable"] is None, "helper-separate-library-features")
         selected_rows.append(library)
     for selected in selected_rows:
-        expected_opt = "1" if build_target == INTEL_TARGET and selected is selected_rows[1] else "3"
+        expected_opt = "1" if selected is selected_rows[1] else "3"
         profile = selected.get("profile")
         need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
              and profile.get("opt_level") == expected_opt and type(selected.get("fresh")) is bool, "helper-release-profile")
@@ -6759,7 +6759,7 @@ class Operation:
                       cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
-                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", *(("--config", RESIDENT_CARGO_OVERRIDE) if self.target == INTEL_TARGET else ()),
+                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--config", RESIDENT_CARGO_OVERRIDE,
                            "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
