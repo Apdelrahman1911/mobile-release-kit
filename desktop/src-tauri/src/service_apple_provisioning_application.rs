@@ -59,6 +59,18 @@ impl ApplicationService {
         observation.revision = state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?;
         self.save(&mut state, next)
     }
+    pub(crate) fn apple_preparation_current(&self,e:&requests::preparation::Entry)->Result<(),Error>{
+        let state=self.lock()?;self.check(&state)?;let grant=live_grant(&state)?;
+        let saved=Self::build_point(&state,&e.scope.project.project_id)?;
+        let p=&e.scope.project;
+        if !grant.projects.contains(&p.project_id)||!Arc::ptr_eq(&grant.reserve_read,&e.scope.read)
+            ||saved.runtime_id!=p.runtime_id||saved.root!=p.root||saved.device!=p.device||saved.inode!=p.inode||saved.revision!=p.revision||!saved.fresh||saved.config!=p.config{return Err(Error::Conflict);}
+        e.current()
+    }
+    pub(super) fn service_apple_prepare(&self,client:&ClientSession,input:crate::service_apple_provisioning_prepare_protocol::Submit)->Result<p::ResponseBody,Error>{
+        let at=Instant::now();let state=self.lock()?;self.authorize_build_client(&state,client,&input.origin.project_id)?;
+        self.apple_provisioning_requests.submit_preparation(input,at).map(p::ResponseBody::AppleProvisioningPreparation)
+    }
     pub(super) fn service_apple_provisioning_submit(
         &self,
         client: &ClientSession,
@@ -82,10 +94,11 @@ impl ApplicationService {
     ) -> Result<p::ResponseBody, Error> {
         let state = self.lock()?;
         self.authorize_build_client(&state, client, &q.project_id)?;
-        let result = self
-            .apple_provisioning_requests
-            .query(q, cancel)
-            .map(p::ResponseBody::AppleProvisioningRequest);
+        let result = match self.apple_provisioning_requests.preparation(q){
+            Ok(e)=>{if cancel{e.scope.stop(wire::Reason::UserCancelled,Instant::now());}e.status().map(p::ResponseBody::AppleProvisioningPreparation)},
+            Err(Error::Conflict)=>self.apple_provisioning_requests.query(q,cancel).map(p::ResponseBody::AppleProvisioningRequest),
+            Err(e)=>Err(e),
+        };
         drop(state);
         result
     }
@@ -95,7 +108,7 @@ impl ApplicationService {
 mod tests {
     use super::*;
     #[test]
-    fn apple_cli_history_only_front_refuses_all_three_live_methods() {
+    fn apple_cli_history_only_front_refuses_all_live_methods() {
         let id = |c: char| crate::service_protocol::Id::parse(&c.to_string().repeat(32)).unwrap();
         let q = wire::Query {
             project_id: id('1'),
@@ -103,6 +116,7 @@ mod tests {
             request_id: id('3'),
         };
         for body in [
+            p::RequestBody::AppleProvisioningPrepare(crate::service_apple_provisioning_prepare_protocol::Submit { origin:q.clone(),grant_id:id('4'),scope_id:id('5') }),
             p::RequestBody::AppleProvisioningSubmit(wire::Submit {
                 origin: q.clone(),
                 grant_id: id('4'),

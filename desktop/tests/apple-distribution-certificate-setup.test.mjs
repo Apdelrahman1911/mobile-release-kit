@@ -114,7 +114,8 @@ test('certificate modes use the same RAW4 with exact current key selection, no P
   assert.equal(parseAppleProvisioningRequest({ ...request(), reference: id('1') }), null);
   assert.equal(parseAppleProvisioningRequest({ ...request('certificate-create'), reference: null }), null);
   assert.equal(parseAppleProvisioningRequest({ ...request('certificate-reconcile'), reference: id('0') }), null);
-  assert.equal(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: 'local-ios-key-recover-v1' }), null);
+  assert.ok(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: 'local-ios-key-recover-v1' }));
+  assert.equal(encodeAppleProvisioningRequest('start_apple_provisioning', { ...id('1'), consentVersion: 'local-ios-key-recover-v2' }), null);
   await api.status(); await api.cancel(id('1')); (await api.subscribe(() => {}))();
   assert.deepEqual([...new Set(calls.map(([command]) => command))].sort(),
     ['apple_provisioning_status', 'cancel_apple_provisioning', 'prepare_apple_provisioning', 'start_apple_provisioning'].sort());

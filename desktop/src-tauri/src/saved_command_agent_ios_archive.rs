@@ -553,7 +553,7 @@ mod tests {
                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
             ),
         };
-        let prepared = Prepared { agent_store:None, store_witness:None,
+        let prepared = Prepared { agent_store_preparation:None, agent_store:None, store_witness:None,
             agent_build: Some(link.clone()),
             agent_local_check: None,
             upload_key_preparation: None,

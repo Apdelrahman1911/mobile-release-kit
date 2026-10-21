@@ -13,6 +13,8 @@ use super::*;
 use crate::apple_provisioning_protocol as apple_wire;
 #[path="saved_command_agent_apple_provisioning.rs"]
 pub(super) mod agent;
+#[path="saved_command_agent_apple_prepare.rs"]
+pub(super) mod preparation;
 #[path="saved_command_apple_profile_review.rs"]
 mod profile_review;
 #[path = "saved_command_apple_key_review.rs"]
@@ -98,6 +100,7 @@ impl AppleProvisioningReview {
 }
 
 pub(super) struct Intent {
+    preparation: Option<Arc<preparation::Link>>,
     agent: std::sync::OnceLock<Arc<agent::Binding>>,
     witness: Arc<()>,
     input: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
@@ -691,6 +694,10 @@ impl SavedCommandOwner {
         gate: apple_wire::Availability,
         document: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
     ) -> Result<apple_wire::Status, BridgeError> {
+        self.prepare_apple_provisioning_with_origin(input,registration,root,gate,document,None)
+    }
+    pub(crate) fn prepare_apple_provisioning_with_origin(&self,input:apple_wire::Prepare,registration:u32,root:RegisteredRoot,
+        gate:apple_wire::Availability,document:Arc<crate::asset_session::AppleProvisioningDocumentInput>,origin:Option<Arc<preparation::Link>>) -> Result<apple_wire::Status,BridgeError>{
         self.require_domain(SavedCommandDomain::AppleProvisioning)?;
         if !document.matches(&input.context, registration, &root) {
             return Err(apple_wire::invalid());
@@ -730,32 +737,19 @@ impl SavedCommandOwner {
                 .cloned().ok_or_else(apple_wire::invalid)?)
         } else {None};
         let material = document.material().clone();
-        let status = self.prepare_bound(
-            Context::AppleProvisioning(input.context),
-            registration,
-            root,
-            Availability::from_store(gate),
-            Some(PrivateSigningMaterial::Store(material)),
-            None,
-        )?;
-        let mut registry = self.inner.lock();
-        let prepared = registry.prepared.as_mut().ok_or_else(apple_wire::invalid)?;
-        if prepared.apple.is_some() {
-            return Err(apple_wire::invalid());
+        let delegated=origin.is_some();
+        let intent=Arc::new(Intent{preparation:origin,agent:std::sync::OnceLock::new(),witness:Arc::new(()),input:document,review,profile_review,key_review,certificate_review,p12_review});
+        let context=Context::AppleProvisioning(input.context);
+        if delegated {
+            return self.prepare_bound_requests_apple(context,registration,root,Availability::from_store(gate),
+                Some(PrivateSigningMaterial::Store(material)),None,None,None,None,Some(preparation::Commit{intent})).and_then(Status::apple);
         }
-        if let Some(review) = &review {
-            prepared.expires = prepared.expires.min(review.expires);
-        }
-        if let Some(review)=&profile_review { prepared.expires=prepared.expires.min(review.expires()); }
-        if let Some(review) = &key_review { prepared.expires = prepared.expires.min(review.expires()); }
-        if let Some(review)=&certificate_review { prepared.expires=prepared.expires.min(review.expires()); }
-        if let Some(review)=&p12_review {prepared.expires=prepared.expires.min(review.expires());}
-        prepared.apple = Some(Arc::new(Intent {
-            agent:std::sync::OnceLock::new(),witness:Arc::new(()),
-            input: document,
-            review,
-            profile_review, key_review, certificate_review,p12_review,
-        }));
+        let status=self.prepare_bound(context,registration,root,Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)),None)?;
+        let mut registry=self.inner.lock();
+        let prepared=registry.prepared.as_mut().ok_or_else(apple_wire::invalid)?;
+        if prepared.apple.is_some(){return Err(apple_wire::invalid());}
+        prepared.expires=preparation::intent_expiry(&intent,prepared.expires);
+        prepared.apple=Some(intent);
         status.apple()
     }
     pub(crate) fn prepared_apple_provisioning_input(
@@ -808,13 +802,7 @@ impl SavedCommandOwner {
                 .filter(|prepared|agent::start_matches(prepared,entry))
                 .and_then(|prepared| prepared.apple.as_ref())
                 .ok_or_else(apple_wire::invalid)?;
-            if let Some(review) = &intent.review {
-                review.claim(&document, Instant::now())?;
-            }
-            if let Some(review)=&intent.profile_review { review.claim(&document,Instant::now())?; }
-            if let Some(review) = &intent.key_review { review.claim(&document, Instant::now())?; }
-            if let Some(review) = &intent.certificate_review { review.claim(&document,Instant::now())?; }
-            if let Some(review)=&intent.p12_review {review.claim(&document,Instant::now())?;}
+            let _ = intent; // Actual review claims occur under the same before-take lock below.
         }
         let admitted = self.start_bound_requests_apple(
             Start {

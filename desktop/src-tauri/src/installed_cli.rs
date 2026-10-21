@@ -82,6 +82,7 @@ Usage:\n\
   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
   mrk configuration-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk configuration-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk apple-provisioning-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID SCOPE_ID --reviewed [--json]\n\
   mrk apple-provisioning-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk apple-provisioning-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk apple-provisioning-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -333,8 +334,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "backupRestoreScope":"android-keystore-only","restoreNewUnassigned":true,"implicitAssignment":false,
                 "rememberAssignment":false,"recoveryAcknowledgment":false,
                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
-            "appleProvisioning":{"scope":"one-existing-desktop-prepared-apple-step","commands":apple_provisioning::COMMANDS,
-                "modeCount":15,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"headless":false,
+            "appleProvisioning":{"scope":"one-desktop-selected-preparation-or-prepared-apple-step","commands":apple_provisioning::COMMANDS,
+                "modeCount":15,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":true,"prepareRequiresDesktopSelection":true,"prepareIsStart":false,"headless":false,
                 "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
                 "maxPreparedMs":300000,"nativeWorkMs":1200000,"nativeHardMs":1210000,"providerEffectsPossible":true,
                 "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":false,"p12Reconcile":false},
@@ -346,8 +347,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
+                "nativePrepareCommand":"store-prepare","separateStartCommand":"store-start","prepareAuthorizesStart":false,
+                "currentInventory":["android","ios","paired"],"inventoryIsAllocationAuthority":false,"pairedInventoryRequiresTwoCurrentLoans":true,
                 "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
-                "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":false,"nativeAvailabilityChecked":false},
+                "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":true,"oldSubmitQueryVariants":false,"nativeAvailabilityChecked":false},
             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
@@ -398,7 +401,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
-        text.push_str("\nStore steps: separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR, failed-job retry, five-file setup Publish or GET-only original-intent Reconcile. Load/Prepare remain explicit Desktop actions; Counter setup is excluded. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
@@ -498,11 +501,12 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
-        p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
+        p::ResponseBody::AppleProvisioningRequest(_)|p::ResponseBody::AppleProvisioningPreparation(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
         p::ResponseBody::MetadataImagesRequest(s)=>metadata_images::human(s),
         p::ResponseBody::MetadataImagesAccess(_)=>"Prepared image-copy permission DATA; review the full preview in Desktop. No Store upload.\n".into(),
         p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
         p::ResponseBody::ToolSetupRequest(_)=>"Use tool-setup-status with the same original request IDs; never replay.\n".into(),
+        p::ResponseBody::StorePreparation(_)=>"Use store-status with the original request; Prepare never authorizes Start.\n".into(),
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),

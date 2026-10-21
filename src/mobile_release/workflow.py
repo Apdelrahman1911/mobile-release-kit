@@ -1238,7 +1238,9 @@ class GitHub:
 
     def download(self, artifact: Mapping[str, Any], destination: Path, *, handoff: bool = False) -> Path:
         if self.history is not None:
-            _require(not handoff, "History never downloads binary handoff packages")
+            if handoff:
+                _require(self.history.candidate_download is not None, "History never downloads a binary handoff")
+                self.history.candidate_download.allow_handoff(self, artifact, destination)
             return self.history.download(self, artifact, destination)
         limit = MAX_HANDOFF if handoff else MAX_EVIDENCE
         _require(0 < artifact["size_in_bytes"] <= limit, "artifact exceeds the supported package size")
@@ -1625,15 +1627,21 @@ def _create_proof(root: Path, context: Context, phase: str, github: GitHub, *,
     _write_json(root / filename, proof, app_root=app_root, cancellation=cancellation)
 
 
-def _validate_handoff(root: Path, platform: str, intent: Mapping[str, Any] | None = None) -> None:
-    files = _files(root, maximum=MAX_HANDOFF)
+def _validate_handoff(root: Path, platform: str, intent: Mapping[str, Any] | None = None, *, history=None) -> None:
+    files = _files(root, maximum=MAX_HANDOFF, history=history)
     allowed = HANDOFF_FILES[platform]
     required = {"app-release.aab", "validation-report.json", "SHA256SUMS"} if platform == "android" else {"app.ipa", "archive.zip", "validation-report.json", "SHA256SUMS"}
     _require(required <= set(files) <= set(allowed) | {"SHA256SUMS"}, "candidate handoff layout is incomplete or contains unknown files")
-    _require(not any(path.is_dir() for path in root.iterdir()), "candidate handoff must have a flat fixed layout")
-    _require(files["SHA256SUMS"].stat().st_size <= 4096, "candidate handoff checksums are oversized")
+    directories = (any(path.is_dir() for path in root.iterdir()) if history is None
+                   else bool(_history_origin(history).files(root, 1024 * 1024 * 1024)[1]))
+    _require(not directories, "candidate handoff must have a flat fixed layout")
+    _require(_history_stat(files["SHA256SUMS"], history).st_size <= 4096, "candidate handoff checksums are oversized")
     try:
-        lines = files["SHA256SUMS"].read_text(encoding="ascii").splitlines()
+        if history is None:
+            lines = files["SHA256SUMS"].read_text(encoding="ascii").splitlines()
+        else:
+            with _history_origin(history).reader(files["SHA256SUMS"], 4096) as reader:
+                lines = reader.read(reader.size).decode("ascii").splitlines()
     except UnicodeError:
         raise WorkflowError("candidate handoff checksums are malformed") from None
     checksums: dict[str, str] = {}
@@ -1643,13 +1651,13 @@ def _validate_handoff(root: Path, platform: str, intent: Mapping[str, Any] | Non
         assert match is not None
         checksums[match[2]] = match[1]
     _require(set(checksums) == set(files) - {"SHA256SUMS"}, "candidate handoff checksum set is incomplete")
-    _require(all(sha256_file(files[name]) == digest for name, digest in checksums.items()), "candidate handoff bytes differ from their checksums")
+    _require(all(_history_sha(files[name], history) == digest for name, digest in checksums.items()), "candidate handoff bytes differ from their checksums")
     if intent is not None:
         records = {item["logicalName"]: item for item in intent["artifacts"] if item["logicalName"] != "store-metadata"}
         _require(set(records) == {allowed[name] for name in checksums}, "candidate handoff artifact set differs from the original intent")
         for name in checksums:
             record = records[allowed[name]]
-            _require(record["fileName"] == name and record["sha256"] == checksums[name] and record["size"] == files[name].stat().st_size, "candidate handoff replaced an intent-authorized artifact")
+            _require(record["fileName"] == name and record["sha256"] == checksums[name] and record["size"] == _history_stat(files[name], history).st_size, "candidate handoff replaced an intent-authorized artifact")
 
 
 def _metadata_binding(path: Path, intent: Mapping[str, Any], *, history=None) -> None:

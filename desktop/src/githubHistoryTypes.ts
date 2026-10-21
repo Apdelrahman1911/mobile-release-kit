@@ -1,4 +1,5 @@
-// Closed readonly projection DATA, not proof, Store state or a native permit.
+// Closed projection DATA, not proof, Store state or a native permit.
+import type { GitHubCandidateDownloadEffect, GitHubCandidateDownloadStart } from './githubCandidateDownload.ts';
 export type GitHubHistoryStage = 'candidate' | 'external-testing' | 'production-submit';
 export type GitHubHistoryPlatform = 'android' | 'ios';
 export type GitHubHistoryReason = 'none' | 'unqualified' | 'not-connected' | 'busy' | 'invalid-input' | 'target-changed' |
@@ -32,6 +33,7 @@ export interface GitHubHistoryResult {
 }
 export interface GitHubHistoryOperation {
   id: string; phase: 'running' | 'stopping' | 'settled' | 'cleanup-unknown'; reason: GitHubHistoryReason; selection: GitHubHistorySelection;
+  download?: GitHubCandidateDownloadEffect;
 }
 export interface GitHubHistoryStatus {
   schemaVersion: 1; revision: number; sessionId: string | null; available: boolean; reason: GitHubHistoryReason;
@@ -43,6 +45,7 @@ export interface GitHubHistoryStart {
 export interface GitHubHistoryApi {
   githubHistoryStatus(): Promise<GitHubHistoryStatus>;
   startGitHubHistory(args: GitHubHistoryStart): Promise<GitHubHistoryStatus>;
+  downloadGitHubCandidate?(args: GitHubCandidateDownloadStart): Promise<GitHubHistoryStatus>;
   cancelGitHubHistory(args: { operationId: string }): Promise<GitHubHistoryStatus>;
   subscribeGitHubHistory(listener: (value: GitHubHistoryStatus | null) => void): Promise<() => void>;
 }

@@ -77,10 +77,10 @@ impl ApplicationService {
     ) -> Result<p::ResponseBody, Error> {
         let state = self.lock()?;
         self.authorize_build_client(&state, client, &q.project_id)?;
-        let result = self
-            .store_requests
-            .query(q, cancel)
-            .map(p::ResponseBody::StoreRequest);
+        let result = if let Some(entry) = self.store_requests.find_preparation(q)? {
+            if cancel { entry.cancel(wire::Reason::UserCancelled, Instant::now()); }
+            entry.status().map(|s| p::ResponseBody::StorePreparation(Box::new(s)))
+        } else { self.store_requests.query(q, cancel).map(p::ResponseBody::StoreRequest) };
         drop(state);
         result
     }

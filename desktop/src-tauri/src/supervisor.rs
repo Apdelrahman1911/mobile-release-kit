@@ -2681,7 +2681,7 @@ impl InstalledSettlementSlots {
             Self::GitHubHistory(native) => {
                 let mut slots = match native.lock() { Ok(slots) => slots,
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
-                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first),&mut ||history::download_work_expired(owner))
             },
             Self::GitHubAuth(native) => {
                 let mut slots = match native.lock() { Ok(slots) => slots,
@@ -4370,6 +4370,21 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         let decoded=owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown)
             .and_then(|local|local.decode_before_close(&owner,&resources));
         if let Err(error)=decoded {owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    if let Some(reply)=history_reply.as_ref().filter(|v|v.download.is_some()){
+        let returned=history::download_return_data(
+            resources.waited.is_some_and(|v|v.success()),resources.write_end.is_some_and(|v|v.complete),
+            resources.out_end.as_ref().is_some_and(|v|v.eof&&!v.overflow),
+            resources.err_end.as_ref().is_some_and(|v|v.eof&&!v.overflow&&v.bytes.is_empty()),
+            resources.writer.is_none()&&resources.stdout.is_none()&&resources.stderr.is_none()
+                &&resources.failed_writer.is_none()&&resources.failed_stdout.is_none()&&resources.failed_stderr.is_none(),
+            owner.failed(),reply);
+        if returned {
+            let armed=resources.github_history.as_ref().ok_or_else(BridgeError::cleanup_unknown)
+                .and_then(|slots|slots.lock().map_err(|_|BridgeError::cleanup_unknown())?.arm_download(reply));
+            if let Err(error)=armed{owner.fail(error);}
+        }else{owner.fail(BridgeError::new("history_source_changed","The original download producer did not return a complete result."));}
     }
     // Known child custody only permits attempting the SAME native settlement;
     // it never proves the actual source/native closes, joins or success.

@@ -12,6 +12,10 @@ use std::{
     time::Instant,
 };
 
+#[path = "service_store_prepare_requests.rs"]
+pub(crate) mod preparation;
+use preparation::{PreparationLease, StoredEntry};
+
 pub(crate) struct Control {
     stop: Mutex<Option<(p::Reason, Instant)>>,
     failed: AtomicBool,
@@ -157,7 +161,8 @@ struct Lease {
 }
 struct Book {
     lease: Option<Arc<Lease>>,
-    entries: Vec<Arc<Entry>>,
+    entries: Vec<StoredEntry>,
+    preparation: Option<Arc<PreparationLease>>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -547,6 +552,7 @@ impl Inbox {
             instance,
             book: Mutex::new(Book {
                 lease: None,
+                preparation: None,
                 entries: Vec::with_capacity(p::REQUEST_LIMIT),
                 closed: false,
             }),
@@ -567,6 +573,7 @@ impl Inbox {
         if b.closed {
             return Err(Error::Unavailable);
         }
+        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
         if b.entries.len() >= p::REQUEST_LIMIT
             || b.entries.iter().any(|e| e.pending())
             || b.lease.as_ref().is_some_and(|l| {
@@ -586,6 +593,7 @@ impl Inbox {
         if b.closed {
             return Err(Error::Unavailable);
         }
+        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
         if b.entries.len() >= p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
             return Err(Error::Busy);
         }
@@ -612,12 +620,11 @@ impl Inbox {
         if let Some(old) = b
             .entries
             .iter()
-            .find(|e| e.input.origin.request_id == input.origin.request_id)
+            .find(|e| e.origin().request_id == input.origin.request_id)
         {
-            return if old.input == input {
-                old.status()
-            } else {
-                Err(Error::Conflict)
+            return match old.original() {
+                Some(old) if old.input == input => old.status(),
+                _ => Err(Error::Conflict),
             };
         }
         let lease = b.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
@@ -627,6 +634,7 @@ impl Inbox {
         {
             return Err(Error::AccessDenied);
         }
+        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) { return Err(Error::Busy); }
         if b.entries.len() >= p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
             return Err(Error::Busy);
         }
@@ -651,7 +659,7 @@ impl Inbox {
             }),
         });
         *once = Some(Arc::downgrade(&entry));
-        b.entries.push(entry.clone());
+        b.entries.push(StoredEntry::Original(entry.clone()));
         drop(once);
         lease.scope.changes.send_modify(|_| {});
         entry.status()
@@ -664,6 +672,7 @@ impl Inbox {
         let e = b
             .entries
             .iter()
+            .filter_map(StoredEntry::original)
             .find(|e| e.input.origin == *q)
             .ok_or(Error::Conflict)?
             .clone();
@@ -678,7 +687,7 @@ impl Inbox {
         if b.closed {
             return Ok(None);
         }
-        for entry in &b.entries {
+        for entry in b.entries.iter().filter_map(StoredEntry::original) {
             let mut r = entry.lock()?;
             if !r.claimed && r.unknown.is_none() {
                 r.claimed = true;
@@ -692,7 +701,7 @@ impl Inbox {
         Ok(None)
     }
     pub(crate) fn entries(&self) -> Result<Vec<Arc<Entry>>, Error> {
-        Ok(self.lock()?.entries.clone())
+        Ok(self.lock()?.entries.iter().filter_map(StoredEntry::original).cloned().collect())
     }
     pub(crate) fn access(&self) -> Result<p::Access, Error> {
         let b = self.lock()?;
@@ -756,6 +765,7 @@ impl Inbox {
         if let Some(l) = &b.lease {
             l.scope.control.stop(reason, at);
         }
+        if let Some(l) = &b.preparation { l.scope.control.stop(reason, at); }
         for e in &b.entries {
             if e.pending() {
                 e.cancel(reason, at);
@@ -781,6 +791,7 @@ impl Inbox {
         if let Some(l) = &b.lease {
             l.scope.control.unknown(at);
         }
+        if let Some(l) = &b.preparation { l.scope.control.unknown(at); }
         for e in &b.entries {
             e.unknown(p::Reason::HistoryUnavailable);
         }
@@ -796,7 +807,7 @@ impl Inbox {
         }
         Ok(b.entries
             .iter()
-            .filter(|e| &e.input.origin.project_id == project)
+            .filter(|e| &e.origin().project_id == project)
             .map(|e| crate::service_request_catalogue::AdditionalRequest {
                 family: crate::service_request_catalogue::AdditionalFamily::Store,
                 request_id: e.origin().request_id.clone(),

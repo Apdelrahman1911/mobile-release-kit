@@ -237,7 +237,10 @@ pub enum RequestBody {
     #[serde(rename="tool-setup.submit")] ToolSetupSubmit(crate::service_tool_setup_protocol::Submit),
     #[serde(rename="tool-setup.status")] ToolSetupStatus(crate::service_tool_setup_protocol::Query),
     #[serde(rename="tool-setup.cancel")] ToolSetupCancel(crate::service_tool_setup_protocol::Query),
+    #[serde(rename="store.prepare")] StorePrepare(crate::service_store_prepare_protocol::Submit),
+    #[serde(rename="store.start")] StoreStart(crate::service_store_prepare_protocol::Submit),
     #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
+    #[serde(rename="apple-provisioning.prepare")] AppleProvisioningPrepare(crate::service_apple_provisioning_prepare_protocol::Submit),
     #[serde(rename="apple-provisioning.submit")] AppleProvisioningSubmit(crate::service_apple_provisioning_protocol::Submit),
     #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
     #[serde(rename="apple-provisioning.status")] AppleProvisioningStatus(crate::service_apple_provisioning_protocol::Query),
@@ -325,7 +328,9 @@ pub enum ResponseBody {
     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
     StoreRequest(crate::service_store_protocol::Status),
+    StorePreparation(Box<crate::service_store_prepare_protocol::Status>),
     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
+    AppleProvisioningPreparation(crate::service_apple_provisioning_prepare_protocol::Status),
     ToolSetupRequest(crate::service_tool_setup_protocol::Status),
     GitIndexScope(crate::service_git_protocol::Scope),
     GitIndexRequest(crate::service_git_protocol::Status),
@@ -398,9 +403,9 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
         && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
-    if matches!(&request.request,RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
+    if matches!(&request.request,RequestBody::StorePrepare(_)|RequestBody::StoreStart(_)|RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
-    if matches!(&request.request,RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
+    if matches!(&request.request,RequestBody::AppleProvisioningPrepare(_)|RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
@@ -526,9 +531,17 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
         },
+        ResponseBody::StorePreparation(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance || crate::service_metadata_text_protocol::encoded(response, crate::service_store_prepare_protocol::STATUS_LIMIT).is_err() { return Err(Error::InvalidRequest); }
+        }
         ResponseBody::StoreRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_store_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::AppleProvisioningPreparation(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_apple_provisioning_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
         },
         ResponseBody::AppleProvisioningRequest(row)=>{
             row.validate()?;

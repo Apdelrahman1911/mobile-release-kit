@@ -1,5 +1,5 @@
-//! MAIN-only delegation of one retained Apple Prepared. No CLI Prepare,
-//! account discovery, credential import, runtime startup or synthetic consent.
+//! MAIN-only delegation of one retained Apple Prepared. The preparation child
+//! adds only genuine selected-scope Prepare; no account/material discovery or synthetic consent.
 use super::super::*;
 use crate::{
     application_service::ApplicationService,
@@ -10,6 +10,8 @@ use crate::{
     service_protocol::{Error, Id},
 };
 use serde::Deserialize;
+#[path="asset_session_agent_apple_prepare.rs"]
+pub(crate) mod prepare;
 fn public(error: Error) -> BridgeError {
     super::super::application_service::public_error(error)
 }
@@ -41,6 +43,8 @@ struct Nonce {
 #[derive(Default)]
 pub(crate) struct State {
     grant: Option<Arc<Grant>>,
+    prepare:Option<Arc<prepare::Grant>>,
+    call:Option<Arc<prepare::CallOriginal>>,
     nonces: Vec<Nonce>,
 }
 impl State {
@@ -201,22 +205,24 @@ impl DocumentBinding {
                 .agent_apple
                 .reserve(&args.consent_id)
                 .map_err(public)?;
-            if state
-                .agent_apple
-                .grant
-                .as_ref()
-                .is_some_and(|g| !g.scope.retired.load(Ordering::Acquire))
-                || self.apple_provisioning_gate(&state)
-                    != crate::apple_provisioning_protocol::Availability::Available
-            {
-                return Err(public(Error::Busy));
-            }
             let approval = self.inner.bridge.apple_provisioning.apple_approval(
                 args.mode,
                 &args.operation_id,
                 &args.owner_generation,
                 args.expected_status_revision,
             )?;
+            if state
+                .agent_apple
+                .grant
+                .as_ref()
+                .is_some_and(|g| !g.scope.retired.load(Ordering::Acquire))
+                || prepare::occupies(&state.agent_apple)&&!approval.preparation().as_ref().is_some_and(|e|prepare::matches_handoff(&state.agent_apple,e))
+                || self.apple_provisioning_gate(&state)
+                    != crate::apple_provisioning_protocol::Availability::Available
+            {
+                return Err(public(Error::Busy));
+            }
+
             self.agent_apple_input_current(&state, &approval)?;
             let native = self.service_project_locked(&state, approval.project())?;
             let edit = self
@@ -265,6 +271,7 @@ impl DocumentBinding {
                 .grant
                 .as_ref()
                 .is_some_and(|g| !g.scope.retired.load(Ordering::Acquire))
+            || prepare::occupies(&state.agent_apple)&&!approval.preparation().as_ref().is_some_and(|e|prepare::matches_handoff(&state.agent_apple,e))
             || self.apple_provisioning_gate(&state)
                 != crate::apple_provisioning_protocol::Availability::Available
         {
@@ -289,10 +296,8 @@ impl DocumentBinding {
             return Err(public(Error::Conflict));
         }
         self.agent_apple_material_current(&state, &approval, &edit)?;
-        service
-            .apple_provisioning_requests()
-            .can_allow()
-            .map_err(public)?;
+        let preparation=approval.preparation();
+        match &preparation {Some(e)=>service.apple_provisioning_requests().can_handoff_preparation(e),None=>service.apple_provisioning_requests().can_allow()}.map_err(public)?;
         if let Some(old) = self.inner.agent_apple_service.get() {
             if old.as_ptr() != Arc::as_ptr(&service) {
                 return Err(public(Error::Conflict));
@@ -317,10 +322,7 @@ impl DocumentBinding {
             stamp,
         });
         state.agent_apple.grant = Some(grant.clone());
-        match service
-            .apple_provisioning_requests()
-            .allow(scope, args.consent_id)
-        {
+        match match preparation {Some(e)=>service.apple_provisioning_requests().allow_after_preparation(&e,scope,args.consent_id),None=>service.apple_provisioning_requests().allow(scope,args.consent_id)} {
             Ok(v) => Ok(v),
             Err(e) => {
                 self.inner.bridge.apple_provisioning.stop_agent_apple(
@@ -496,6 +498,7 @@ impl DocumentBinding {
             Ok(None) => {}
             Err(_) => service.apple_provisioning_requests().fence(),
         }
+        if self.apple_prepare_tick(&service).is_err(){service.apple_provisioning_requests().fence();}
         let _ = flush(&service);
     }
     pub(crate) fn agent_apple_relay_lost(&self) {

@@ -109,7 +109,7 @@ fn store_candidate_report_only_exposes_same_local_intent_digests() {
     assert!(value.get("sourceCommit").is_none());
     assert!(value.get("destination").is_none());
 }
-fn binding() -> (
+pub(super) fn binding() -> (
     SavedCommandOwner,
     Prepared,
     Arc<Binding>,
@@ -177,6 +177,7 @@ fn binding_with_read_end(
         consumed: AtomicBool::new(false),
     });
     let prepared = Prepared {
+        agent_store_preparation: None,
         agent_store: Some(link.clone()),
         store_witness: Some(witness),
         agent_build: None,

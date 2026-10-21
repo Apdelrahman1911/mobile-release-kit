@@ -1,3 +1,6 @@
+import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
+import { StorePreparationController } from './agentStorePreparationController.ts';
+import { storePreparationInput, storePreparationPeerReason } from './agentStorePreparation.ts';
 import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
 import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
 import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
@@ -28,6 +31,8 @@ import { selectRehearsalCandidate } from './releaseRehearsal.ts';
 import type { RehearsalAction, RehearsalContext, RehearsalTarget } from './releaseRehearsal.ts';
 import { LocalStorePreflightController, localStoreOwnerReason, localStoreProjectObservation } from './localStorePreflight.ts';
 import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
+import { AgentApplePreparationController } from './agentApplePreparationController.ts';
+import { AgentApplePreparationAccess } from './components/AgentApplePreparationAccess.tsx';
 import { AgentAppleProvisioningController } from './agentAppleProvisioningController.ts';
 import { AgentAppleProvisioningAccess } from './components/AgentAppleProvisioningAccess.tsx';
 import { AppleProvisioningController } from './appleProvisioningController.ts';
@@ -266,9 +271,11 @@ export function App() {
   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
   const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
+  const storePreparationControllerRef=useRef<StorePreparationController|null>(null);
   const agentToolSetupRef=useRef<AgentToolSetupController|null>(null);
   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
+  const agentApplePrepareRef = useRef<AgentApplePreparationController|null>(null);
   const agentAppleControllerRef = useRef<AgentAppleProvisioningController | null>(null);
   const appleProvisioningControllerRef = useRef<AppleProvisioningController | null>(null);
   const offlinePreflightControllerRef = useRef<OfflinePreflightController | null>(null);
@@ -400,9 +407,9 @@ export function App() {
   const storePrepareBusy = useCallback(() => localStorePrepareControllerRef.current ? localStorePrepareOwnerReason(localStorePrepareControllerRef.current.getSnapshot()) : null, []);
   const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
-  const agentStoreBusy=useCallback(()=>agentStoreControllerRef.current?.ownerReason()??null,[]);
+  const agentStoreBusy=useCallback(()=>storePreparationControllerRef.current?.ownerReason()??agentStoreControllerRef.current?.ownerReason()??null,[]);
   const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
-  const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? agentAppleControllerRef.current?.ownerReason() ?? null, []);
+  const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? agentAppleControllerRef.current?.ownerReason() ?? agentApplePrepareRef.current?.ownerReason() ?? null, []);
   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
   const toolPreparationBusy = useCallback(() => agentToolSetupRef.current?.ownerReason() ?? toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
@@ -1072,6 +1079,19 @@ export function App() {
         review: appleProvisioning.delegationReview()};
     },
   }));
+  const [agentApplePreparation] = useState(() => new AgentApplePreparationController({
+    syncOriginal:appleProvisioning.syncProject,selection:appleProvisioning.preparationSelection,reserve:appleProvisioning.reservePreparation,
+    current:()=>{
+      const service=cliService.current,current=workspaceRef.current;
+      const project=current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
+      return {port:service.api?.mode==='native'?service.api.agentApplePreparation??null:null,session:service.api?.mode==='native'?service:null,
+        projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',blockedReason:appleOtherOperationReason()};
+    },
+  }));
+  agentApplePrepareRef.current=agentApplePreparation;
+  useSyncExternalStore(agentApplePreparation.subscribe,agentApplePreparation.getSnapshot,agentApplePreparation.getSnapshot);
+  useEffect(()=>{agentApplePreparation.syncContext();});
+  useEffect(()=>()=>agentApplePreparation.dispose(),[agentApplePreparation]);
   agentAppleControllerRef.current = agentAppleProvisioning;
   useSyncExternalStore(agentAppleProvisioning.subscribe, agentAppleProvisioning.getSnapshot, agentAppleProvisioning.getSnapshot);
   useEffect(() => { agentAppleProvisioning.syncContext(); });
@@ -1119,13 +1139,29 @@ export function App() {
     return {port:service.api?.mode==='native'?service.api.agentStoreAccess??null:null,
       nativeSession:service.api?.mode==='native'?service:null,projectId:id,epoch:project??service,
       preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[]),...(executeReview?[executeReview]:[]),...(reconcileReview?[reconcileReview]:[])],
-      blockedReason:appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+      blockedReason:storePreparationControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
   }}));
   agentStoreControllerRef.current=agentStoreAccess;
   useSyncExternalStore(agentStoreAccess.subscribe,agentStoreAccess.getSnapshot,agentStoreAccess.getSnapshot);
   useEffect(()=>{agentStoreAccess.syncContext();});
   useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
-  const agentStoreReason=agentStoreAccess.ownerReason();
+  const [storePreparationAccess]=useState(()=>new StorePreparationController({current:kind=>{
+    const service=cliService.current,w=workspaceRef.current;
+    const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
+    const observation=project?localStoreProjectObservation(project,releaseVersion.getSnapshot()):null;
+    const input=storePreparationInput(kind,observation,assetSession.getSnapshot(),localHistory.getSnapshot());
+    const peer=storePreparationControllerRef.current?.peer()??null;
+    const peers=storePreparationPeerReason(peer&&!peer.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
+      storePreparationPeerReason(peer?.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()));
+    return {port:service.api?.mode==='native'?service.api.agentStorePreparation??null:null,nativeSession:service.api?.mode==='native'?service:null,
+      projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',input,
+      blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??storeExecuteBusy()??storeReconcileBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+  }}));
+  storePreparationControllerRef.current=storePreparationAccess;
+  useSyncExternalStore(storePreparationAccess.subscribe,storePreparationAccess.getSnapshot,storePreparationAccess.getSnapshot);
+  useEffect(()=>{storePreparationAccess.syncContext();});
+  useEffect(()=>()=>storePreparationAccess.dispose(),[storePreparationAccess]);
+  const agentStoreReason=storePreparationAccess.ownerReason()??agentStoreAccess.ownerReason();
   // One shared facade. These exceptions exclude only the selected
   // controller's own prepared object; its private delegate method rematches it.
   const [agentToolSetup]=useState(()=>new AgentToolSetupController({
@@ -2213,6 +2249,7 @@ export function App() {
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         <AgentStoreAccess controller={agentStoreAccess}/>
+        <AgentStorePreparation controller={storePreparationAccess}/>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {identityBinding && identityState && identityBusy() && <div className={`notice ${identityBinding.rebindFailed || identityState.issue ? 'notice-warning' : 'notice-info'}`} role={identityBinding.rebindFailed || identityState.issue ? 'alert' : 'status'}>
@@ -2272,7 +2309,7 @@ export function App() {
         {page !== 'artifacts' && <ArtifactInspection state={artifactInspectionState} controller={artifactInspection} compact
           projectName={session?.project.name??null} onHelp={setHelp} onShow={()=>navigate('artifacts')}/>}
         {page !== 'dashboard' && <AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState} compact
-          cliPanel={<AgentAppleProvisioningAccess controller={agentAppleProvisioning} />} cliRetained={!!agentAppleProvisioning.ownerReason()}
+          cliPanel={<><AgentApplePreparationAccess controller={agentApplePreparation}/><AgentAppleProvisioningAccess controller={agentAppleProvisioning} /></>} cliRetained={!!agentAppleProvisioning.ownerReason()||!!agentApplePreparation.ownerReason()}
           onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }}
           onShow={() => navigate('dashboard')} />}
         {page !== 'releases' && <>
@@ -2348,7 +2385,7 @@ export function App() {
             workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}
           appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
-            cliPanel={<AgentAppleProvisioningAccess controller={agentAppleProvisioning} />}
+            cliPanel={<><AgentApplePreparationAccess controller={agentApplePreparation}/><AgentAppleProvisioningAccess controller={agentAppleProvisioning} /></>}
             p12Fingerprint={appleP12FingerprintView(p12FingerprintContext())} onUseP12Fingerprint={useP12Fingerprint}
             savedBundleId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.bundleId'))}
             configuredTeamId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.teamId'))}
@@ -2359,7 +2396,7 @@ export function App() {
               navigate('credentials');
             }}
             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
-          appleProvisioningNeedsAttention={!!agentAppleProvisioning.ownerReason() || appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+          appleProvisioningNeedsAttention={!!agentApplePreparation.ownerReason() || !!agentAppleProvisioning.ownerReason() || appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} onGit={() => navigate('github')} /></>}

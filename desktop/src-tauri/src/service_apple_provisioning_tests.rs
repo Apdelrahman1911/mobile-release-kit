@@ -334,7 +334,7 @@ fn apple_cli_finite_roster_never_reclaims_terminal_or_unknown_rows() {
     let f = Fixture::new();
     let mut b = f.inbox.book.lock().unwrap();
     for _ in 0..p::REQUEST_LIMIT {
-        b.entries.push(Arc::new(Entry {
+        b.entries.push(Stored::Start(Arc::new(Entry {
             input: f.input(),
             scope: f.scope.clone(),
             submitted: Instant::now(),
@@ -349,7 +349,7 @@ fn apple_cli_finite_roster_never_reclaims_terminal_or_unknown_rows() {
                 history_claim: None,
                 unknown: None,
             }),
-        }));
+        })));
     }
     drop(b);
     assert!(f.inbox.can_allow().is_err());
@@ -412,11 +412,12 @@ fn apple_cli_exact_modes_and_status_payloads_remain_small_and_closed() {
             < 4096
     );
     // 8KiB scope/native-link metadata plus TWO 8KiB native/history snapshots.
-    // Same original IPC worker input is already charged; add this typed/reply backing.
-    assert!(
-        p::DOCUMENT_BACKING
-            >= 32 * 3 * 8192 + 8 * (3 * p::STATUS_LIMIT + p::RAW_LIMIT) + 128 * 1024
-    );
+    // The accepted common eight-worker pool owns the IPC-only term, not each
+    // retained family. Keep ALL32 row debits and the original128KiB ancillary.
+    assert!(p::ROW_BACKING >= 3 * 8192);
+    assert_eq!(p::DOCUMENT_BACKING, 32 * p::ROW_BACKING + 128 * 1024);
+    assert_eq!(p::IPC_WORKER_BACKING, 3 * p::STATUS_LIMIT + p::RAW_LIMIT);
+    assert_eq!(crate::installed_cli_ipc::CLIENTS, 8);
 }
 #[test]
 fn apple_cli_record_requires_exact_mode_and_all_three_return_cuts() {

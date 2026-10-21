@@ -103,7 +103,8 @@ def parse_request(raw: bytes, budget: HistoryBudget) -> HistoryRequest:
     require(type(row["protocol"]) is str and row["protocol"] == PROTOCOL)
     context = HistoryContext.parse(row["context"])
     native = _keys(row["native"], ("profile", "projectRoot", "rootIdentity", "configIdentity",
-        "workRoot", "workIdentity", "provider", "parentDescriptorReservation", "clock"))
+        "workRoot", "workIdentity", "provider", "parentDescriptorReservation", "clock")
+        + (("download",) if type(row["native"]) is dict and "download" in row["native"] else ()))
     require(type(native["profile"]) is str and native["profile"] in ("macos-arm64", "macos-x86_64"))
     root, work = _path(native["projectRoot"]), _path(native["workRoot"])
     require(work != root and not work.startswith(root + "/"))
@@ -128,6 +129,9 @@ def parse_request(raw: bytes, budget: HistoryBudget) -> HistoryRequest:
     native = {**native, "projectRoot": root, "workRoot": work, "rootIdentity": root_identity,
         "workIdentity": work_identity, "configIdentity": config,
         "provider": {**provider, "identity": provider_identity}, "clock": dict(clock)}
+    if "download" in native:
+        from .github_candidate_download import native as download_native
+        native["download"] = download_native(native["download"], context)
     return HistoryRequest(_id(row["id"]), _id(row["ownerGeneration"]), context, native,
                           hashlib.sha256(raw).hexdigest())
 
@@ -150,7 +154,7 @@ def parse_go(raw: bytes, request: HistoryRequest, budget: HistoryBudget) -> str:
     return token
 
 
-def terminal_frame(request: HistoryRequest, result: object, reason: str, lifetime: object) -> bytes:
+def terminal_frame(request: HistoryRequest, result: object, reason: str, lifetime: object, *, download=None) -> bytes:
     require(type(request) is HistoryRequest and type(reason) is str and reason in REASONS)
     life = _keys(lifetime, ("complete", "fatal", "contained", "commandDispatched", "commands", "verifierCalls",
                             "inputClosed", "handlersRestored", "invocationClosed", "stopObserved"))
@@ -166,5 +170,16 @@ def terminal_frame(request: HistoryRequest, result: object, reason: str, lifetim
         result = parse_result(result, request.context)
     else:
         require(reason not in ("none", "busy", "not-connected"))
-    return canonical({"protocol": PROTOCOL, "id": request.id, "requestSha256": request.digest,
-        "result": result, "reason": reason, "lifetime": dict(life)}, RESULT_LIMIT)
+    row = {"protocol": PROTOCOL, "id": request.id, "requestSha256": request.digest,
+        "result": result, "reason": reason, "lifetime": dict(life)}
+    if "download" in request.native:
+        from .github_candidate_download import candidate
+        if download is not None:
+            require(result is not None and result["verification"] == "verified" and reason == "none")
+            download = candidate(download, request.context)
+        else:
+            require(result is None or result["verification"] != "verified")
+        row["download"] = download
+    else:
+        require(download is None)
+    return canonical(row, RESULT_LIMIT)

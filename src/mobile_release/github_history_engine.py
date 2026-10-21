@@ -123,7 +123,11 @@ class _HistoryEngine:
                 "commands": operation.budget._calls, "verifierCalls": operation.budget._verifiers,
                 "inputClosed": self.input.closed, "handlersRestored": self.guard.handler_state == "RESTORED",
                 "invocationClosed": operation.closed, "stopObserved": stop}
-        self.write(wire.terminal_frame(self.request, result, reason, life), terminal=True)
+        download = None
+        if result is not None and result["verification"] == "verified" and operation.candidate_download is not None:
+            wire.require(operation.candidate_download.finished)
+            download = operation.candidate_download.result
+        self.write(wire.terminal_frame(self.request, result, reason, life, download=download), terminal=True)
 
 
 def main(*, started, runtime_dir):

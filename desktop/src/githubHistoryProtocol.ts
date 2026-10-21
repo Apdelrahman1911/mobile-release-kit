@@ -1,3 +1,4 @@
+import { candidateDownloadEffect, candidateDownloadExported, GITHUB_CANDIDATE_DOWNLOAD_CONSENT } from './githubCandidateDownload.ts';
 // Only closed display/request DATA. No verifier, network, clock lease or native authority.
 import { connectionBounded as bounded, connectionKeys as keys, connectionOpaqueId as id,
   connectionNumericId as numericId, sameConnectionData as same } from './githubConnectionProtocol.ts';
@@ -116,7 +117,7 @@ export function parseGitHubHistoryStatus(value: unknown): GitHubHistoryStatus | 
         || typeof value.available !== 'boolean' || !one(value.reason, GITHUB_HISTORY_REASONS) || value.available !== (value.reason === 'none')) return null;
     const op = value.operation;
     if (op !== null) {
-      if (!keys(op, ['id', 'phase', 'reason', 'selection']) || !id(op.id) || value.sessionId === null || !githubHistorySelection(op.selection)
+      if (!(keys(op, ['id', 'phase', 'reason', 'selection']) || keys(op, ['id', 'phase', 'reason', 'selection', 'download']) && githubHistorySelection(op.selection) && candidateDownloadEffect(op.download, op.selection)) || !id(op.id) || value.sessionId === null || !githubHistorySelection(op.selection)
           || !one(op.phase, ['running', 'stopping', 'settled', 'cleanup-unknown']) || !one(op.reason, GITHUB_HISTORY_REASONS)) return null;
       if (op.phase !== 'settled') {
         const reasons = { running: 'none', stopping: 'cancelled', 'cleanup-unknown': 'cleanup-unknown' };
@@ -127,17 +128,23 @@ export function parseGitHubHistoryStatus(value: unknown): GitHubHistoryStatus | 
     if (value.available && (value.sessionId === null || op !== null && op.phase !== 'settled')) return null;
     if (value.result !== null && (op === null || op.phase !== 'settled' || op.reason !== 'none'
         || !parseGitHubHistoryResult(value.result) || !keys(value.result, ['schemaVersion', 'context', 'observedAt', 'verification', 'reason', 'evidence', 'assurance'])
-        || !context(value.result.context) || !same(value.result.context.selection, op.selection))) return null;
+        || !context(value.result.context) || !same(value.result.context.selection, op.selection)
+        || Object.hasOwn(op, 'download') && value.result.verification === 'verified' && (!candidateDownloadEffect(op.download, value.result.context.selection) || !candidateDownloadExported(op.download)))) return null;
     return JSON.parse(JSON.stringify(value)) as GitHubHistoryStatus;
   } catch { return null; }
 }
-export type GitHubHistoryCommand = 'github_history_status' | 'github_history_start' | 'github_history_cancel';
+export type GitHubHistoryCommand = 'github_history_status' | 'github_history_start' | 'github_history_download_primary' | 'github_history_cancel';
 export function githubHistoryRequestFits(command: GitHubHistoryCommand, value: unknown): value is Record<string, unknown> {
   try {
     if (!bounded(value, 4096, 64, 4)) return false;
     if (command === 'github_history_status') return keys(value, []);
     if (command === 'github_history_cancel') return keys(value, ['operationId']) && id(value.operationId);
-    return command === 'github_history_start' && keys(value, ['sessionId', 'expectedRevision', 'expectedConnectionRevision', 'selection'])
+    const shape = command === 'github_history_start' && keys(value, ['sessionId', 'expectedRevision', 'expectedConnectionRevision', 'selection'])
+      || command === 'github_history_download_primary' && keys(value, ['sessionId', 'expectedRevision', 'expectedConnectionRevision', 'selection', 'consentVersion', 'confirmed'])
+        && value.consentVersion === GITHUB_CANDIDATE_DOWNLOAD_CONSENT && value.confirmed === true
+        && githubHistorySelection(value.selection) && value.selection.stage === 'candidate';
+    return shape && keys(value, command === 'github_history_start' ? ['sessionId', 'expectedRevision', 'expectedConnectionRevision', 'selection']
+      : ['sessionId', 'expectedRevision', 'expectedConnectionRevision', 'selection', 'consentVersion', 'confirmed'])
       && id(value.sessionId) && revision(value.expectedRevision) && revision(value.expectedConnectionRevision) && githubHistorySelection(value.selection);
   } catch { return false; }
 }

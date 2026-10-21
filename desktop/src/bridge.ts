@@ -1,3 +1,4 @@
+import { createStorePreparationPort } from './agentStorePreparation.ts';
 import { createVersionEditAgentApi } from './serviceVersionEditProtocol.ts';
 import { createAgentGithubActionPort } from './agentGithubActionAccess.ts';
 import { createMetadataServiceApi } from './serviceMetadataTextProtocol.ts';
@@ -102,6 +103,7 @@ import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionReservePort } from './versionReserve.ts';
 import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
 import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
+import { createApplePreparationPort } from './agentApplePreparation.ts';
 import { createAppleCliPort } from './agentAppleProvisioning.ts';
 import { createAgentStoreAccessPort } from './agentStoreAccess.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
@@ -115,7 +117,7 @@ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -170,7 +172,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
   };
   const githubHistoryCall = async (command: GitHubHistoryCommand, value: unknown): Promise<GitHubHistoryStatus> => {
     try {
-      if (mode !== 'native' || (command === 'github_history_start' && !listen)) throw { code: 'github_history_refused_runtime_unavailable' };
+      if (mode !== 'native' || ((command === 'github_history_start' || command === 'github_history_download_primary') && !listen)) throw { code: 'github_history_refused_runtime_unavailable' };
       if (!githubHistoryRequestFits(command, value)) throw { code: 'github_history_refused_invalid_input' };
       // The closed request carries correlation DATA only, not a root, hash,
       // token or provider choice. Native independently admits the saved original.
@@ -436,8 +438,10 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentGithubAction: mode === 'native' ? createAgentGithubActionPort((command,bytes)=>invoke<unknown>(command,bytes)) : null,
+    agentApplePreparation: mode === 'native' && listen ? createApplePreparationPort((command,bytes)=>invoke<unknown>(command,bytes),listen) : null,
     agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentToolSetup: mode === 'native' ? createAgentToolSetupPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentStorePreparation: mode === 'native' ? createStorePreparationPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
@@ -822,6 +826,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     },
     githubHistoryStatus: () => githubHistoryCall('github_history_status', {}),
     startGitHubHistory: (args) => githubHistoryCall('github_history_start', args),
+    downloadGitHubCandidate: (args) => githubHistoryCall('github_history_download_primary', args),
     cancelGitHubHistory: (args) => githubHistoryCall('github_history_cancel', args),
     subscribeGitHubHistory: async (onStatus) => {
       try {

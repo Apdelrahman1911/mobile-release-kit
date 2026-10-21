@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { GitHubCandidateDownload } from './GitHubCandidateDownload.tsx';
 import type { HelpContent } from '../types.ts';
 import type { GitHubHistoryController } from '../githubHistoryController.ts';
 import type { GitHubHistoryAuthority, GitHubHistoryPlatform, GitHubHistoryStage, GitHubHistoryView } from '../githubHistoryTypes.ts';
@@ -116,6 +117,7 @@ export function GitHubHistory({ state, controller, onHelp, compact = false, onSh
         </dl></details>}
         {result.verification !== 'verified' && <p className="save-note">Unavailable or refused evidence is not a negative release-history proof. Missing artifacts do not prove that no release happened.</p>}
       </article>}
+      <GitHubCandidateDownload controller={controller} state={state} />
       {controls}<p className="save-note">Status reads local native state, not GitHub. Cancel requests original cleanup only; it never cancels a remote workflow. A new read requires known settlement and another explicit Start.<HelpButton content={HELP.recovery} onHelp={onHelp} /></p>
     </>}
   </section>;

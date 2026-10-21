@@ -1,14 +1,17 @@
-//! Three fixed calls to the already-open Desktop. No provider, candidate,
+//! Four fixed calls to the already-open Desktop. No provider, candidate,
 //! credential, prepared material or release executor exists in this client.
 use super::*;
 use crate::service_apple_provisioning_protocol as apple;
+use crate::service_apple_provisioning_prepare_protocol as prepare;
 
-pub(super) const COMMANDS: [&str; 3] = [
+pub(super) const COMMANDS: [&str; 4] = [
     "apple-provisioning-submit",
     "apple-provisioning-status",
     "apple-provisioning-cancel",
+    "apple-provisioning-prepare",
 ];
 enum Command {
+    Prepare {project:Id,instance:Id,grant:Id,scope:Id},
     Submit {
         project: Id,
         instance: Id,
@@ -40,6 +43,7 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         words.pop();
     }
     let command = match words.as_slice() {
+        ["apple-provisioning-prepare",project,instance,grant,scope,"--reviewed"]=>Command::Prepare {project:Id::parse(project)?,instance:Id::parse(instance)?,grant:Id::parse(grant)?,scope:Id::parse(scope)?},
         ["apple-provisioning-submit", project, instance, grant, review, "--reviewed"] => {
             Command::Submit {
                 project: Id::parse(project)?,
@@ -89,11 +93,18 @@ fn unconfirmed(q: &apple::Query, error: Error, json: bool) -> Vec<u8> {
 fn output(
     response: &p::Response,
     q: &apple::Query,
-    submitted: Option<(&Id, &Id)>,
+    submitted: Option<(&Id, &Id, bool)>,
     json: bool,
 ) -> Result<(u8, Vec<u8>), Error> {
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
+    }
+    if let p::ResponseBody::AppleProvisioningPreparation(status)=&response.response {
+        status.validate()?;
+        if status.origin!=*q||response.service_instance!=q.service_instance||submitted.is_some_and(|(grant,scope,is_prepare)|!is_prepare||&status.grant_id!=grant||&status.scope_id!=scope){return Err(Error::StateUnknown);}
+        let code=match status.phase{prepare::Phase::Unknown=>6,prepare::Phase::Refused=>5,_=>0};
+        let bytes=if json{let mut b=p::encode_response(response)?;b.push(b'\n');b}else{format!("Apple preparation: {:?}; {:?}.\n{}Preparation only; no provider work, key generation or save has started. Review the exact new intent in Desktop and separately approve Start.\n",status.phase,status.settlement,receipt(q)).into_bytes()};
+        return Ok((code,bytes));
     }
     let p::ResponseBody::AppleProvisioningRequest(status) = &response.response else {
         return Err(Error::StateUnknown);
@@ -102,7 +113,7 @@ fn output(
     if status.origin != *q
         || response.service_instance != q.service_instance
         || submitted
-            .is_some_and(|(grant, review)| &status.grant_id != grant || &status.review_id != review)
+            .is_some_and(|(grant, review,is_prepare)| is_prepare||&status.grant_id != grant || &status.review_id != review)
     {
         return Err(Error::StateUnknown);
     }
@@ -148,6 +159,11 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let (q, submitted, body) = match options.command {
+            Command::Prepare{project,instance,grant,scope}=>{
+                let q=apple::Query{project_id:project,service_instance:instance,request_id:Id::random()?};
+                std::io::stderr().write_all(receipt(&q).as_bytes()).map_err(|_|Error::Unavailable)?;
+                (q.clone(),Some((grant.clone(),scope.clone(),true)),p::RequestBody::AppleProvisioningPrepare(prepare::Submit{origin:q,grant_id:grant,scope_id:scope}))
+            },
             Command::Submit {
                 project,
                 instance,
@@ -166,7 +182,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                     .map_err(|_| Error::Unavailable)?;
                 (
                     q.clone(),
-                    Some((grant.clone(), review.clone())),
+                    Some((grant.clone(), review.clone(),false)),
                     p::RequestBody::AppleProvisioningSubmit(apple::Submit {
                         origin: q,
                         grant_id: grant,
@@ -192,7 +208,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
             output(
                 &response,
                 &q,
-                submitted.as_ref().map(|(a, b)| (a, b)),
+                submitted.as_ref().map(|(a, b,is_prepare)| (a, b,*is_prepare)),
                 options.json,
             )
         })();

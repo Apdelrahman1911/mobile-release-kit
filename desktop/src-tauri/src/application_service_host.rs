@@ -77,6 +77,7 @@ impl NativeProject {
 pub(crate) struct AllowTicket {
     owner: Arc<()>, epoch: u64, source_epoch: u64,
     original: NativeProject, expires: Instant, startup_expires: Instant,
+    apple_preparation: Option<std::sync::Weak<crate::service_apple_provisioning_requests::preparation::Entry>>,
 }
 /// Explicit native Desktop setup, not an agent-access grant. The wrapped
 /// ticket is never passed to finish_allow or exposed through IPC.
@@ -254,6 +255,7 @@ impl ApplicationHost {
     }
     fn check_startup(&self, state: &Control, ticket: &AllowTicket) -> Result<(), Error> {
         self.check_allow(state, ticket)?;
+        if let Some(entry)=&ticket.apple_preparation{entry.upgrade().ok_or(Error::AccessDenied)?.current()?;}
         if Instant::now() >= ticket.startup_expires { Err(Error::Expired) } else { Ok(()) }
     }
     /// Under the real DocumentBinding lock, inspect the COMPLETE genuine native
@@ -351,6 +353,13 @@ impl ApplicationHost {
         work_end: Instant) -> Result<NativeStateTicket, Error> {
         self.begin_start(original, false, Some(work_end)).map(NativeStateTicket)
     }
+    /// Only the already claimed same Apple preparation can tighten this
+    /// native ticket. Its READ/STOP is sampled by the original source callbacks.
+    pub(crate) fn bind_apple_preparation(&self,ticket:&mut NativeStateTicket,entry:&Arc<crate::service_apple_provisioning_requests::preparation::Entry>)->Result<(),Error>{
+        if !Arc::ptr_eq(&ticket.0.owner,&self.identity)||ticket.0.apple_preparation.is_some()||ticket.0.startup_expires>entry.end()
+            ||ticket.0.original.runtime_id!=entry.scope.project.runtime_id{return Err(Error::Conflict);}
+        entry.current()?;ticket.0.apple_preparation=Some(Arc::downgrade(entry));Ok(())
+    }
     /// Retire only this unfinished ticket. A late caller cannot cancel a newer
     /// startup or close its originals. Actual Host shutdown still joins them.
     pub(crate) fn cancel_native_state_ticket(&self, ticket: &NativeStateTicket) -> Result<(), Error> {
@@ -388,7 +397,7 @@ impl ApplicationHost {
         if now >= startup_expires { return Err(Error::Expired); }
         state.pending = Some(state.epoch);
         Ok(AllowTicket { owner: self.identity.clone(), epoch: state.epoch,
-            source_epoch: state.source_epoch, original, expires, startup_expires })
+            source_epoch: state.source_epoch, original, expires, startup_expires, apple_preparation:None })
     }
     /// Ordinary selection changes retire an unfinished Allow, but do not
     /// transfer, extend or revoke an already granted original project's lease.

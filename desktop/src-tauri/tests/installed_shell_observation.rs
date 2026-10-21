@@ -58,6 +58,10 @@ mod service_metadata_text_requests;
 mod service_version_reserve_protocol;
 #[path="../src/service_store_protocol.rs"]
 mod service_store_protocol;
+#[path="../src/service_store_prepare_protocol.rs"]
+mod service_store_prepare_protocol;
+#[path="../src/service_store_inventory_protocol.rs"]
+mod service_store_inventory_protocol;
 #[path="../src/service_store_requests.rs"]
 mod service_store_requests;
 #[path="../src/service_github_action_protocol.rs"]
@@ -66,6 +70,8 @@ mod service_github_action_protocol;
 mod service_github_action_requests;
 #[path="../src/service_apple_provisioning_protocol.rs"]
 mod service_apple_provisioning_protocol;
+#[path="../src/service_apple_provisioning_prepare_protocol.rs"]
+mod service_apple_provisioning_prepare_protocol;
 #[path="../src/service_apple_provisioning_requests.rs"]
 mod service_apple_provisioning_requests;
 #[path="../src/service_version_reserve_requests.rs"]

@@ -442,8 +442,10 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
   readonly agentGithubAction?: import('./agentGithubActionAccess.ts').AgentGithubActionPort | null;
+  readonly agentApplePreparation?: import('./agentApplePreparation.ts').ApplePreparationPort | null;
   readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
   readonly agentToolSetup?: import('./agentToolSetup.ts').AgentToolSetupPort | null;
+  readonly agentStorePreparation?: import('./agentStorePreparation.ts').StorePreparationPort | null;
   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;

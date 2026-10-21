@@ -2,6 +2,8 @@
 //! process, credential, attestation or Store authority.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[path="github_candidate_download_protocol.rs"]
+pub(crate) mod download;
 use sha2::{Digest, Sha256};
 use crate::{error::BridgeError, github_connection_protocol::{bounds, nullable, numeric_id},
     protocol::{strict_json, valid_id}};
@@ -223,7 +225,9 @@ impl ResultData {
 pub(crate) enum Phase { Running, Stopping, Settled, CleanupUnknown }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Operation { pub(crate) id: String, pub(crate) phase: Phase, pub(crate) reason: Reason, pub(crate) selection: Selection }
+pub(crate) struct Operation { pub(crate) id: String, pub(crate) phase: Phase, pub(crate) reason: Reason, pub(crate) selection: Selection,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="present_download")] pub(crate) download:Option<download::Effect> }
+fn present_download<'de,D:serde::Deserializer<'de>,T:Deserialize<'de>>(decoder:D)->Result<Option<T>,D::Error>{T::deserialize(decoder).map(Some)}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct Status {
@@ -236,7 +240,7 @@ impl Status {
         if self.schema_version!=1 || !revision(self.revision) || self.session_id.as_ref().is_some_and(|id|!valid_id(id))
             || self.available!=(self.reason==Reason::None) { return false; }
         if let Some(op)=&self.operation {
-            if !valid_id(&op.id) || !op.selection.valid() || self.session_id.is_none() { return false; }
+            if !valid_id(&op.id) || !op.selection.valid() || self.session_id.is_none() || op.download.as_ref().is_some_and(|v|!v.valid(&op.selection)) { return false; }
             if op.phase!=Phase::Settled {
                 let expected=match op.phase {Phase::Running=>Reason::None,Phase::Stopping=>Reason::Cancelled,_=>Reason::CleanupUnknown};
                 if op.reason!=expected || self.available || self.result.is_some()
@@ -245,13 +249,15 @@ impl Status {
         }
         if self.available && (self.session_id.is_none() || self.operation.as_ref().is_some_and(|op|op.phase!=Phase::Settled)) { return false; }
         if let Some(result)=&self.result { if !result.valid() || !self.operation.as_ref().is_some_and(|op|
-            op.phase==Phase::Settled && op.reason==Reason::None && op.selection==result.context.selection) { return false; } }
+            op.phase==Phase::Settled && op.reason==Reason::None && op.selection==result.context.selection
+                && op.download.as_ref().is_none_or(|v|result.verification!=Verification::Verified||v.exported())) { return false; } }
         self.retained_heap_bytes().and_then(|n|n.checked_add(std::mem::size_of::<Self>())).is_some_and(|n|n<=RETAINED_REPLY_LIMIT)
             && fits(self,RESPONSE_LIMIT)
     }
     pub(crate) fn retained_heap_bytes(&self)->Option<usize> {
         let mut bytes=self.session_id.as_ref().map_or(0,String::capacity);
-        if let Some(op)=&self.operation { bytes=bytes.checked_add(op.id.capacity())?.checked_add(op.selection.retained_heap_bytes())?; }
+        if let Some(op)=&self.operation { bytes=bytes.checked_add(op.id.capacity())?.checked_add(op.selection.retained_heap_bytes())?
+            .checked_add(op.download.as_ref().map_or(Some(0),download::Effect::retained_bytes)?)?; }
         bytes.checked_add(self.result.as_ref().map_or(Some(0),ResultData::retained_heap_bytes)?)
     }
 }
@@ -262,7 +268,7 @@ pub(crate) struct StartArgs { pub(crate) session_id: String, pub(crate) expected
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct CancelArgs { pub(crate) operation_id: String }
-pub(crate) enum Command { Status, Start(StartArgs), Cancel(CancelArgs) }
+pub(crate) enum Command { Status, Start(StartArgs), Download(StartArgs), Cancel(CancelArgs) }
 pub(crate) fn decode_command(name:&str,value:&Value)->Result<Command,BridgeError> {
     if !wire(value,4096,64,4) { return Err(BridgeError::invalid()); }
     match name {
@@ -273,6 +279,7 @@ pub(crate) fn decode_command(name:&str,value:&Value)->Result<Command,BridgeError
                 return Err(BridgeError::invalid()); }
             Ok(Command::Start(args))
         },
+        "github_history_download_primary"=>Ok(Command::Download(download::Args::deserialize(value).map_err(|_|BridgeError::invalid())?.into_start()?)),
         "github_history_cancel"=> {
             let args=CancelArgs::deserialize(value).map_err(|_|BridgeError::invalid())?;
             if !valid_id(&args.operation_id) { return Err(BridgeError::invalid()); } Ok(Command::Cancel(args))
@@ -328,21 +335,24 @@ pub(crate) struct Native {
     pub(crate) profile:NativeProfile,pub(crate) project_root:String,pub(crate) root_identity:DirectoryIdentity,
     pub(crate) config_identity:FileIdentity,pub(crate) work_root:String,pub(crate) work_identity:DirectoryIdentity,
     pub(crate) provider:Provider,pub(crate) parent_descriptor_reservation:u32,pub(crate) clock:Clock,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="present_download")] pub(crate) download:Option<download::Pins>,
 }
 impl Native {
     fn valid(&self)->bool { absolute(&self.project_root)&&absolute(&self.work_root)&&self.root_identity.valid()&&self.work_identity.valid()
         && self.work_identity.mode&0o7777==0o700 && self.config_identity.valid(CONFIG_LIMIT,false)&&self.provider.valid(self.profile)
-        &&self.parent_descriptor_reservation<=56&&self.clock.valid() }
+        &&self.parent_descriptor_reservation<=56&&self.clock.valid()
+        &&self.download.as_ref().is_none_or(|v|v.valid()&&v.parent_identity.uid==self.work_identity.uid) }
     fn retained_heap_bytes(&self)->Option<usize>{strings(&[&self.project_root,&self.work_root])?.checked_add(self.root_identity.retained_heap_bytes()?)?
         .checked_add(self.config_identity.retained_heap_bytes()?)?.checked_add(self.work_identity.retained_heap_bytes()?)?
-        .checked_add(self.provider.retained_heap_bytes()?)?.checked_add(self.clock.retained_heap_bytes()?)}
+        .checked_add(self.provider.retained_heap_bytes()?)?.checked_add(self.clock.retained_heap_bytes()?)?
+        .checked_add(self.download.as_ref().map_or(Some(0),download::Pins::retained_bytes)?)}
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct Initial { pub(crate) protocol:String,pub(crate) id:String,pub(crate) owner_generation:String,pub(crate) context:Context,pub(crate) native:Native }
 impl Initial {
     pub(crate) fn encode(&self)->Result<Vec<u8>,BridgeError>{
-        if self.protocol!=PROTOCOL||!valid_id(&self.id)||!valid_id(&self.owner_generation)||!self.context.valid()||!self.native.valid(){return Err(BridgeError::invalid());}
+        if self.protocol!=PROTOCOL||!valid_id(&self.id)||!valid_id(&self.owner_generation)||!self.context.valid()||!self.native.valid()||self.native.download.is_some()&&self.context.selection.stage!=Stage::Candidate{return Err(BridgeError::invalid());}
         encode(self,INITIAL_LIMIT)
     }
     pub(crate) fn retained_heap_bytes(&self)->Option<usize>{strings(&[&self.protocol,&self.id,&self.owner_generation])?
@@ -388,13 +398,24 @@ impl Lifetime {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct Reply {protocol:String,id:String,request_sha256:String,
-    #[serde(deserialize_with="nullable")] pub(crate) result:Option<ResultData>,pub(crate) reason:Reason,pub(crate) lifetime:Lifetime}
+    #[serde(deserialize_with="nullable")] pub(crate) result:Option<ResultData>,pub(crate) reason:Reason,pub(crate) lifetime:Lifetime,
+    #[serde(default)] pub(crate) download:Option<download::Candidate>}
 pub(crate) fn decode_reply(raw:&[u8],initial:&Initial,digest:&str)->Result<Reply,BridgeError>{
-    let reply:Reply=serde_json::from_value(frame(raw,TERMINAL_LIMIT)?).map_err(|_|BridgeError::protocol())?;
+    let value=frame(raw,TERMINAL_LIMIT)?;
+    if value.get("download").is_some()!=initial.native.download.is_some(){return Err(BridgeError::protocol());}
+    let reply:Reply=serde_json::from_value(value).map_err(|_|BridgeError::protocol())?;
     if reply.protocol!=PROTOCOL||reply.id!=initial.id||reply.request_sha256!=digest||!hex(digest,64)||!reply.lifetime.valid(){return Err(BridgeError::protocol());}
     if let Some(result)=&reply.result {
         if reply.reason!=Reason::None||!reply.lifetime.complete()||!result.valid()||result.context!=initial.context{return Err(BridgeError::protocol());}
     }else if matches!(reply.reason,Reason::None|Reason::Busy|Reason::NotConnected){return Err(BridgeError::protocol());}
+    if initial.native.download.is_some(){
+        match (&reply.download,&reply.result){
+            (Some(candidate),Some(result)) if candidate.valid()&&download::result_eligible(result)=>{},
+            (None,None)=>{},
+            (None,Some(result)) if result.verification!=Verification::Verified=>{},
+            _=>return Err(BridgeError::protocol()),
+        }
+    }
     if reply.retained_heap_bytes().and_then(|n|n.checked_add(std::mem::size_of::<Reply>())).is_none_or(|n|n>RETAINED_REPLY_LIMIT){
         return Err(BridgeError::new("history_resources_unavailable","The finite History reply storage was exceeded."));
     }
@@ -417,7 +438,7 @@ mod tests {
             work_identity:DirectoryIdentity{device:"1".into(),inode:"4".into(),mode:0o40700,uid:501,gid:20},
             provider:Provider{relative_path:"tools/gh".into(),version:"2.88.1".into(),target:NativeProfile::Arm64.target().into(),
                 source_manifest_sha256:"d".repeat(64),sha256:"e".repeat(64),identity:FileIdentity{mode:0o100555,uid:0,..identity()}},
-            parent_descriptor_reservation:56,clock:Clock{name:"CLOCK_UPTIME_RAW".into(),work_end_ns:"1".into(),hard_end_ns:"10000000001".into()}}}}
+            download:None,parent_descriptor_reservation:56,clock:Clock{name:"CLOCK_UPTIME_RAW".into(),work_end_ns:"1".into(),hard_end_ns:"10000000001".into()}}}}
     fn line(value:&Value)->Vec<u8>{let mut raw=serde_json::to_vec(value).unwrap();raw.push(b'\n');raw}
     #[test]
     fn closed_history_commands_frames_and_original_context(){
@@ -479,7 +500,7 @@ mod tests {
             "operationIntentSha256":"b".repeat(64),"receiptSha256":"c".repeat(64),"provenanceSha256":"d".repeat(64)},"assurance":ASSURANCE});
         let result:ResultData=serde_json::from_value(result).unwrap();assert!(result.valid());
         let mut status=Status{schema_version:1,revision:LAST_REVISION,session_id:Some("s".repeat(64)),available:true,reason:Reason::None,
-            operation:Some(Operation{id:"o".repeat(64),phase:Phase::Settled,reason:Reason::None,selection:c.selection}),result:Some(result)};
+            operation:Some(Operation{id:"o".repeat(64),phase:Phase::Settled,reason:Reason::None,selection:c.selection,download:None}),result:Some(result)};
         assert!(status.fits_wire()&&status.retained_heap_bytes().unwrap()<RESPONSE_LIMIT);
         status.available=false;status.reason=Reason::CleanupUnknown;assert!(status.fits_wire()); // earlier settled result unchanged
         status.operation.as_mut().unwrap().phase=Phase::Running;assert!(!status.fits_wire());
@@ -493,5 +514,6 @@ mod tests {
 }
 impl Reply {
     pub(crate) fn retained_heap_bytes(&self)->Option<usize>{strings(&[&self.protocol,&self.id,&self.request_sha256])?
-        .checked_add(self.result.as_ref().map_or(Some(0),ResultData::retained_heap_bytes)?)}
+        .checked_add(self.result.as_ref().map_or(Some(0),ResultData::retained_heap_bytes)?)?
+        .checked_add(self.download.as_ref().map_or(Some(0),download::Candidate::retained_bytes)?)}
 }

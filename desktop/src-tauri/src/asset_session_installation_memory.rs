@@ -585,6 +585,8 @@ mod known {
         agent_ios_archive_grant: None,
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_store_preparation:None,
         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -705,6 +707,8 @@ mod known {
         agent_ios_archive_grant: None,
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_store_preparation:None,
         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]

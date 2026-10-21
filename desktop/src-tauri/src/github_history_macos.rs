@@ -121,13 +121,14 @@ impl GitHubHistoryRuntimeSlots {
             .checked_add(HistorySources::working_reservation_bytes()?)?
             .checked_add(wire::CONFIG_LIMIT as usize)?.checked_add(wire::WIRE_COPY_RESERVE)
     }
-    pub(crate) fn reserve_once(&mut self)->Result<usize>{
+    pub(crate) fn reserve_once(&mut self,nomination:&Nomination)->Result<usize>{
         if !self.never_started(){return Err(AdmissionFailure::AlreadyUsed);}
         let original=self.original_mut()?;
+        if let Some(trace)=&nomination.download{original.sources.configure_download(&nomination.selection,trace.clone()).map_err(|_|AdmissionFailure::Bounds)?;}
         let records=crate::macos_install_record::RUNTIME_RECORD_LIMIT;
         original.code.records.try_reserve_exact(records).map_err(native_error)?;
         if original.code.records.capacity()>records{return Err(AdmissionFailure::Bounds);}
-        Self::working_reservation_bytes().ok_or(AdmissionFailure::Bounds)
+        Self::working_reservation_bytes().and_then(|n|n.checked_add(if nomination.download.is_some(){wire::download::CONTROL_RESERVE}else{0})).ok_or(AdmissionFailure::Bounds)
     }
     pub(crate) fn new()->Self{Self{inspection:Some(Original::new()),acquisition:None,settlement:false}}
     fn original(&self)->Result<&Original>{match (&self.inspection,&self.acquisition){(Some(v),None)=>Ok(v),(None,Some(v))=>Ok(&v.original),_=>Err(AdmissionFailure::Unknown)}}
@@ -158,11 +159,11 @@ impl GitHubHistoryRuntimeSlots {
         let context=nomination.context(&raw_sha);
         let initial=wire::Initial{protocol:wire::PROTOCOL.into(),id:id.into(),owner_generation:nomination.owner_generation.clone(),context,
             native:wire::Native{profile:provider_nomination_profile(&provider)?,project_root:nomination.root.path.to_str().ok_or_else(BridgeError::invalid)?.into(),
-                root_identity,config_identity,work_root,work_identity,provider,parent_descriptor_reservation:original.sources.parent_reservation().ok_or_else(BridgeError::cleanup_unknown)?,clock}};
+                root_identity,config_identity,work_root,work_identity,provider,download:original.sources.download_pins().map_err(source_error)?,parent_descriptor_reservation:original.sources.parent_reservation().ok_or_else(BridgeError::cleanup_unknown)?,clock}};
         let raw=initial.encode()?;let digest=wire::request_digest(&raw);
         original.sealed=Some(Arc::new(SealedHistoryRequest{initial,raw,digest}));
         original.code.point(end,stop).map_err(|_|BridgeError::cleanup_unknown())?;
-        if original.retained_bytes().zip(Self::working_reservation_bytes()).is_none_or(|(actual,maximum)|actual>maximum){
+        if original.retained_bytes().zip(Self::working_reservation_bytes().and_then(|n|n.checked_add(if nomination.download.is_some(){wire::download::CONTROL_RESERVE}else{0}))).is_none_or(|(actual,maximum)|actual>maximum){
             original.code.note_acl(AdmissionFailure::Bounds,Instant::now());return Err(BridgeError::new("history_resources_unavailable","The actual History source storage exceeded its containing debit."));
         }
         Ok(VerifiedRuntime{python:selection.python.clone(),bootstrap:selection.bootstrap.clone(),core:selection.core.clone(),cwd:selection.cwd.clone()})
@@ -178,12 +179,26 @@ impl GitHubHistoryRuntimeSlots {
         self.acquisition.as_mut().ok_or(AdmissionFailure::AlreadyUsed)}
     pub(crate) fn no_child_effect(&self)->bool{self.original().is_ok_and(|v|!v.claimed||v.no_effect)}
     pub(crate) fn mark_interrupted(&mut self){if let Ok(v)=self.original_mut(){v.code.unknown=true;}}
-    pub(crate) fn settle_originals(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->CloseOutcome{
+    pub(crate) fn arm_download(&mut self,reply:&wire::Reply)->std::result::Result<(),BridgeError>{
+        if self.settlement{return Err(BridgeError::cleanup_unknown());}
+        let original=self.original_mut().map_err(|_|BridgeError::cleanup_unknown())?;
+        if !original.claimed||original.no_effect||original.code.first_failure().is_some(){return Err(BridgeError::cleanup_unknown());}
+        original.sources.arm_download(reply).map_err(source_error)
+    }
+    pub(crate) fn settle_originals(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool,
+        work_expired:&mut dyn FnMut()->bool)->CloseOutcome{
         if self.settlement{return CloseOutcome::Unknown;}self.settlement=true;
         let Ok(v)=self.original_mut()else{return CloseOutcome::Unknown;};
         if v.sources.pending_native(){v.code.unknown=true;return CloseOutcome::Unknown;}
         // Same clock closure and first native failure; source consuming closes
         // precede code close and all calls remain in this registered original.
+        // This phase still requires original WORK/noF/currentness. Only the
+        // subsequent original closes use the conservative cleanup endpoint.
+        if v.code.first_failure().is_none()&&!v.code.unknown{
+            if let Err(reason)=v.sources.publish_download(work_expired){
+                v.code.note_acl(if reason==crate::asset_commands::Reason::CleanupUnknown{AdmissionFailure::Unknown}else{AdmissionFailure::Native},Instant::now());
+            }
+        }
         let first=Cell::new(v.code.first_failure());
         let source=v.sources.settle(&mut ||expired(first.get()),&mut |reason|{
             let failure=if reason==crate::asset_commands::Reason::CleanupUnknown{AdmissionFailure::Unknown}else{AdmissionFailure::Native};
@@ -192,7 +207,9 @@ impl GitHubHistoryRuntimeSlots {
         if let Some((failure,at))=first.get(){v.code.note_acl(failure,at);}
         if source.is_err()&&!v.sources.settled(){v.code.unknown=true;}
         let code=v.code.settle(expired);
-        if code==CloseOutcome::Settled&&v.sources.settled(){CloseOutcome::Settled}else{CloseOutcome::Unknown}
+        let known=code==CloseOutcome::Settled&&v.sources.settled();
+        v.sources.close_download_record(known);
+        if known{CloseOutcome::Settled}else{CloseOutcome::Unknown}
     }
     pub(crate) fn settled(&self)->bool{self.settlement&&self.original().is_ok_and(|v|v.code.settled()&&v.sources.settled())}
 }

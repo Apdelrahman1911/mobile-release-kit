@@ -50,6 +50,7 @@ function freeze<T>(v:T):T {if(v&&typeof v==='object'){for(const item of Object.v
 export function parseStoreReview(raw: unknown): StoreReview | null { try { const v=copyBoundedComparisonData(raw,2048,52); return review(v) ? freeze(v) : null; } catch { return null; } }
 export const sameStoreReview = (a: StoreReview | null, b: StoreReview | null) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
 const accessLimits=['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic'];
+export { result as validStoreReport };
 function result(v: unknown, r: StoreReview): boolean {
   if (!record(v) || v.kind !== r.kind) return false;
   if(r.kind==='execute'||r.kind==='reconcile')return validStoreReleaseResult(v,r);

@@ -344,6 +344,21 @@ impl DocumentBinding {
         input: wire::Prepare,
         app_data: &std::path::Path,
     ) -> Result<wire::Status, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {return self.prepare_apple_provisioning_origin(input,app_data,None).await;}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        {let _=(input,app_data);self.inner.bridge.apple_provisioning.status_apple_provisioning(wire::Availability::UnsupportedPlatform)}
+    }
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    pub(super) async fn prepare_apple_provisioning_origin(&self,input:wire::Prepare,app_data:&std::path::Path,
+        origin:Option<Arc<crate::saved_command_owner::AgentApplePrepareLink>>)->Result<wire::Status,BridgeError>{
+        let call=self.apple_prepare_original(origin.as_ref().map(|l|&l.entry))?;
+        let result=self.prepare_apple_provisioning_call(input,app_data,origin,&call).await;
+        call.returned();result
+    }
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    async fn prepare_apple_provisioning_call(&self,input:wire::Prepare,app_data:&std::path::Path,
+        origin:Option<Arc<crate::saved_command_owner::AgentApplePrepareLink>>,call:&agent::prepare::Original)->Result<wire::Status,BridgeError>{
         if !input.context.valid() { return Err(wire::invalid()); }
         let host = &self.inner.bridge.application_service;
         let (project, stamp, ticket, registration, root, saved, material) = {
@@ -360,10 +375,11 @@ impl DocumentBinding {
             let project = self.service_project_locked(&state, &input.context.project_id)?;
             let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
             let saved = self.apple_provisioning_saved_input(&state, &input.context, registration, &root, &edit)?;
+            if let Some(link)=&origin{self.agent_apple_prepare_current(&state,link,&material,&edit)?;}
             if let Some(ready) = &state.apple_provisioning_ready {
                 match host.native_state_current(ready, &project) {
                     Ok(()) => return self.prepare_apple_provisioning_locked(&state, input, &edit,
-                        PreparedAppleSources { gate, registration, root, saved, material }),
+                        PreparedAppleSources { gate, registration, root, saved, material },origin),
                     // Only a fresh explicit Prepare may establish a new binding.
                     Err(crate::service_protocol::Error::Conflict) => {},
                     Err(error) => return Err(startup_error(error)),
@@ -372,7 +388,10 @@ impl DocumentBinding {
             let stamp = edit.stamp()?;
             let roster = self.inner.bridge.native_roster().map_err(|_| changed())?;
             host.reserve_native_state_location(app_data, &roster.roots).map_err(startup_error)?;
-            let ticket = host.begin_native_state(project.clone()).map_err(startup_error)?;
+            let mut ticket=match &origin{Some(link)=>{link.entry.host_entered().map_err(startup_error)?;host.begin_native_state_until(project.clone(),link.entry.end())},None=>host.begin_native_state(project.clone())}.map_err(startup_error)?;
+            let bound=match &origin{Some(link)=>host.bind_apple_preparation(&mut ticket,&link.entry),None=>Ok(())};
+            let ticket=Arc::new(ticket);call.ticket(ticket.clone())?;
+            bound.map_err(startup_error)?; // even a lost/expired binding retains the exact returned ticket
             (project, stamp, ticket, registration, root, saved, material)
         };
         // No Document/Edit/Host guard is held across this original startup.
@@ -392,7 +411,10 @@ impl DocumentBinding {
             || !saved.current_locked(&self.inner, &state, &edit, &input.context, registration, &root)
             || !material.provisioning_current_locked(&self.inner, &state, &input.context, registration, &root)
         { return Err(changed()); }
-        let ready = Arc::new(host.finish_native_state(ticket, &current).map_err(startup_error)?);
+        if let Some(link)=&origin{self.agent_apple_prepare_current(&state,link,&material,&edit)?;}
+        call.finishing();
+        let ready=Arc::new(host.finish_native_state_retained(&ticket,&current).map_err(startup_error)?);
+        call.finished();
         // Count the actual new Ready before retaining it in Document. The
         // pre-Edit census already counted any previous Ready still held here.
         let ready_bytes = lookup_memory::native_state_ready_bytes(&ready).map_err(|_| changed())?;
@@ -403,7 +425,7 @@ impl DocumentBinding {
         // Same Document AND Edit originals span Ready publication and the
         // actual operation preparation. No re-locking public call or gap.
         self.prepare_apple_provisioning_locked(&state, input, &edit,
-            PreparedAppleSources { gate, registration, root, saved, material })
+            PreparedAppleSources { gate, registration, root, saved, material },origin)
     }
     fn prepare_apple_provisioning_locked(
         &self,
@@ -411,6 +433,7 @@ impl DocumentBinding {
         input: wire::Prepare,
         edit: &crate::edit_owner::SavedEditGuard<'_>,
         sources: PreparedAppleSources,
+        origin:Option<Arc<crate::saved_command_owner::AgentApplePrepareLink>>,
     ) -> Result<wire::Status, BridgeError> {
         let PreparedAppleSources { gate, registration, root, saved, material } = sources;
         let ready = state
@@ -450,7 +473,7 @@ impl DocumentBinding {
         self.inner
             .bridge
             .apple_provisioning
-            .prepare_apple_provisioning(input, registration, root, gate, original)
+            .prepare_apple_provisioning_with_origin(input, registration, root, gate, original,origin)
     }
     pub(crate) fn start_apple_provisioning(
         &self,

@@ -43,7 +43,7 @@ impl GitHubHistoryAdmission {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         {
             let mut slots=crate::installed_runtime::GitHubHistoryRuntimeSlots::new();
-            let source=slots.reserve_once().map_err(|_|BridgeError::new("history_resources_unavailable","The original History storage was not admitted."))?;
+            let source=slots.reserve_once(&nomination).map_err(|_|BridgeError::new("history_resources_unavailable","The original History storage was not admitted."))?;
             let bytes=source.checked_add(nomination.retained_heap_bytes().ok_or_else(BridgeError::invalid)?)
                 .and_then(|n|n.checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>()+128*1024))
                 .ok_or_else(BridgeError::invalid)?;
@@ -101,6 +101,26 @@ pub(super) fn child_custody_reply(result:Result<wire::Reply,BridgeError>)->Resul
     let reply=result?;
     if !reply.lifetime.originals_settled(){return Err(BridgeError::cleanup_unknown());}
     Ok(reply)
+}
+
+// Actual driver IO/wait objects feed this predicate before the one native
+// publication phase is armed. A valid terminal or GitHub result alone cannot.
+pub(super) fn download_return_data(wait:bool,writer:bool,stdout:bool,stderr:bool,handles_returned:bool,
+    failed:bool,reply:&wire::Reply)->bool{
+    wait&&writer&&stdout&&stderr&&handles_returned&&!failed&&reply.lifetime.complete()
+        &&reply.reason==wire::Reason::None&&reply.download.as_ref().is_some_and(wire::download::Candidate::valid)
+        &&reply.result.as_ref().is_some_and(wire::download::result_eligible)
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn download_work_expired(owner:&Owner)->bool{
+    let Some(ends)=owner.history_endpoints else{return true;};
+    if !wire::download::work_permits(Instant::now(),ends.work,owner.failed(),*owner.stop.borrow(),true){
+        if !owner.failed(){owner.fail(if *owner.stop.borrow(){BridgeError::new("cancelled","The original download was stopped.")}else{BridgeError::timeout()});}return true;
+    }
+    let current=owner.history_gate.as_ref().zip(owner.history_nomination.as_ref())
+        .is_some_and(|(gate,nomination)|gate.download_current(&owner.id,nomination));
+    if !current{owner.fail(crate::github_history_session::refused(wire::Reason::TargetChanged));}
+    !current||!wire::download::work_permits(Instant::now(),ends.work,owner.failed(),*owner.stop.borrow(),current)
 }
 
 pub(super) async fn write_history(mut writer:tokio::process::ChildStdin,initial:Vec<u8>,
@@ -196,4 +216,21 @@ pub(crate) fn history_original_data_checks(){
     crate::github_history_session::history_session_data_checks();
     crate::github_connection_session::github_history_connection_data_checks();
     crate::asset_session::github_history_document_data_checks();
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    #[test]
+    fn download_requires_each_original_driver_return_and_no_prior_failure(){
+        let reply=wire::download::tests::reply();
+        assert!(download_return_data(true,true,true,true,true,false,&reply));
+        for n in 0..6 {let mut fields=[true,true,true,true,true,false];fields[n]=!fields[n];
+            assert!(!download_return_data(fields[0],fields[1],fields[2],fields[3],fields[4],fields[5],&reply));}
+        for n in 0..4 {let mut bad=reply.clone();match n{
+            0=>bad.download=None,1=>bad.lifetime.input_closed=false,2=>bad.lifetime.stop_observed=true,_=>bad.result=None}
+            assert!(!download_return_data(true,true,true,true,true,false,&bad));}
+        // Pure actual predicate DATA: no spawned process, returned wait, native
+        // SourceBook, GO, frame or success receipt is fabricated by this test.
+    }
 }

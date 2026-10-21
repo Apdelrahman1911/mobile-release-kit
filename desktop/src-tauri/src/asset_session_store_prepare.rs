@@ -23,6 +23,7 @@ impl DocumentBinding {
     pub(crate) fn start_local_store_prepare(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
         let admitted_at=Instant::now(); // Original endpoint begins before lock/lookup/queue.
         let mut state=self.lock();
+        self.inner.bridge.local_store_prepare.agent_store_original().ordinary_store_start_allowed(&args.operation_id,&args.owner_generation)?;
         let original=self.inner.bridge.local_store_prepare.prepared_material(&args.operation_id,&args.owner_generation)?;
         let project=self.inner.bridge.local_store_prepare.prepared_project(&args.operation_id,&args.owner_generation)?;
         let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();

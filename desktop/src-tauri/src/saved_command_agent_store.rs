@@ -5,6 +5,8 @@ use crate::{
     service_protocol as s, service_store_protocol as p, service_store_requests as requests,
 };
 use std::sync::{OnceLock, Weak};
+#[path = "saved_command_agent_store_prepare.rs"]
+pub(crate) mod preparation;
 #[path = "saved_command_agent_store_release.rs"]
 mod release;
 
@@ -246,7 +248,7 @@ impl Binding {
 /// without a notification; keep sampling after STOP so an earlier original
 /// revoke can still tighten F. The existing Unknown endpoint disables the slot.
 pub(super) fn control_poll(owner: &Session) -> Option<Duration> {
-    owner.agent_store.as_ref().map(|_| Duration::from_millis(5))
+    (owner.agent_store.is_some() || owner.agent_store_preparation.is_some()).then(|| Duration::from_millis(5))
 }
 fn native_reason(r: p::Reason) -> Reason {
     match r {
@@ -416,6 +418,7 @@ pub(super) fn consume(p: &Prepared) -> Result<(), BridgeError> {
     Ok(())
 }
 pub(super) fn changed(r: &Registry) {
+    preparation::changed(r);
     if let Some(a) = &r.active {
         if let Some(b) = &a.owner.agent_store {
             b.publish(&a.projection, r.revision, false);
@@ -427,11 +430,13 @@ pub(super) fn changed(r: &Registry) {
     }
 }
 pub(super) fn retired_prepared(p: &Prepared, reason: Reason, revision: u32) {
+    preparation::retired_prepared(p, reason, revision);
     if let Some(b) = &p.agent_store {
         b.publish(&retire(p.projection.clone(), reason), revision, true);
     }
 }
 pub(super) fn retired(a: &Active, revision: u32) {
+    preparation::retired(a, revision);
     if let Some(b) = &a.owner.agent_store {
         b.publish(&a.projection, revision, true);
     }

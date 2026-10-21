@@ -4,6 +4,8 @@
 use super::*;
 use crate::github_history_protocol as wire;
 use sha2::{Digest,Sha256};
+#[path="github_candidate_download_sources_macos.rs"]
+mod download_sources;
 
 const PARENT_LIMIT:usize=56;
 const SOURCE_FIXED:usize=6; // /, private anchor, release, config, tmp, created work
@@ -14,7 +16,7 @@ const DISK_FLOOR:u64=5*1024*1024*1024;
 enum Creation { New, Entered, Absent, Created, Removing, Removed, Unknown }
 
 pub(crate) struct HistorySources {
-    book:SourceBook,
+    book:SourceBook, download:Option<Box<download_sources::State>>,
     config:Option<(usize,wire::FileIdentity,String)>,
     project:Option<(usize,RegisteredRoot)>,
     work:Option<usize>,work_parent:Option<usize>,work_name:Vec<u8>,work_path:String,
@@ -48,7 +50,7 @@ impl HistorySources {
     }
     #[cfg(test)]
     pub(crate) fn data_checks(){history_source_data_checks();}
-    pub(crate) fn new()->Self {Self{book:SourceBook::new(),config:None,project:None,work:None,work_parent:None,
+    pub(crate) fn new()->Self {Self{book:SourceBook::new(),download:None,config:None,project:None,work:None,work_parent:None,
         work_name:Vec::new(),work_path:String::new(),creation:Creation::New,first:None,finished:false,parent_reservation:0}}
     pub(crate) fn not_started(&self)->bool {self.book.not_started()&&self.creation==Creation::New&&!self.finished&&self.first.is_none()}
     pub(crate) fn settled(&self)->bool {self.finished&&self.book.settled()
@@ -56,14 +58,38 @@ impl HistorySources {
     pub(crate) fn pending_native(&self)->bool {
         self.book.slots.iter().any(|s|matches!(s.state,OriginalState::Acquiring|OriginalState::Closing|OriginalState::Unknown)
             ||s.acl.iter().any(|a|!a.settled())) || matches!(self.creation,Creation::Entered|Creation::Removing|Creation::Unknown)
+            ||self.download.as_ref().is_some_and(|v|v.pending())
     }
     fn fail(&mut self,reason:Reason){if self.first.is_none(){self.first=Some(reason);}}
     pub(crate) fn retained_bytes(&self)->Option<usize> {
-        let mut n=self.book.retained_bytes()?.checked_add(self.work_name.capacity())?.checked_add(self.work_path.capacity())?;
+        let mut n=self.book.retained_bytes()?.checked_add(self.work_name.capacity())?.checked_add(self.work_path.capacity())?
+            .checked_add(self.download.as_ref().map_or(Some(0),|v|v.retained_bytes())?)?;
         if let Some((_,root))=&self.project{n=n.checked_add(root.path.capacity())?;}
         if let Some((_,id,hash))=&self.config{n=n.checked_add(id.retained_heap_bytes()?)?.checked_add(hash.capacity())?;}
         Some(n)
     }
+    pub(crate) fn configure_download(&mut self,selection:&wire::Selection,trace:std::sync::Arc<wire::download::Trace>)->Result<(),Reason>{
+        if !self.not_started()||self.download.is_some(){return Err(Reason::SourceRefused);}
+        let value=download_sources::State::new(selection,trace)?;
+        if value.retained_bytes().is_none_or(|n|n>32*1024){return Err(Reason::Capacity);}
+        self.download=Some(Box::new(value));Ok(())
+    }
+    pub(crate) fn reservation_bytes(&self)->Option<usize>{Self::working_reservation_bytes()?
+        .checked_add(if self.download.is_some(){wire::download::CONTROL_RESERVE}else{0})}
+    pub(crate) fn download_pins(&self)->Result<Option<wire::download::Pins>,Reason>{self.download.as_ref().map(|v|v.pins()).transpose()}
+    pub(crate) fn arm_download(&mut self,reply:&wire::Reply)->Result<(),Reason>{
+        match (&mut self.download,&reply.download,&reply.result){
+            (Some(value),Some(candidate),Some(result)) if reply.reason==wire::Reason::None&&reply.lifetime.complete()=>value.arm(candidate,result),
+            _=>Err(Reason::SourceRefused),
+        }
+    }
+    pub(crate) fn publish_download(&mut self,work:&mut dyn FnMut()->bool)->Result<(),Reason>{
+        let result=if let Some(value)=self.download.as_mut().filter(|v|v.armed()){
+            value.publish_once(&mut self.book,&self.config,if self.creation==Creation::Removed{self.work}else{None},work)
+        }else{Ok(())};
+        if let Err(reason)=result{self.fail(reason);}result
+    }
+    pub(crate) fn close_download_record(&self,known:bool){if let Some(value)=&self.download{value.closed(known);}}
     pub(crate) fn parent_reservation(&self)->Option<u32>{
         if self.config.is_none()||self.work.is_none()||self.creation!=Creation::Created||self.first.is_some(){return None;}
         u32::try_from(self.parent_reservation).ok()
@@ -81,8 +107,9 @@ impl HistorySources {
         stop:&mut dyn FnMut()->bool)->Result<(),Reason>{
         let components=parts(&root.path)?;
         let expected=root.identity.posix()?;
-        self.parent_reservation=source_reservation(components.len(),other).ok_or(Reason::Capacity)?;
-        let capacity=components.len().checked_add(SOURCE_FIXED).ok_or(Reason::Capacity)?;
+        let extra=if self.download.is_some(){download_sources::ORIGINALS}else{0};
+        self.parent_reservation=source_reservation(components.len().checked_add(extra).ok_or(Reason::Capacity)?,other).ok_or(Reason::Capacity)?;
+        let capacity=components.len().checked_add(SOURCE_FIXED+extra).ok_or(Reason::Capacity)?;
         self.book.begin(capacity,0,0)?;
         if self.book.slots.capacity()>capacity{return Err(Reason::Capacity);}
         self.work_name=copy_bytes(format!("{WORK_PREFIX}{nonce}").as_bytes())?;
@@ -141,7 +168,9 @@ impl HistorySources {
         self.book.slots[work].identity=Some(Identity::Directory(expected));self.work=Some(work);
         self.book.private_acl(work,0,stop)?;
         self.empty_work(stop)?;self.post(stop)?;
-        if self.retained_bytes().zip(Self::working_reservation_bytes()).is_none_or(|(actual,reserved)|actual>reserved){return Err(Reason::Capacity);}Ok(())
+        if let Some(download)=&mut self.download{download.inspect(&mut self.book,release,work,stop)?;}
+        self.post(stop)?;
+        if self.retained_bytes().zip(self.reservation_bytes()).is_none_or(|(actual,reserved)|actual>reserved){return Err(Reason::Capacity);}Ok(())
     }
     pub(crate) fn post_observed(&mut self,stop:&mut dyn FnMut()->bool)->Result<(),Reason>{
         let result=self.post(stop);if let Err(reason)=result{self.fail(reason);}result
@@ -156,23 +185,28 @@ impl HistorySources {
     // Repeated PRE/POST only borrows held originals. ACL phase0/phase1 is not
     // reset/reissued on each callback; phase1 is one terminal native original.
     pub(crate) fn post(&self,stop:&mut dyn FnMut()->bool)->Result<(),Reason>{
-        for alias in &self.book.aliases {self.book.check_alias(alias,stop)?;}
-        if let Some(anchors)=&self.book.anchors{
+        Self::post_book(&self.book,&self.config,if self.creation==Creation::Removed{self.work}else{None},self.download.as_deref(),stop)
+    }
+    fn post_book(book:&SourceBook,config:&Option<(usize,wire::FileIdentity,String)>,removed_work:Option<usize>,
+        download:Option<&download_sources::State>,stop:&mut dyn FnMut()->bool)->Result<(),Reason>{
+        for alias in &book.aliases {book.check_alias(alias,stop)?;}
+        if let Some(anchors)=&book.anchors{
             for (name,expected) in [(b"var".as_slice(),anchors.var),(b"tmp".as_slice(),anchors.tmp)]{
-                checkpoint(stop)?;let observed=stat::fstatat(self.book.fd(anchors.private)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_|Reason::SourceChanged)?;
+                checkpoint(stop)?;let observed=stat::fstatat(book.fd(anchors.private)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_|Reason::SourceChanged)?;
                 checkpoint(stop)?;if directory_identity(&observed)?!=expected{return Err(Reason::SourceChanged);}
             }
         }
-        for (index,slot) in self.book.slots.iter().enumerate(){
-            if self.creation==Creation::Removed&&slot.state==OriginalState::Closed&&Some(index)==self.work{continue;}
+        for (index,slot) in book.slots.iter().enumerate(){
+            if slot.state==OriginalState::Closed&&Some(index)==removed_work{continue;}
+            if let Some(download)=download.filter(|v|v.owns_file(index)){download.check_file(book,index,stop)?;continue;}
             let expected=slot.identity.ok_or(Reason::SourceChanged)?;let file=matches!(expected,Identity::File(_));
-            checkpoint(stop)?;filesystem(self.book.fd(index)?,stop)?;
-            let held=stat::fstat(self.book.fd(index)?).map_err(|_|Reason::SourceChanged)?;checkpoint(stop)?;
-            let named=if let Some(parent)=slot.parent {stat::fstatat(self.book.fd(parent)?,OsStr::from_bytes(&slot.name),AtFlags::AT_SYMLINK_NOFOLLOW)}
+            checkpoint(stop)?;filesystem(book.fd(index)?,stop)?;
+            let held=stat::fstat(book.fd(index)?).map_err(|_|Reason::SourceChanged)?;checkpoint(stop)?;
+            let named=if let Some(parent)=slot.parent {stat::fstatat(book.fd(parent)?,OsStr::from_bytes(&slot.name),AtFlags::AT_SYMLINK_NOFOLLOW)}
                 else{stat::lstat(Path::new("/"))}.map_err(|_|Reason::SourceChanged)?;
             checkpoint(stop)?;
             if identity(&held,file)?!=expected||identity(&named,file)?!=expected{return Err(Reason::SourceChanged);}
-            if let Some((config,expected,_))=&self.config{if *config==index&&(file_data(&held)?!=*expected||file_data(&named)?!=*expected){return Err(Reason::SourceChanged);}}
+            if let Some((config,expected,_)) =config{if *config==index&&(file_data(&held)?!=*expected||file_data(&named)?!=*expected){return Err(Reason::SourceChanged);}}
         }
         Ok(())
     }
@@ -253,6 +287,7 @@ impl HistorySources {
             let result=self.book.private_acl(*config,1,stop);
             if let Err(reason)=result{self.fail(reason);failed(reason);}
         }
+        if let Some(download)=&mut self.download{download.terminal(&mut self.book,stop,failed);}
         // Independent known originals are consumed even after an earlier error;
         // that first error remains, while uncertain closes independently veto.
         let known=self.book.close_all_observing(failed);self.finished=true;

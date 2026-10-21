@@ -10,6 +10,8 @@ use crate::{
     service_store_protocol as p, service_store_requests as requests,
 };
 use serde::Deserialize;
+#[path = "asset_session_agent_store_prepare.rs"]
+pub(crate) mod preparation;
 #[path = "asset_session_agent_store_release.rs"]
 mod release;
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
@@ -146,7 +148,7 @@ impl DocumentBinding {
         let (native, stamp, approval, epoch) = {
             let mut state = self.lock();
             self.service_document_gate(&state)?;
-            if state
+            if state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || state
                 .agent_store_grant
                 .as_ref()
                 .is_some_and(|g| !g.scope.retired.load(Ordering::Acquire))
@@ -219,7 +221,7 @@ impl DocumentBinding {
         let grant_id = Id::random().map_err(public)?;
         let mut state = self.lock();
         self.service_document_gate(&state)?;
-        if self.inner.agent_store_revoke_epoch.load(Ordering::Acquire) != epoch
+        if state.agent_store_preparation.as_ref().is_some_and(|g|g.scope.occupied()) || self.inner.agent_store_revoke_epoch.load(Ordering::Acquire) != epoch
             || self.store_delegate_gate(&state, args.kind)
                 != crate::local_store_preflight_protocol::Availability::Available
             || state
@@ -306,6 +308,7 @@ impl DocumentBinding {
             self.store_delegate_owner(g.scope.review.kind)
                 .stop_agent_store(&g.binding, p::Reason::PermissionRevoked, at);
         }
+        if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::PermissionRevoked,at);}
         let result = match self.agent_store_service() {
             Ok(Some(s)) => s
                 .store_requests()
@@ -433,6 +436,7 @@ impl DocumentBinding {
             return;
         };
         self.check_agent_store_original();
+        self.check_store_preparation();
         match service.store_requests().claim() {
             Ok(Some(claim)) => {
                 let result = self.admit_agent_store(&service, claim.entry());
@@ -444,6 +448,7 @@ impl DocumentBinding {
             Ok(None) => {}
             Err(_) => service.store_requests().fence(),
         }
+        self.tick_store_preparation(&service);
         let _ = flush(&service);
     }
     pub(crate) fn agent_store_relay_lost(&self) {
@@ -500,6 +505,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         };
         history.returned(result)?;
     }
+    preparation::flush_preparation(service)?;
     service.native_history_current()?;
     returned.known = true;
     Ok(())

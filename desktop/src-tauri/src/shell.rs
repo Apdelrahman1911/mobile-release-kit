@@ -342,8 +342,13 @@ async fn prepare_apple_provisioning(app: tauri::AppHandle, webview: Webview, req
     edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
     let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
-    let args = crate::apple_provisioning_protocol::prepare(&value)?;
     let app_data = app.path().app_local_data_dir().map_err(|_| BridgeError::unavailable("The application's private data folder is unavailable."))?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if value.get("intent").is_some(){
+        let q=crate::asset_session::apple_provisioning::agent::prepare::address(value)?;
+        return state.document.prepare_agent_apple(webview.label(),q,&app_data).await;
+    }
+    let args = crate::apple_provisioning_protocol::prepare(&value)?;
     state.document.prepare_apple_provisioning(args, &app_data).await
 }
 #[tauri::command]
@@ -2096,6 +2101,54 @@ async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
 #[tauri::command]
+async fn revoke_agent_store_preparation(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_store::preparation::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_store_preparation(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn agent_store_preparation_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_store::preparation::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_store_preparation_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_store_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::agent_store::preparation::AllowPrepare = crate::asset_session::agent_store::preparation::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_store_prepare(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_store_preparation_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::agent_store::preparation::AllowStart = crate::asset_session::agent_store::preparation::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_store_preparation_start(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+}
+#[tauri::command]
 async fn agent_store_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -2137,6 +2190,12 @@ async fn agent_apple_provisioning_access(webview: Webview, request: tauri::ipc::
     let window = edit_window(&webview)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        let bytes=project_identity_request_bytes(&request)?;
+        let value=crate::apple_provisioning_protocol::raw_request(bytes)?;
+        if value.get("intent").is_some(){
+            crate::asset_session::apple_provisioning::agent::prepare::access_request(value)?;
+            return serde_json::to_value(state.document.agent_apple_prepare_access(window)?).map_err(|_|BridgeError::protocol());
+        }
         let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
         serde_json::to_value(state.document.agent_apple_access(window)?).map_err(|_| BridgeError::protocol())
     }
@@ -2149,6 +2208,12 @@ async fn allow_agent_apple_provisioning(webview: Webview, request: tauri::ipc::R
     let window = edit_window(&webview)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        let bytes=project_identity_request_bytes(&request)?;
+        let value=crate::apple_provisioning_protocol::raw_request(bytes)?;
+        if value.get("intent").is_some(){
+            let args=crate::asset_session::apple_provisioning::agent::prepare::decode_value(value)?;
+            return serde_json::to_value(state.document.allow_agent_apple_prepare(window,args)?).map_err(|_|BridgeError::protocol());
+        }
         let args: crate::asset_session::apple_provisioning::agent::Allow = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
         serde_json::to_value(state.document.allow_agent_apple(window, args)?).map_err(|_| BridgeError::protocol())
     }
@@ -2161,6 +2226,12 @@ async fn revoke_agent_apple_provisioning(webview: Webview, request: tauri::ipc::
     let window = edit_window(&webview)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        let bytes=project_identity_request_bytes(&request)?;
+        let value=crate::apple_provisioning_protocol::raw_request(bytes)?;
+        if value.get("intent").is_some(){
+            let args=crate::asset_session::apple_provisioning::agent::prepare::decode_value(value)?;
+            return serde_json::to_value(state.document.revoke_agent_apple_prepare(window,args)?).map_err(|_|BridgeError::protocol());
+        }
         let args: crate::asset_session::apple_provisioning::agent::Revoke = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
         serde_json::to_value(state.document.revoke_agent_apple(window,args)?).map_err(|_| BridgeError::protocol())
     }
@@ -2172,6 +2243,13 @@ async fn agent_apple_provisioning_request_status(webview:Webview,request:tauri::
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))]{
+        let bytes=project_identity_request_bytes(&request)?;
+        let value=crate::apple_provisioning_protocol::raw_request(bytes)?;
+        if value.get("intent").is_some(){
+            let q=crate::asset_session::apple_provisioning::agent::prepare::address(value)?;
+            return serde_json::to_value(state.document.agent_apple_preparation_status(window,&q)?).map_err(|_|BridgeError::protocol());
+        }
+
         let args:crate::service_apple_provisioning_protocol::Query=crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
         serde_json::to_value(state.document.agent_apple_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
     }
@@ -2918,6 +2996,13 @@ async fn github_history_start(webview: Webview, request: tauri::ipc::Request<'_>
     fixture_command!(state, Forbidden, observed, crate::github_history_session::refused(crate::github_history_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_history_session::refused(crate::github_history_protocol::Reason::InvalidInput)); }
     state.document.github_history_command("github_history_start", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_history_download_primary(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_history_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_history_session::refused(crate::github_history_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_history_session::refused(crate::github_history_protocol::Reason::InvalidInput)); }
+    state.document.github_history_command("github_history_download_primary", request_body(&request)?)
 }
 
 #[tauri::command]
@@ -3822,6 +3907,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut version_prepare_key=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut apple_prepare_key=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut configuration_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_text_revision=None;
@@ -3946,6 +4033,16 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             document.service_store_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.service_apple_provisioning_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(access)=document.agent_apple_prepare_access(MAIN_WINDOW){
+                if let Some(status)=access.status{
+                    let key=(status.origin.clone(),status.revision);
+                    if apple_prepare_key.as_ref()!=Some(&key){
+                        if app.emit_to(MAIN_WINDOW,crate::service_apple_provisioning_prepare_protocol::EVENT,&status).is_err(){document.agent_apple_relay_lost();}
+                        apple_prepare_key=Some(key);
+                    }
+                }
+            }
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.service_tool_setup_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -5884,6 +5981,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_git_repository_access, allow_agent_git_repository, revoke_agent_git_repository,
             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+            agent_store_preparation_access, revoke_agent_store_preparation, allow_agent_store_prepare, allow_agent_store_preparation_start,
             agent_store_access, allow_agent_store, revoke_agent_store,
             agent_github_action_access, allow_agent_github_action, revoke_agent_github_action, agent_github_action_request_status,
             agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
@@ -5945,7 +6043,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_play_cleanup_status, github_play_cleanup_prepare, github_play_cleanup_start, github_play_cleanup_pending, github_play_cleanup_observe, github_play_cleanup_discard, github_play_cleanup_cancel, github_play_cleanup_allow_agent,
             github_activity_status, github_activity_read, github_activity_cancel, github_browser_open,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
-            github_history_status, github_history_start, github_history_cancel,
+            github_history_status, github_history_start, github_history_download_primary, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
             upload_key_status, upload_key_prepare, upload_key_create, upload_key_recover,
             vault_prepare_delete, vault_backup_export, vault_backup_import, vault_commit, vault_bind, vault_discard, vault_lock,

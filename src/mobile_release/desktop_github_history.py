@@ -119,7 +119,11 @@ class HistoryOperation:
         self.config = None
         self._download_size = None
         self._output_record = self._output_parent = None
+        self.candidate_download = None
         source.bind_operation(self)
+        if "download" in request.native:
+            from .github_candidate_download import Download
+            self.candidate_download = Download(self)
 
     def require_owner(self, cancellation=None):
         require(type(self) is HistoryOperation and self.pid == os.getpid()
@@ -382,6 +386,8 @@ class HistoryOperation:
             raise HistoryRefused("resources-unavailable")
         # Fixed19 is a prospective ceiling, not 19 fabricated executions.
         self.budget.reserve_verifiers()
+        if self.candidate_download is not None:
+            self.candidate_download.admit()
         for name in ("home", "cache", "tmp"):
             self.ensure_directory(self.work / name)
         self.source_post()
@@ -792,8 +798,10 @@ class HistoryOperation:
         artifact = github.artifact(selected.run_id, name)
         require(artifact is not None)
         root = github.download(artifact, self.work / "primary")
-        Verifier(github, allow_current=False).final(root, selected.stage, artifact=artifact)
+        intent = Verifier(github, allow_current=False).final(root, selected.stage, artifact=artifact)
         require(self.final_observation is not None)
+        if self.candidate_download is not None:
+            self.candidate_download.prepare(github, root, intent)
 
     def cleanup(self):
         self.require_owner()

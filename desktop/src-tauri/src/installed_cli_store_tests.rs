@@ -111,14 +111,17 @@ fn store_cli_lost_ack_has_only_original_status_cancel_and_no_replay() {
     let catalogue: serde_json::Value =
         serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
     let c = &catalogue["store"];
-    assert_eq!(c["commands"].as_array().unwrap().len(), 3);
+    assert_eq!(c["commands"].as_array().unwrap().len(), 5);
     for key in [
         "defaultEnabled",
-        "queryVariants",
+        "oldSubmitQueryVariants",
         "nativeAvailabilityChecked",
     ] {
         assert_eq!(c[key], false);
     }
+    assert_eq!(c["queryVariants"], true);
+    assert_eq!(c["prepareAuthorizesStart"], false);
+    assert_eq!(c["inventoryIsAllocationAuthority"], false);
     assert_eq!(c["readGrantAuthorizesExecution"], false);
     for key in ["execute", "reconcile", "upload", "promotion", "requiresSeparateExactModeConsent"] { assert_eq!(c[key], true); }
     for key in ["oldAccessPrepareGrantsAuthorizeRelease", "automaticRetry", "publicRelease"] { assert_eq!(c[key], false); }
@@ -135,3 +138,6 @@ fn store_cli_lost_ack_has_only_original_status_cancel_and_no_replay() {
 
 #[path = "installed_cli_store_release_tests.rs"]
 mod release_tests;
+
+#[path = "installed_cli_store_prepare_tests.rs"]
+mod preparation_tests;

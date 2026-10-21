@@ -332,7 +332,7 @@ fn store_finite_roster_never_reclaims_terminal_or_unknown_rows() {
     let f = Fixture::new();
     let mut b = f.inbox.book.lock().unwrap();
     for _ in 0..p::REQUEST_LIMIT {
-        b.entries.push(Arc::new(Entry {
+        b.entries.push(StoredEntry::Original(Arc::new(Entry {
             input: f.input(),
             scope: f.scope.clone(),
             submitted: Instant::now(),
@@ -346,7 +346,7 @@ fn store_finite_roster_never_reclaims_terminal_or_unknown_rows() {
                 history_claim: None,
                 unknown: None,
             }),
-        }));
+        })));
     }
     drop(b);
     assert!(f.inbox.can_allow().is_err());
@@ -406,3 +406,6 @@ fn store_full_census_includes_retained_rows_ipc_and_projection_without_credit() 
 
 #[path = "service_store_release_inbox_tests.rs"]
 mod release_tests;
+
+#[path = "service_store_prepare_tests.rs"]
+mod preparation_tests;

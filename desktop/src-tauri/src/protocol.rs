@@ -92,7 +92,7 @@ pub fn encode_request(id: &str, method: Method, params: &Value) -> Result<Vec<u8
 
 use crate::bounded_json_seed::Seed;
 
-fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
+pub(crate) fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
     std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let mut nodes = 0usize;

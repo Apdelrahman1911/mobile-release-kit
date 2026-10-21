@@ -1,5 +1,7 @@
 // App-owned observation only. Native owns the saved originals, read consent,
 // provider, absolute deadlines and finality. No polling, replacement owner or writes.
+import { candidateDownloadNames, candidateDownloadProgress, GITHUB_CANDIDATE_DOWNLOAD_CONSENT } from './githubCandidateDownload.ts';
+import type { GitHubCandidateDownloadStart } from './githubCandidateDownload.ts';
 import { isDirty } from './drafts.ts';
 import type { ProjectSession } from './drafts.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
@@ -18,7 +20,7 @@ interface Context {
 }
 interface Observer { api: Port; active: boolean; unlisten: (() => void) | null; ready: Promise<void> | null;
   reading: Promise<void> | null; accepted: GitHubHistoryStatus | null; invalidated: boolean }
-interface Pending { observer: Observer; context: Context; epoch: object; selection: GitHubHistorySelection;
+interface Pending { download: boolean; observer: Observer; context: Context; epoch: object; selection: GitHubHistorySelection;
   revision: number; previousId: string | null; operationId: string | null; sent: boolean; cancelAfterAdmission: boolean; cancelRequested: boolean }
 interface Observation { observer: Observer; context: Context; epoch: object; id: string; result: GitHubHistoryResult }
 interface Callbacks { connection: () => GitHubConnectionViewState; selectedProject: () => ProjectSession | null; otherOperationReason?: () => string | null }
@@ -49,10 +51,19 @@ function inContext(result: GitHubHistoryResult, c: Context, selection: GitHubHis
 }
 function progress(old: GitHubHistoryStatus, next: GitHubHistoryStatus): boolean {
   if (old.revision === next.revision) return same(old, next);
-  if (old.revision > next.revision || old.reason === 'cleanup-unknown' || old.operation?.phase === 'cleanup-unknown') return false;
+  if (old.revision > next.revision) return false;
+  if (old.reason === 'cleanup-unknown' || old.operation?.phase === 'cleanup-unknown') {
+    // Late diagnostics from the SAME original may become visible; no Unknown
+    // owner/result/permission is cleared by that one-way DATA observation.
+    return !!old.operation?.download && !!next.operation?.download && old.sessionId === next.sessionId
+      && old.operation.id === next.operation.id && same(old.operation.selection, next.operation.selection)
+      && next.operation.phase === 'cleanup-unknown' && next.operation.reason === 'cleanup-unknown'
+      && next.reason === 'cleanup-unknown' && !next.available && next.result === null
+      && candidateDownloadProgress(old.operation.download, next.operation.download);
+  }
   const a = old.operation, b = next.operation;
   if (a && b?.id === a.id) {
-    if (old.sessionId !== next.sessionId || !same(a.selection, b.selection)
+    if (old.sessionId !== next.sessionId || !same(a.selection, b.selection) || !candidateDownloadProgress(a.download, b.download)
         || a.phase === 'stopping' && b.phase === 'running'
         || a.phase === 'settled' && (!same(a, b) || !same(old.result, next.result))) return false;
   } else if (a && a.phase !== 'settled') return false;
@@ -146,6 +157,7 @@ export class GitHubHistoryController {
     const op = s.operation;
     return p.sent && s.revision > p.revision && s.sessionId === p.context.sessionId && op !== null
       && op.id !== p.previousId && (p.operationId === null || op.id === p.operationId) && same(op.selection, p.selection)
+      && p.download === (op.download !== undefined)
       && (s.result === null || inContext(s.result, p.context, p.selection));
   }
   private correlate(o: Observer, s: GitHubHistoryStatus): void {
@@ -169,7 +181,7 @@ export class GitHubHistoryController {
     const p = this.pending, op = s.operation;
     if (p?.observer === o && p.sent && s.revision > p.revision && s.sessionId === p.context.sessionId
         && op && op.id !== p.previousId && (p.operationId === null || op.id === p.operationId)
-        && same(op.selection, p.selection) && s.result && !inContext(s.result, p.context, p.selection)) {
+        && same(op.selection, p.selection) && (p.download !== (op.download !== undefined) || s.result && !inContext(s.result, p.context, p.selection))) {
       this.fail('response-invalid'); return null;
     }
     const old = o.accepted;
@@ -215,19 +227,36 @@ export class GitHubHistoryController {
     if (!s.available) return GITHUB_HISTORY_REASON_HELP[s.reason];
     return this.callbacks.otherOperationReason?.() ?? (!this.selection() ? 'Choose an exact run ID, attempt 1–100, release stage and platform. No latest run is selected.' : null);
   }
-  start(): void {
+  downloadReview(): { scope: object; relativePath: string; primary: string } | null {
+    // SAME private invalidation epoch: equal displayed data after an away/back
+    // edit cannot revive the earlier checkbox. This pin never crosses IPC.
+    const selection = this.selection(), c = this.liveContext(), names = selection && candidateDownloadNames(selection);
+    return names && c ? { scope: this.epoch, relativePath: names.relativePath, primary: names.primary } : null;
+  }
+  downloadReason(): string | null {
+    return this.startReason() ?? (!this.api?.downloadGitHubCandidate ? 'This native bridge has no candidate-download command.'
+      : !this.downloadReview() ? 'Select a candidate run and platform. Later-stage artifacts and arbitrary exports are not supported.' : null);
+  }
+  downloadCandidate(confirmed: boolean, scope: object): void {
+    if (!confirmed || this.downloadReview()?.scope !== scope) return;
+    this.startOriginal(scope);
+  }
+  start(): void { this.startOriginal(null); }
+  private startOriginal(downloadScope: object | null): void {
     this.syncContext();
-    if (this.startReason()) return;
+    if (downloadScope !== null ? this.downloadReason() || this.downloadReview()?.scope !== downloadScope : this.startReason()) return;
     const o = this.observer!, c = this.liveContext()!, s = o.accepted!, selection = this.selection()!;
     const args = { sessionId: c.sessionId, expectedRevision: s.revision,
-      expectedConnectionRevision: this.callbacks.connection().status!.revision, selection };
-    if (!githubHistoryRequestFits('github_history_start', args)) { this.update({ error: 'invalid-input' }); return; }
-    const p: Pending = { observer: o, context: c, epoch: this.epoch, selection, revision: s.revision,
+      expectedConnectionRevision: this.callbacks.connection().status!.revision, selection,
+      ...(downloadScope !== null ? { consentVersion: GITHUB_CANDIDATE_DOWNLOAD_CONSENT, confirmed: true as const } : {}) };
+    if (!githubHistoryRequestFits(downloadScope === null ? 'github_history_start' : 'github_history_download_primary', args)) { this.update({ error: 'invalid-input' }); return; }
+    const p: Pending = { download: downloadScope !== null, observer: o, context: c, epoch: this.epoch, selection, revision: s.revision,
       previousId: s.operation?.id ?? null, operationId: null, sent: false, cancelAfterAdmission: false, cancelRequested: false };
     this.pending = p; this.observation = null; this.update({ pending: true, error: null });
     // The latch precedes synchronous subscriber reentry, then every selection/context is checked again.
     if (this.pending !== p || p.epoch !== this.epoch || o.api !== this.api || o.accepted !== s || !same(c, this.liveContext())
-        || this.callbacks.connection().status?.revision !== args.expectedConnectionRevision || !same(selection, this.selection())) {
+        || this.callbacks.connection().status?.revision !== args.expectedConnectionRevision || !same(selection, this.selection())
+        || downloadScope !== null && (this.downloadReview()?.scope !== downloadScope || this.callbacks.otherOperationReason?.())) {
       if (this.pending === p) { this.pending = null; this.update({ pending: false, error: 'target-changed' }); } return;
     }
     o.invalidated = false; // Fresh explicit read after actual current-port admission.
@@ -240,7 +269,9 @@ export class GitHubHistoryController {
         this.pending = null; this.update({ pending: false, error: e.reason }); this.maintain();
       } else this.update({ uncertain: true, error: e.reason });
     };
-    try { void o.api.startGitHubHistory(args).then((reply) => {
+    try { const call = downloadScope === null ? o.api.startGitHubHistory(args)
+      : o.api.downloadGitHubCandidate!(args as GitHubCandidateDownloadStart);
+      void call.then((reply) => {
       const accepted = this.receive(o, reply);
       if (this.pending === p && (!accepted || p.operationId === null)) this.update({ uncertain: true, error: 'response-invalid' });
     }, failed); } catch (error) { failed(error); }

@@ -157,9 +157,25 @@ struct Lease {
     entry: Mutex<Option<Weak<Entry>>>,
     withdrawn: AtomicBool,
 }
+#[path="service_apple_provisioning_prepare_requests.rs"]
+pub(crate) mod preparation;
+enum Stored { Start(Arc<Entry>), Prepare(Arc<preparation::Entry>) }
+impl Stored {
+    fn origin(&self)->&p::Query {match self {Self::Start(e)=>e.origin(),Self::Prepare(e)=>e.origin()}}
+    fn pending(&self)->bool {match self {Self::Start(e)=>e.pending(),Self::Prepare(e)=>e.pending()}}
+    fn stop(&self,r:p::Reason,at:Instant){match self{Self::Start(e)=>e.cancel(r,at),Self::Prepare(e)=>e.scope.stop(r,at)}}
+    fn unknown(&self,r:p::Reason){match self{Self::Start(e)=>e.unknown(r),Self::Prepare(e)=>e.unknown(r)}}
+}
+enum Allowed { Start(Arc<Lease>), Prepare(preparation::Lease) }
+impl Allowed {
+    fn id(&self)->&Id{match self{Self::Start(l)=>&l.id,Self::Prepare(l)=>&l.id}}
+    fn occupied(&self)->bool{match self{Self::Start(l)=>!l.scope.retired.load(Ordering::Acquire)||l.scope.control.first().is_err()||(!l.withdrawn.load(Ordering::Acquire)&&Instant::now()<l.scope.expires),Self::Prepare(l)=>!l.scope.released()}}
+    fn stop(&self,r:p::Reason,at:Instant){match self{Self::Start(l)=>l.scope.control.stop(r,at),Self::Prepare(l)=>l.scope.stop(r,at)}}
+    fn unknown(&self,at:Instant){match self{Self::Start(l)=>l.scope.control.unknown(at),Self::Prepare(l)=>l.scope.unknown()}}
+}
 struct Book {
-    lease: Option<Arc<Lease>>,
-    entries: Vec<Arc<Entry>>,
+    lease: Option<Allowed>,
+    entries: Vec<Stored>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -590,11 +606,7 @@ impl Inbox {
         }
         if b.entries.len() >= p::REQUEST_LIMIT
             || b.entries.iter().any(|e| e.pending())
-            || b.lease.as_ref().is_some_and(|l| {
-                !l.scope.retired.load(Ordering::Acquire)
-                    || l.scope.control.first().is_err()
-                    || (!l.withdrawn.load(Ordering::Acquire) && Instant::now() < l.scope.expires)
-            })
+            || b.lease.as_ref().is_some_and(Allowed::occupied)
         {
             return Err(Error::Busy);
         }
@@ -612,19 +624,15 @@ impl Inbox {
         if b.entries.len() >= p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
             return Err(Error::Busy);
         }
-        if b.lease.as_ref().is_some_and(|l| {
-            !l.scope.retired.load(Ordering::Acquire)
-                || l.scope.control.first().is_err()
-                || (!l.withdrawn.load(Ordering::Acquire) && Instant::now() < l.scope.expires)
-        }) {
+        if b.lease.as_ref().is_some_and(Allowed::occupied) {
             return Err(Error::Busy);
         }
-        b.lease = Some(Arc::new(Lease {
+        b.lease = Some(Allowed::Start(Arc::new(Lease {
             id,
             scope,
             entry: Mutex::new(None),
             withdrawn: AtomicBool::new(false),
-        }));
+        })));
         self.access_locked(&b)
     }
     pub(crate) fn submit(&self, input: p::Submit, submitted: Instant) -> Result<p::Status, Error> {
@@ -638,15 +646,11 @@ impl Inbox {
         if let Some(old) = b
             .entries
             .iter()
-            .find(|e| e.input.origin.request_id == input.origin.request_id)
+            .find(|e| e.origin().request_id == input.origin.request_id)
         {
-            return if old.input == input {
-                old.status()
-            } else {
-                Err(Error::Conflict)
-            };
+            return match old {Stored::Start(old) if old.input==input=>old.status(),_=>Err(Error::Conflict)};
         }
-        let lease = b.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
+        let lease = match b.lease.as_ref(){Some(Allowed::Start(l))=>l.clone(),_=>return Err(Error::AccessDenied)};
         if lease.id != input.grant_id
             || lease.scope.review_id != input.review_id
             || lease.scope.project_id != input.origin.project_id
@@ -678,7 +682,7 @@ impl Inbox {
             }),
         });
         *once = Some(Arc::downgrade(&entry));
-        b.entries.push(entry.clone());
+        b.entries.push(Stored::Start(entry.clone()));
         drop(once);
         lease.scope.changes.send_modify(|_| {});
         entry.status()
@@ -691,9 +695,8 @@ impl Inbox {
         let e = b
             .entries
             .iter()
-            .find(|e| e.input.origin == *q)
-            .ok_or(Error::Conflict)?
-            .clone();
+            .find_map(|e|match e{Stored::Start(e) if e.origin()==q=>Some(e.clone()),_=>None})
+            .ok_or(Error::Conflict)?;
         drop(b);
         if cancel {
             e.cancel(p::Reason::UserCancelled, Instant::now());
@@ -705,7 +708,8 @@ impl Inbox {
         if b.closed {
             return Ok(None);
         }
-        for entry in &b.entries {
+        for stored in &b.entries {
+            let Stored::Start(entry)=stored else{continue;};
             let mut r = entry.lock()?;
             if !r.claimed && r.unknown.is_none() {
                 r.claimed = true;
@@ -719,14 +723,14 @@ impl Inbox {
         Ok(None)
     }
     pub(crate) fn entries(&self) -> Result<Vec<Arc<Entry>>, Error> {
-        Ok(self.lock()?.entries.clone())
+        Ok(self.lock()?.entries.iter().filter_map(|e|match e{Stored::Start(e)=>Some(e.clone()),_=>None}).collect())
     }
     pub(crate) fn access(&self) -> Result<p::Access, Error> {
         let b = self.lock()?;
         self.access_locked(&b)
     }
     fn access_locked(&self, b: &Book) -> Result<p::Access, Error> {
-        let Some(l) = &b.lease else {
+        let Some(Allowed::Start(l)) = &b.lease else {
             return Ok(p::Access::empty());
         };
         let entry = l
@@ -780,7 +784,7 @@ impl Inbox {
     }
     pub(crate) fn withdraw(&self, nonce: &Id, at: Instant) -> Result<p::Access, Error> {
         let b = self.lock()?;
-        if let Some(l) = b.lease.as_ref().filter(|l| &l.id == nonce) {
+        if let Some(Allowed::Start(l)) = b.lease.as_ref().filter(|l| l.id() == nonce) {
             l.withdrawn.store(true, Ordering::Release);
             l.scope.control.stop(p::Reason::PermissionRevoked, at);
         }
@@ -789,11 +793,11 @@ impl Inbox {
     pub(crate) fn revoke(&self, reason: p::Reason, at: Instant) -> Result<p::Access, Error> {
         let b = self.lock()?;
         if let Some(l) = &b.lease {
-            l.scope.control.stop(reason, at);
+            l.stop(reason, at);
         }
         for e in &b.entries {
             if e.pending() {
-                e.cancel(reason, at);
+                e.stop(reason, at);
             }
         }
         self.access_locked(&b)
@@ -814,7 +818,7 @@ impl Inbox {
         };
         let at = Instant::now();
         if let Some(l) = &b.lease {
-            l.scope.control.unknown(at);
+            l.unknown(at);
         }
         for e in &b.entries {
             e.unknown(p::Reason::HistoryUnavailable);
@@ -831,7 +835,7 @@ impl Inbox {
         }
         Ok(b.entries
             .iter()
-            .filter(|e| &e.input.origin.project_id == project)
+            .filter(|e| &e.origin().project_id == project)
             .map(|e| crate::service_request_catalogue::AdditionalRequest {
                 family: crate::service_request_catalogue::AdditionalFamily::AppleProvisioning,
                 request_id: e.origin().request_id.clone(),

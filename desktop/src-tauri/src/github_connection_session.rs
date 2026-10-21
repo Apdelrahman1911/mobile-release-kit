@@ -1915,7 +1915,7 @@ impl ConnectionState {
     }
     pub(crate) fn history_nomination(&mut self,args:crate::github_history_protocol::StartArgs,
         generation:u32,root:crate::asset_source::RegisteredRoot,edit_stamp:crate::edit_owner::SavedEditStamp,
-        binding:String,owner_generation:String,work_nonce:String,now:Instant)
+        binding:String,owner_generation:String,work_nonce:String,download:bool,now:Instant)
         ->Result<(std::sync::Arc<crate::github_history_session::Nomination>,Instant),BridgeError>{
         use crate::{github_history_protocol as p,github_history_session as s};
         self.room().map_err(|_|s::refused(p::Reason::CleanupUnknown))?;
@@ -1939,9 +1939,10 @@ impl ConnectionState {
         if !args.selection.valid()||!p::hex(&binding,64)||!p::hex(&owner_generation,32)||!p::hex(&work_nonce,32){
             return Err(s::refused(p::Reason::InvalidInput));
         }
+        let download=if download{Some(p::download::Trace::new(&args.selection)?)}else{None};
         let nomination=std::sync::Arc::new(s::Nomination{session_id:private.id.clone(),project_id:private.project_id.clone(),
             generation,root,edit_stamp,project_binding:binding,repository:repository.full_name.clone(),account_id:account.id.clone(),
-            repository_id:repository.id.clone(),tooling_sha:tooling_sha.into(),selection:args.selection,owner_generation,work_nonce});
+            repository_id:repository.id.clone(),tooling_sha:tooling_sha.into(),selection:args.selection,owner_generation,work_nonce,download});
         Ok((nomination,private.clock.end))
     }
     pub(crate) fn history_start(&mut self,nomination:std::sync::Arc<crate::github_history_session::Nomination>,
@@ -1989,6 +1990,12 @@ impl ConnectionState {
         let token=self.private.as_ref().and_then(|v|v.token.as_deref()).ok_or_else(||s::refused(p::Reason::Expired))?;
         let bytes=p::encode_go(id,digest,token)?;
         if !claim(){return Err(s::refused(p::Reason::Cancelled));}Ok(bytes)
+    }
+    pub(crate) fn history_download_current(&self,id:&str,nomination:&std::sync::Arc<crate::github_history_session::Nomination>,
+        generation:u32,root:&crate::asset_source::RegisteredRoot,edit:&crate::edit_owner::SavedEditGuard<'_>,now:Instant)->bool{
+        nomination.download.is_some()&&self.history.active.as_ref().is_some_and(|v|
+            v.ticket.operation_id()==id&&v.ticket.go_claimed()&&std::sync::Arc::ptr_eq(&v.nomination,nomination))
+            &&self.history_current(generation,root,edit,now)
     }
     pub(crate) fn history_cancel(&mut self,id:&str)->Result<crate::github_history_protocol::Status,BridgeError>{
         self.history.cancel(id)?;Ok(self.history.snapshot())
@@ -2052,7 +2059,7 @@ pub(crate) fn github_history_connection_data_checks(){
     assert!(retained>=29);assert_eq!(state.retained_heap_bytes_if_quiescent(),Some(before+retained));
     assert!(state.history_has_retained_data());
     state.history.view.operation=Some(p::Operation{id:"history-data".into(),phase:p::Phase::Settled,
-        reason:p::Reason::ArtifactMissing,selection:p::Selection{run_id:"1".into(),attempt:1,stage:p::Stage::Candidate,platform:p::Platform::Ios}});
+        reason:p::Reason::ArtifactMissing,download:None,selection:p::Selection{run_id:"1".into(),attempt:1,stage:p::Stage::Candidate,platform:p::Platform::Ios}});
     let original=state.history.view.operation.clone();state.unknown();
     assert_eq!(state.history.view.operation,original);assert!(state.retained_heap_bytes_if_quiescent().is_none());
     assert!(state.history.view.fits_wire());

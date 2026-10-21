@@ -5,6 +5,9 @@ use crate::local_store_preflight_protocol as wire;
 use sha2::{Digest, Sha256};
 #[path="asset_session_apple_provisioning_material.rs"]
 mod apple_provisioning;
+#[path="asset_session_apple_prepare_material.rs"]
+mod apple_prepare;
+pub(crate) use apple_prepare::ApplePreparationMaterial;
 #[path="asset_session_apple_profile_material.rs"]
 mod apple_profile;
 #[path="asset_session_apple_key_material.rs"]

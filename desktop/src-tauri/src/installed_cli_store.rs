@@ -3,8 +3,11 @@
 use super::*;
 use crate::service_store_protocol as store;
 
-pub(super) const COMMANDS: [&str; 3] = ["store-submit", "store-status", "store-cancel"];
+#[path="installed_cli_store_prepare.rs"]
+mod preparation;
+pub(super) const COMMANDS: [&str; 5] = ["store-submit", "store-status", "store-cancel", "store-prepare", "store-start"];
 enum Command {
+    Preparation(preparation::Command),
     Submit {
         project: Id,
         instance: Id,
@@ -54,6 +57,7 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
                 Command::Cancel(q)
             }
         }
+        ["store-prepare" | "store-start", ..] => Command::Preparation(preparation::parse(&words)?),
         _ => return Err(Error::InvalidRequest),
     };
     Ok(Parsed { command, json })
@@ -87,6 +91,9 @@ fn output(
 ) -> Result<(u8, Vec<u8>), Error> {
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
+    }
+    if submitted.is_none() && matches!(&response.response,p::ResponseBody::StorePreparation(_)) {
+        return preparation::output(response,q,None,json);
     }
     let p::ResponseBody::StoreRequest(status) = &response.response else {
         return Err(Error::StateUnknown);
@@ -149,6 +156,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let (q, submitted, body) = match options.command {
+            Command::Preparation(command) => return preparation::execute(command,options.json),
             Command::Submit {
                 project,
                 instance,

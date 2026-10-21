@@ -32,7 +32,7 @@ pub(in crate::saved_command_owner) fn mode(v: apple_wire::Mode) -> Result<p::Mod
         A::KeyRecover => return Err(refused()),
     })
 }
-fn review(
+pub(super) fn review(
     c: &Context,
     id: &str,
     generation: &str,
@@ -77,6 +77,7 @@ pub(crate) struct Approval {
     review: p::Review,
 }
 impl Approval {
+    pub(crate) fn preparation(&self)->Option<Arc<requests::preparation::Entry>>{self.intent.upgrade().and_then(|i|i.preparation.as_ref().map(|l|l.entry.clone()))}
     pub(crate) fn review(&self) -> &p::Review {
         &self.review
     }
@@ -234,7 +235,7 @@ impl Binding {
 pub(in crate::saved_command_owner) fn control_poll(owner: &Session) -> Option<Duration> {
     binding(owner).map(|_| Duration::from_millis(5))
 }
-fn native_reason(r: p::Reason) -> Reason {
+pub(super) fn native_reason(r: p::Reason) -> Reason {
     match r {
         p::Reason::Expired => Reason::IntentExpired,
         p::Reason::ContextChanged => Reason::ContextChanged,
@@ -399,6 +400,7 @@ pub(in crate::saved_command_owner) fn start_matches(
     p: &Prepared,
     entry: Option<&Arc<requests::Entry>>,
 ) -> bool {
+    if !super::preparation::start_matches(p,entry){return false;}
     match (prepared_binding(p), entry) {
         (None, None) => true,
         (Some(b), Some(e)) => {
@@ -436,6 +438,7 @@ pub(in crate::saved_command_owner) fn retired_prepared(
     reason: Reason,
     revision: u32,
 ) {
+    super::preparation::retired(p);
     if let Some(b) = prepared_binding(p) {
         b.publish(&retire(p.projection.clone(), reason), revision, true, None)
     }
@@ -505,7 +508,7 @@ impl SavedCommandOwner {
             .filter(|p| {
                 prepared_binding(p).is_none()
                     && p.projection.phase == Phase::AwaitingConsent
-                    && p.projection.intent_usable
+                    && p.projection.intent_usable && super::preparation::current_ready(p)
                     && r.revision == revision
                     && p.projection.operation_id == operation.as_str()
                     && p.projection.owner_generation == generation.as_str()
@@ -570,7 +573,12 @@ impl SavedCommandOwner {
             latest: Mutex::new(None),
             consumed: AtomicBool::new(false),
         });
-        intent.agent.set(link.clone()).map_err(|_| refused())?;
+        if let Some(preparation)=&intent.preparation{preparation.entry.claim_start().map_err(|_|refused())?;}
+        if intent.agent.set(link.clone()).is_err() {
+            if let Some(preparation)=&intent.preparation{preparation.entry.unknown(p::Reason::CleanupUnknown);}
+            link.scope.control.unknown(Instant::now());
+            return Err(refused());
+        }
         changed(&r);
         Ok(link)
     }

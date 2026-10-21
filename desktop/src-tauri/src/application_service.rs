@@ -84,6 +84,8 @@ mod local_checks;
 mod agent_android_build;
 #[path = "application_service_tool_setup.rs"]
 mod agent_tool_setup;
+#[path="service_store_prepare_application.rs"]
+mod store_preparation;
 #[path="service_store_application.rs"]
 mod agent_store;
 #[path="service_apple_provisioning_application.rs"]
@@ -464,7 +466,10 @@ impl ApplicationService {
                 p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
                 p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
                 p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
+                p::RequestBody::StorePrepare(v)=>return self.service_store_preparation(client,v.clone(),false),
+                p::RequestBody::StoreStart(v)=>return self.service_store_preparation(client,v.clone(),true),
                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
+                p::RequestBody::AppleProvisioningPrepare(v)=>return self.service_apple_prepare(client,v.clone()),
                 p::RequestBody::AppleProvisioningSubmit(v)=>return self.service_apple_provisioning_submit(client,v.clone()),
                 p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
                 p::RequestBody::AppleProvisioningStatus(q)=>return self.service_apple_provisioning_query(client,q,false),
@@ -548,8 +553,9 @@ impl ApplicationService {
                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
+                p::RequestBody::StorePrepare(_) | p::RequestBody::StoreStart(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
-                p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+                p::RequestBody::AppleProvisioningPrepare(_) | p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
                 p::RequestBody::VersionEditPrepare(_) | p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |

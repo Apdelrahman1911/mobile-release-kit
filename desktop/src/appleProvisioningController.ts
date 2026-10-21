@@ -1,5 +1,8 @@
 // App-held UI coordination only. Neither promises, events nor comparison
 // counters can settle the original native Session or its account-wide journal.
+import { applePreparationSelection, sameApplePreparationQuery } from './agentApplePreparation.ts';
+import type { ApplePreparationDelegate, ApplePreparationMode, ApplePreparationStatus } from './agentApplePreparation.ts';
+import type { AppleCliQuery } from './agentAppleProvisioning.ts';
 import { appleCliId, parseAppleCliReview, sameAppleCliReview } from './agentAppleProvisioning.ts';
 import type { AppleCliReview, AppleCliStatus } from './agentAppleProvisioning.ts';
 import type { AppleCliDelegate } from './agentAppleProvisioningController.ts';
@@ -33,6 +36,7 @@ type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate' | 'p12';
 const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) || mode === 'key-recover' ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
 interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
 interface DelegatedStart { nonce: string; review: AppleCliReview; anchor: number; allowJoined: boolean; submitted: boolean; final: boolean; checking: boolean; abandonedBeforeAllow: boolean }
+interface PreparationOriginal {selection:PrepareAppleProvisioning;api:AppleProvisioningApi;witness:Witness;epoch:number;nonce:string;expires:number;allowJoined:boolean;called:boolean;returned:boolean;withdrawn:boolean;ready:boolean;observedUsable:boolean;query:AppleCliQuery|null;attempt:Attempt|null}
 interface Attempt {
   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
@@ -89,6 +93,7 @@ export class AppleProvisioningController {
   private cancellation: CancelSlot | null = null;
   private cancelClaim: AppleProvisioningIdentity | null = null;
   private attempt: Attempt | null = null;
+  private preparation: PreparationOriginal | null = null;
   private review: Reference | null = null;
   private registration: Reference | null = null;
   private restored: Reference | null = null;
@@ -159,16 +164,18 @@ export class AppleProvisioningController {
   private startReturned(a: Attempt): boolean { return a.delegated ? a.delegated.allowJoined && a.delegated.final && !a.delegated.checking : a.startJoined; }
   private startAnchor(a: Attempt): number | null { return a.delegated?.anchor ?? a.startedAt; }
   private settled(): boolean {
-    return !this.action && !this.cancellation && !this.read && !this.subscribing && !active(this.status?.operation) &&
+    return (!this.preparation || this.preparation.ready) && !this.action && !this.cancellation && !this.read && !this.subscribing && !active(this.status?.operation) &&
       (!this.attempt || this.attempt.terminalRead && !this.attempt.delegated?.checking) && !this.issue;
   }
-  ownerReason = (): string | null => this.issue || this.action || this.cancellation || this.subscribing || this.read ||
+  ownerReason = (): string | null => this.preparation && !this.preparation.ready ? 'An exact CLI preparation scope or original caller remains retained. Check or withdraw it first.' : this.operationOwnerReason();
+  private operationOwnerReason = (): string | null => this.issue || this.action || this.cancellation || this.subscribing || this.read ||
     active(this.status?.operation) || this.attempt && (!this.attempt.terminalRead || this.attempt.delegated?.checking) ?
     'An Apple setup intent, request or original cleanup is retained. Finish or cancel it before other work.' : null;
-  private baseReason(family: InputFamily = 'bundle'): string | null {
+  private baseReason(family: InputFamily = 'bundle', preparation?: PreparationOriginal): string | null {
     if (!this.original || this.connectionRetired) return 'Use the installed Mac app. Browser preview cannot run Apple setup.';
     if (this.issue) return attention;
-    if (this.ownerReason() || this.read) return this.ownerReason() ?? 'Wait for the current original status response.';
+    if (this.preparation && !this.preparation.ready && this.preparation !== preparation) return 'Withdraw the exact CLI preparation scope before using ordinary Prepare.';
+    if (this.operationOwnerReason() || this.read) return this.operationOwnerReason() ?? 'Wait for the current original status response.';
     if (!this.initialized || !this.off || this.status?.availability !== 'available') return 'Apple setup is unavailable or busy. Refresh its status; no other account is selected automatically.';
     const witness = this.capture(family);
     if (family === 'key' && !witness) return 'Choose the App Store Connect key, unlock encrypted storage, then assess and assign its P8, Key ID and Issuer ID in Set up Apple signing. Save the app settings and read the saved version first. No P12 is needed.';
@@ -210,8 +217,8 @@ export class AppleProvisioningController {
         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'certificate-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
     return op.certificateRecovery ?? null;
   }
-  private reason(mode: AppleProvisioningMode): string | null {
-    const base = this.baseReason(inputFamily(mode)); if (base) return base;
+  private reason(mode: AppleProvisioningMode, preparation?: PreparationOriginal): string | null {
+    const base = this.baseReason(inputFamily(mode),preparation); if (base) return base;
     if (mode === 'certificate-create' && !this.referenceCurrent(this.certificateReview)) return 'Finish a fresh certificate check for this saved key first. Its separate request review is one-use and expires; an old receipt cannot restore it.';
     if (mode === 'certificate-reconcile' && !this.certificateReconciliationReference()) return 'Choose a matching earlier certificate request. A read-only check never repeats issuance or clears earlier uncertainty.';
     if ((mode === 'p12-reuse' || mode === 'p12-save') && (!this.referenceCurrent(this.p12Review) || this.p12Review.action !== mode)) return 'Finish a fresh P12 review for the same saved key and assigned inputs. Only its exact reuse or new-save choice may continue; an old result cannot restore it.';
@@ -227,6 +234,68 @@ export class AppleProvisioningController {
     if (mode === 'reconcile' && !this.reconciliationReference()) return 'Choose a saved attempt below, or use the prior registration from this session. Readback never repeats the write.';
     return null;
   }
+  private requestFor(mode:AppleProvisioningMode,witness:Witness):PrepareAppleProvisioning|null {
+    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' || mode === 'p12-review' || mode === 'key-recover' ? null :
+      mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.identity :
+      mode === 'certificate-create' ? this.certificateReview?.identity : mode === 'certificate-reconcile' ? this.certificateReconciliationReference()?.identity : mode === 'key-prepare' ? this.keyReview?.identity :
+      mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
+      mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
+    return parseAppleProvisioningRequest({...witness.base,mode,reference,newApplication:mode==='register',displayName:this.displayName});
+  }
+  preparationSelection = (mode:ApplePreparationMode):PrepareAppleProvisioning|null => {
+    const witness=this.capture(inputFamily(mode));
+    return !this.disposed&&this.visible&&this.original?.prepareDelegated&&witness&&!this.reason(mode)?applePreparationSelection(this.requestFor(mode,witness)):null;
+  };
+  reservePreparation = (selection:PrepareAppleProvisioning,nonce:string):ApplePreparationDelegate|null => {
+    this.syncProject();const chosen=applePreparationSelection(selection),api=this.original;
+    if(!chosen||!api?.prepareDelegated||!appleCliId(nonce)||!sameOfflineData(chosen,this.preparationSelection(chosen.mode as ApplePreparationMode)))return null;
+    const family=inputFamily(chosen.mode),target=this.capture(family);if(!target)return null;
+    if(this.inputFamily!==family){
+      this.epoch++;this.clearConsent();this.clearCertificateReview();this.clearP12Review();this.review=null;this.restored=null;this.profileReview=null;this.restoredProfile=null;this.keyReview=null;
+      this.declaredNew=false;if(this.attempt)this.attempt.retired=true;this.inputFamily=family;this.witness=target;
+    }
+    const r:PreparationOriginal={selection:freeze(chosen),api,witness:target,epoch:this.epoch,nonce,expires:Math.min(this.now()+300000,
+      chosen.mode==='register'?this.review?.expires??Infinity:chosen.mode==='key-prepare'?this.keyReview?.expires??Infinity:chosen.mode==='certificate-create'?this.certificateReview?.expires??Infinity:
+      isAppleProfileMode(chosen.mode)?this.profileReview?.expires??Infinity:isAppleP12Mode(chosen.mode)?this.p12Review?.expires??Infinity:Infinity),
+      allowJoined:false,called:false,returned:false,withdrawn:false,ready:false,observedUsable:false,query:null,attempt:null};
+    this.preparation=r;this.cancelRequested=false;
+    const original=()=>this.preparation===r&&this.original===api;
+    const current=()=>original()&&!this.disposed&&!this.connectionRetired&&this.visible&&this.epoch===r.epoch&&sameWitness(r.witness,this.capture(family))&&
+      this.displayName===r.selection.displayName&&this.now()<r.expires&&!this.issue&&!this.cancelRequested&&!r.withdrawn&&(!r.called?!this.reason(chosen.mode,r)&&sameOfflineData(r.selection,this.requestFor(chosen.mode,r.witness)):true);
+    this.publish();
+    return {
+      current,
+      allowReturned:()=>{r.allowJoined=true;},
+      run:async(q,closing)=>{
+        if(!original()||r.called||!r.allowJoined||r.query&&!sameApplePreparationQuery(r.query,q)||!api.prepareDelegated||!this.status||this.action)return false;
+        if(closing?!r.withdrawn:!current())return false;
+        r.query=freeze({...q});r.called=true;
+        // The genuine MAIN caller remains in the original ActionSlot. A
+        // returned exact withdrawal permits only its native no-Host refusal.
+        await this.runPreparation(r.selection,r.witness,api,r);
+        return true;
+      },
+      observe:async(s:ApplePreparationStatus)=>{
+        if(!original()||!r.called||!r.returned||!r.query||!sameApplePreparationQuery(r.query,s.origin)||s.grantId!==r.nonce||s.mode!==r.selection.mode)return;
+        const a=r.attempt;if(!a||this.attempt!==a||a.startClaimed||a.delegated)return;
+        if(s.phase==='refused'){
+          if(a.identity){this.fail('protocol');return;}
+          a.terminalRead=true;a.retired=true;r.ready=true;this.publish();return;
+        }
+        if(s.phase!=='prepared'||!s.prepared)return;
+        await this.postInvokeRead();const op=this.status?.operation;
+        if(!sameAppleIdentity(a.identity,s.prepared)||!sameOfflineData(s.prepared.savedConfig,r.selection.savedConfig)||
+            !sameOfflineData(s.prepared.savedVersion,{bytes:r.selection.savedVersion.bytes,sha256:r.selection.savedVersion.sha256,name:r.selection.savedVersion.name,build:r.selection.savedVersion.build})||
+            !sameAppleIdentity(a.identity,op)||!this.status||this.status.statusRevision<s.prepared.statusRevision){this.fail('protocol');return;}
+        r.ready=true;
+        if(!this.issue&&this.current(a)&&s.usable&&!r.withdrawn&&op?.phase==='awaiting-consent'&&op.intentUsable){a.prepareAccepted=true;this.prepareConsent(a);}
+        this.publish();
+      },
+      withdrawn:(q)=>{r.withdrawn=true;if(q)r.query=freeze({...q});else if(!r.called&&original()){this.preparation=null;this.publish();}},
+      notSent:()=>{if(!r.allowJoined&&!r.called&&original()){this.preparation=null;this.publish();}},
+      uncertain:()=>{if(original())this.fail();},
+    };
+  };
   // Pure provisional DATA. Only native Allow binds this actual Prepared;
   // neither a renderer result nor these fields constructs native authority.
   delegationReview = (): AppleCliReview | null => {
@@ -429,12 +498,22 @@ export class AppleProvisioningController {
     if (before && next.statusRevision < before.statusRevision) return next;
     if (before && next.statusRevision === before.statusRevision && !sameOfflineData(before, next)) { this.fail('protocol'); return null; }
     const op = next.operation, a = this.attempt;
-    if (before?.operation && sameAppleIdentity(before.operation, op) && !appleProvisioningProgress(before.operation, op!)) { this.fail('protocol'); return null; }
+    if (before?.operation && sameAppleIdentity(before.operation, op) && !appleProvisioningProgress(before.operation, op!)) {
+      // A delegated Prepare alone begins unpublished. Permit its ONE exact
+      // common-commit publication as DATA, not as a caller/history return or
+      // consent. Ordinary modes retain the original non-renewable progression.
+      const p=this.preparation;
+      const published=p&&p.api===this.original&&p.called&&p.attempt===a&&!p.observedUsable&&a&&!a.startClaimed&&!a.delegated&&
+        before.operation.phase==='awaiting-consent'&&!before.operation.intentUsable&&op?.phase==='awaiting-consent'&&op.intentUsable&&
+        sameOfflineData({...before.operation,intentUsable:true},op);
+      if(!published){this.fail('protocol');return null;}
+    }
     if (before?.operation && active(before.operation) && !sameAppleIdentity(before.operation, op)) { this.fail('protocol'); return null; }
     if (a && !a.identity && op && next.statusRevision > a.after && !sameAppleIdentity(a.previous, op) &&
         sameOfflineData(op.context, appleProvisioningContext(a.request))) a.identity = freeze(identity(op));
     if (a?.identity && sameAppleIdentity(a.identity, op) && !sameOfflineData(op!.context, appleProvisioningContext(a.request))) { this.fail('protocol'); return null; }
     if (a?.identity && !a.terminalRead && !sameAppleIdentity(a.identity, op)) { this.fail('protocol'); return null; }
+    if(this.preparation?.attempt===a&&a&&sameAppleIdentity(a.identity,op)&&op?.intentUsable)this.preparation.observedUsable=true;
     this.status = freeze(next);
     if (next.availability === 'cleanup-unknown' || op?.phase === 'unknown') this.fail('cleanup-unknown');
     if (a && source === 'read' && read?.afterInvoke && read.mutation === this.mutation && a.prepareJoined &&
@@ -570,11 +649,24 @@ export class AppleProvisioningController {
       mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
     if (!request) return Promise.resolve();
-    const a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
+    return this.runPreparation(request,this.witness,api);
+  }
+  private prepareConsent(a:Attempt):void {
+    const op=this.status?.operation;
+    if(this.consentUntil!==null||this.issue||!this.current(a)||!a.prepareAccepted||!a.prepareJoined||!sameAppleIdentity(a.identity,op)||op?.phase!=='awaiting-consent'||!op.intentUsable||a.startClaimed||a.delegated)return;
+    this.consentUntil=Math.min(a.preparedAt+60000,a.keyReviewExpires??Infinity,a.certificateReviewExpires??Infinity,a.p12ReviewExpires??Infinity,
+      this.preparation?.attempt===a?this.preparation.expires:Infinity);this.acknowledged=false;
+    if(this.now()>=this.consentUntil)this.invalidate();
+    else this.consentTimer=setTimeout(()=>{if(this.attempt===a&&!a.startClaimed&&!a.delegated)this.invalidate();},this.consentUntil-this.now());
+  }
+  private runPreparation(request:PrepareAppleProvisioning,witness:Witness,api:AppleProvisioningApi,preparation?:PreparationOriginal):Promise<void>{
+    const mode=request.mode;if(!this.status)return Promise.resolve();
+    const a: Attempt = { request: freeze(request), witness, epoch: this.epoch, after: this.status.statusRevision,
       previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
       certificateReviewExpires: mode === 'certificate-create' ? this.certificateReview?.expires ?? null : null,
       p12ReviewExpires: mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.expires ?? null : null,
-      retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false, delegated: null };
+      retired: !!preparation?.withdrawn || preparation !== undefined && preparation.epoch!==this.epoch, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false, delegated: null };
+    if(preparation)preparation.attempt=a;
     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
     if (isAppleP12Mode(mode)) this.clearP12Review(); // An uncertain Prepare never restores save/reuse consent.
     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
@@ -585,20 +677,20 @@ export class AppleProvisioningController {
     const slot: ActionSlot = { kind: 'prepare', joined: false, original: null, promise: null }; this.action = slot;
     slot.promise = (async () => {
       try {
-        slot.original = api.prepare(request); const reply = this.receive(await slot.original, 'invoke');
+        slot.original = preparation ? api.prepareDelegated!(preparation.query!) : api.prepare(request); const reply = this.receive(await slot.original, 'invoke');
         const op = reply?.operation;
-        if (!op || !sameAppleIdentity(a.identity, op) || !sameOfflineData(op.context, appleProvisioningContext(a.request))) this.fail('protocol');
+        if(preparation){
+          if(op&&sameAppleIdentity(a.identity,op)&&op.intentUsable)this.fail('protocol');
+          // Availability-only refusal is not a Prepared. Its exact service
+          // query and actual caller/history cuts decide the known no-Host case.
+        } else if (!op || !sameAppleIdentity(a.identity, op) || !sameOfflineData(op.context, appleProvisioningContext(a.request))) this.fail('protocol');
         else a.prepareAccepted = op.phase === 'awaiting-consent' && op.intentUsable;
       } catch { this.fail(); }
       finally {
+        if(preparation)preparation.returned=true;
         a.prepareJoined = true; slot.joined = true; this.publish(); await this.postInvokeRead();
         if (this.action === slot) this.action = null;
-        const op = this.status?.operation;
-        if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
-          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity, a.p12ReviewExpires ?? Infinity); this.acknowledged = false;
-          if (this.now() >= this.consentUntil) this.invalidate();
-          else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed && !a.delegated) this.invalidate(); }, this.consentUntil - this.now());
-        }
+        if(!preparation)this.prepareConsent(a);
         this.cleanupListener(); this.publish();
       }
     })(); this.publish(); return slot.promise;

@@ -892,6 +892,8 @@ struct DocumentState {
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_grant:Option<Arc<agent_store::Grant>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_store_preparation:Option<Arc<agent_store::preparation::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
     agent_apple:apple_provisioning::agent::State,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_tool_setup:agent_tool_setup::State,
@@ -1149,6 +1151,8 @@ fn slot_private_data_empty(_slot: &Slot) -> bool {
     { true }
 }
 fn assets_can_exit_locked(state: &DocumentState) -> bool {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if apple_provisioning::agent::prepare::call_pending(&state.agent_apple){return false;}
     !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
         && gh_auth::can_exit(state) && !git_local::pending(state)
 }
@@ -1348,6 +1352,22 @@ impl GitHubSetupGoGate {
 /// weak reference contains no credential, renderer path or alternate clock.
 pub(crate) struct GitHubHistoryGoGate { inner: Weak<Inner> }
 impl GitHubHistoryGoGate {
+    // Compare the SAME live Doc/Edit/Connection/ticket only. No GO, token,
+    // permission renewal or blocking hashing while this lock is borrowed.
+    pub(crate) fn download_current(&self,id:&str,nomination:&Arc<crate::github_history_session::Nomination>)->bool{
+        let Some(inner)=self.inner.upgrade()else{return false;};
+        let document=DocumentBinding{inner};let mut state=document.lock();
+        document.expire(&mut state,Instant::now());
+        if document.github_gate(&state)!=GitHubReason::None{return false;}
+        let current=document.registry_result(&mut state,document.inner.bridge.native_project(&nomination.project_id),None);
+        let (generation,root)=match current{Ok(value)=>value,Err(error)=>{
+            if error.reason==Reason::CleanupUnknown{state.github.unknown();}return false;
+        }};
+        let edit=match document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity){Ok(value)=>value,Err(error)=>{
+            if error.code=="cleanup_unknown"{state.github.unknown();}return false;
+        }};
+        state.github.history_download_current(id,nomination,generation,&root,&edit,Instant::now())
+    }
     pub(crate) fn claim(&self,id:&str,digest:&str,nomination:&Arc<crate::github_history_session::Nomination>,
         claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
         use crate::{github_history_protocol as p,github_history_session as s};
@@ -1413,14 +1433,14 @@ impl DocumentBinding {
         if matches!(command,p::Command::Status){return Ok(self.github_history_status());}
         // Bounded private metadata only. The native source/work originals are
         // not opened until the containing Supervisor registers the real owner.
-        let nonces=if matches!(command,p::Command::Start(_)){
+        let nonces=if matches!(command,p::Command::Start(_)|p::Command::Download(_)){
             let mut raw=[0u8;32];getrandom::fill(&mut raw).map_err(|_|s::refused(p::Reason::RuntimeUnavailable))?;
             Some((raw[..16].iter().map(|b|format!("{b:02x}")).collect::<String>(),
                 raw[16..].iter().map(|b|format!("{b:02x}")).collect::<String>()))
         }else{None};
         let mut state=self.lock();self.expire(&mut state,Instant::now());
         if let p::Command::Cancel(args)=&command{return state.github.history_cancel(&args.operation_id);}
-        let p::Command::Start(args)=command else{return Err(s::refused(p::Reason::InvalidInput));};
+        let (args,download)=match command{p::Command::Start(args)=>(args,false),p::Command::Download(args)=>(args,true),_=>return Err(s::refused(p::Reason::InvalidInput))};
         let external=self.github_gate(&state);
         let available=state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),Instant::now(),external);
         if !available.available{return Err(s::refused(available.reason));}
@@ -1443,7 +1463,7 @@ impl DocumentBinding {
         };
         let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
         let(owner_generation,work_nonce)=nonces.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
-        let(nomination,credential_end)=state.github.history_nomination(args,generation,root,stamp,binding,owner_generation,work_nonce,Instant::now())?;
+        let(nomination,credential_end)=state.github.history_nomination(args,generation,root,stamp,binding,owner_generation,work_nonce,download,Instant::now())?;
         let gate=GitHubHistoryGoGate{inner:Arc::downgrade(&self.inner)};
         let admission=crate::supervisor::GitHubHistoryAdmission::reserve(nomination.clone(),gate,credential_end)
             .map_err(crate::github_connection_session::history_admission_error)?;
@@ -3077,6 +3097,8 @@ impl DocumentBinding {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8646,6 +8668,8 @@ pub(crate) fn assert_project_path_document_contracts() {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8788,6 +8812,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
@@ -8893,6 +8919,8 @@ mod tests {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_store_preparation:None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,

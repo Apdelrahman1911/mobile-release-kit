@@ -1,5 +1,7 @@
 // Four fixed RAW commands. The parent supplies its existing window-scoped
 // invoke/listener; no preview, HTTP, credential or native-state fallback.
+import { applePreparationQuery } from './agentApplePreparation.ts';
+import type { AppleCliQuery } from './agentAppleProvisioning.ts';
 import { APPLE_PROVISIONING_EVENT, encodeAppleProvisioningRequest } from './appleProvisioningProtocol.ts';
 import type { AppleProvisioningCommand } from './appleProvisioningProtocol.ts';
 import type { AppleProvisioningIdentity, PrepareAppleProvisioning, StartAppleProvisioning } from './appleProvisioningTypes.ts';
@@ -7,6 +9,7 @@ import type { AppleProvisioningIdentity, PrepareAppleProvisioning, StartApplePro
 export interface AppleProvisioningApi {
   readonly mode: 'native';
   prepare(request: PrepareAppleProvisioning): Promise<unknown>;
+  prepareDelegated?(query: AppleCliQuery): Promise<unknown>;
   start(request: StartAppleProvisioning): Promise<unknown>;
   status(): Promise<unknown>;
   cancel(request: AppleProvisioningIdentity): Promise<unknown>;
@@ -23,6 +26,7 @@ export function createAppleProvisioningApi(mode: string, invoke: Invoke, listen?
   };
   return Object.freeze({ mode: 'native' as const,
     prepare: (value: PrepareAppleProvisioning) => call('prepare_apple_provisioning', value),
+    prepareDelegated: (query: AppleCliQuery) => applePreparationQuery(query) ? invoke('prepare_apple_provisioning', new TextEncoder().encode(JSON.stringify({intent:'agent-apple-prepare',origin:query}))) : Promise.reject({code:'apple_provisioning_invalid'}),
     start: (value: StartAppleProvisioning) => call('start_apple_provisioning', value),
     status: () => call('apple_provisioning_status', {}),
     cancel: (value: AppleProvisioningIdentity) => call('cancel_apple_provisioning', value),

@@ -24,6 +24,10 @@ mod service_configuration_requests;
 mod service_version_reserve_protocol;
 #[path="service_store_protocol.rs"]
 mod service_store_protocol;
+#[path="service_store_prepare_protocol.rs"]
+mod service_store_prepare_protocol;
+#[path="service_store_inventory_protocol.rs"]
+mod service_store_inventory_protocol;
 mod service_tool_setup_protocol;
 mod service_tool_setup_requests;
 #[path="service_store_requests.rs"]
@@ -34,6 +38,8 @@ mod service_github_action_protocol;
 mod service_github_action_requests;
 #[path="service_apple_provisioning_protocol.rs"]
 mod service_apple_provisioning_protocol;
+#[path="service_apple_provisioning_prepare_protocol.rs"]
+mod service_apple_provisioning_prepare_protocol;
 #[path="service_apple_provisioning_requests.rs"]
 mod service_apple_provisioning_requests;
 #[path="service_version_reserve_requests.rs"]

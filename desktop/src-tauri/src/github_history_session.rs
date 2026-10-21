@@ -11,6 +11,7 @@ pub(crate) struct Nomination {
     pub(crate) root:RegisteredRoot,pub(crate) edit_stamp:SavedEditStamp,
     pub(crate) project_binding:String,pub(crate) repository:String,pub(crate) account_id:String,pub(crate) repository_id:String,
     pub(crate) tooling_sha:String,pub(crate) selection:wire::Selection,pub(crate) owner_generation:String,pub(crate) work_nonce:String,
+    pub(crate) download:Option<Arc<wire::download::Trace>>,
 }
 impl Nomination {
     pub(crate) fn context(&self,actual_raw_sha:&str)->wire::Context{
@@ -26,7 +27,8 @@ impl Nomination {
     pub(crate) fn retained_heap_bytes(&self)->Option<usize>{
         let mut n=self.root.path.capacity().checked_add(self.selection.retained_heap_bytes())?;
         for s in [&self.session_id,&self.project_id,&self.project_binding,&self.repository,&self.account_id,&self.repository_id,
-            &self.tooling_sha,&self.owner_generation,&self.work_nonce]{n=n.checked_add(s.capacity())?;}Some(n)
+            &self.tooling_sha,&self.owner_generation,&self.work_nonce]{n=n.checked_add(s.capacity())?;}
+        n.checked_add(self.download.as_ref().map_or(Some(0),|v|v.retained_bytes())?)
     }
 }
 pub(crate) struct Active {pub(crate) ticket:GitHubHistoryTicket,pub(crate) nomination:Arc<Nomination>}
@@ -69,22 +71,31 @@ impl State {
     pub(crate) fn native_work_pending(&self)->bool{self.active.is_some()}
     pub(crate) fn settled(&self)->bool{self.active.is_none()}
     pub(crate) fn receipt(&self)->Option<GitHubHistoryReceipt>{self.active.as_ref().map(|v|v.ticket.receipt())}
+    fn merge_download(&mut self){
+        if let (Some(active),Some(operation))=(&self.active,&mut self.view.operation){
+            if operation.id==active.ticket.operation_id(){
+                if let Some(trace)=&active.nomination.download{operation.download=Some(trace.snapshot());}
+            }
+        }
+    }
     pub(crate) fn finish(&mut self,before:wire::Status){
-        if self.exhausted{self.view=before;return;}
+        self.merge_download();
+        if self.exhausted{let diagnostic=self.view.operation.as_ref().and_then(|v|v.download.clone());
+            self.view=before;if let Some(op)=&mut self.view.operation{if diagnostic.is_some(){op.download=diagnostic;}}return;}
         if self.view!=before{
             if before.revision>=wire::LAST_REVISION-1{self.view.revision=wire::LAST_REVISION;self.exhausted=true;self.unknown();}
             else{self.view.revision=before.revision+1;}
         }
     }
     pub(crate) fn unknown(&mut self){
-        self.view.available=false;self.view.reason=wire::Reason::CleanupUnknown;
+        self.merge_download();self.view.available=false;self.view.reason=wire::Reason::CleanupUnknown;
         if let Some(active)=&self.active{active.ticket.stop();}
         if let Some(op)=&mut self.view.operation{if op.phase!=wire::Phase::Settled{
             op.phase=wire::Phase::CleanupUnknown;op.reason=wire::Reason::CleanupUnknown;self.view.result=None;
         }}
     }
     pub(crate) fn stop(&mut self){
-        if let Some(active)=&self.active{
+        self.merge_download();if let Some(active)=&self.active{
             active.ticket.stop();self.view.available=false;
             if let Some(op)=&mut self.view.operation{if op.phase!=wire::Phase::CleanupUnknown{
                 op.phase=wire::Phase::Stopping;op.reason=wire::Reason::Cancelled;
@@ -93,7 +104,7 @@ impl State {
     }
     pub(crate) fn start(&mut self,active:Active,before:wire::Status){
         self.view.result=None;self.view.operation=Some(wire::Operation{id:active.ticket.operation_id().into(),phase:wire::Phase::Running,
-            reason:wire::Reason::None,selection:active.nomination.selection.clone()});
+            reason:wire::Reason::None,selection:active.nomination.selection.clone(),download:active.nomination.download.as_ref().map(|v|v.snapshot())});
         self.view.session_id=Some(active.nomination.session_id.clone());self.view.available=false;self.view.reason=wire::Reason::Busy;
         self.active=Some(active);self.finish(before);
     }
@@ -105,14 +116,19 @@ impl State {
     // is known and the containing Document source check is complete. Unknown
     // originals stay active, never cleared by a frame/enum alone.
     pub(crate) fn publish_settled(&mut self,reply:Result<wire::Reply,BridgeError>,current:bool,was_unknown:bool){
-        let before=self.snapshot();
+        let before=self.snapshot();self.merge_download();
         if self.active.is_none(){self.unknown();self.finish(before);return;}
         if was_unknown||self.view.reason==wire::Reason::CleanupUnknown{self.unknown();self.finish(before);return;}
         let (reason,result)=match reply{
             Ok(reply) if current=>(reply.reason,reply.result),
             Ok(_)=>(wire::Reason::TargetChanged,None),Err(error)=>(outcome_reason(&error),None),
         };
-        if reason==wire::Reason::CleanupUnknown{self.unknown();self.finish(before);return;}
+        let uncertain=self.view.operation.as_ref().and_then(|v|v.download.as_ref()).is_some_and(|v|
+            v.publication==wire::download::Publication::Published&&!v.closed||matches!(v.publication,wire::download::Publication::Entered|wire::download::Publication::Unknown)
+                ||matches!(v.durability,wire::download::Durability::Entered|wire::download::Durability::Unknown));
+        let missing_publication=reason==wire::Reason::None&&result.as_ref().is_some_and(wire::download::result_eligible)
+            &&self.view.operation.as_ref().and_then(|v|v.download.as_ref()).is_some_and(|v|!v.exported());
+        if reason==wire::Reason::CleanupUnknown||uncertain||missing_publication{self.unknown();self.finish(before);return;}
         if let Some(op)=&mut self.view.operation{op.phase=wire::Phase::Settled;op.reason=reason;}
         self.view.result=result;self.view.available=false;self.view.reason=if current{wire::Reason::Busy}else{wire::Reason::TargetChanged};
         self.active=None;self.finish(before);
@@ -131,7 +147,7 @@ pub(crate) fn history_session_data_checks(){
         (BridgeError::new("busy","fixed"),wire::Reason::Busy)]{assert_eq!(outcome_reason(&error),reason);}
     assert!(state.cancel("foreign").is_err());
     state.view.session_id=Some("known-session".into());state.view.operation=Some(wire::Operation{id:"old-read".into(),phase:wire::Phase::Settled,
-        reason:wire::Reason::ArtifactMissing,selection:wire::Selection{run_id:"1".into(),attempt:1,stage:wire::Stage::Candidate,platform:wire::Platform::Ios}});
+        reason:wire::Reason::ArtifactMissing,download:None,selection:wire::Selection{run_id:"1".into(),attempt:1,stage:wire::Stage::Candidate,platform:wire::Platform::Ios}});
     let original=state.view.operation.clone();let before=state.snapshot();state.unknown();state.finish(before);
     assert_eq!(state.view.operation,original);assert!(state.view.fits_wire());assert!(state.retained_heap_bytes_if_quiescent().is_none());
     let mut state=State::new();state.view.revision=wire::LAST_REVISION-1;let before=state.snapshot();state.view.reason=wire::Reason::ProviderUnavailable;
