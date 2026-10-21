@@ -15,6 +15,8 @@ import { LocalStorePreflightController, localStoreOwnerReason, localStoreProject
 import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
 import { AppleProvisioningController } from './appleProvisioningController.ts';
 import { AppleBundleRegistration } from './components/AppleBundleRegistration.tsx';
+import { appleP12FingerprintView, applyAppleP12Fingerprint } from './appleP12Fingerprint.ts';
+import type { AppleP12FingerprintContext, AppleP12FingerprintEdit } from './appleP12Fingerprint.ts';
 import { GitHubPublicationController, githubPublicationOwnerReason } from './githubPublicationController.ts';
 import { GitHubPublication } from './components/GitHubPublication.tsx';
 import { GitHubRepositoryCreateController } from './githubRepositoryCreateController.ts';
@@ -1870,6 +1872,12 @@ export function App() {
       reason: bootstrapPending.current ? 'Wait for the current application capabilities.' :
         projectPathOwnerReason(pathPickerRef.current) ?? savedCommandBusy() ?? savedCommandPrerequisiteReason(false, false, undefined, false, true) };
   };
+  const p12FingerprintContext = (): AppleP12FingerprintContext => ({ ...projectScriptsContext(), controller: appleProvisioning });
+  const useP12Fingerprint = (edit: AppleP12FingerprintEdit): boolean => {
+    if (!applyAppleP12Fingerprint(edit, p12FingerprintContext, dispatch)) return false;
+    navigate('settings');
+    return true;
+  };
   // Same live owners as Home; this view only reveals existing controls or
   // selects an exact returned history row. It cannot start a check or build.
   const rehearsalContext = (): RehearsalContext => {
@@ -2149,6 +2157,7 @@ export function App() {
             workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}
           appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
+            p12Fingerprint={appleP12FingerprintView(p12FingerprintContext())} onUseP12Fingerprint={useP12Fingerprint}
             savedBundleId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.bundleId'))}
             configuredTeamId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.teamId'))}
             onSigningCredentials={() => {

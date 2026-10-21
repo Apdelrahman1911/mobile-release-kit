@@ -8,6 +8,9 @@ import { appleProvisioningContext, appleProvisioningConsent, appleProvisioningPr
   parseAppleProvisioningRequest, parseAppleProvisioningStatus } from '../src/appleProvisioningProtocol.ts';
 import { appleP12InputBase, retainedAppleP12Input, parseAppleP12Result, parseAppleP12SavedReference, appleP12Copy } from '../src/appleP12SetupProtocol.ts';
 import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { appleP12FingerprintView, applyAppleP12Fingerprint } from '../src/appleP12Fingerprint.ts';
+import { initialWorkspace, isDirty, reviewFresh, workspaceReducer } from '../src/drafts.ts';
+import { getValue } from '../src/catalog.ts';
 
 const clone = value => structuredClone(value);
 const identity = digit => ({ operationId: digit.repeat(32), ownerGeneration: 'f'.repeat(32) });
@@ -249,4 +252,182 @@ test('terminal saved metadata can only withdraw, never appear late, change refer
   assert.equal(appleProvisioningProgress(op, saved), false);
   assert.equal(appleProvisioningProgress(saved, { ...saved, savedP12: { ...savedRef(), recordId: 'a'.repeat(32) } }), false);
   assert.equal(appleProvisioningProgress(saved, { ...op, result: result('p12-save', 'blocked') }), false);
+});
+
+const fingerprintPath = 'ios.distributionCertificateSha256', fingerprint = 'ab'.repeat(32);
+function fingerprintResult(mode) {
+  const value = result(mode); value.certificateSha256 = fingerprint;
+  if (value.output) value.output.certificateSha256 = fingerprint;
+  return value;
+}
+// The existing Apple promise fixture above plus the actual workspace reducer.
+// This only models App's synchronous retirement -> reducer -> sync ordering;
+// there is no settings writer, fake save result or extra execution owner.
+function settingsDraft(h, ios = { enabled: true, bundleId: 'com.example.fixture' }) {
+  const projectId = h.project.projectId, selected = { id: projectId, name: 'Fixture', path: '/inert/p12-fingerprint' };
+  const snapshot = { root: selected.path, observedAt: '2026-10-21T00:00:00Z', observationScope: 'single-request-non-atomic',
+    config: { state: 'format-valid', path: 'release/mobile-release.json', content: clone(h.project.savedConfig),
+      data: { ios, android: { enabled: false }, source: { candidateBranch: 'main' } }, issues: [] },
+    discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
+    assurance: { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
+      gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' }, issues: [] };
+  const d = { workspace: workspaceReducer(initialWorkspace, { type: 'select', project: selected }),
+    service: {}, epoch: 1, preview: false, reason: null, commits: [],
+    catalog: { fields: [{ path: fingerprintPath, input: 'text' }] } };
+  d.reduce = action => { const old = d.workspace; d.workspace = workspaceReducer(old, action); return old !== d.workspace; };
+  d.reduce({ type: 'snapshot-start', projectId, requestId: 1 });
+  d.reduce({ type: 'snapshot-done', projectId, requestId: 1, snapshot, observedAt: 1 });
+  d.context = () => ({ controller: h.controller, session: d.workspace.projects[d.workspace.selectedId] ?? null,
+    catalog: d.catalog, service: d.service, epoch: d.epoch, preview: d.preview, reason: d.reason });
+  d.sync = () => { const s = d.context().session; h.replaceProject({ ...h.project, projectId: s.project.id,
+    draftRevision: s.revision, baselineGeneration: s.baselineGeneration, observationGeneration: s.observationGeneration,
+    savedConfig: s.savedConfigContent, dirtyDraft: isDirty(s), snapshotPending: s.snapshotRequest !== null,
+    saveRecoveryRequired: s.saveRecoveryRequired || s.saveRecoveryNeedsReload }); };
+  d.commit = action => { d.commits.push(action); h.controller.beforeWorkspaceAction();
+    const changed = d.reduce(action); if (changed) d.sync(); return changed; };
+  d.view = () => appleP12FingerprintView(d.context());
+  d.sync(); return d;
+}
+async function savedFingerprint(h) {
+  await reviewed(h, fingerprintResult('p12-review'));
+  const op = await prepared(h, 'p12-save', '2', 4);
+  await started(h, op, { ...complete(op, fingerprintResult('p12-save')), savedP12: savedRef() }, 5);
+  return op;
+}
+
+test('fingerprint explicit handoff edits one empty field with the real reducer; baseline, reviews and Save remain separate', async t => {
+  for (const empty of [undefined, '']) {
+    const h = harness(t); await h.ready;
+    const d = settingsDraft(h, { enabled: true, bundleId: 'com.example.fixture', ...(empty === undefined ? {} : { distributionCertificateSha256: empty }) });
+    await savedFingerprint(h);
+    let s = d.context().session;
+    d.reduce({ type: 'review-start', projectId: s.project.id, binding: { id: 1, revision: s.revision, baselineGeneration: s.baselineGeneration } });
+    d.reduce({ type: 'review-done', projectId: s.project.id, requestId: 1, result: { fields: [{ path: fingerprintPath, state: 'optional' }] } });
+    s = d.context().session; assert.equal(reviewFresh(s), true);
+    const view = d.view(), callCount = h.calls.length, stateBefore = h.state;
+    assert.equal(view.certificateSha256, fingerprint); assert.ok(view.edit); assert.equal(d.commits.length, 0);
+    assert.equal(h.state, stateBefore, 'render does not sync, invalidate or invoke anything');
+    assert.equal(applyAppleP12Fingerprint(view.edit, d.context, d.commit), true);
+    const after = d.context().session;
+    assert.equal(getValue(after.draft, fingerprintPath), fingerprint);
+    assert.equal(after.draft.ios.bundleId, s.draft.ios.bundleId); assert.equal(after.draft.android, s.draft.android);
+    assert.equal(after.baseline, s.baseline); assert.equal(after.snapshot, s.snapshot); assert.equal(after.savedConfigContent, s.savedConfigContent);
+    assert.equal(after.revision, s.revision + 1); assert.equal(after.baselineGeneration, s.baselineGeneration);
+    assert.equal(after.review, s.review); assert.equal(reviewFresh(after), false); assert.equal(after.lastSave, null);
+    assert.equal(after.reviewRequest, null); assert.equal(after.validationRequest, null); assert.equal(isDirty(after), true);
+    assert.equal(d.commits.length, 1); assert.equal(d.commits[0].type, 'edit'); assert.equal(d.commits[0].expectedSession, s);
+    assert.equal(h.calls.length, callCount, 'no new native operation, Review, Save or assignment');
+    assert.equal(h.state.historical, true, 'ordinary edit intentionally retires the old Apple comparison');
+    assert.equal(applyAppleP12Fingerprint(view.edit, d.context, d.commit), false); assert.equal(d.commits.length, 1);
+  }
+});
+
+test('fingerprint never overwrites equal, conflicting, malformed or non-string existing settings', async t => {
+  for (const value of [fingerprint, fingerprint.toUpperCase(), Array(32).fill('AB').join(':'),
+    'cd'.repeat(32), ` ${fingerprint}`, `${fingerprint}\n`, ' ', 'AB:CD', null, 17, [], {}]) {
+    const h = harness(t); await h.ready; const d = settingsDraft(h, { enabled: true, distributionCertificateSha256: value });
+    await savedFingerprint(h); const before = d.context().session, view = d.view();
+    assert.equal(view.edit, null); assert.equal(view.certificateSha256, fingerprint); assert.ok(view.reason);
+    if ([fingerprint, fingerprint.toUpperCase(), Array(32).fill('AB').join(':')].includes(value)) assert.match(view.reason, /already/);
+    assert.equal(d.context().session, before); assert.deepEqual(getValue(before.draft, fingerprintPath), value); assert.equal(d.commits.length, 0);
+  }
+});
+
+test('fingerprint needs actual Start return and final read; event output or known-cancel saved metadata is not a source', async t => {
+  const h = harness(t); await h.ready; const d = settingsDraft(h);
+  await reviewed(h, fingerprintResult('p12-review')); assert.equal(d.view().edit, null);
+  const op = await prepared(h, 'p12-save', '2', 4); h.controller.acknowledge(op.operationId, op.ownerGeneration, true);
+  const work = h.controller.start(op.operationId, op.ownerGeneration), call = h.calls.at(-1);
+  const terminal = status(5, { ...complete(op, fingerprintResult('p12-save')), savedP12: savedRef() });
+  h.emit(terminal); await h.controller.checkStatus();
+  assert.equal(d.view().certificateSha256, null); assert.equal(d.view().edit, null); assert.equal(d.commits.length, 0);
+  h.reply(call, terminal); await work; assert.ok(d.view().edit);
+  const h2 = harness(t); await h2.ready; const d2 = settingsDraft(h2); await reviewed(h2);
+  const cancelledOp = await prepared(h2, 'p12-save', '2', 4); await started(h2, cancelledOp, { ...cancelled(cancelledOp), savedP12: savedRef() }, 5);
+  assert.ok(h2.state.savedP12); assert.equal(d2.view().certificateSha256, null); assert.equal(d2.view().edit, null);
+});
+
+test('fingerprint output without a saved reference, withdrawal and Unknown cannot supply a draft edit', async t => {
+  const h = harness(t); await h.ready; const d = settingsDraft(h); await reviewed(h);
+  const op = await prepared(h, 'p12-save', '2', 4); await started(h, op, complete(op, fingerprintResult('p12-save')), 5);
+  assert.equal(d.view().certificateSha256, null); assert.equal(d.view().edit, null);
+  const h2 = harness(t); await h2.ready; const d2 = settingsDraft(h2), saved = await savedFingerprint(h2), edit = d2.view().edit;
+  h2.emit(status(6, complete(saved, fingerprintResult('p12-save'))));
+  assert.equal(d2.view().certificateSha256, null); assert.equal(applyAppleP12Fingerprint(edit, d2.context, d2.commit), false);
+  const h3 = harness(t); await h3.ready; const d3 = settingsDraft(h3), original = await savedFingerprint(h3), before = d3.view().edit;
+  h3.emit(status(6, unknown(original), 'cleanup-unknown'));
+  assert.equal(d3.view().edit, null); assert.equal(applyAppleP12Fingerprint(before, d3.context, d3.commit), false); assert.equal(d3.commits.length, 0);
+});
+
+test('fingerprint explicit click syncs unnotified project and asset drift rather than trusting an old snapshot', async t => {
+  for (const change of [h => h.replaceProject({ ...h.project, observationGeneration: h.project.observationGeneration + 1 }, false),
+    h => { const a = h.assets; a.status.records[1].revision++; h.replaceAssets(a, false); }]) {
+    const h = harness(t); await h.ready; const d = settingsDraft(h); await savedFingerprint(h);
+    const edit = d.view().edit, before = h.state; change(h);
+    assert.equal(h.state, before); assert.ok(d.view().edit, 'render is only a provisional comparison');
+    assert.equal(applyAppleP12Fingerprint(edit, d.context, d.commit), false);
+    assert.equal(h.state.historical, true); assert.equal(d.commits.length, 0);
+  }
+});
+
+test('fingerprint pending manual read, retired connection and historical result stay comparison-only', async t => {
+  const h = harness(t); await h.ready; const d = settingsDraft(h); await savedFingerprint(h);
+  const original = clone(h.state.status), edit = d.view().edit, poll = deferred(); h.reads.push(poll);
+  const work = h.controller.checkStatus(); assert.equal(h.state.reading, true); assert.equal(d.view().edit, null);
+  assert.equal(applyAppleP12Fingerprint(edit, d.context, d.commit), false);
+  poll.resolve(original); await work; assert.ok(d.view().edit);
+  h.controller.beforeWorkspaceAction(); assert.equal(h.state.historical, true); assert.equal(d.view().certificateSha256, fingerprint); assert.equal(d.view().edit, null);
+  h.controller.beginConnection(); assert.equal(d.view().edit, null); assert.equal(d.commits.length, 0);
+});
+
+test('fingerprint click rematches synchronous status, cancellation, peer and project/service ABA notifications', async t => {
+  for (const change of [
+    (h, _d) => h.controller.cancel(),
+    (h, _d) => { const a = h.assets; h.replaceAssets(assets(true)); h.replaceAssets(a); },
+    (h, _d) => h.emit({ ...clone(h.state.status), statusRevision: h.state.status.statusRevision + 1 }),
+    (_h, d) => { d.service = {}; }, (_h, d) => { d.epoch++; },
+    (_h, d) => { d.reason = 'Wait for the original configuration save.'; },
+    (_h, d) => { d.reduce({ type: 'select', project: { id: '_other', name: 'Other', path: '/inert/other' } }); d.reduce({ type: 'switch', projectId: '_p12_fixture' }); d.epoch++; },
+    (_h, d) => { d.reduce({ type: 'edit', projectId: '_p12_fixture', path: 'ios.bundleId', value: 'com.example.newer' }); },
+  ]) {
+    const h = harness(t); await h.ready; const d = settingsDraft(h); await savedFingerprint(h); const edit = d.view().edit;
+    let once = true; const off = h.controller.subscribe(() => { if (!once) return; once = false; change(h, d); });
+    assert.equal(applyAppleP12Fingerprint(edit, d.context, d.commit), false); off(); await flush();
+    assert.equal(d.commits.length, 0); assert.equal(getValue(d.context().session.draft, fingerprintPath), undefined);
+  }
+});
+
+test('fingerprint expectedSession rejects a newer draft created during ordinary edit retirement', async t => {
+  const h = harness(t); await h.ready; const d = settingsDraft(h); await savedFingerprint(h); const edit = d.view().edit;
+  let once = true; const off = h.controller.subscribe(() => {
+    if (!once || !h.state.historical) return; once = false;
+    d.reduce({ type: 'edit', projectId: '_p12_fixture', path: fingerprintPath, value: 'cd'.repeat(32) });
+  });
+  assert.equal(applyAppleP12Fingerprint(edit, d.context, d.commit), false); off();
+  assert.equal(d.commits.length, 1, 'attempted ordinary action still goes through the reducer');
+  assert.equal(getValue(d.context().session.draft, fingerprintPath), 'cd'.repeat(32));
+  assert.notEqual(d.context().session, edit.context.session); assert.equal(d.context().session.lastSave, null);
+});
+
+test('fingerprint refuses dirty, stale, missing or recovering Settings and unsupported parent/catalog without changing data', async t => {
+  for (const change of [
+    d => { d.preview = true; }, d => { d.service = null; }, d => { d.catalog = { fields: [] }; },
+    d => { d.reason = 'An original operation is unconfirmed.'; }, d => { d.epoch = Number.MAX_SAFE_INTEGER; },
+    d => d.reduce({ type: 'edit', projectId: '_p12_fixture', path: 'ios.bundleId', value: 'com.example.other' }),
+    d => d.reduce({ type: 'snapshot-start', projectId: '_p12_fixture', requestId: 2 }),
+    d => d.reduce({ type: 'git-local-intent', projectId: '_p12_fixture' }),
+    d => { d.context().session.saveRecoveryRequired = true; }, d => { d.context().session.saveRecoveryNeedsReload = true; },
+    d => { d.context().session.sourceChanged = true; }, d => { d.context().session.snapshot.root = '/inert/foreign'; },
+    d => { d.context().session.savedConfigContent = { bytes: 100, sha256: 'b'.repeat(64) }; },
+    d => { const s = d.context().session; d.reduce({ type: 'review-start', projectId: s.project.id, binding: { id: 1, revision: s.revision, baselineGeneration: s.baselineGeneration } }); },
+    d => { const s = d.context().session; d.reduce({ type: 'review-start', projectId: s.project.id, binding: { id: 1, revision: s.revision, baselineGeneration: s.baselineGeneration } });
+      d.reduce({ type: 'review-done', projectId: s.project.id, requestId: 1, result: { fields: [{ path: fingerprintPath, state: 'forbidden' }] } }); },
+  ]) {
+    const h = harness(t); await h.ready; const d = settingsDraft(h); await savedFingerprint(h);
+    const edit = d.view().edit; assert.ok(edit); change(d); const before = clone(d.context().session.draft);
+    assert.equal(d.view().edit, null); assert.equal(applyAppleP12Fingerprint(edit, d.context, d.commit), false);
+    assert.deepEqual(d.context().session.draft, before); assert.equal(d.commits.length, 0);
+  }
+  const h = harness(t); await h.ready; const d = settingsDraft(h, 'unsupported parent'); await savedFingerprint(h);
+  assert.equal(d.view().edit, null); assert.equal(d.context().session.draft.ios, 'unsupported parent');
 });

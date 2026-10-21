@@ -1,9 +1,12 @@
+import { useState } from 'react';
 import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
 import { appleP12Copy, isAppleP12Mode, type AppleP12Mode } from '../appleP12SetupProtocol.ts';
+import type { AppleP12FingerprintEdit, AppleP12FingerprintView } from '../appleP12Fingerprint.ts';
 
 interface Props {
   controller: AppleProvisioningController; state: AppleProvisioningState;
   onSigningCredentials(): void; onCredentials(): void;
+  fingerprint?: AppleP12FingerprintView; onUseFingerprint?(edit: AppleP12FingerprintEdit): boolean;
 }
 const labels: Record<AppleP12Mode, string> = {
   'p12-review': 'Check P12 setup', 'p12-reuse': 'Recheck this P12', 'p12-save': 'Save new P12 to encrypted vault',
@@ -14,7 +17,8 @@ const consent: Record<AppleP12Mode, string> = {
   'p12-save': 'Recheck this existing key and certificate. If the checks pass, package them as one new P12 and save it with its password in the encrypted vault. Do not replace existing items, assign credentials, generate a key, request a certificate or start a build.',
 };
 
-export function AppleP12Setup({ controller, state, onSigningCredentials, onCredentials }: Props) {
+export function AppleP12Setup({ controller, state, onSigningCredentials, onCredentials, fingerprint, onUseFingerprint }: Props) {
+  const [fingerprintChanged, setFingerprintChanged] = useState(false);
   const op = state.status?.operation;
   const outcome = op && isAppleP12Mode(op.context.mode) && state.p12TerminalRead ? op.outcome : null;
   const copy = appleP12Copy(state.p12Result, state.savedP12, outcome);
@@ -50,6 +54,17 @@ export function AppleP12Setup({ controller, state, onSigningCredentials, onCrede
     </div>}
     {state.savedP12 && <div className="save-note"><p>Next: find this P12 in saved credentials. Check and assign it for the intended app, then make a separate encrypted backup.</p>
       <details><summary>Saved P12 record details</summary><p>Record: <code>{state.savedP12.recordId}</code> · revision {state.savedP12.revisionCounter}.</p></details>
+    </div>}
+    {fingerprint?.certificateSha256 && <div className="notice">
+      <h4>Certificate fingerprint (SHA-256)</h4>
+      <p>This public identifier belongs to the certificate in the saved P12 above.</p>
+      <p><code>{fingerprint.certificateSha256}</code></p>
+      <button type="button" disabled={!fingerprint.edit || !onUseFingerprint} onClick={() => {
+        if (fingerprint.edit && onUseFingerprint) setFingerprintChanged(!onUseFingerprint(fingerprint.edit));
+      }}>Add fingerprint to Settings draft</button>
+      <p>Then review and save the draft in Settings. This does not assign the P12 or make signing ready.</p>
+      {fingerprint.reason && <p className="save-note">{fingerprint.reason}</p>}
+      {fingerprintChanged && <p role="alert">The project or result changed. Your draft was kept; check the current Settings before trying again.</p>}
     </div>}
     <details><summary>How to back up or restore a P12</summary>
       <p>This view never displays your private key or password. Use the existing saved-credential controls to import, check or assign a P12.</p>

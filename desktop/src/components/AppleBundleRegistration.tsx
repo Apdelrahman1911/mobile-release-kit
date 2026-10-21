@@ -1,5 +1,6 @@
 import { AppleP12Setup } from './AppleP12Setup.tsx';
 import { isAppleP12Mode } from '../appleP12SetupProtocol.ts';
+import type { AppleP12FingerprintEdit, AppleP12FingerprintView } from '../appleP12Fingerprint.ts';
 import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
 import { AppleDistributionCertificateSetup } from './AppleDistributionCertificateSetup.tsx';
 import { isAppleDistributionCertificateMode } from '../appleDistributionCertificateSetupProtocol.ts';
@@ -12,6 +13,7 @@ import type { AppleProvisioningMode, AppleProvisioningResult } from '../applePro
 interface Props {
   controller: AppleProvisioningController; state: AppleProvisioningState;
   onCredentials(): void; onProjectIdentity(): void; onSigningCredentials?(): void;
+  p12Fingerprint?: AppleP12FingerprintView; onUseP12Fingerprint?(edit: AppleP12FingerprintEdit): boolean;
   compact?: boolean; onShow?(): void;
   // Display-only saved-configuration labels, not account/team authority.
   savedBundleId?: string | null; configuredTeamId?: string | null;
@@ -37,7 +39,7 @@ function resultCopy(result: AppleProvisioningResult): { title: string; detail: s
   return { title: 'No registration decision is available', detail: 'The response, prerequisites or account-wide journal fence require attention. Do not create or revoke signing credentials to work around this result.' };
 }
 
-export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
+export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, p12Fingerprint, onUseP12Fingerprint, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
   const op = state.status?.operation, result = state.result, copy = result ? resultCopy(result) : null;
   if (compact) {
     if (!state.retained && !state.issue) return null;
@@ -118,7 +120,8 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
     <AppleSigningSetup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
     <AppleDistributionKeySetup controller={controller} state={state} onKeyCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
     <AppleDistributionCertificateSetup controller={controller} state={state} onKeyCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
-    <AppleP12Setup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
+    <AppleP12Setup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials}
+      fingerprint={p12Fingerprint} onUseFingerprint={onUseP12Fingerprint} />
     <details open={!!state.registrationReference}>
       <summary>Read back a prior registration without retrying</summary>
       <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>
