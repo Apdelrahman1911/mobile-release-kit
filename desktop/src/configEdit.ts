@@ -82,6 +82,7 @@ export type ConfigRecoveryAttention = Pick<ConfigEditProjection,
   'projectId' | 'sessionId' | 'ownerGeneration' | 'phase' | 'nativeFinality' | 'coreOutcome'>;
 
 export interface ConfigEditState {
+  delegationPending?: boolean;
   mode: BridgeMode;
   listening: boolean;
   initialized: boolean;
@@ -105,6 +106,7 @@ export const initialConfigEdit: ConfigEditState = {
 };
 
 export type ConfigEditAction =
+  | { type: 'delegation-pending'; value: boolean }
   | { type: 'connect'; mode: BridgeMode }
   | { type: 'listening' }
   | { type: 'read-start' }
@@ -240,6 +242,7 @@ function observe(state: ConfigEditState, status: ConfigEditStatus, source: 'read
 
 export function configEditReducer(state: ConfigEditState, action: ConfigEditAction): ConfigEditState {
   switch (action.type) {
+    case 'delegation-pending': return !!state.delegationPending === action.value ? state : { ...state, delegationPending: action.value };
     case 'connect': return { ...state, mode: action.mode };
     case 'listening': return { ...state, listening: true };
     case 'read-start': return { ...state, readPending: true };
@@ -319,6 +322,7 @@ const availabilityCopy: Record<EditAvailability, string> = {
 };
 
 export function nativeStartReason(state: ConfigEditState): string | null {
+  if (state.delegationPending) return 'An original CLI configuration request is pending. Review or stop it in the same Desktop.';
   if (state.mode === 'preview') return 'Browser preview cannot open a native save session or simulate saving.';
   if (state.mode !== 'native') return 'Saving requires the native desktop bridge.';
   if (state.integrityFailed) return 'Native save status did not match the reviewed contract. Saving is disabled; your draft is retained.';
@@ -353,6 +357,7 @@ export function editStartReason(state: ConfigEditState, session: ProjectSession 
 // Synchronous renderer exclusion before an opposite-domain Open reply/event.
 // This is a refusal only; the shared native registry is still the real owner.
 export function configurationOwnerReason(state: ConfigEditState, projectId: string): string | null {
+  if (state.delegationPending) return 'The original CLI configuration request is pending; keep its review and native calls.';
   if (state.nativeBlocked || state.integrityFailed || state.generationLost || state.observationIssue) {
     return 'Configuration edit ownership is unverified. Observe the original native status; do not open a competing workflow edit.';
   }

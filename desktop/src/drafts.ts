@@ -1,3 +1,5 @@
+import type { DelegatedConfigurationSave } from './serviceConfigurationController.ts';
+import { changedConfiguration, settingsFromConfig } from './serviceConfigurationProtocol.ts';
 import { validInitializationCompletion } from './projectInitialization.ts';
 import type { ConfirmedInitialization } from './projectInitialization.ts';
 import { blockingAncestor, getValue, sameJson, setValue } from './catalog.ts';
@@ -135,6 +137,7 @@ export type WorkspaceAction =
   | { type: 'project-identity-intent'; projectId: string }
   | { type: 'git-local-intent'; projectId: string }
   | { type: 'initialization-final'; projectId: string; completion: ConfirmedInitialization }
+  | { type: 'delegated-config-save-final'; projectId: string; receipt: DelegatedConfigurationSave }
   | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
   | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention }
   | { type: 'config-recovery-final'; projectId: string; completion: ConfigRecoveryCompletion };
@@ -379,6 +382,37 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // Its redacted preview cannot establish raw equality to the input draft.
       // Keep baseline/draft/undo and all counters; only explicit refresh then
       // user-confirmed discard may adopt observed saved configuration.
+      break;
+    }
+    case 'delegated-config-save-final': {
+      const receipt = action.receipt, {request, projection, before, after, statusRevision} = receipt;
+      const original = request.original, prepared = projection.prepared, review = request.review;
+      const result = normalEditResult(projection);
+      if (!original || !review || !request.change || !prepared || !result || !projection.applySubmitted || !projection.checkout ||
+        request.runtimeProjectId !== action.projectId || projection.projectId !== action.projectId ||
+        projection.sessionId !== original.sessionId || projection.ownerGeneration !== original.ownerGeneration ||
+        projection.checkout.revision !== original.revision || prepared.revision !== original.revision || prepared.planToken !== review.planToken ||
+        !isU32(statusRevision) || statusRevision <= review.nativeStatusRevision ||
+        !sameJson(projection.checkout.base, before) || !sameJson(changedConfiguration(before, request.change), after) ||
+        !sameJson(settingsFromConfig(before) as unknown as JsonValue, review.before as unknown as JsonValue) ||
+        !sameJson(settingsFromConfig(after) as unknown as JsonValue, review.after as unknown as JsonValue) ||
+        session.lastSave && (session.lastSave.sessionId === projection.sessionId || session.lastSave.statusRevision >= statusRevision)) return state;
+      const matches = session === receipt.expectedSession && session.revision === receipt.draftRevision && session.baselineGeneration === receipt.baselineGeneration &&
+        session.observationGeneration === receipt.observationGeneration && session.snapshotRequest === null && session.baseline === before &&
+        !!session.draft && sameJson(session.draft, before) && !isDirty(session) && !session.saveRecoveryRequired && !session.saveRecoveryNeedsReload;
+      const advance = matches && result === 'saved';
+      const generation = advance ? session.baselineGeneration + 1 : session.baselineGeneration;
+      const revision = advance ? session.revision + 1 : session.revision;
+      const lastSave: SavedDraftRevision = {sessionId: projection.sessionId, statusRevision, draftRevision: matches ? revision : receipt.draftRevision,
+        baselineGeneration: receipt.baselineGeneration, resultingBaselineGeneration: matches ? generation : null, result};
+      // A CLI write never replaces a newer/dirty/ABA form. Its actual completion
+      // remains visible and stale saved-file evidence is retired in either case.
+      next = {...session, lastSave, snapshotRequest: null, snapshotPredatesSave: true, savedConfigContent: null};
+      if (!matches) { next = {...next, sourceChanged: true}; break; }
+      next = {...next, baseline: advance ? structuredClone(after) : session.baseline, draft: advance ? structuredClone(after) : session.draft,
+        baselineGeneration: generation, revision, draftOrigin: advance ? 'saved' : session.draftOrigin, sourceChanged: false,
+        validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
+        review: null, reviewRequest: null, reviewError: null, suggestion: null, suggestionRequest: null, suggestionError: null, editError: null};
       break;
     }
     case 'config-save-final': {

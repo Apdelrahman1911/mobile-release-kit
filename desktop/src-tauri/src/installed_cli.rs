@@ -7,6 +7,8 @@ use p::{Error, Id};
 use std::{ffi::OsString, io::Write, path::PathBuf};
 #[path = "installed_cli_identity.rs"]
 mod identity;
+#[path="installed_cli_configuration.rs"]
+mod configuration;
 #[path = "installed_cli_identity_actions.rs"]
 mod identity_actions;
 #[path = "installed_cli_local_checks.rs"]
@@ -27,8 +29,17 @@ mod git_repository;
 mod git_remote;
 #[path="installed_cli_version_reserve.rs"]
 mod version_reserve;
+#[path="installed_cli_store.rs"]
+mod store;
 #[path="installed_cli_play_cleanup.rs"]
 mod play_cleanup;
+
+// Local static catalogue output, including its newline. This is not an IPC
+// frame, operation/Document quota, or total allocator bound. Keep complete
+// compiled capabilities instead of silently omitting newly supported families.
+const CAPABILITIES_BYTES: usize = 32 * 1024;
+#[path="installed_cli_upload_key.rs"]
+mod upload_key;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -36,6 +47,18 @@ Usage:\n\
   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk upload-key-scope PROJECT_ID [--json]\n\
+  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
+  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk configuration-read PROJECT_ID OBSERVATION_REVISION [--json]\n\
+  mrk configuration-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION --stdin [--json]\n\
+  mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+  mrk configuration-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk configuration-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -102,6 +125,7 @@ Keep the printed instance/request IDs: inspect or cancel the same original, neve
 Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
 Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
+Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
 There is no arbitrary edit, toolkit signing, credential or publishing route.\n";
 
 struct Options { request: p::Request, json: bool }
@@ -237,6 +261,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
                 "commands": IDENTITY_ACTION_COMMANDS,
             },
+            "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
+                "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
+                "excludes":["identity","version","enabled-platforms","commands","credentials","signing","recovery"],"nativeAvailabilityChecked":false},
             "gitIndex": {"scope":"desktop-selected-stage-or-unstage", "defaultEnabled":false,"oneUse":true,
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
@@ -245,6 +272,16 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
                 "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+            "androidUploadKey": {"actions":["generate-new","bind-reviewed"],"defaultEnabled":false,"oneUse":true,
+                "maxAllowSeconds":crate::service_upload_key_protocol::ALLOW_SECONDS,"maxRetainedRequests":crate::service_upload_key_protocol::REQUEST_LIMIT,
+                "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
+                "privateArguments":false,"backup":false,"rememberAssignment":false,"recoveryAcknowledgment":false,
+                "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
+            "store": {"scope":"one-existing-desktop-prepared-nonpublishing-store-step","commands":store::COMMANDS,
+                "kinds":["access-check","candidate-prepare"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+                "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+                "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
+                "execute":false,"reconcile":false,"upload":false,"promotion":false,"queryVariants":false,"nativeAvailabilityChecked":false},
             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
@@ -253,7 +290,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "includesPrivateDraft":false,"hooks":false,"signing":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":git_commit::COMMANDS},
-            "gitRepository": {"actions":["initialize","branch-create","branch-switch","branch-rename","fast-forward"],
+            "gitRepository": {"actions":["initialize","branch-create","branch-switch","branch-rename","fast-forward","set-upstream"],
                 "defaultEnabled":false,"oneUse":true,"sharesGitGrantAnd32Requests":true,"requiresRunningDesktop":true,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"fetch":false,"push":false,"nativeAvailabilityChecked":false,
                 "commands":git_repository::COMMANDS},
@@ -262,7 +299,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -288,19 +325,21 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
+        text.push_str("\nStore steps: separate Desktop one-use approval of an existing prepared basic access check or candidate preparation. Android access uses a temporary uncommitted edit; candidate preparation writes the local journal. No Execute/upload/promotion/Reconcile.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
     };
     if json { bytes.push(b'\n'); }
-    if bytes.len() > 12 * 1024 { return Err(Error::StateUnknown); }
+    if bytes.len() > CAPABILITIES_BYTES { return Err(Error::StateUnknown); }
     Ok(bytes)
 }
 
@@ -386,6 +425,9 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+        p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+        p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+        p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
@@ -418,8 +460,11 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     // argument contents are neither echoed nor included in a public response.
     let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
+    if configuration::recognizes(&args){return configuration::run(args);}
     if identity::recognizes(&args) { return identity::run(args); }
+    if upload_key::recognizes(&args) { return upload_key::run(args); }
     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+    if store::recognizes(&args){return store::run(args);}
     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
     if git_index::recognizes(&args) { return git_index::run(args); }
     if git_commit::recognizes(&args) { return git_commit::run(args); }
@@ -509,7 +554,7 @@ mod tests {
         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 160);
+        assert_eq!(caps["requestDiscovery"]["maxRequests"], 256); // Two detail inboxes plus six distinct 32-row metadata namespaces.
     }
     #[test]
     fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {
@@ -558,7 +603,7 @@ mod tests {
     #[test]
     fn capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals() {
         let bytes = capabilities(true).unwrap();
-        assert!(bytes.len() <= 12 * 1024 && bytes.ends_with(b"\n"));
+        assert!(bytes.len() <= CAPABILITIES_BYTES && bytes.ends_with(b"\n"));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["protocolVersion"], p::VERSION);
         assert_eq!(value["scope"], "compiled-interface");

@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { Catalog, CredentialGuide, HelpContent } from '../types.ts';
 import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
@@ -33,7 +34,7 @@ function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { g
   </section>;
 }
 
-export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; nativeBusyReason?: string | null }) {
+export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, onOfflineChecks, onAndroidSigning, delegation, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; onOfflineChecks: () => void; onAndroidSigning: () => void; delegation?: ReactNode; nativeBusyReason?: string | null }) {
   const [filter, setFilter] = useState('');
   const [selectedGuide, setSelectedGuide] = useState('');
   const [preparation, setPreparation] = useState<ReleaseInputPreparationTarget | null>(null);
@@ -78,6 +79,7 @@ export function Credentials({ catalog, state, controller, project, inputState, i
     {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Private session controls cannot start conflicting work; original status, cancellation and discard remain separate.</p>}
     <div ref={sessionRef} tabIndex={-1}><CredentialSession state={state} controller={controller} project={project} guide={catalog?.credentialGuide ?? null} onHelp={onHelp} nativeBusyReason={nativeBusyReason}
       preparation={preparation} isPreparationCurrent={isPreparationCurrent} takePreparation={takePreparation} dismissPreparation={dismissPreparation} /></div>
+    {delegation}
     <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
     <details className="card progressive-disclosure" ref={referenceRef}>
       <summary>Reference: where to find files, supported formats &amp; privacy</summary>

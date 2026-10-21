@@ -2496,7 +2496,12 @@ impl DocumentBinding {
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(super) fn bind_vault(&self, token: &str) -> Result<AssetStatus, AssetError> {
+        self.bind_vault_delegated(token,None)
+    }
+    pub(super) fn bind_vault_delegated(&self, token:&str, agent:Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus,AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, true)?;
+        if let Some(link)=&agent { super::agent_upload_key::consume(self,&state,link,crate::service_upload_key_protocol::Kind::BindReviewed)?; }
+        else { super::agent_upload_key::gui_available(&state)?; }
         let preview = self.consume_preview(&mut state, token, true)?;
         let decision = (|| -> Result<(Slot, Job), AssetError> {
             let roster = self.vault_roster(&mut state)?;
@@ -2518,6 +2523,7 @@ impl DocumentBinding {
         })();
         let (slot, job) = match decision { Ok(decision) => decision, Err(error) => return Err(self.refuse_consumed(&mut state, error)) };
         for assignment in &mut state.assignments { if Some(assignment.kind) == slot.kind { assignment.availability = AssignmentAvailability::Unavailable; } }
+        if let Some(link)=&agent { super::agent_upload_key::attach(&state,&slot.owner,link)?; }
         let start = self.install(&mut state, slot, super::Job::Vault(job))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }

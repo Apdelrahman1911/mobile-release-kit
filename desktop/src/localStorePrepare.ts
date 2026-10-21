@@ -30,7 +30,7 @@ export function localStorePrepareRequest(project:LocalStoreProject|null,assets:A
 export class LocalStorePrepareController {
  private state:LocalStorePrepareState={mode:'unavailable',applicationId:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
- private attempt:{request:PrepareLocalStoreIntent;epoch:number;after:number;previous:LocalStorePrepareIdentity|null;id:LocalStorePrepareIdentity|null;retired:boolean;started:boolean}|null=null;
+ private attempt:{delegated?:boolean;request:PrepareLocalStoreIntent;epoch:number;after:number;previous:LocalStorePrepareIdentity|null;id:LocalStorePrepareIdentity|null;retired:boolean;started:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
  private readonly source:Source;
  private selectionPending=false;private historyHead:number|null=null;
@@ -44,7 +44,15 @@ export class LocalStorePrepareController {
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
+ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
+ delegatePrepared(id:LocalStorePrepareIdentity,revision:number):(()=>boolean)|null{
+  this.syncProject();const a=this.attempt,api=this.api;
+  const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request);
+  if(!exact()||!a||a.delegated||this.state.consentUntil===null||this.now()>=this.state.consentUntil)return null;
+  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
+  // Survives removal of ordinary consent, not context/native-identity changes.
+  return ()=>exact()&&a.delegated===true;
+ }
  beginConnection=()=>{this.invalidate();if(localStorePrepareOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
   try{const unlisten=await api.subscribeLocalStorePrepare(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
@@ -72,6 +80,7 @@ export class LocalStorePrepareController {
   }catch{this.fail();}finally{this.update({pending:false});}}
  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
+  if(a?.delegated)return; // Only native CLI consent can consume this linked review.
   if(a?.started)return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});

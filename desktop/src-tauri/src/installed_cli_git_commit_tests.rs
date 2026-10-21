@@ -97,7 +97,7 @@ fn commit_request_framing_and_catalogue_preserve_no_draft_and_existing_output_ca
         assert!(!std::str::from_utf8(&bytes).unwrap().contains(field));
     }
     let catalogue = super::super::capabilities(true).unwrap();
-    assert!(catalogue.len() <= 12 * 1024);
+    assert!(catalogue.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let v: serde_json::Value = serde_json::from_slice(&catalogue).unwrap();
     assert_eq!(v["gitIndex"]["commit"], false);
     assert_eq!(

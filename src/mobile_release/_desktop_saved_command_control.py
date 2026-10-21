@@ -33,6 +33,7 @@ class SavedCommandDomain(Enum):
     ArtifactInspection = "artifact-inspection"
     GitHubHistory = "github-history"
     GitHubAuth = "github-auth"
+    GitHubDevice = "github-device"
     GitRead = "git-read"
     GitLocal = "git-local"
     GitRemote = "git-remote"
@@ -80,6 +81,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.GitRead:
         from . import _desktop_git_read_protocol
         return _desktop_git_read_protocol
+    if domain is SavedCommandDomain.GitHubDevice:
+        from . import github_device_protocol
+        return github_device_protocol
     if domain is SavedCommandDomain.GitHubAuth:
         from . import _desktop_github_auth_protocol
         return _desktop_github_auth_protocol
@@ -143,6 +147,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_git_read_control import GitReadInput
     if type(source) is GitReadInput and source.domain is SavedCommandDomain.GitRead:
         return SavedCommandDomain.GitRead
+    from ._desktop_github_device import DeviceInput
+    if type(source) is DeviceInput and source.domain is SavedCommandDomain.GitHubDevice:
+        return SavedCommandDomain.GitHubDevice
     from ._desktop_github_auth_control import GhAuthInput
     if type(source) is GhAuthInput and source.domain is SavedCommandDomain.GitHubAuth:
         return SavedCommandDomain.GitHubAuth
@@ -319,6 +326,7 @@ class _SavedCommandInput:
                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
                            SavedCommandDomain.GitHubAuth: "Original gh-auth input changed",
+                           SavedCommandDomain.GitHubDevice: "Original device connection input changed",
                            SavedCommandDomain.GitRead: "Original Git read input changed",
                            SavedCommandDomain.GitLocal: "Original local Git input changed",
                            SavedCommandDomain.GitRemote: "Original private Git input changed",

@@ -184,9 +184,9 @@ fn repository_output_is_family_bound_and_init_preview_never_fabricates_an_index_
 }
 
 #[test]
-fn compiled_repository_catalogue_preserves_old_families_and_existing_twelve_kib_bound() {
+fn compiled_repository_catalogue_preserves_old_families_and_local_output_bound() {
     let bytes = super::super::capabilities(true).unwrap();
-    assert!(bytes.len() <= 12 * 1024);
+    assert!(bytes.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let own = &value["gitRepository"];
     assert_eq!(

@@ -339,7 +339,7 @@ impl DocumentBinding {
             let (registration, root) = self.inner.bridge.native_project(&input.context.project_id)
                 .map_err(|_| changed())?;
             let material = self.review_apple_provisioning_material(&state, &input.context, registration, &root)?;
-            let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes().ok_or_else(changed)?;
+            let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes(input.context.mode).ok_or_else(changed)?;
             lookup_memory::store_admission_bytes(&self.inner, &state, &material, future).map_err(|_| changed())?;
             let project = self.service_project_locked(&state, &input.context.project_id)?;
             let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
@@ -368,7 +368,7 @@ impl DocumentBinding {
         }
         let current = self.service_allow_current_locked(&state, &project, &stamp)?;
         self.recheck_apple_provisioning_material(&state, &material, &input.context, registration, &root)?;
-        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes().ok_or_else(changed)?;
+        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes(input.context.mode).ok_or_else(changed)?;
         let admitted_bytes = lookup_memory::store_admission_bytes(&self.inner, &state, &material, future)
             .map_err(|_| changed())?;
         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
@@ -453,7 +453,7 @@ impl DocumentBinding {
             .bridge
             .native_project(&original.context.project_id)
             .map_err(|_| changed())?;
-        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes()
+        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes(original.context.mode)
             .ok_or_else(changed)?;
         lookup_memory::store_admission_bytes(&self.inner, &state, original.material(), future)
             .map_err(|_| changed())?;

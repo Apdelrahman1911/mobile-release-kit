@@ -513,7 +513,7 @@ impl FinalObserverReturn {
             state: Mutex::new(ObserverReturn::Fresh),
         }
     }
-    fn receipt(&self, result: GitHubAuthReceipt) -> GitHubAuthReceipt {
+    pub(super) fn receipt(&self, result: GitHubAuthReceipt) -> GitHubAuthReceipt {
         match self.state.lock() {
             Ok(state) => match (*state, result) {
                 (ObserverReturn::Unknown, _) => GitHubAuthReceipt::RetainedUnknown,

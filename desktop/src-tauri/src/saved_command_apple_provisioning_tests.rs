@@ -72,10 +72,36 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
     assert_eq!(clocks.settlement(Some(first)), first + SETTLEMENT);
     assert!(clocks.settlement(Some(clocks.work + Duration::from_secs(9))) <= clocks.finality);
     let retained = retained_document_backing_bytes().unwrap();
-    let active = document_backing_bytes().unwrap();
     assert!(retained >= APPLE_PROVISIONING_INPUT_LIMIT + 2 * apple_wire::STATUS_LIMIT);
-    assert!(active >= 8 * crate::apple_provisioning_journal::STATE_LIMIT);
-    assert!(active.checked_add(retained).unwrap() < 64 * 1024 * 1024);
+    let common = document_backing_bytes(apple_wire::Mode::Review).unwrap();
+    for mode in [
+        apple_wire::Mode::Review, apple_wire::Mode::Register, apple_wire::Mode::Reconcile,
+        apple_wire::Mode::ProfileReview, apple_wire::Mode::ProfileReuse,
+        apple_wire::Mode::ProfileCreate, apple_wire::Mode::ProfileReconcile,
+        apple_wire::Mode::KeyReview, apple_wire::Mode::KeyPrepare, apple_wire::Mode::KeyRecover,
+        apple_wire::Mode::CertificateReview, apple_wire::Mode::CertificateCreate,
+        apple_wire::Mode::CertificateReconcile,
+        apple_wire::Mode::P12Review, apple_wire::Mode::P12Reuse, apple_wire::Mode::P12Save,
+    ] {
+        // Mirror the actual initialize branches, not a max of mutually
+        // exclusive sessions. All sixteen modes retain the same common quote.
+        let parent = match mode {
+            apple_wire::Mode::Review | apple_wire::Mode::Register | apple_wire::Mode::Reconcile => 0,
+            apple_wire::Mode::ProfileReview | apple_wire::Mode::ProfileReuse
+            | apple_wire::Mode::ProfileCreate | apple_wire::Mode::ProfileReconcile =>
+                super::super::apple_signing::backing_bytes().unwrap(),
+            apple_wire::Mode::KeyReview | apple_wire::Mode::KeyPrepare | apple_wire::Mode::KeyRecover
+            | apple_wire::Mode::CertificateReview | apple_wire::Mode::CertificateCreate
+            | apple_wire::Mode::CertificateReconcile
+            | apple_wire::Mode::P12Review | apple_wire::Mode::P12Reuse | apple_wire::Mode::P12Save =>
+                super::super::apple_key::backing_bytes(mode).unwrap(),
+        };
+        let active = document_backing_bytes(mode).unwrap();
+        assert_eq!(active.checked_sub(common), Some(parent), "{mode:?}");
+        assert!(active >= 8 * crate::apple_provisioning_journal::STATE_LIMIT, "{mode:?}");
+        assert!(active.checked_add(retained).unwrap() < 64 * 1024 * 1024, "{mode:?}");
+        assert!(active.checked_add(usize::MAX).is_none(), "{mode:?}");
+    }
     // This is a fixed representation census only, not a native/RSS bound.
 }
 

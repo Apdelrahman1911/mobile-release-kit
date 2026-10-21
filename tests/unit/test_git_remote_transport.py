@@ -305,7 +305,8 @@ class GitRemoteTransportTests(unittest.TestCase):
         source = HeadersOnly(raw_http(t.FETCH, b"SYNTHETIC_PRIVATE_BODY", status=401))
         parsed = h._ResponseBody(source, clock, _role=h._ResponseRole.GIT_REMOTE_FETCH)
         result = h._response_result(parsed, clock, _remote_delivery=None)
-        self.assertEqual(result.observation, {"status": 401, "body": None, "failure": "none"})
+        self.assertEqual(result.observation, {"status": None, "body": None, "failure": "unauthorized"})
+        self.assertEqual(result.control["reason"], "unauthorized")
         self.assertNotIn("SYNTHETIC_PRIVATE", repr(result))
 
     def test_sink_failure_after_prefix_and_unknown_close_never_retry(self):

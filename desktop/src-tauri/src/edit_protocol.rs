@@ -579,10 +579,19 @@ pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovery: bool) ->
 }
 
 pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
-    if bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+    decode_configuration(bytes, session, false)
+}
+// Private native selection; no request/child may choose this decoder. Full
+// bounded-frame parse precedes raw.clone/from_value and any queue retention.
+pub(crate) fn decode_agent_configuration(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+    decode_configuration(bytes, session, true)
+}
+fn decode_configuration(bytes: &[u8], session: &str, agent: bool) -> Result<ChildFrame, BridgeError> {
+    let limit = if agent { crate::protocol::CONFIGURATION_AGENT_FRAME_BYTES } else { RESPONSE_LIMIT };
+    if bytes.len() > limit || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| *b == b'\r' || *b == b'\n') { return Err(BridgeError::protocol()); }
-    let value = strict_json(body)?;
+    let value = if agent { crate::protocol::strict_configuration_agent_frame_json(body)? } else { strict_json(body)? };
     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session {
         return Err(BridgeError::protocol());
     }
@@ -590,6 +599,8 @@ pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
     match value["kind"].as_str() {
         Some("opened") if seq == 0 => {
             if !keys(&value["result"], &["revision", "base", "scopeResources"]) { return Err(BridgeError::protocol()); }
+            if agent { crate::service_configuration_protocol::derivation_bound(&value["result"]["base"])
+                .map_err(|_| BridgeError::protocol())?; }
             let result: Opened = serde_json::from_value(value["result"].clone()).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !(result.base.is_null() || result.base.is_object())
                 || bounded(&result.base, CONFIG_LIMIT).is_err() || result.scope_resources != ResourceState::Settled { return Err(BridgeError::protocol()); }

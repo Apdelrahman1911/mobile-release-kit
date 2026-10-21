@@ -149,6 +149,16 @@ pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
     strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
 }
 
+// Only the new automated Config slice uses this fixed, smaller entry to
+// the SAME Seed. Ordinary Config/other protocol limits stay unchanged. The
+// envelope allowance is separate from its 256KiB/4096-node/depth20 base.
+pub(crate) const CONFIGURATION_AGENT_FRAME_BYTES: usize = 272 * 1024;
+pub(crate) const CONFIGURATION_AGENT_FRAME_NODES: usize = 4160;
+pub(crate) fn strict_configuration_agent_frame_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > CONFIGURATION_AGENT_FRAME_BYTES { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, CONFIGURATION_AGENT_FRAME_NODES, 24)
+}
+
 // Fixed native VersionAllocations state only. No renderer namespace/decoder
 // selection and no widening of the ordinary passive protocol's limits.
 pub(crate) fn strict_version_allocation_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {

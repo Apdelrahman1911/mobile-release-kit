@@ -179,7 +179,7 @@ fn exact_ready_effect_unknown_and_family_mismatch_remain_distinct() {
 fn complete_capabilities_remain_bounded_and_discovery_includes_remote() {
     for json in [false, true] {
         let b = super::super::capabilities(json).unwrap();
-        assert!(b.len() <= 12 * 1024);
+        assert!(b.len() <= crate::installed_cli::CAPABILITIES_BYTES);
         let s = String::from_utf8(b).unwrap();
         for name in super::super::git_remote::NAMES {
             assert!(s.contains(name));

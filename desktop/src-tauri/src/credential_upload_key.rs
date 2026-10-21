@@ -926,6 +926,7 @@ impl DocumentBinding {
         if !consent.qualified(self) || native_availability != wire::Availability::Available {
             return Err(AssetError::new(Reason::Unqualified));
         }
+        let agent = consent.agent().cloned(); // Original claim retained before any native prepare.
         self.reconcile();
         let context = {
             let mut state = self.lock();
@@ -1099,6 +1100,7 @@ impl DocumentBinding {
                 saved,
             )
             .map_err(|_| AssetError::new(Reason::ContextStale))?;
+        if let Some(link)=&agent { link.preparation(preparation.operation_id(),preparation.owner_generation()).map_err(|_| AssetError::new(Reason::CleanupUnknown))?; }
         if !preparation.current()
             || preparation.inspection_reservation_bytes()
                 != crate::macos_install_record::CONTROL_LIMIT
@@ -1223,6 +1225,7 @@ impl DocumentBinding {
         {
             return Err(AssetError::new(Reason::Capacity));
         }
+        if let Some(link)=&agent { crate::asset_session::agent_upload_key::attach(&state,&slot.owner,link)?; }
         let start = self.install(
             &mut state,
             slot,

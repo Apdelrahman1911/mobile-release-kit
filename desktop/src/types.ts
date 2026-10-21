@@ -424,6 +424,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+  readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
@@ -432,10 +433,13 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly agentGitRepository?: import('./service_git_repository_permission.ts').GitRepositoryPermissionApi | null;
   readonly agentGitRemote?: import('./service_git_remote_permission.ts').GitRemotePermissionApi | null;
   readonly agentGitIndex?: import('./service_git_permission.ts').PermissionApi<import('./service_git_permission.ts').GitIndexApproval> | null;
+  readonly githubDevice?: import('./githubDeviceConnectionProtocol.ts').GitHubDeviceApi | null;
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+  readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+  readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;

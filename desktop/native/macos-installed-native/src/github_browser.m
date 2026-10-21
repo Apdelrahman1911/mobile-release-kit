@@ -22,9 +22,10 @@ static int sha(const uint8_t *p,size_t n) {if(!p||n!=40)return 0;for(size_t i=0;
 static int number(const uint8_t *p,size_t n) {if(!p||!n||n>20||p[0]<'1'||p[0]>'9')return 0;uint64_t value=0;for(size_t i=0;i<n;i++){if(p[i]<'0'||p[i]>'9')return 0;uint64_t digit=(uint64_t)(p[i]-'0');if(value>(UINT64_MAX-digit)/10)return 0;value=value*10+digit;}return 1;}
 int mrk_github_browser(int kind,const uint8_t *repository,size_t repository_len,
     const uint8_t *first,size_t first_len,const uint8_t *second,size_t second_len) {
-    if(!repo(repository,repository_len))return EINVAL;
+    if(kind!=4&&!repo(repository,repository_len))return EINVAL;
     if(kind==1||kind==2){if(!number(first,first_len)||second_len!=0)return EINVAL;}
     else if(kind==3){if(!sha(first,first_len)||!sha(second,second_len)||memcmp(first,second,40)==0)return EINVAL;}
+    else if(kind==4){if(repository_len||first_len||second_len)return EINVAL;}
     else return EINVAL;
     uint32_t uid=0;int admitted=mrk_user(&uid);if(admitted)return admitted;
     if(![NSThread isMainThread])return EPERM;
@@ -35,7 +36,8 @@ int mrk_github_browser(int kind,const uint8_t *repository,size_t repository_len,
             NSString *r=[[[NSString alloc] initWithBytes:repository length:repository_len encoding:NSASCIIStringEncoding] autorelease];
             NSString *a=[[[NSString alloc] initWithBytes:first length:first_len encoding:NSASCIIStringEncoding] autorelease];
             NSString *text=nil;
-            if(kind==3){
+            if(kind==4){text=@"https://github.com/login/device";}
+            else if(kind==3){
                 NSString *b=[[[NSString alloc] initWithBytes:second length:second_len encoding:NSASCIIStringEncoding] autorelease];
                 if(!b)return ENOMEM;text=[NSString stringWithFormat:@"https://github.com/%@/compare/%@...%@",r,a,b];
             } else text=[NSString stringWithFormat:@"https://github.com/%@/pull/%@%@",r,a,kind==2?@"/files":@""];

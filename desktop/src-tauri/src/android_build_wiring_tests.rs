@@ -8,7 +8,11 @@ fn empty_state() -> DocumentState {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_local_check_grant: None,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_upload_key: agent_upload_key::State::default(),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_ios_archive_grant: None,
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_store_grant:None,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,

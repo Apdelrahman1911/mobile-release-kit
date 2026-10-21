@@ -1373,6 +1373,7 @@ macro_rules! slots {
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
 slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
+slots!(GitHubDeviceRuntimeSlots, GitHubDeviceInstalledRuntime, runtime::GitHubDeviceInstalledProfile);
 slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
 #[path = "git_read_runtime_macos.rs"]
 mod git_read_runtime;
@@ -1421,6 +1422,8 @@ impl VersionAllocationSourceInstalledRuntime {
 
 #[path = "github_auth_runtime_macos.rs"]
 mod github_auth_runtime;
+#[path = "github_device_runtime_macos.rs"]
+mod github_device_runtime;
 slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
 slots!(GitHubSetupRuntimeSlots, GitHubSetupInstalledRuntime, runtime::GitHubSetupInstalledProfile);
 slots!(GitHubReleaseRuntimeSlots, GitHubReleaseInstalledRuntime, runtime::GitHubReleaseInstalledProfile);

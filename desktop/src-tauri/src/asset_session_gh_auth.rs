@@ -5,6 +5,9 @@
 use super::*;
 #[path = "asset_session_gh_auth_accounts.rs"]
 mod accounts;
+#[path="asset_session_github_device.rs"]
+pub(super) mod device;
+pub(crate) use device::GitHubDeviceGoGate;
 use crate::{
     github_auth_capture_wire as wire, github_auth_entry_protocol as entry_wire,
     github_auth_native_owner::NativeGhProvider,
@@ -30,12 +33,14 @@ pub(super) enum Entry {
     Finished(GitHubAuthStatus),
     Accounts(Arc<accounts::Read>),
     AccountsFinished(accounts::Finished),
+    Device(Arc<device::Registration>),
+    DeviceFinished(crate::github_device_protocol::Status),
 }
 impl Entry {
     fn original(&self) -> Option<&Arc<Registration>> {
         match self {
             Self::Original(original) => Some(original),
-            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) => None,
+            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) | Self::Device(_) | Self::DeviceFinished(_) => None,
         }
     }
 }
@@ -832,19 +837,24 @@ pub(crate) enum GitHubAuthCustody {
     Refused(GitHubReason),
     Unknown,
 }
-pub(crate) struct GitHubAuthConnectionHold {
-    original: Arc<Registration>,
-}
+pub(crate) enum GitHubAuthConnectionHold { Gh{original:Arc<Registration>},Device(Arc<device::Registration>) }
 impl GitHubAuthConnectionHold {
+    pub(crate) fn device_matches(&self,owner:&Arc<OriginalWork>,context:&crate::github_device_protocol::Context)->bool{
+        matches!(self,Self::Device(original) if original.matches(owner,context))
+    }
+    pub(crate) fn device_target(&self,context:&crate::github_device_protocol::Context,end:Instant)->bool{
+        matches!(self,Self::Device(original) if original.admitted_target(context,end))
+    }
+    pub(crate) fn device_gate(&self)->Option<GitHubDeviceGoGate>{match self{Self::Device(original)=>Some(original.gate()),Self::Gh{..}=>None}}
+
     pub(crate) fn custody(&self) -> GitHubAuthCustody {
-        self.original.custody()
+        match self{Self::Gh{original}=>original.custody(),Self::Device(original)=>original.custody()}
     }
     pub(crate) fn stop(&self, cause: GitHubReason) {
-        self.original
-            .fail(github_session::refused(cause), Instant::now());
+        match self{Self::Gh{original}=>original.fail(github_session::refused(cause),Instant::now()),Self::Device(original)=>original.stop(cause)}
     }
     pub(crate) fn matches(&self, owner: &Arc<OriginalWork>, context: &wire::Context) -> bool {
-        Arc::ptr_eq(owner, &self.original.original) && context == &self.original.context
+        match self{Self::Gh{original}=>Arc::ptr_eq(owner,&original.original)&&context==&original.context,Self::Device(_)=>false}
     }
     pub(crate) fn admitted_target_matches(
         &self,
@@ -854,13 +864,14 @@ impl GitHubAuthConnectionHold {
         login: &str,
         revision: &str,
     ) -> bool {
-        let context = &self.original.context;
+        let Self::Gh{original}=self else{return false};
+        let context = &original.context;
         context.project_id == project
             && context.repository == repository
             && context.generation == generation
             && context.login == login
             && context.revision == revision
-            && self.original.facts.lock().is_ok_and(|facts| {
+            && original.facts.lock().is_ok_and(|facts| {
                 facts.stage == Stage::Http
                     && facts.http_claimed
                     && !facts.http_started
@@ -873,6 +884,7 @@ impl GitHubAuthConnectionHold {
 }
 
 pub(super) fn pending(state: &DocumentState) -> bool {
+    if device::pending(state){return true}
     if accounts::pending(state) { return true; }
     state
         .gh_auth
@@ -886,6 +898,7 @@ pub(super) fn pending(state: &DocumentState) -> bool {
         })
 }
 pub(super) fn can_exit(state: &DocumentState) -> bool {
+    if !device::can_exit(state){return false}
     if !accounts::can_exit(state) { return false; }
     state
         .gh_auth
@@ -894,6 +907,7 @@ pub(super) fn can_exit(state: &DocumentState) -> bool {
         .is_none_or(|original| original.actual_settled())
 }
 pub(super) fn stop(state: &DocumentState, cause: GitHubReason) {
+    device::stop(state,cause);
     accounts::stop(state, cause);
     if let Some(original) = state.gh_auth.as_ref().and_then(Entry::original) {
         if !original.actual_settled() {
@@ -905,6 +919,7 @@ fn observation_scope_only(stage: Stage, body_returned: bool) -> bool {
     body_returned || matches!(stage, Stage::Closing | Stage::BodyReturned)
 }
 pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentState, now: Instant) {
+    device::observe(document,state,now);
     accounts::observe(document, state, now);
     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
         return;
@@ -989,6 +1004,7 @@ pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentSta
 /// same Document lock. Neither body return nor a result-shaped /user message
 /// may discard these originals. Unknown originals are never replaced here.
 pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentState) {
+    device::retire(document,state);
     accounts::retire(document, state);
     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
         return;
@@ -1039,6 +1055,8 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
         None => Some(0),
         Some(Entry::Original(_)) | Some(Entry::Accounts(_)) => None,
         Some(Entry::AccountsFinished(finished)) => finished.retained_bytes(),
+        Some(Entry::Device(original))=>original.data_bytes(),
+        Some(Entry::DeviceFinished(status))=>std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?),
         Some(Entry::Finished(status)) => {
             std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?)
         }
@@ -1324,7 +1342,7 @@ fn status(document: &DocumentBinding, state: &DocumentState) -> GitHubAuthStatus
             connection_revision: state.github.snapshot().revision,
             ..status.clone()
         },
-        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) => GitHubAuthStatus {
+        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) | Some(Entry::Device(_)) | Some(Entry::DeviceFinished(_)) => GitHubAuthStatus {
             schema_version: 1,
             document_revision: state.revision,
             connection_revision: state.github.snapshot().revision,
@@ -1769,7 +1787,7 @@ async fn run(
         // gh-auth's own pending admission must not self-reject as external Busy.
         let external = document.github_base_gate(&state);
         state.github.reconcile(Instant::now(), external);
-        let hold = GitHubAuthConnectionHold {
+        let hold = GitHubAuthConnectionHold::Gh {
             original: original.clone(),
         };
         let connection = state.github.connect_prepared_gh(

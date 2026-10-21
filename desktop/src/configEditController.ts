@@ -1,3 +1,5 @@
+import { ConfigurationServiceController } from './serviceConfigurationController.ts';
+import type { DelegatedConfigurationSave } from './serviceConfigurationController.ts';
 // Closed renderer-side orchestration. Testable with inert DTO promises; the
 // original native owner, never this object or a JS future, owns real resources.
 import { sameJson } from './catalog.ts';
@@ -16,6 +18,7 @@ interface EditContext {
   recoveryUnavailable?: () => string | null;
   onRecovered?: (completion: ConfigRecoveryCompletion) => void;
   otherEditReason?: (projectId: string) => string | null;
+  onDelegatedSave?: (receipt: DelegatedConfigurationSave) => void;
   onConfirmedSave: (receipt: ConfirmedConfigSave) => void;
   onRecoveryRequired?: (attention: ConfigRecoveryAttention) => void;
 }
@@ -42,7 +45,16 @@ export class ConfigEditController {
   private recoveryVisible = true;
   private recoveryCompletion: { binding: ConfigRecoveryBinding; statusRevision: number } | null = null;
 
-  constructor(context: EditContext) { this.context = context; }
+  readonly agent: ConfigurationServiceController;
+  constructor(context: EditContext) {
+    this.context = context;
+    this.agent = new ConfigurationServiceController({
+      project: context.project, selected: () => context.selectedProject?.() ?? null,
+      otherReason: (id) => context.recoveryUnavailable?.() ?? context.otherEditReason?.(id) ?? null,
+      native: () => this.state, observe: (status) => this.receive(status, 'reply'), checkNative: () => this.checkStatus(),
+      busy: (value) => this.change({type: 'delegation-pending', value}), saved: (receipt) => context.onDelegatedSave?.(receipt),
+    });
+  }
 
   getSnapshot = (): ConfigEditState => this.state;
 
@@ -65,7 +77,7 @@ export class ConfigEditController {
     if (this.disposed || this.api) return;
     this.api = api;
     this.change({ type: 'connect', mode: api.mode });
-    if (api.mode === 'native') await this.checkStatus();
+    if (api.mode === 'native') { await this.checkStatus(); await this.agent.connect(api); }
   }
 
   // Coalesce concurrent reads. No periodic polling, heartbeat, new process,
@@ -178,6 +190,7 @@ export class ConfigEditController {
           if (project && !project.saveRecoveryRequired) this.context.onRecoveryRequired?.(attention);
         }
         this.processRecovery();
+        this.agent.process();
         let attempt = this.state.attempt;
         if (!attempt) continue;
         const owner = attempt.projection;
@@ -268,14 +281,15 @@ export class ConfigEditController {
     if (this.disposed || value === this.recoveryVisible) return;
     this.recoveryVisible = value; this.recoveryInvalidate();
   }
-  serviceIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
-  selectionIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
-  shutdownIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
+  serviceIntent(): void { if (!this.disposed) { this.agent.invalidate(); this.recoveryInvalidate(); } }
+  selectionIntent(): void { if (!this.disposed) { this.agent.invalidate(); this.recoveryInvalidate(); } }
+  shutdownIntent(): void { if (!this.disposed) { this.agent.invalidate(); void this.agent.revoke(); this.recoveryInvalidate(); } }
   snapshotIntent(projectId: string): void {
     if (!this.disposed && (projectId === this.state.recovery?.binding.projectId || projectId === this.recoveryCompletion?.binding.projectId)) this.recoveryInvalidate();
   }
   beforeWorkspaceAction(action: WorkspaceAction): void {
     if (this.disposed) return;
+    this.agent.beforeWorkspaceAction(action);
     if (action.type === 'select' || action.type === 'switch' ||
         (action.projectId === this.state.recovery?.binding.projectId || action.projectId === this.recoveryCompletion?.binding.projectId) &&
         ['snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal', 'forget-removal', 'reset',
@@ -419,6 +433,7 @@ export class ConfigEditController {
 
   dispose(): void {
     if (this.disposed) return;
+    this.agent.dispose();
     this.recoveryCompletion = null;
     const recovery = this.state.recovery;
     if (this.api?.mode === 'native' && recovery?.sessionId && recovery.projection && !recovery.closeClaimed &&

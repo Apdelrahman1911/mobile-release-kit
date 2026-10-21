@@ -8,6 +8,8 @@ import { connectionOpaqueId, connectionProgress, connectionRepository, connectio
   sameConnectionData } from './githubConnectionProtocol.ts';
 import { ghResultMatches, githubGhFailure, parseGitHubGhRequest, parseGitHubGhResult } from './githubGhEntryProtocol.ts';
 import type { GitHubGhHandoff, GitHubGhRequest } from './githubGhEntryProtocol.ts';
+import { parseDeviceStart, parseDeviceCompletion, deviceStartFailure, deviceConnectionReason } from './githubDeviceConnectionProtocol.ts';
+import type { DeviceStart, DeviceHandoff } from './githubDeviceConnectionProtocol.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -303,6 +305,49 @@ export class GitHubConnectionController {
     } catch (error) {
       pending.replyPending = false; this.ghRejected(pending, error); return false;
     }
+  }
+  // Device approval uses the SAME original Connect latch/observer. The
+  // retained completion waits for the real device calls; no new connection
+  // owner or account authority comes from a user code/progress notification.
+  connectDevice(value: DeviceStart, handoff: DeviceHandoff): boolean {
+    const request = parseDeviceStart(value);
+    if (!request || !this.canConnect() || handoff.port !== this.port || !this.observer || !this.state.context || !this.state.status ||
+      request.projectId !== this.state.context.projectId || request.repository !== this.state.context.repository ||
+      request.expectedConnectionRevision !== this.state.status.revision) return false;
+    const pending = this.newPending('connect',this.observer,this.state.context,this.state.status);
+    this.pending = pending; this.update({busy:'connect',uncertain:false,error:null});
+    if (!this.unsentCurrent(pending) || !this.contextReady() || this.state.status?.session !== null || handoff.port !== this.port) {
+      this.discardUnsent(pending); return false;
+    }
+    pending.sent = true; pending.replyPending = true;
+    const failed = (error: unknown) => {
+      if (this.pending !== pending || pending.done) return;
+      const f = deviceStartFailure(error);
+      if (f.notAdmitted && pending.operationId === null && pending.sessionId === null && !pending.observer.accepted?.session) {
+        this.finishGhPending(pending,f.reason); return;
+      }
+      pending.uncertain = true; this.update({uncertain:true}); this.fail('response-invalid',true);
+    };
+    try {
+      const original = handoff.submit(request);
+      if (!original || typeof original.then !== 'function') throw new Error();
+      void original.then(value => {
+        const result = parseDeviceCompletion(value);
+        if (this.pending !== pending || pending.done || !pending.observer.active) return;
+        if (!result || result.device.projectId !== request.projectId || result.device.repository !== request.repository) {failed(null);return;}
+        if (!result.connection) {
+          if (pending.operationId || pending.sessionId || pending.observer.accepted?.session) {failed(null);return;}
+          this.finishGhPending(pending,deviceConnectionReason(result.device.reason));return;
+        }
+        const reply = this.receive(pending.observer,result.connection);
+        if (!reply || !this.originMatches(pending,reply)) failed(null);
+      },failed).finally(() => {
+        pending.replyPending = false;
+        if (this.pending === pending && pending.disconnectedBeforeReply && !pending.uncertain) this.finishGhPending(pending);
+        else this.settlePending(pending.observer.accepted);
+        this.maintainObserver();
+      });return true;
+    } catch(error) {pending.replyPending=false;failed(error);return false;}
   }
   private finishGhPending(pending: Pending, reason?: GitHubConnectionReason): void {
     if (this.pending !== pending || pending.done) return;

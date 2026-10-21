@@ -6,7 +6,7 @@ unsafe extern "C" {
         first:*const u8,first_len:usize,second:*const u8,second_len:usize)->i32;
 }
 fn request(kind:i32,repository:&str,first:&str,second:&str)->io::Result<()> {
-    if repository.is_empty()||repository.len()>140||first.is_empty()||first.len()>40||second.len()>40 {
+    if if kind==4 { !repository.is_empty()||!first.is_empty()||!second.is_empty() } else { repository.is_empty()||repository.len()>140||first.is_empty()||first.len()>40||second.len()>40 } {
         return Err(io::Error::from_raw_os_error(nix::libc::EINVAL));
     }
     // SAFETY: all pointers borrow live bounded UTF-8 bytes for the synchronous
@@ -16,3 +16,6 @@ fn request(kind:i32,repository:&str,first:&str,second:&str)->io::Result<()> {
 }
 pub fn pull_request(repository:&str,number:&str,files:bool)->io::Result<()> {request(if files{2}else{1},repository,number,"")}
 pub fn comparison(repository:&str,base_sha:&str,head_sha:&str)->io::Result<()> {request(3,repository,base_sha,head_sha)}
+
+/// Fixed device page only, no user/device code in the URL.
+pub fn open_device()->io::Result<()> {request(4,"","","")}

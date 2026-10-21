@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) const DETAIL_LIMIT: usize = local::LIMIT + build::LIMIT;
 pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_LIMIT
     + crate::agent_identity_requests::LIMIT
-    + crate::service_version_reserve_protocol::REQUEST_LIMIT;
+    + crate::service_version_reserve_protocol::REQUEST_LIMIT
+    + crate::service_upload_key_protocol::REQUEST_LIMIT
+    + crate::service_configuration_protocol::REQUEST_LIMIT
+    + crate::service_store_protocol::REQUEST_LIMIT;
 pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
 pub const VIEW_BYTES: usize = 64 * 1024;
 // Same eight IPC workers: one typed view, its encoded output, finite borrowed
@@ -23,7 +26,7 @@ pub(crate) const DOCUMENT_BACKING: usize = 8
         + std::mem::size_of::<Catalogue>()
         + 64
         + DETAIL_LIMIT * (std::mem::size_of::<Request>() + 3 * 32 + std::mem::size_of::<usize>())
-        // The returned IDs plus ONE temporary immutable-input list. The three
+        // The returned IDs plus ONE temporary immutable-input list. All
         // additional inboxes are copied in sequence, never held concurrently.
         + (ADDITIONAL_LIMIT + 32) * (std::mem::size_of::<AdditionalRequest>() + 32)
         + 1024);
@@ -167,6 +170,9 @@ pub enum AdditionalFamily {
     GitRemote,
     Identity,
     VersionReservation,
+    AndroidUploadKey,
+    Configuration,
+    Store,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
@@ -174,6 +180,9 @@ impl AdditionalFamily {
             Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
             Self::Identity => 1,
             Self::VersionReservation => 2,
+            Self::AndroidUploadKey => 3,
+            Self::Configuration => 4,
+            Self::Store => 5,
         }
     }
     fn status_command(self) -> &'static str {
@@ -184,6 +193,9 @@ impl AdditionalFamily {
             Self::GitRemote => "git-remote-status",
             Self::Identity => "identity-request-status",
             Self::VersionReservation => "version-reserve-status",
+            Self::AndroidUploadKey => "upload-key-status",
+            Self::Configuration => "configuration-status",
+            Self::Store => "store-status",
         }
     }
 }
@@ -245,7 +257,7 @@ impl Catalogue {
         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
             return Err(Error::InvalidRequest);
         }
-        let mut counts = [0usize; 3];
+        let mut counts = [0usize; 6];
         for (index, row) in additional.iter().enumerate() {
             let namespace = row.family.namespace();
             counts[namespace] += 1;
@@ -258,6 +270,9 @@ impl Catalogue {
         if counts[0] > crate::service_git_protocol::REQUEST_LIMIT
             || counts[1] > crate::agent_identity_requests::LIMIT
             || counts[2] > crate::service_version_reserve_protocol::REQUEST_LIMIT
+            || counts[3] > crate::service_upload_key_protocol::REQUEST_LIMIT
+            || counts[4] > crate::service_configuration_protocol::REQUEST_LIMIT
+            || counts[5] > crate::service_store_protocol::REQUEST_LIMIT
         {
             return Err(Error::InvalidRequest);
         }
@@ -468,7 +483,7 @@ mod tests {
         }
         fullest.schema_version = 2;
         fullest.additional_requests = Some(
-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation]
+            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store]
                 .into_iter()
                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
                 .collect(),
@@ -522,12 +537,15 @@ mod tests {
             AdditionalRequest { family: AdditionalFamily::GitCommit, request_id: id(4) },
             AdditionalRequest { family: AdditionalFamily::Identity, request_id: id(3) },
             AdditionalRequest { family: AdditionalFamily::VersionReservation, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::AndroidUploadKey, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::Configuration, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::Store, request_id: id(3) },
         ]);
         current.validate().unwrap();
         let text = human(&current);
         assert!(!text.contains("No requests retained"));
         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
-            ("identity-request-status",3), ("version-reserve-status",3)] {
+            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3)] {
             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
         }
         let encoded = serde_json::to_value(&current).unwrap();
@@ -542,7 +560,7 @@ mod tests {
         assert!(!accepted(changed));
         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation] {
+        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store] {
             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
             assert!(current.validate().is_err());
         }

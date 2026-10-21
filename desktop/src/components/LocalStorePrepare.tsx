@@ -1,7 +1,8 @@
 import { isLocalStoreStage, localStoreStageLabel } from '../localStoreStageProtocol.ts';
 import { localStorePrepareOwnerReason, type LocalStorePrepareController, type LocalStorePrepareState } from '../localStorePrepare.ts';
 
-export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow }: {
+export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
+  agentReason?: string | null;
   state: LocalStorePrepareState; controller: LocalStorePrepareController; compact?: boolean;
   onCredentials: () => void; onShow: () => void;
 }) {
@@ -33,7 +34,7 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
       <p>{stage ? `Prepare ${target} using the original uploaded binary and the current saved metadata. This reads Store state and saves a new local plan; it does not send the promotion or publish. Android may create a temporary uncommitted edit.` : op?.context.platform === 'ios' ? 'Read App Store Connect for this iOS candidate and save a local TestFlight-internal plan. No build is uploaded and no Store release is changed.' : 'Prepare this Android candidate for internal testing, without uploading or publishing. This contacts Google Play and creates a temporary uncommitted edit. Cancellation or a network failure can leave that edit until Google expires it.'}</p>
       <p>Version {op?.context.savedVersion.name} · Build {op?.context.savedVersion.build}. Candidate <code>{op?.context.candidateOperationId}</code>.</p>
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this preparation only, not a release.</label>
-      <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>Prepare local Store intent</button>
+      <button disabled={!!agentReason || !state.acknowledged || state.pending} onClick={() => void controller.start()}>Prepare local Store intent</button>
     </div>}
     {retained && <div role="status"><p>{op?.phase === 'running' ? 'Preparing the original candidate. This can take up to 20 minutes. Keep the application open until cleanup is confirmed.' : retained}</p><button onClick={() => void controller.cancel()}>Cancel original preparation</button></div>}
     <button disabled={state.mode !== 'native'} onClick={() => void controller.checkStatus()}>Refresh preparation status</button>

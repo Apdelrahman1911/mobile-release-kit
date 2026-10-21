@@ -281,8 +281,15 @@ pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
 /// runtime's separate control/FD admission. All jobs are serial, so reserve
 /// one complete namespace decode/encode/readback scratch set, plus every
 /// retained slot/ACK and the at-most-one previous review's comparison backing.
-pub(crate) fn document_backing_bytes() -> Option<usize> {
+pub(crate) fn document_backing_bytes(mode: apple_wire::Mode) -> Option<usize> {
     use crate::apple_provisioning_journal::{ROWS, ROW_LIMIT, STATE_LIMIT};
+    // The SAME validated Context initializes only one of these parent facets.
+    // Common and previously retained backing below remains charged in full.
+    let parent = if mode.profile() {
+        super::apple_signing::backing_bytes()?
+    } else {
+        super::apple_key::backing_bytes(mode)?
+    };
     let mut total = store::document_backing_bytes()?;
     for (count, size) in [
         (8usize, STATE_LIMIT),
@@ -310,10 +317,8 @@ pub(crate) fn document_backing_bytes() -> Option<usize> {
         .checked_add(std::mem::size_of::<Intent>())?
         .checked_add(std::mem::size_of::<AppleProvisioningReview>())?
         .checked_add(std::mem::size_of::<profile_review::Review>())?
-        .checked_add(super::apple_signing::backing_bytes()?)?
         .checked_add(std::mem::size_of::<key_review::Review>())?
-        .checked_add(super::apple_key::backing_bytes(apple_wire::Mode::KeyPrepare)?.max(
-            super::apple_key::backing_bytes(apple_wire::Mode::CertificateCreate)?).max(super::apple_key::backing_bytes(apple_wire::Mode::P12Save)?))?
+        .checked_add(parent)?
         .checked_add(6*1024*1024)?
         .checked_sub(retained_document_backing_bytes()?)
 }

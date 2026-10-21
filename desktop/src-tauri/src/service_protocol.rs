@@ -209,6 +209,18 @@ pub enum RequestBody {
     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
+    #[serde(rename="upload-key.scope")] UploadKeyScope(ProjectQuery),
+    #[serde(rename="upload-key.submit")] UploadKeySubmit(crate::service_upload_key_protocol::Submit),
+    #[serde(rename="upload-key.status")] UploadKeyStatus(crate::service_upload_key_protocol::Query),
+    #[serde(rename="upload-key.cancel")] UploadKeyCancel(crate::service_upload_key_protocol::Query),
+    #[serde(rename="configuration.read")] ConfigurationRead(crate::service_configuration_protocol::Read),
+    #[serde(rename="configuration.prepare")] ConfigurationPrepare(crate::service_configuration_protocol::Prepare),
+    #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
+    #[serde(rename="configuration.status")] ConfigurationStatus(crate::service_configuration_protocol::Query),
+    #[serde(rename="configuration.cancel")] ConfigurationCancel(crate::service_configuration_protocol::Query),
+    #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
+    #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
+    #[serde(rename="store.cancel")] StoreCancel(crate::service_store_protocol::Query),
     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
@@ -276,7 +288,11 @@ pub struct ServiceInfo {
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
+    UploadKeyAccess(crate::service_upload_key_protocol::Access),
+    UploadKeyRequest(crate::service_upload_key_protocol::Status),
+    ConfigurationRequest(crate::service_configuration_protocol::Status),
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+    StoreRequest(crate::service_store_protocol::Status),
     GitIndexScope(crate::service_git_protocol::Scope),
     GitIndexRequest(crate::service_git_protocol::Status),
     GitCommitScope(crate::service_git_commit_protocol::Scope),
@@ -331,9 +347,16 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+    if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
+        && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+    if matches!(&request.request,RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
+        &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+    if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
+    if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
+    if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -406,6 +429,16 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             let mut seen = std::collections::BTreeSet::new();
             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
         }
+        ResponseBody::UploadKeyAccess(row) => { row.validate()?; if serde_json::to_vec(row).map_err(|_| Error::InvalidRequest)?.len() > crate::service_upload_key_protocol::VIEW_LIMIT { return Err(Error::InvalidRequest); } },
+        ResponseBody::UploadKeyRequest(row) => { row.validate()?; if serde_json::to_vec(row).map_err(|_| Error::InvalidRequest)?.len() > crate::service_upload_key_protocol::VIEW_LIMIT { return Err(Error::InvalidRequest); } },
+        ResponseBody::ConfigurationRequest(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_configuration_protocol::STATUS_BYTES{return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::StoreRequest(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_store_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+        },
         ResponseBody::VersionReserveRequest(row) => {
             row.validate()?;
             if row.origin.service_instance != response.service_instance

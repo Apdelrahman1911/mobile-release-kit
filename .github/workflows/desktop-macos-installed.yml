@@ -2168,12 +2168,25 @@ jobs:
           umask 077
           ulimit -c 0
           # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+      - name: Verify the installed CLI against the joined native service
+        id: installed_cli_native
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_service.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
           # Same image: one local check, seven CLI calls, eight IPC joins.
+          # Separate step contains its original135s caller and cleanup; the
+          # service's preceding765s caller cannot consume this outer budget.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
       - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
         id: tool_inputs
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && steps.tool_service.outcome == 'success'
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && steps.installed_cli_native.outcome == 'success'
         timeout-minutes: 22
         shell: bash
         env:

@@ -123,8 +123,16 @@ mod git_fetch_state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;
+mod service_upload_key_protocol;
+mod service_upload_key_requests;
+mod service_configuration_protocol;
+mod service_configuration_requests;
 #[path="service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
+#[path="service_store_protocol.rs"]
+mod service_store_protocol;
+#[path="service_store_requests.rs"]
+mod service_store_requests;
 #[path="service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
 mod service_git_protocol;
@@ -317,6 +325,8 @@ mod github_auth_capture_wire;
 mod github_auth_nomination;
 mod github_auth_native_owner;
 mod github_auth_entry_protocol;
+mod github_device_protocol;
+mod github_device_native;
 mod github_auth_accounts;
 mod github_connection_session;
 mod github_preflight_protocol;

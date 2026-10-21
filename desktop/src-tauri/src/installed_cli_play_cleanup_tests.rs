@@ -72,7 +72,7 @@ fn lost_reply_preserves_original_ids_and_ack_is_not_cleanup_in_human_or_json() {
 #[test]
 fn actual_capability_catalogue_keeps_fixed_limit_and_separate_mutating_consent() {
     let bytes = super::super::capabilities(true).unwrap();
-    assert!(bytes.len() <= 12 * 1024 + 1);
+    assert!(bytes.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let cleanup = &v["playCleanup"];
     assert_eq!(cleanup["oneUse"], true);

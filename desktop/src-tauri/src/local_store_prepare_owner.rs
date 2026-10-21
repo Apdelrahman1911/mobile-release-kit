@@ -21,6 +21,7 @@ impl LocalStorePrepareOwner {
     pub(crate) fn claim_matches(&self,c:&crate::saved_command_owner::LocalHistoryClaim)->bool{c.matches_owner(&self.saved)}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn helper_matches(&self,c:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{c.matches_owner(&self.saved)}
+    pub(crate) fn agent_store_original(&self)->&SavedCommandOwner{&self.saved}
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

@@ -26,8 +26,18 @@ pub(crate) const RETAINED_LIMIT: usize = 8 * 1024 * 1024;
 // The prospective 8,000-token guard runs BEFORE JSON decoding, including
 // embedded Contents documents. This is owned-backing arithmetic, not RSS.
 pub(crate) const REMOTE_WORK_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const SESSION_LIMIT: usize = 64 * 1024 * 1024;
+// The complete shared Document has its own 64-MiB ceiling. Cleanup keeps its
+// existing 16+16+8-MiB work reservation separately: at most 104 MiB of owned
+// backing, not RSS, extra credential capacity, or credit from unused work.
+pub(crate) const DOCUMENT_LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const SESSION_LIMIT: usize = DOCUMENT_LIMIT
+    + crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES
+    + REMOTE_WORK_BYTES
+    + RETAINED_LIMIT;
 pub(crate) fn admission_bytes(retained_document: usize) -> Option<usize> {
+    if retained_document > DOCUMENT_LIMIT {
+        return None;
+    }
     retained_document
         .checked_add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?
         .checked_add(REMOTE_WORK_BYTES)?

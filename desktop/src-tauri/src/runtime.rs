@@ -479,6 +479,21 @@ impl GitHubAuthInstalledProfile {
     }
 }
 
+// Device OAuth uses only the publisher-bound client ID, never a gh identity.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubDeviceInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubDeviceInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() || crate::github_device_protocol::configured().is_none() {
+            return Err(unavailable());
+        }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_device_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
 // Two separate action families. Fixed installed selection is DATA, not
 // read-only authority, native/service qualification, or permission to dispatch.
 // No launch-time environment or renderer value selects a publisher binding.
@@ -1996,6 +2011,18 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         if !self.github_auth_profile_available() { return Err(unavailable()); }
         originals.inspect_once(GitHubAuthInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn github_device_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() && crate::github_device_protocol::configured().is_some() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_device_installed(&self, originals: &mut crate::installed_runtime::GitHubDeviceRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_device_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubDeviceInstalledProfile { _private: () }, end, stop)
     }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn resolve_github_setup_installed(&self, originals: &mut crate::installed_runtime::GitHubSetupRuntimeSlots,

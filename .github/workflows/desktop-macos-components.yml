@@ -439,7 +439,7 @@ jobs:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
     if: github.event_name == 'workflow_dispatch' && (inputs.apple_key_component || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-native-tests' || inputs.component == 'app-contracts' || inputs.component == 'automation-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
-    name: ${{ inputs.component == 'automation-contracts' && 'Test affected automation and Mac admission contracts' || inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
+    name: ${{ inputs.component == 'automation-contracts' && 'Test affected automation and check Mac app graphs' || inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     permissions:
@@ -489,7 +489,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B desktop/tools/prepare_ci_xcode.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests' && inputs.component != 'automation-contracts'
+        if: inputs.component != 'app-contracts' && inputs.component != 'local-keychain-contracts' && inputs.component != 'app-native-tests'
         with:
           node-version: '24.20.0'
       - name: Allocate task-owned app compiler directory
@@ -533,7 +533,7 @@ jobs:
           # Exact SDK/Rust/profile/dependency key only. Source changes still
           # run Cargo, including build.rs SOURCE/release env invalidation.
           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
-      - name: ${{ inputs.component == 'automation-contracts' && 'Run only affected memory, cleanup and foreground-history contracts' || inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+      - name: ${{ inputs.component == 'automation-contracts' && 'Run affected automation contracts and check current Mac graphs' || inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'app-native-tests' && 'Run focused library regressions and native backup/IPC checks' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -549,61 +549,118 @@ jobs:
           export npm_config_cache="$WORK_ROOT/npm-cache"
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           if [[ "$APP_CHECKS" == automation-contracts ]]; then
-            # Linux production/CLI compilation ran locally. Its full libtest
-            # graph exceeds the VPS RAM reserve; this same focused Mac batch
-            # also exercises the real Darwin quotes and SourceBook/IPC paths.
-            # No frontend, app launch, signing, notarization or provider calls.
+            # Compile and run only the new/affected library contracts first:
+            # DATA and isolated private Store fixtures, not provider/native work.
+            # Then check the current shipping, CLI and observer feature graphs
+            # with real frontend assets; no app launch, packaging or signing.
             export CARGO_BUILD_JOBS=1
             automation_home=$(/usr/bin/mktemp -d "$HOME/.mrka.XXXXXX")
             trap 'status=$?; if ! /bin/rmdir "$automation_home"; then printf "%s\n" "Automation fixture retained for disposable-host teardown." >&2; test "$status" -ne 0 || status=1; fi; exit "$status"' EXIT
             tests=(
-              macos_history_inventory::tests::original_backing_and_full_control_reservations_stay_separate
-              git_local_protocol::tests::local_admission_keeps_writer_bound_with_shared_document_data_and_full_code
-              git_local_protocol::fetch_worker::tests::remote_quote_preserves_shared_data_writer_remote_and_code_bounds
-              git_local_protocol::push_worker::tests::push_quote_preserves_shared_data_writer_remote_and_code_bounds
-              asset_session::tool_memory::tests::public_partition_preserves_document_cap_future_reserve_and_checked_totals
-              asset_session::lookup_memory::local_execute_census_remaining_has_no_overflow_or_added_credit
-              asset_session::shared_memory_tests::actual_document_and_retained_capacity_obey_shared_admission
+              # Configuration CLI: original linkage, consent, finality and bounded drafts.
+              service_configuration_protocol::tests::closed_groups_preserve_unselected_and_forbidden_fields_without_exporting_them
+              service_configuration_protocol::tests::change_grammar_rejects_identity_enabled_commands_and_unbounded_or_unsafe_containers
+              service_configuration_protocol::tests::required_nullable_projection_fields_keep_missing_and_wrong_type_distinct
+              service_configuration_protocol::tests::full_derivation_is_bounded_before_clone_and_does_not_reset_the_original
+              service_configuration_protocol::tests::final_combinations_never_invent_a_saved_configuration
+              service_configuration_requests::tests::duplicate_read_is_same_data_and_other_request_cannot_replace_live_or_unknown_original
+              service_configuration_requests::tests::read_permission_never_supplies_an_original_preview_or_apply_grant
+              service_configuration_requests::tests::native_poll_retains_the_earliest_read_or_explicit_stop_without_a_renderer
+              service_configuration_requests::tests::exactly_thirty_two_cancelled_metadata_rows_stay_discoverable_without_history_eviction
+              service_configuration_requests::tests::exact_desktop_query_keeps_old_refusal_after_latest_row_without_fallback
+              service_configuration_requests::tests::wrong_origin_close_and_poison_cannot_rearm_a_prior_request
+              service_configuration_requests::tests::exhausted_original_status_or_publication_counter_fences_the_same_inbox
+              application_service::agent_configuration::tests::current_read_enqueues_without_store_mutation_and_does_not_authorize_apply
+              application_service::agent_configuration::tests::renewal_observes_and_stops_old_request_but_never_revives_original_facet
+              application_service::agent_configuration::tests::wrong_project_stale_alias_and_unobserved_poison_are_not_read_or_native_authority
+              edit_owner::agent_configuration::tests::exact_seven_publications_have_no_repeat_skip_or_rebase
+              edit_owner::agent_configuration::tests::no_preview_or_watchdog_cancellation_can_be_replaced_by_status_data
+              edit_owner::agent_configuration::tests::actual_main_window_decoders_accept_only_the_closed_origin_variant
+              edit_owner::agent_configuration::tests::new_cli_frame_limits_precede_clone_while_ordinary_configuration_stays_supported
+              edit_owner::agent_configuration::tests::failed_retirement_chain_cannot_publish_saved_attribution_or_change_physical_facts
+              edit_owner::agent_configuration::memory::tests::original_last_capacity_and_private_other_domain_submission_are_not_status_credit
+              edit_owner::agent_configuration::memory::tests::entire_active_checkout_plus_prepared_is_bounded_before_status_clone
+              asset_session::agent_configuration::configuration_storage_tests::actual_default_document_fits_configuration_quote_and_retained_capacity_refuses
+              installed_cli::configuration::tests::actual_bounded_cli_collector_keeps_apply_and_explicit_review_argument
+              installed_cli::configuration::tests::strict_stdin_and_typed_requests_never_accept_full_config_or_implicit_enable
+              installed_cli::configuration::tests::actual_capability_output_keeps_limit_scope_and_all_compiled_repository_actions
+              # Upload-key CLI: nonce/revoke ordering and original three-return finality.
+              service_upload_key_protocol::tests::actions_require_exact_distinct_desktop_consents_and_no_private_fields
+              service_upload_key_protocol::tests::access_requires_nullable_fields_and_never_renews_consumed_permission
+              service_upload_key_requests::tests::one_exact_read_facet_and_desktop_scope_are_required_before_any_claim
+              service_upload_key_requests::tests::exact_duplicates_observe_only_and_never_alias_another_project_instance_or_grant
+              service_upload_key_requests::tests::every_order_requires_actual_caller_native_and_continuation_returns
+              service_upload_key_requests::tests::attempted_preparation_without_install_and_lost_original_return_are_absorbing_unknown
+              service_upload_key_requests::tests::queued_cancel_is_not_native_nogo_and_stale_revoke_cannot_withdraw_a_new_consent
+              service_upload_key_requests::tests::read_revoke_and_original_end_never_renew_or_infer_success_on_stop
+              service_upload_key_requests::tests::catalogue_copies_only_original_ids_without_expiring_or_polling_requests
+              service_upload_key_requests::tests::capacity_keeps_all_original_tombstones_and_never_resets_a_used_consent
+              service_upload_key_requests::tests::unknown_join_wrong_original_and_poison_cannot_become_finished_or_a_new_grant
+              asset_session::agent_upload_key::tests::exact_revoke_before_first_allow_cut_is_retained_without_stopping_another_nonce
+              asset_session::agent_upload_key::tests::main_requests_are_small_explicit_action_and_consent_pairs_not_status_authority
+              asset_session::agent_upload_key::tests::exact_revoke_is_an_address_only_and_duplicate_or_foreign_fields_refuse
+              application_service::upload_key::tests::reconnect_and_revoke_preserve_the_original_request_not_a_new_permission
+              application_service::upload_key::tests::foreign_project_client_and_replaced_read_facet_cannot_borrow_upload_key_scope
+              installed_cli::upload_key::tests::actual_collector_admits_only_four_ids_only_commands_and_explicit_submit_review
+              installed_cli::upload_key::tests::submit_wire_carries_only_original_ids_and_cannot_request_material_or_a_new_action
+              installed_cli::upload_key::tests::pending_saved_unassigned_and_reviewed_bind_are_distinct_and_exactly_correlated
+              installed_cli::upload_key::tests::unknown_or_lost_ack_prints_only_original_status_stop_and_never_a_replay_command
+              installed_cli::upload_key::tests::scope_and_existing_request_catalogue_expose_only_bounded_original_addresses
+              # Store CLI: fixed delegate, original currentness/watchdog and finality (no provider).
+              service_store_requests::tests::store_triple_cut_in_both_native_caller_orders
+              service_store_requests::tests::store_history_progress_ack_cannot_settle_later_native_terminal
+              service_store_requests::tests::store_dropped_call_or_history_is_absorbing_unknown
+              service_store_requests::tests::store_history_error_not_native_result_is_unknown
+              service_store_requests::tests::store_retired_unused_unknown_cannot_be_replaced
+              service_store_requests::tests::store_same_request_reconnect_does_not_reexecute_and_grant_consumes_once
+              service_store_requests::tests::store_cancel_is_not_retirement_and_preserves_earliest_stop
+              service_store_requests::tests::store_unknown_does_not_renew_original_cutoff
+              service_store_requests::tests::store_read_revoke_and_wrong_doc_never_admit
+              service_store_requests::tests::store_native_identity_conflict_or_false_terminal_stays_unknown
+              service_store_requests::tests::store_complete_keeps_metadata_not_a_new_grant_or_replay
+              service_store_requests::tests::store_finite_roster_never_reclaims_terminal_or_unknown_rows
+              service_store_requests::tests::store_wire_required_nulls_closed_reports_and_private_fields
+              service_store_requests::tests::store_full_census_includes_retained_rows_ipc_and_projection_without_credit
+              saved_command_owner::agent_store::tests::store_facet_never_delegates_both_query_or_later_context
+              saved_command_owner::agent_store::tests::store_terminal_shaped_data_before_original_retirement_stays_pending
+              saved_command_owner::agent_store::tests::store_actual_validated_result_projects_fail_findings_without_release_authority
+              saved_command_owner::agent_store::tests::store_candidate_report_only_exposes_same_local_intent_digests
+              saved_command_owner::agent_store::tests::store_watchdog_uses_original_read_end_without_relay_or_worker_output
+              saved_command_owner::agent_store::tests::store_watchdog_samples_renewed_old_read_after_stop_and_keeps_earliest_f
+              saved_command_owner::agent_store::tests::store_same_original_entry_and_witness_required_before_one_consumption
+              saved_command_owner::agent_store::tests::store_early_native_retirement_is_retained_data_not_lost_to_late_relay
+              saved_command_owner::agent_store::tests::store_missing_material_or_consumed_missing_native_owner_never_becomes_clean
+              saved_command_owner::agent_store::tests::store_raw_main_request_is_bounded_before_closed_decode
+              installed_cli::store::tests::store_cli_requires_fixed_id_only_consent_and_closed_commands
+              installed_cli::store::tests::store_cli_output_correlates_actual_response_and_pending_is_not_completion
+              installed_cli::store::tests::store_cli_lost_ack_has_only_original_status_cancel_and_no_replay
+              # Device login: closed DATA, clocks and joined memory readers (no OAuth).
+              github_device_protocol::tests::missing_publisher_is_not_a_borrowed_gh_application
+              github_device_protocol::tests::exact_public_request_cannot_supply_token_code_or_provider
+              github_device_protocol::tests::private_terminal_correlation_and_mixed_reply_refuse_before_consumption
+              github_device_native::tests::pending_slow_down_retains_original_expiry_without_first_failure
+              github_device_native::tests::original_first_failure_and_hard_ceiling_cannot_renew_on_status_or_stop
+              supervisor::github_device::tests::original_memory_reader_keeps_private_token_out_of_public_result_until_separate_retirement
+              supervisor::github_device::tests::unsolicited_ready_plus_terminal_and_unknown_never_mint_private_reply
+              supervisor::github_device::tests::per_call_endpoint_and_first_failure_never_extend_original_device_handoff_budget
+              asset_session::gh_auth::device::tests::absent_original_gate_cannot_mint_device_request_or_claim_go
+              asset_session::gh_auth::device::tests::missing_client_id_refuses_before_document_original_or_runtime_entry
+              asset_session::gh_auth::device::tests::pending_device_original_keeps_peer_exclusion_and_stop_cannot_fake_finality
+              # Apple: exclusive active-mode quote and two actual inert payload records.
+              saved_command_owner::apple_provisioning::tests::apple_original_clock_and_finite_representation_quote_are_not_renewed
               asset_session::shared_memory_tests::actual_document_plus_apple_future_fits_original_session_limit
+              # Play cleanup: separate bounded Document and work partitions.
+              github_play_cleanup_protocol::tests::exact_fixed_allowances_preserve_separate_document_and_cleanup_bounds
+              asset_session::play_cleanup::tests::actual_document_growth_preserves_separate_cleanup_and_document_limits
+              # Complete composed Document: new retained inboxes count, no runtime entry.
+              asset_session::shared_memory_tests::actual_document_and_retained_capacity_obey_shared_admission
               asset_session::shared_memory_tests::actual_mac_native_quotes_fit_current_document_before_any_runtime_is_opened
-              github_play_cleanup_protocol::tests::advanced_dispatch_head_is_separate_from_original_source_and_alias_safe_once_key
-              github_play_cleanup_protocol::tests::acknowledgement_and_absent_later_journal_are_never_cleanup_success
-              github_play_cleanup_protocol::tests::worker_refusal_has_exact_correlation_and_no_public_consent_or_private_field
-              github_play_cleanup_protocol::tests::explicit_closed_command_does_not_accept_desktop_release_markers_or_auto_confirm
-              github_play_cleanup_protocol::tests::exact_fixed_allowances_use_checked_remaining_document_budget
-              service_play_cleanup_protocol::tests::closed_request_accepts_only_three_ids_and_consent_not_provider_material
-              service_play_cleanup_protocol::tests::nullable_fields_and_acknowledgement_cannot_fabricate_cleanup_finality
-              service_play_cleanup_protocol::tests::response_rematches_instance_and_fixed_small_bound
-              service_play_cleanup_requests::tests::consumed_access_is_not_revoked_scope_and_exact_retry_never_remints_claim
-              service_play_cleanup_requests::tests::original_earliest_stop_and_later_unknown_do_not_renew_watchdog_or_revisions
-              service_play_cleanup_requests::tests::original_native_go_and_unknown_are_immediate_monotone_facts_not_join_or_retry_authority
-              service_play_cleanup_requests::tests::known_refusal_without_go_is_not_sent_and_a_later_reply_cannot_erase_original_go
-              service_play_cleanup_requests::tests::prearm_review_expiry_uses_original_end_and_postarm_does_not_renew_read_permission
-              service_play_cleanup_requests::tests::dropped_claim_close_and_context_loss_are_not_native_settlement
-              service_play_cleanup_requests::tests::known_preinsertion_refusal_keeps_tombstone_and_capacity_does_not_evict_it
-              service_play_cleanup_requests::tests::poisoned_or_fenced_original_inbox_invalidates_already_claimed_link
-              application_service::agent_play_cleanup::tests::actual_read_and_cleanup_scopes_both_required_reconnect_and_presend_rematch
-              application_service::agent_play_cleanup::tests::original_grant_clone_drop_and_renewal_do_not_rebind_old_cleanup_scope
-              application_service::agent_play_cleanup::tests::before_allow_revocation_and_claim_watchdog_do_not_wait_for_service_io_mutex
-              application_service::agent_play_cleanup::tests::unobserved_service_poison_fences_claim_without_second_service_lock
-              asset_session::play_cleanup::tests::default_document_fits_cleanup_but_real_retained_buffers_refuse_without_quota_change
-              github_connection_session::play_cleanup::tests::access_countdown_is_data_but_disable_or_replacement_advances_original_revision
-              github_connection_session::play_cleanup::tests::stale_or_unknown_data_without_original_consent_never_gains_agent_review
-              supervisor::play_cleanup::tests::delayed_agent_stop_uses_original_failure_plus_two_and_never_supplies_management_join
-              installed_cli::play_cleanup::tests::original_argument_collector_accepts_exact_reviewed_submit_and_rejects_extras
-              installed_cli::play_cleanup::tests::lost_reply_preserves_original_ids_and_ack_is_not_cleanup_in_human_or_json
-              installed_cli::play_cleanup::tests::actual_capability_catalogue_keeps_fixed_limit_and_separate_mutating_consent
-              application_service::history_policy::tests::original_history_lease_never_renews_or_rearms
-              application_service::history_policy::service_tests::history_allowlist_precedes_every_dispatch_family_and_service_lock
-              application_service::history_policy::service_tests::history_reload_is_stale_and_never_restores_alias_grant_or_execution
-              application_service::history_policy::service_tests::history_stop_overtakes_blocked_grant_publication_without_timer_renewal
-              application_service_host::headless::tests::history_startup_deadline_and_stop_refuse_before_source_without_rearming
-              installed_history_service::tests::serve_history_requires_exact_foreground_consent_and_bounded_native_path
-              service_protocol::tests::service_info_accepts_only_desktop_or_foreground_history_tuple
-              application_service_host::headless::tests::macos::history_native_original_sources_join_before_grant_and_restart_does_not_restore_it
-              application_service_host::headless::tests::macos::history_concurrent_host_is_busy_and_cannot_take_over_or_delete_original_endpoint
-              application_service_host::headless::tests::macos::history_stopped_joined_startup_grants_nothing_and_saved_path_cannot_adopt_replacement
+              # Complete compiled CLI catalogue, not command/IPC execution.
               installed_cli::tests::capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals
+              installed_cli::play_cleanup::tests::actual_capability_catalogue_keeps_fixed_limit_and_separate_mutating_consent
+              # Complete shared request catalogue: actual ID namespaces, wire cap and privacy.
+              service_request_catalogue::tests::combined_build_capacity_and_id_namespace_are_not_per_family
+              service_request_catalogue::tests::additional_ids_have_strict_schema_presence_privacy_and_original_commands
             )
             (
               cd "$automation_home"
@@ -611,7 +668,19 @@ jobs:
                 --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --lib -- \
                 "${tests[@]}" --exact --test-threads=1 --nocapture | tee "$WORK_ROOT/automation-contracts.log"
             )
-            grep -Eq '^test result: ok\. 47 passed; 0 failed; 0 ignored;' "$WORK_ROOT/automation-contracts.log"
+            grep -Eq "^test result: ok\. ${#tests[@]} passed; 0 failed; 0 ignored;" "$WORK_ROOT/automation-contracts.log"
+            # generate_context! embeds ../dist in the actual shell graph.
+            # Reuse the normal frontend build and existing app-typecheck checks;
+            # do not build another app binary or enable observation in shipping.
+            npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+            npm --prefix desktop run build
+            rustup run 1.98.1 cargo check --locked --lib \
+              --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features installed-cli --manifest-path desktop/src-tauri/Cargo.toml --bin mrk
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features desktop-shell,custom-protocol,macos-installed-observation \
+              --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
             exit 0
           fi
           if [[ "$APP_CHECKS" != app-contracts && "$APP_CHECKS" != local-keychain-contracts && "$APP_CHECKS" != app-native-tests ]]; then

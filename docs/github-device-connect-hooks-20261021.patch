@@ -1,0 +1,1845 @@
+diff --git a/desktop/native/macos-installed-native/src/github_browser.m b/desktop/native/macos-installed-native/src/github_browser.m
+--- a/desktop/native/macos-installed-native/src/github_browser.m
++++ b/desktop/native/macos-installed-native/src/github_browser.m
+@@ -22,9 +22,10 @@
+ static int number(const uint8_t *p,size_t n) {if(!p||!n||n>20||p[0]<'1'||p[0]>'9')return 0;uint64_t value=0;for(size_t i=0;i<n;i++){if(p[i]<'0'||p[i]>'9')return 0;uint64_t digit=(uint64_t)(p[i]-'0');if(value>(UINT64_MAX-digit)/10)return 0;value=value*10+digit;}return 1;}
+ int mrk_github_browser(int kind,const uint8_t *repository,size_t repository_len,
+     const uint8_t *first,size_t first_len,const uint8_t *second,size_t second_len) {
+-    if(!repo(repository,repository_len))return EINVAL;
++    if(kind!=4&&!repo(repository,repository_len))return EINVAL;
+     if(kind==1||kind==2){if(!number(first,first_len)||second_len!=0)return EINVAL;}
+     else if(kind==3){if(!sha(first,first_len)||!sha(second,second_len)||memcmp(first,second,40)==0)return EINVAL;}
++    else if(kind==4){if(repository_len||first_len||second_len)return EINVAL;}
+     else return EINVAL;
+     uint32_t uid=0;int admitted=mrk_user(&uid);if(admitted)return admitted;
+     if(![NSThread isMainThread])return EPERM;
+@@ -35,7 +36,8 @@
+             NSString *r=[[[NSString alloc] initWithBytes:repository length:repository_len encoding:NSASCIIStringEncoding] autorelease];
+             NSString *a=[[[NSString alloc] initWithBytes:first length:first_len encoding:NSASCIIStringEncoding] autorelease];
+             NSString *text=nil;
+-            if(kind==3){
++            if(kind==4){text=@"https://github.com/login/device";}
++            else if(kind==3){
+                 NSString *b=[[[NSString alloc] initWithBytes:second length:second_len encoding:NSASCIIStringEncoding] autorelease];
+                 if(!b)return ENOMEM;text=[NSString stringWithFormat:@"https://github.com/%@/compare/%@...%@",r,a,b];
+             } else text=[NSString stringWithFormat:@"https://github.com/%@/pull/%@%@",r,a,kind==2?@"/files":@""];
+diff --git a/desktop/native/macos-installed-native/src/github_browser.rs b/desktop/native/macos-installed-native/src/github_browser.rs
+--- a/desktop/native/macos-installed-native/src/github_browser.rs
++++ b/desktop/native/macos-installed-native/src/github_browser.rs
+@@ -6,7 +6,7 @@
+         first:*const u8,first_len:usize,second:*const u8,second_len:usize)->i32;
+ }
+ fn request(kind:i32,repository:&str,first:&str,second:&str)->io::Result<()> {
+-    if repository.is_empty()||repository.len()>140||first.is_empty()||first.len()>40||second.len()>40 {
++    if if kind==4 { !repository.is_empty()||!first.is_empty()||!second.is_empty() } else { repository.is_empty()||repository.len()>140||first.is_empty()||first.len()>40||second.len()>40 } {
+         return Err(io::Error::from_raw_os_error(nix::libc::EINVAL));
+     }
+     // SAFETY: all pointers borrow live bounded UTF-8 bytes for the synchronous
+@@ -16,3 +16,6 @@
+ }
+ pub fn pull_request(repository:&str,number:&str,files:bool)->io::Result<()> {request(if files{2}else{1},repository,number,"")}
+ pub fn comparison(repository:&str,base_sha:&str,head_sha:&str)->io::Result<()> {request(3,repository,base_sha,head_sha)}
++
++/// Fixed device page only, no user/device code in the URL.
++pub fn open_device()->io::Result<()> {request(4,"","","")}
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -122,6 +122,9 @@
+ import { GitRepositoryController } from './gitRepositoryController.ts';
+ import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
+ import { GitHubConnectionController } from './githubConnectionController.ts';
++import { GitHubDeviceConnectionController } from './githubDeviceConnectionController.ts';
++import type { GitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
++import { GitHubDeviceConnection } from './components/GitHubDeviceConnection.tsx';
+ import { GitHubGhEntryController } from './githubGhEntryController.ts';
+ import type { GitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { GitHubPreflightController, githubPreflightOwnerReason } from './githubPreflightController.ts';
+@@ -336,7 +339,12 @@
+   const githubGhEntryRef = useRef<GitHubGhEntryController | null>(null);
+   const githubGhApiRef = useRef<GitHubGhApi | null>(null);
+   const githubGhAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+-  const githubGhBusy = useCallback(() => githubGhEntryRef.current?.ownerReason() ?? null, []);
++  const githubDeviceRef = useRef<GitHubDeviceConnectionController | null>(null);
++  const githubDeviceApiRef = useRef<GitHubDeviceApi | null>(null);
++  const githubDeviceAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
++  const githubGhOnlyBusy = useCallback(() => githubGhEntryRef.current?.ownerReason() ?? null, []);
++  const githubDeviceBusy = useCallback(() => githubDeviceRef.current?.ownerReason() ?? null, []);
++  const githubGhBusy = useCallback(() => githubGhOnlyBusy() ?? githubDeviceBusy(), [githubGhOnlyBusy,githubDeviceBusy]);
+   const githubPublicationControllerRef = useRef<GitHubPublicationController | null>(null);
+   const githubRemoteSetupControllerRef = useRef<GitHubRemoteSetupController | null>(null);
+   const githubPreflightControllerRef = useRef<GitHubPreflightController | null>(null);
+@@ -413,6 +421,7 @@
+         projectGeneration: connectionProjectGeneration.current, repository: applicationRepositoryRef.current,
+       } : null);
+     githubGhEntryRef.current?.syncContext();
++    githubDeviceRef.current?.syncContext();
+     versionEnrollmentRef.current?.syncContext();
+     versionReserveRef.current?.syncContext();
+     repositoryCreateRef.current?.syncContext();
+@@ -428,7 +437,7 @@
+   // Keep the reducer's latest state synchronously visible to save admission.
+   // A React render/effect delay must not let an older review authorize Apply.
+   const dispatch = useCallback((action: WorkspaceAction) => {
+-    githubGhEntryRef.current?.beforeContextIntent();
++    githubGhEntryRef.current?.beforeContextIntent(); githubDeviceRef.current?.beforeContextIntent();
+     retireIdentity();
+     externalObserverRef.current?.beforeWorkspaceAction();
+     cliReadAccessControllerRef.current?.invalidateContext();
+@@ -562,6 +571,12 @@
+   }));
+   githubGhEntryRef.current = githubGhEntry;
+   const githubGhState = useSyncExternalStore(githubGhEntry.subscribe, githubGhEntry.getSnapshot, githubGhEntry.getSnapshot);
++  const [githubDevice] = useState(() => new GitHubDeviceConnectionController(githubConnection, {
++    current: () => ({api:githubDeviceApiRef.current,port:connectionPortRef.current,
++      context:connectionControllerRef.current?.getSnapshot().context??null,blocked:githubDeviceAdmission.current()}),
++  }));
++  githubDeviceRef.current=githubDevice;
++  useSyncExternalStore(githubDevice.subscribe,githubDevice.getSnapshot,githubDevice.getSnapshot);
+   const originalConnection = connectionState.status ?? connectionState.retained;
+   const [repositoryCreate] = useState(() => new GitHubRepositoryCreateController(
+     githubConnection.getSnapshot, () => repositoryCreateAdmission.current()));
+@@ -898,11 +913,14 @@
+   // This coupled entry excludes only its own picker work and the existing
+   // Connect latch. That controller independently checks its original idle
+   // session before latching, then retains the exact handoff before native IPC.
+-  githubGhAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
++  githubGhAdmission.current = () => githubDeviceBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+     savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ??
+     cliReadAccessControllerRef.current?.pendingReason() ??
+     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+       ? 'Finish the prepared GitHub review before connecting another account.' : null);
++  githubDeviceAdmission.current = () => githubGhOnlyBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
++    savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
++    (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared ? 'Finish the prepared review before browser sign-in.' : null);
+   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
+     playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+   const [artifactInspection] = useState(() => new ArtifactInspectionController({
+@@ -1370,7 +1388,7 @@
+     if (originalGit) { setBootError({ code: 'git_read_busy', message: originalGit, retryable: false }); return; }
+     const originalGh = githubGhBusy();
+     if (originalGh) { setBootError({ code: 'github_cli_busy', message: originalGh, retryable: false }); return; }
+-    githubGhEntry.beforeContextIntent();
++    githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
+     const originalIdentity = identityBusy();
+     if (originalIdentity) {
+       setBootError({ code: 'identity_busy', message: originalIdentity, retryable: false }); return;
+@@ -1408,8 +1426,8 @@
+     connectionHelpGeneration.current = helpGeneration;
+     githubConnection.setHelp(null);
+     githubConnection.setContext(null);
+-    connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+-    githubGhEntry.attach(null, null); // Refuses replacement if an original read intervened.
++    connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null; githubDeviceApiRef.current = null;
++    githubGhEntry.attach(null, null); githubDevice.attach(null, null); // Refuses replacement if an original read intervened.
+     void githubConnection.attach(null);
+     void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null);
+     void githubPreflight.connect(null);
+@@ -1449,9 +1467,11 @@
+       connectionPortRef.current = port;
+       connectionHandoffRef.current = connection.mode === 'native' ? { port, submit: connection.connectGitHubToken } : null;
+       githubGhApiRef.current = connection.mode === 'native' ? connection.githubGhEntry ?? null : null;
++      githubDeviceApiRef.current = connection.mode === 'native' ? connection.githubDevice ?? null : null;
+       // No account discovery or Connect on attach. Availability/status remains
+       // an explicit read; failed rebind retains old original controls.
+       githubGhEntry.attach(githubGhApiRef.current, port);
++      githubDevice.attach(githubDeviceApiRef.current, port);
+       // Fixed read-only Status may expose an unavailable native gate. Working
+       // passive appInfo is neither credential admission nor TLS qualification.
+       void githubConnection.attach(port);
+@@ -1504,17 +1524,17 @@
+         identityRef.current?.ui.sync();
+         cliReadAccessControllerRef.current?.invalidateContext();
+         cliReadAccessControllerRef.current?.syncContext();
+-        githubGhEntry.beforeContextIntent();
+-        connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+-        githubGhEntry.attach(null, null);
++        githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
++        connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null; githubDeviceApiRef.current = null;
++        githubGhEntry.attach(null, null); githubDevice.attach(null, null);
+         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
+         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
+       }
+     } finally {
+       passivePending.current -= 1; setPassivePending(passivePending.current);
+-      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
++      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); githubDevice.syncContext(); }
+     }
+-  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubDevice, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+
+   // Before bootstrap: retire consent on the actual saved/key projection, and
+   // keep the view responsive to peer-owner changes without renewing an intent.
+@@ -1595,7 +1615,7 @@
+
+   useEffect(() => {
+     void bootstrap();
+-    return () => { githubGhEntry.beforeContextIntent(); githubGhApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; syncGitReadRef.current(); retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
++    return () => { githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent(); githubGhApiRef.current = null; githubDeviceApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; syncGitReadRef.current(); retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+   }, [bootstrap]);
+
+   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
+@@ -1636,6 +1656,7 @@
+   useEffect(() => () => iosArchive.dispose(), [iosArchive]);
+   useEffect(() => () => releaseEvidence.dispose(), [releaseEvidence]);
+   useEffect(() => () => githubGhEntry.dispose(), [githubGhEntry]);
++  useEffect(() => () => githubDevice.dispose(), [githubDevice]);
+   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
+   useEffect(() => () => githubPublication.dispose(), [githubPublication]);
+   useEffect(() => () => repositoryCreate.dispose(), [repositoryCreate]);
+@@ -1682,7 +1703,7 @@
+       retireIdentity();
+       externalObserverRef.current?.beforeWorkspaceAction();
+       cliReadAccessControllerRef.current?.invalidateContext();
+-      githubGhEntryRef.current?.beforeContextIntent();
++      githubGhEntryRef.current?.beforeContextIntent(); githubDeviceRef.current?.beforeContextIntent();
+       void toolAcquisitionControllerRef.current?.cancel();
+       void appleProvisioningControllerRef.current?.cancel();
+       initializationControllerRef.current?.requestClose();
+@@ -1802,7 +1823,7 @@
+
+   const changeApplicationRepository = (value: string) => {
+     if (versionEnrollmentBusy()) return;
+-    githubGhEntry.beforeContextIntent();
++    githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
+     retireIdentity();
+     if (value === applicationRepositoryRef.current) return;
+     externalObserver.beforeWorkspaceAction();
+@@ -2142,6 +2163,7 @@
+         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
+         {(page !== 'environment' || environmentState.platform !== 'android' || environmentState.operation !== 'build') &&
+           <PrepareBuildEnvironment {...toolPreparationView} compact />}
++        {page !== 'github' && <GitHubDeviceConnection controller={githubDevice} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubGhEntry controller={githubGhEntry} compact
+           originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined}
+           onShow={() => navigate('github')} />}
+@@ -2265,8 +2287,8 @@
+             <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
+             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
+             handoff={connectionHandoffRef.current}
+-            ghEntry={<GitHubGhEntry controller={githubGhEntry}
+-              originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} />} />
++            ghEntry={<><GitHubGhEntry controller={githubGhEntry}
++              originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} /><GitHubDeviceConnection controller={githubDevice} /></>} />
+             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
+             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
+             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -91,6 +91,7 @@
+ import { createGitRepositoryPermissionApi } from './service_git_repository_permission.ts';
+ import { createGitRemotePermissionApi } from './service_git_remote_permission.ts';
+ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
++import { createGitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createVersionReservePort } from './versionReserve.ts';
+@@ -421,6 +422,7 @@
+     agentGitRemote: createGitRemotePermissionApi(mode, invoke),
+     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
++    githubDevice: createGitHubDeviceApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+diff --git a/desktop/src/githubConnectionController.ts b/desktop/src/githubConnectionController.ts
+--- a/desktop/src/githubConnectionController.ts
++++ b/desktop/src/githubConnectionController.ts
+@@ -8,6 +8,8 @@
+   sameConnectionData } from './githubConnectionProtocol.ts';
+ import { ghResultMatches, githubGhFailure, parseGitHubGhRequest, parseGitHubGhResult } from './githubGhEntryProtocol.ts';
+ import type { GitHubGhHandoff, GitHubGhRequest } from './githubGhEntryProtocol.ts';
++import { parseDeviceStart, parseDeviceCompletion, deviceStartFailure, deviceConnectionReason } from './githubDeviceConnectionProtocol.ts';
++import type { DeviceStart, DeviceHandoff } from './githubDeviceConnectionProtocol.ts';
+
+ function freeze<T>(value: T): T {
+   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+@@ -304,6 +306,49 @@
+       pending.replyPending = false; this.ghRejected(pending, error); return false;
+     }
+   }
++  // Device approval uses the SAME original Connect latch/observer. The
++  // retained completion waits for the real device calls; no new connection
++  // owner or account authority comes from a user code/progress notification.
++  connectDevice(value: DeviceStart, handoff: DeviceHandoff): boolean {
++    const request = parseDeviceStart(value);
++    if (!request || !this.canConnect() || handoff.port !== this.port || !this.observer || !this.state.context || !this.state.status ||
++      request.projectId !== this.state.context.projectId || request.repository !== this.state.context.repository ||
++      request.expectedConnectionRevision !== this.state.status.revision) return false;
++    const pending = this.newPending('connect',this.observer,this.state.context,this.state.status);
++    this.pending = pending; this.update({busy:'connect',uncertain:false,error:null});
++    if (!this.unsentCurrent(pending) || !this.contextReady() || this.state.status?.session !== null || handoff.port !== this.port) {
++      this.discardUnsent(pending); return false;
++    }
++    pending.sent = true; pending.replyPending = true;
++    const failed = (error: unknown) => {
++      if (this.pending !== pending || pending.done) return;
++      const f = deviceStartFailure(error);
++      if (f.notAdmitted && pending.operationId === null && pending.sessionId === null && !pending.observer.accepted?.session) {
++        this.finishGhPending(pending,f.reason); return;
++      }
++      pending.uncertain = true; this.update({uncertain:true}); this.fail('response-invalid',true);
++    };
++    try {
++      const original = handoff.submit(request);
++      if (!original || typeof original.then !== 'function') throw new Error();
++      void original.then(value => {
++        const result = parseDeviceCompletion(value);
++        if (this.pending !== pending || pending.done || !pending.observer.active) return;
++        if (!result || result.device.projectId !== request.projectId || result.device.repository !== request.repository) {failed(null);return;}
++        if (!result.connection) {
++          if (pending.operationId || pending.sessionId || pending.observer.accepted?.session) {failed(null);return;}
++          this.finishGhPending(pending,deviceConnectionReason(result.device.reason));return;
++        }
++        const reply = this.receive(pending.observer,result.connection);
++        if (!reply || !this.originMatches(pending,reply)) failed(null);
++      },failed).finally(() => {
++        pending.replyPending = false;
++        if (this.pending === pending && pending.disconnectedBeforeReply && !pending.uncertain) this.finishGhPending(pending);
++        else this.settlePending(pending.observer.accepted);
++        this.maintainObserver();
++      });return true;
++    } catch(error) {pending.replyPending=false;failed(error);return false;}
++  }
+   private finishGhPending(pending: Pending, reason?: GitHubConnectionReason): void {
+     if (this.pending !== pending || pending.done) return;
+     pending.done = true; this.pending = null;
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -432,6 +432,7 @@
+   readonly agentGitRepository?: import('./service_git_repository_permission.ts').GitRepositoryPermissionApi | null;
+   readonly agentGitRemote?: import('./service_git_remote_permission.ts').GitRemotePermissionApi | null;
+   readonly agentGitIndex?: import('./service_git_permission.ts').PermissionApi<import('./service_git_permission.ts').GitIndexApproval> | null;
++  readonly githubDevice?: import('./githubDeviceConnectionProtocol.ts').GitHubDeviceApi | null;
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -334,6 +334,7 @@
+             "review_agent_identity", "prepare_agent_identity", "apply_agent_identity",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
++            "github_device_status", "github_device_start", "github_device_check", "github_device_open", "github_device_cancel",
+             "git_read_status", "git_read_start", "git_read_cancel",
+             "version_enrollment_status", "version_enrollment_review", "version_enrollment_confirm", "version_enrollment_cancel",
+             "version_reserve_status", "version_reserve_review", "version_reserve_start", "version_reserve_cancel", "version_reserve_edit",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -69,6 +69,11 @@
+     "allow-review-agent-identity", "allow-prepare-agent-identity", "allow-apply-agent-identity",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
++    "allow-github-device-status",
++    "allow-github-device-start",
++    "allow-github-device-check",
++    "allow-github-device-open",
++    "allow-github-device-cancel",
+     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
+     "allow-version-enrollment-status", "allow-version-enrollment-review", "allow-version-enrollment-confirm", "allow-version-enrollment-cancel",
+     "allow-version-reserve-status", "allow-version-reserve-review", "allow-version-reserve-start", "allow-version-reserve-cancel", "allow-version-reserve-edit",
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -144,7 +144,7 @@
+ #[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_git_local_unavailable.rs")]
+ mod git_local;
+ pub(crate) use git_local::GitLocalGate;
+-pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
++pub(crate) use gh_auth::{GitHubDeviceGoGate, GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
+ #[path = "asset_session_github_publication.rs"]
+ mod github_publication;
+ pub(crate) use github_publication::GitHubPublicationGoGate;
+@@ -2174,6 +2174,7 @@
+             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
++            if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+@@ -2260,6 +2261,29 @@
+         } else if kind==crate::git_local_protocol::Kind::Fetch {
+             crate::git_local_protocol::fetch_worker::admission_bytes(retained,future)
+         } else {crate::git_local_protocol::admission_bytes(retained,future)}.ok_or(Problem::Capacity)
++    }
++    // Exact current device coordinator only; its OriginalWork has never opened
++    // Source/GUI/keyring/vault. Real per-call Supervisor Books must already be
++    // gone, and the complete retained Doc/Original is counted under the old cap.
++    pub(super) fn github_device_admission_bytes(document:&Arc<Inner>,state:&DocumentState,owner:&Arc<OriginalWork>,future:usize)->Result<usize,Problem>{
++        if !gh_auth::device::census_original(state).is_some_and(|current|Arc::ptr_eq(current,owner))
++            || gh_auth::retained_bytes(state).is_none(){return Err(Problem::CleanupUnknown)}
++        let source=owner.source.try_lock().map_err(|_|Problem::CleanupUnknown)?;
++        let retirement=owner.retirement.try_lock().map_err(|_|Problem::CleanupUnknown)?;
++        let child=owner.child.try_lock().map_err(|_|Problem::CleanupUnknown)?;
++        let coordinator=owner.coordinator.try_lock().map_err(|_|Problem::CleanupUnknown)?;
++        if !source.not_started()||!retirement_empty(&retirement)||child.receipt!=JoinReceipt::New||child.handle.is_some()
++            ||coordinator.receipt!=JoinReceipt::Pending||coordinator.handle.is_none(){return Err(Problem::CleanupUnknown)}
++        if !owner.keyring.try_lock().is_ok_and(|k|k.resources_settled()&&k.allocations_released()){return Err(Problem::CleanupUnknown)}
++        let mut census=Census{current:Some((owner,&source,&retirement)),bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
++            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
++        census.artifact_document(document)?;census.document(state)?;
++        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?}
++        census.add(std::mem::size_of::<Census<'_>>())?;
++        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++        {crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity)}
++        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
++        {let _=future;Err(Problem::Unavailable)}
+     }
+     pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+         history_admission_bytes(document,state,future)
+diff --git a/desktop/src-tauri/src/asset_session_gh_auth.rs b/desktop/src-tauri/src/asset_session_gh_auth.rs
+--- a/desktop/src-tauri/src/asset_session_gh_auth.rs
++++ b/desktop/src-tauri/src/asset_session_gh_auth.rs
+@@ -5,6 +5,9 @@
+ use super::*;
+ #[path = "asset_session_gh_auth_accounts.rs"]
+ mod accounts;
++#[path="asset_session_github_device.rs"]
++pub(super) mod device;
++pub(crate) use device::GitHubDeviceGoGate;
+ use crate::{
+     github_auth_capture_wire as wire, github_auth_entry_protocol as entry_wire,
+     github_auth_native_owner::NativeGhProvider,
+@@ -30,12 +33,14 @@
+     Finished(GitHubAuthStatus),
+     Accounts(Arc<accounts::Read>),
+     AccountsFinished(accounts::Finished),
++    Device(Arc<device::Registration>),
++    DeviceFinished(crate::github_device_protocol::Status),
+ }
+ impl Entry {
+     fn original(&self) -> Option<&Arc<Registration>> {
+         match self {
+             Self::Original(original) => Some(original),
+-            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) => None,
++            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) | Self::Device(_) | Self::DeviceFinished(_) => None,
+         }
+     }
+ }
+@@ -832,19 +837,24 @@
+     Refused(GitHubReason),
+     Unknown,
+ }
+-pub(crate) struct GitHubAuthConnectionHold {
+-    original: Arc<Registration>,
+-}
++pub(crate) enum GitHubAuthConnectionHold { Gh{original:Arc<Registration>},Device(Arc<device::Registration>) }
+ impl GitHubAuthConnectionHold {
++    pub(crate) fn device_matches(&self,owner:&Arc<OriginalWork>,context:&crate::github_device_protocol::Context)->bool{
++        matches!(self,Self::Device(original) if original.matches(owner,context))
++    }
++    pub(crate) fn device_target(&self,context:&crate::github_device_protocol::Context,end:Instant)->bool{
++        matches!(self,Self::Device(original) if original.admitted_target(context,end))
++    }
++    pub(crate) fn device_gate(&self)->Option<GitHubDeviceGoGate>{match self{Self::Device(original)=>Some(original.gate()),Self::Gh{..}=>None}}
++
+     pub(crate) fn custody(&self) -> GitHubAuthCustody {
+-        self.original.custody()
++        match self{Self::Gh{original}=>original.custody(),Self::Device(original)=>original.custody()}
+     }
+     pub(crate) fn stop(&self, cause: GitHubReason) {
+-        self.original
+-            .fail(github_session::refused(cause), Instant::now());
++        match self{Self::Gh{original}=>original.fail(github_session::refused(cause),Instant::now()),Self::Device(original)=>original.stop(cause)}
+     }
+     pub(crate) fn matches(&self, owner: &Arc<OriginalWork>, context: &wire::Context) -> bool {
+-        Arc::ptr_eq(owner, &self.original.original) && context == &self.original.context
++        match self{Self::Gh{original}=>Arc::ptr_eq(owner,&original.original)&&context==&original.context,Self::Device(_)=>false}
+     }
+     pub(crate) fn admitted_target_matches(
+         &self,
+@@ -854,13 +864,14 @@
+         login: &str,
+         revision: &str,
+     ) -> bool {
+-        let context = &self.original.context;
++        let Self::Gh{original}=self else{return false};
++        let context = &original.context;
+         context.project_id == project
+             && context.repository == repository
+             && context.generation == generation
+             && context.login == login
+             && context.revision == revision
+-            && self.original.facts.lock().is_ok_and(|facts| {
++            && original.facts.lock().is_ok_and(|facts| {
+                 facts.stage == Stage::Http
+                     && facts.http_claimed
+                     && !facts.http_started
+@@ -873,6 +884,7 @@
+ }
+
+ pub(super) fn pending(state: &DocumentState) -> bool {
++    if device::pending(state){return true}
+     if accounts::pending(state) { return true; }
+     state
+         .gh_auth
+@@ -886,6 +898,7 @@
+         })
+ }
+ pub(super) fn can_exit(state: &DocumentState) -> bool {
++    if !device::can_exit(state){return false}
+     if !accounts::can_exit(state) { return false; }
+     state
+         .gh_auth
+@@ -894,6 +907,7 @@
+         .is_none_or(|original| original.actual_settled())
+ }
+ pub(super) fn stop(state: &DocumentState, cause: GitHubReason) {
++    device::stop(state,cause);
+     accounts::stop(state, cause);
+     if let Some(original) = state.gh_auth.as_ref().and_then(Entry::original) {
+         if !original.actual_settled() {
+@@ -905,6 +919,7 @@
+     body_returned || matches!(stage, Stage::Closing | Stage::BodyReturned)
+ }
+ pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentState, now: Instant) {
++    device::observe(document,state,now);
+     accounts::observe(document, state, now);
+     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
+         return;
+@@ -989,6 +1004,7 @@
+ /// same Document lock. Neither body return nor a result-shaped /user message
+ /// may discard these originals. Unknown originals are never replaced here.
+ pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentState) {
++    device::retire(document,state);
+     accounts::retire(document, state);
+     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
+         return;
+@@ -1039,6 +1055,8 @@
+         None => Some(0),
+         Some(Entry::Original(_)) | Some(Entry::Accounts(_)) => None,
+         Some(Entry::AccountsFinished(finished)) => finished.retained_bytes(),
++        Some(Entry::Device(original))=>original.data_bytes(),
++        Some(Entry::DeviceFinished(status))=>std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?),
+         Some(Entry::Finished(status)) => {
+             std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?)
+         }
+@@ -1324,7 +1342,7 @@
+             connection_revision: state.github.snapshot().revision,
+             ..status.clone()
+         },
+-        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) => GitHubAuthStatus {
++        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) | Some(Entry::Device(_)) | Some(Entry::DeviceFinished(_)) => GitHubAuthStatus {
+             schema_version: 1,
+             document_revision: state.revision,
+             connection_revision: state.github.snapshot().revision,
+@@ -1769,7 +1787,7 @@
+         // gh-auth's own pending admission must not self-reject as external Busy.
+         let external = document.github_base_gate(&state);
+         state.github.reconcile(Instant::now(), external);
+-        let hold = GitHubAuthConnectionHold {
++        let hold = GitHubAuthConnectionHold::Gh {
+             original: original.clone(),
+         };
+         let connection = state.github.connect_prepared_gh(
+diff --git a/desktop/src-tauri/src/github_connection_session.rs b/desktop/src-tauri/src/github_connection_session.rs
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -141,7 +141,7 @@
+ fn empty_status(revision: u32, reason: Reason) -> Status {
+     Status { schema_version: 1, revision,
+         capability: Capability { read_only_session_available: reason == Reason::None, reason,
+-            device_login: DeviceLogin::PublisherUnconfigured, storage: "session-only".into() },
++            device_login: if crate::github_device_protocol::configured().is_some(){DeviceLogin::NotQualified}else{DeviceLogin::PublisherUnconfigured}, storage: "session-only".into() },
+         session: None, operation: None, account: unobserved(), repository: unobserved(), automation: unobserved(),
+         facts: UnobservedFacts { remote_mutation_available: false, dispatch_available: false,
+             repository_actions_settings_observation: "not-run".into(), environment_observation: "not-run".into(),
+@@ -604,6 +604,16 @@
+         self.private.as_ref().and_then(|session| session.gh_hold.as_ref())
+             .is_some_and(|hold| hold.matches(original, context))
+     }
++    pub(crate) fn device_current(&self, original:&std::sync::Arc<crate::asset_session::OriginalWork>, context:&crate::github_device_protocol::Context)->bool{
++        self.private.as_ref().is_some_and(|p|p.project_id==context.project_id&&p.repository==context.repository&&p.generation==context.generation
++            &&p.retirement.is_none()&&p.ticket.is_some()&&p.gh_selection.is_none()&&p.gh_hold.as_ref().is_some_and(|h|h.device_matches(original,context)))
++    }
++    pub(crate) fn device_wait(&self,original:&std::sync::Arc<crate::asset_session::OriginalWork>,context:&crate::github_device_protocol::Context)->Option<crate::supervisor::GitHubAuthHttpWait>{
++        if !self.device_current(original,context){return None}self.private.as_ref()?.ticket.as_ref().map(GitHubReadTicket::gh_auth_wait)
++    }
++    pub(crate) fn device_retains(&self,original:&std::sync::Arc<crate::asset_session::OriginalWork>,context:&crate::github_device_protocol::Context)->bool{
++        self.private.as_ref().and_then(|p|p.gh_hold.as_ref()).is_some_and(|h|h.device_matches(original,context))
++    }
+     pub(crate) fn local_git_read_session(&self, project: &str, generation: u32, now: Instant) -> Option<LocalGitReadSession> {
+         if self.unknown || self.exhausted || self.native_work_pending()
+             || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted
+@@ -900,13 +910,28 @@
+         self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
+                               Some(selected), Some(hold), generation, supervisor, now, wall)
+     }
++    pub(crate) fn connect_device(&mut self,context:crate::github_device_protocol::Context,token:String,expiry:Option<Instant>,end:Instant,
++        hold:GitHubAuthConnectionHold,supervisor:&Supervisor,now:Instant,wall:SystemTime)->Result<Status,BridgeError>{
++        if !hold.device_target(&context,end)||!context.valid(){return Err(refused(Reason::TargetChanged))}
++        let gate=hold.device_gate().ok_or_else(||refused(Reason::TargetChanged))?;
++        self.connect_bound(ConnectTokenArgs{project_id:context.project_id,repository:context.repository,token},None,Some(hold),
++            Some((end,expiry,gate)),context.generation,supervisor,now,wall)
++    }
+     fn connect_selected(&mut self, args: ConnectTokenArgs, gh_selection: Option<auth_provider::SelectedAccount>,
+         gh_hold: Option<GitHubAuthConnectionHold>, generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
++        self.connect_bound(args,gh_selection,gh_hold,None,generation,supervisor,now,wall)
++    }
++    fn connect_bound(&mut self,args:ConnectTokenArgs,gh_selection:Option<auth_provider::SelectedAccount>,gh_hold:Option<GitHubAuthConnectionHold>,
++        device:Option<(Instant,Option<Instant>,crate::asset_session::GitHubDeviceGoGate)>,generation:u32,supervisor:&Supervisor,now:Instant,wall:SystemTime)->Result<Status,BridgeError>{
+         self.room()?;
+         if self.private.is_some() { return Err(refused(Reason::Busy)); }
+         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+         let Some(sequence) = self.next_session.checked_add(1) else { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); };
+-        let clock = CredentialClock::new(now, wall).ok_or_else(|| refused(Reason::RuntimeUnavailable))?;
++        let mut clock = CredentialClock::new(now, wall).ok_or_else(|| refused(Reason::RuntimeUnavailable))?;
++        if let Some((_,Some(expiry),_))=&device {
++            if *expiry<=now{return Err(refused(Reason::Expired))}
++            if *expiry<clock.end {clock.end=*expiry;clock.display=display_utc(wall.checked_add(expiry.duration_since(now)).ok_or_else(||refused(Reason::RuntimeUnavailable))?).ok_or_else(||refused(Reason::RuntimeUnavailable))?;}
++        }
+         // Allocate private/session/stop/unknown metadata before synchronous
+         // admission. No fallible decode or registration follows ticket creation.
+         let id = format!("github-session-{sequence}");
+@@ -917,8 +942,9 @@
+             clock, token: Some(args.token),
+             gh_selection, gh_hold, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
+         let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None };
+-        let ticket = supervisor.start_github_readonly(&private.repository, None, None,
+-            private.token.as_deref().ok_or_else(|| refused(Reason::InvalidInput))?).map_err(admission_error)?;
++        let token=private.token.as_deref().ok_or_else(||refused(Reason::InvalidInput))?;
++        let ticket=match device {Some((end,_,gate))=>supervisor.start_github_device_readonly(&private.repository,token,end,gate),
++            None=>supervisor.start_github_readonly(&private.repository,None,None,token)}.map_err(admission_error)?;
+         operation.id.push_str(ticket.operation_id());
+         private.ticket = Some(ticket);
+         self.private = Some(private); self.next_session = sequence;
+diff --git a/desktop/src-tauri/src/installed_runtime_macos.rs b/desktop/src-tauri/src/installed_runtime_macos.rs
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1373,6 +1373,7 @@
+ slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
+ slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
+ slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
++slots!(GitHubDeviceRuntimeSlots, GitHubDeviceInstalledRuntime, runtime::GitHubDeviceInstalledProfile);
+ slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
+ #[path = "git_read_runtime_macos.rs"]
+ mod git_read_runtime;
+@@ -1421,6 +1422,8 @@
+
+ #[path = "github_auth_runtime_macos.rs"]
+ mod github_auth_runtime;
++#[path = "github_device_runtime_macos.rs"]
++mod github_device_runtime;
+ slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
+ slots!(GitHubSetupRuntimeSlots, GitHubSetupInstalledRuntime, runtime::GitHubSetupInstalledProfile);
+ slots!(GitHubReleaseRuntimeSlots, GitHubReleaseInstalledRuntime, runtime::GitHubReleaseInstalledProfile);
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -317,6 +317,8 @@
+ mod github_auth_nomination;
+ mod github_auth_native_owner;
+ mod github_auth_entry_protocol;
++mod github_device_protocol;
++mod github_device_native;
+ mod github_auth_accounts;
+ mod github_connection_session;
+ mod github_preflight_protocol;
+diff --git a/desktop/src-tauri/src/passive_management_tests.rs b/desktop/src-tauri/src/passive_management_tests.rs
+--- a/desktop/src-tauri/src/passive_management_tests.rs
++++ b/desktop/src-tauri/src/passive_management_tests.rs
+@@ -32,6 +32,7 @@
+         github_activity_receipt: None, github_activity_request: None, github_activity_gate: None,
+         setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
+         history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None, gh_auth: None, gh_auth_endpoints: None,
++        github_device: None, github_device_read_gate: None, github_device_endpoints: None,
+         git_read: None, git_read_endpoints: None, git_local: None, git_local_endpoints: None, version_allocation_source: None, version_allocation_source_endpoints: None, version_enrollment: None,
+         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
+         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
+@@ -75,7 +76,7 @@
+     let outcome = match rig.owner.profile {
+         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
+         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+-        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
++        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
+     };
+     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
+         driver.await.unwrap();
+diff --git a/desktop/src-tauri/src/runtime.rs b/desktop/src-tauri/src/runtime.rs
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -475,6 +475,21 @@
+         }
+         let cwd = crate::installed_runtime::runtime_root();
+         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_auth_bootstrap.py"),
++            core: cwd.join("core.zip"), cwd })
++    }
++}
++
++// Device OAuth uses only the publisher-bound client ID, never a gh identity.
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) struct GitHubDeviceInstalledProfile { _private: () }
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl GitHubDeviceInstalledProfile {
++    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        if !macos_bindings() || crate::github_device_protocol::configured().is_none() {
++            return Err(unavailable());
++        }
++        let cwd = crate::installed_runtime::runtime_root();
++        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_device_bootstrap.py"),
+             core: cwd.join("core.zip"), cwd })
+     }
+ }
+@@ -1997,6 +2012,18 @@
+         if !self.github_auth_profile_available() { return Err(unavailable()); }
+         originals.inspect_once(GitHubAuthInstalledProfile { _private: () }, end, stop)
+     }
++    pub(crate) fn github_device_profile_available(&self) -> bool {
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        { macos_bindings() && crate::github_device_protocol::configured().is_some() }
++        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++        { false }
++    }
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    pub(crate) fn resolve_github_device_installed(&self, originals: &mut crate::installed_runtime::GitHubDeviceRuntimeSlots,
++        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
++        if !self.github_device_profile_available() { return Err(unavailable()); }
++        originals.inspect_once(GitHubDeviceInstalledProfile { _private: () }, end, stop)
++    }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     pub(crate) fn resolve_github_setup_installed(&self, originals: &mut crate::installed_runtime::GitHubSetupRuntimeSlots,
+         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2274,6 +2274,43 @@
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+     let crate::git_local_protocol::Command::Cancel(id)=git_local_command("git_local_cancel",&webview,&request)? else {return Err(BridgeError::invalid());};
+     state.document.git_local_cancel(&id)
++}
++
++// Distinct fixed device OAuth roles. Raw bytes and the original main window
++// are checked before registration. Installed fixtures have no login authority.
++fn github_device_command(name:&str,webview:&Webview,request:&tauri::ipc::Request<'_>)->Result<crate::github_device_protocol::Command,BridgeError>{
++    if webview.label()!=MAIN_WINDOW{return Err(BridgeError::invalid())}
++    let tauri::ipc::InvokeBody::Raw(raw)=request.body()else{return Err(BridgeError::invalid())};
++    crate::github_device_protocol::command(name,raw)
++}
++#[tauri::command]
++async fn github_device_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_device_protocol::Status,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Device login has no fixture admission."));
++    github_device_command("github_device_status",&webview,&request)?;Ok(state.document.github_device_status())
++}
++#[tauri::command]
++async fn github_device_start(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_device_protocol::Status,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Device login has no fixture admission."));
++    let crate::github_device_protocol::Command::Start(value)=github_device_command("github_device_start",&webview,&request)?else{return Err(BridgeError::invalid())};
++    let observer=state.document.github_device_start(value)?;drop(state);observer.returned().await
++}
++#[tauri::command]
++async fn github_device_check(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_device_protocol::Status,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Device login has no fixture admission."));
++    let crate::github_device_protocol::Command::Check(value)=github_device_command("github_device_check",&webview,&request)?else{return Err(BridgeError::invalid())};
++    let observer=state.document.github_device_check(value)?;drop(state);observer.returned().await
++}
++#[tauri::command]
++async fn github_device_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::github_device_protocol::Status,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Device login has no fixture admission."));
++    let crate::github_device_protocol::Command::Cancel(id)=github_device_command("github_device_cancel",&webview,&request)?else{return Err(BridgeError::invalid())};
++    state.document.github_device_cancel(&id)
++}
++#[tauri::command]
++fn github_device_open(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<(),BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Device login has no fixture admission."));
++    let crate::github_device_protocol::Command::Open(value)=github_device_command("github_device_open",&webview,&request)?else{return Err(BridgeError::invalid())};
++    state.document.github_device_open(value)
+ }
+
+ fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
+@@ -5324,6 +5361,7 @@
+             project_identity_close, project_identity_status,
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
++            github_device_status, github_device_start, github_device_check, github_device_open, github_device_cancel,
+             git_read_status, git_read_start, git_read_cancel,
+             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
+             version_reserve_status, version_reserve_review, version_reserve_start, version_reserve_cancel, version_reserve_edit,
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -38,6 +38,12 @@
+ mod gh_auth;
+ pub(crate) use gh_auth::{GitHubAuthAdmission, GitHubAuthReceipt, GitHubAuthTicket, GitHubAuthWait, GitHubAuthHttpWait};
+ pub(crate) use gh_auth::SourcePost as GitHubAuthSourcePost;
++#[path="supervisor_github_device.rs"]
++mod github_device;
++pub(crate) use github_device::{GitHubDeviceAdmission,GitHubDeviceReceipt,GitHubDeviceTicket,GitHubDeviceWait};
++pub(crate) use github_device::SourcePost as GitHubDeviceSourcePost;
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++use crate::installed_runtime::GitHubDeviceRuntimeSlots;
+ #[path = "supervisor_version_allocation.rs"]
+ mod version_allocation;
+ pub(crate) use version_allocation::{VersionAllocationSource, VersionAllocationSourceAdmission,
+@@ -288,9 +294,12 @@
+     git_read_endpoints: Option<git_read::Endpoints>,
+     git_local_endpoints: Option<git_local::Endpoints>,
+     gh_auth: Option<gh_auth::Invocation>,
++    github_device: Option<github_device::Invocation>,
++    github_device_read_gate:Option<crate::asset_session::GitHubDeviceGoGate>,
+     version_allocation_source: Option<version_allocation::Invocation>,
+     version_enrollment: Option<Arc<enrollment::Invocation>>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
++    github_device_endpoints: Option<github_device::Endpoints>,
+     version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
+     setup_material: Option<SetupMaterial>,
+     setup_first_bound: Option<usize>,
+@@ -309,6 +318,7 @@
+     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
+     history_endpoints: Option<history::Endpoints>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
++    github_device_endpoints: Option<github_device::Endpoints>,
+     git_read_endpoints: Option<git_read::Endpoints>,
+     git_local_endpoints: Option<git_local::Endpoints>,
+     version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
+@@ -335,11 +345,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActionsRetry(actions_retry_protocol::Reply), GitHubPlayCleanup(play_cleanup_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActionsRetry(actions_retry_protocol::Reply), GitHubPlayCleanup(play_cleanup_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitHubDevice, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubPlayCleanup, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubPlayCleanup, GitHubActivity, GitHubHistory, GitHubAuth, GitHubDevice, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -357,6 +367,7 @@
+             Self::GitHubActivity => github_activity_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
++            Self::GitHubDevice => crate::github_device_protocol::RESPONSE_LIMIT,
+             Self::GitRead => crate::git_read_protocol::RESPONSE_LIMIT,
+             Self::GitLocal => crate::git_local_protocol::RESPONSE_LIMIT,
+             Self::VersionAllocationSource => 2048,
+@@ -378,7 +389,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActionsRetry | Self::GitHubPlayCleanup | Self::GitHubActivity => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitHubDevice | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActionsRetry | Self::GitHubPlayCleanup | Self::GitHubActivity => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -399,6 +410,7 @@
+     GitHubActivity { request: github_activity_protocol::Request, gate: crate::asset_session::GitHubActivityGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
++    GitHubDevice(GitHubDeviceAdmission),
+     GitRead(GitReadAdmission),
+     GitLocal(GitLocalAdmission),
+     VersionAllocationSource(VersionAllocationSourceAdmission),
+@@ -407,13 +419,13 @@
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActionsRetry { .. } => Profile::GitHubActionsRetry, Self::GitHubPlayCleanup { .. } => Profile::GitHubPlayCleanup, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActionsRetry { .. } => Profile::GitHubActionsRetry, Self::GitHubPlayCleanup { .. } => Profile::GitHubPlayCleanup, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitHubDevice(_) => Profile::GitHubDevice, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActionsRetry { .. } | Self::GitHubPlayCleanup { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitHubDevice(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActionsRetry { .. } | Self::GitHubPlayCleanup { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -493,6 +505,7 @@
+     GitHubActivity(Arc<Mutex<GitHubActivityReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
++    GitHubDevice,
+     GitRead,
+     GitLocal,
+     VersionAllocationSource,
+@@ -605,7 +618,7 @@
+         Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
+     }
+     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
+-        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, git_read_endpoints: None, git_local_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
++        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, github_device_endpoints: None, git_read_endpoints: None, git_local_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_unknown_pending: false,
+             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
+@@ -628,6 +641,7 @@
+         if self.terminal { return; }
+         let end = self.git_local_endpoints.map_or_else(|| self.version_allocation_source_endpoints.map_or_else(|| self.git_read_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
+             || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
++        let end = self.github_device_endpoints.map_or(end, |original| original.first_failure(now));
+         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
+     }
+@@ -828,6 +842,8 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     github_auth: Option<Arc<Mutex<GitHubAuthRuntimeSlots>>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    github_device: Option<Arc<Mutex<GitHubDeviceRuntimeSlots>>>,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     git_read_slots: Option<Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     git_read_sources: Option<Arc<Mutex<crate::asset_source::GitReadSources>>>,
+@@ -855,6 +871,9 @@
+     gh_auth_after: Option<JoinHandle<Result<(), BridgeError>>>,
+     gh_auth_after_return: Option<Result<(), BridgeError>>,
+     gh_auth_after_failed: bool,
++    github_device_after: Option<JoinHandle<Result<(), BridgeError>>>,
++    github_device_after_return: Option<Result<(), BridgeError>>,
++    github_device_after_failed: bool,
+     version_allocation_source: Option<version_allocation::SourceResources>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     seal: Option<github_seal::SealPhase>,
+@@ -876,11 +895,13 @@
+         if at >= state.endpoint && state.error.is_none() {
+             let endpoint = state.endpoint; state.fail_at(BridgeError::timeout(), endpoint);
+         }
+-        state.fail_at(error, at);
++        state.fail_at(error.clone(), at);
+         if failure == AdmissionFailure::Unknown && !state.unknown {
+             state.unknown = true; state.native_unknown_pending = true;
+         }
+-        drop(state);
++        let endpoint=state.endpoint; drop(state);
++        if let Some(device)=&self.github_device { device.gate.failure(error.clone(),at.min(endpoint)); }
++        if let Some(gate)=&self.github_device_read_gate {gate.failure(error,at.min(endpoint));}
+         self.stop.send_replace(true); self.changed.notify_waiters();
+     }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -888,12 +909,19 @@
+         self.observe_native_failure(first);
+         let mut state = lock(&self.state); let now = Instant::now();
+         if state.terminal { return true; }
+-        if now >= state.endpoint && state.error.is_none() {
+-            let at = state.endpoint; state.fail_at(BridgeError::timeout(), at);
+-        }
++        let first_timeout = if now >= state.endpoint && state.error.is_none() {
++            let at = state.endpoint; state.fail_at(BridgeError::timeout(), at); Some(at)
++        } else { None };
+         let expired = now >= state.cleanup_endpoint.unwrap_or(state.endpoint);
+         if expired && !state.unknown { state.unknown = true; state.native_unknown_pending = true; }
+         drop(state);
++        // This actual native cleanup call can be the first detector of W.
++        // Forward that original F (not a later coordinator return) to the SAME
++        // device parent, after releasing OwnerState; other profiles unchanged.
++        if let Some(at)=first_timeout {
++            if let Some(device)=&self.github_device {device.gate.failure(BridgeError::timeout(),at);}
++            if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),at);}
++        }
+         if expired { self.changed.notify_waiters(); }
+         expired
+     }
+@@ -903,8 +931,10 @@
+         // OwnerState keeps the earlier cause/deadline and sticky Unknown.
+         let mut state = lock(&self.state);
+         if state.terminal { return; }
+-        state.fail_at(error, detected_at);
++        state.fail_at(error.clone(), detected_at);
+         drop(state);
++        if let Some(device)=&self.github_device { device.gate.failure(error.clone(),detected_at); }
++        if let Some(gate)=&self.github_device_read_gate {gate.failure(error,detected_at);}
+         self.stop.send_replace(true); self.changed.notify_waiters();
+     }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -915,8 +945,10 @@
+     fn fail(&self, error: BridgeError) {
+         let mut state = lock(&self.state);
+         if state.terminal { return; }
+-        state.fail_at(error, Instant::now());
++        let at=Instant::now(); state.fail_at(error.clone(), at);
+         drop(state);
++        if let Some(device)=&self.github_device { device.gate.failure(error.clone(),at); }
++        if let Some(gate)=&self.github_device_read_gate {gate.failure(error,at);}
+         self.stop.send_replace(true);
+         self.changed.notify_waiters();
+     }
+@@ -999,6 +1031,8 @@
+             if matches!(&*receipt, GitHubActivityReceipt::Pending) { *receipt = GitHubActivityReceipt::RetainedUnknown; }
+         }
+         if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).unknown(); }
++        if let Some(device) = &self.github_device { device.gate.failure(BridgeError::cleanup_unknown(), Instant::now()); lock(&device.mailbox).unknown(); }
++        if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::cleanup_unknown(),Instant::now());}
+         if let Some(read) = &self.git_read { read.unknown(); }
+         if let Some(local) = &self.git_local { local.unknown(); }
+         if let Some(source) = &self.version_allocation_source { source.unknown(); }
+@@ -1031,7 +1065,9 @@
+         let native_unknown = false;
+         let newly_unknown = (expired && !state.unknown) || native_unknown;
+         drop(state);
+-        if timed_out { self.stop.send_replace(true); self.changed.notify_waiters(); }
++        if timed_out { if let Some(device)=&self.github_device {device.gate.failure(BridgeError::timeout(),self.endpoint());}
++            if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
++            self.stop.send_replace(true); self.changed.notify_waiters(); }
+         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
+         if expired { None } else { Some(play_cleanup::check_deadline(self,now,endpoint)) }
+     }
+@@ -1262,6 +1298,13 @@
+                 });
+                 if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).retire(outcome, was_unknown); }
+             }
++            Profile::GitHubDevice => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::GitHubDevice => Ok(()), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(auth) = &self.github_device { lock(&auth.mailbox).retire(outcome, was_unknown); }
++            }
+             Profile::GitHubHistory => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1416,6 +1459,14 @@
+         // remains observable even if its first data delivery won this race.
+         Ok(GitHubReadTicket { owner, receipt })
+     }
++    // Only the native device hold may call this after its real capture joins.
++    pub(crate) fn start_github_device_readonly(&self, repository:&str, token:&str, end:Instant, gate:crate::asset_session::GitHubDeviceGoGate) -> Result<GitHubReadTicket,BridgeError> {
++        if !self.github_device_profile_available() { return Err(BridgeError::unavailable("The device runtime is unavailable.")); }
++        let receipt=Arc::new(Mutex::new(GitHubReadReceipt::Pending));
++        let owner=self.admit_device_bound(AdmissionRequest::GitHub { repository, expected_account_id:None, expected_repository_id:None, token },
++            CompletionTarget::GitHub(receipt.clone()),Some((end,gate)))?;
++        Ok(GitHubReadTicket{owner,receipt})
++    }
+     pub(crate) fn start_github_preflight(&self, request: preflight_protocol::Request,
+         gate: crate::asset_session::GitHubPreflightGoGate) -> Result<GitHubPreflightTicket, BridgeError> {
+         let receipt = Arc::new(Mutex::new(GitHubPreflightReceipt::Pending));
+@@ -1449,16 +1500,24 @@
+     }
+
+     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
++        self.admit_device_bound(request, completion, None)
++    }
++    fn admit_device_bound(&self, request: AdmissionRequest<'_>, completion: CompletionTarget,
++        device_read_end: Option<(Instant,crate::asset_session::GitHubDeviceGoGate)>) -> Result<Arc<Owner>, BridgeError> {
++        if device_read_end.is_some() && !matches!(&request, AdmissionRequest::GitHub { .. }) { return Err(BridgeError::invalid()); }
+         let git_read_endpoints = match &request { AdmissionRequest::GitRead(value) => Some(value.endpoints), _ => None };
+         let git_local_endpoints = match &request { AdmissionRequest::GitLocal(value) => Some(value.endpoints), _ => None };
+         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
++        let github_device_endpoints = match &request { AdmissionRequest::GitHubDevice(admission) => Some(admission.endpoints),
++            _ => match &device_read_end { Some((end,_))=>Some(github_device::Endpoints::at(Instant::now(),*end).ok_or_else(BridgeError::timeout)?),None=>None } };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+         let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActionsRetry{end,..}|AdmissionRequest::GitHubPlayCleanup{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
+             AdmissionRequest::VersionEnrollment(admission)=>Some(admission.work_end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+         let endpoint = git_local_endpoints.map_or_else(|| version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work), |original| original.work);
++        let endpoint = github_device_endpoints.map_or(endpoint, |value|value.work);
+         let profile = request.profile();
+         let repository_create_receipt = match &completion { CompletionTarget::RepositoryCreate(value) => Some(value.clone()), _ => None };
+         let pull_request_receipt = match &completion { CompletionTarget::GitHubPullRequest(value) => Some(value.clone()), _ => None };
+@@ -1481,7 +1540,7 @@
+             (Profile::GitHubActionsRetry,CompletionTarget::GitHubActionsRetry(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubPlayCleanup,CompletionTarget::GitHubPlayCleanup(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubActivity,CompletionTarget::GitHubActivity(_))=>(None,None,None,None,None,None,None),
+-            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
++            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitHubDevice, CompletionTarget::GitHubDevice) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+         };
+         let executor = tokio::runtime::Handle::try_current()
+@@ -1493,7 +1552,7 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActionsRetry=>format!("github-actions-retry-{key}"),Profile::GitHubPlayCleanup=>format!("github-play-cleanup-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActionsRetry=>format!("github-actions-retry-{key}"),Profile::GitHubPlayCleanup=>format!("github-play-cleanup-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitHubDevice=>format!("github-device-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
+         let (version_enrollment,request)=match request {
+             AdmissionRequest::VersionEnrollment(admission)=>(Some(admission.invocation),None),
+             other=>(None,Some(other)),
+@@ -1518,6 +1577,10 @@
+             Some(AdmissionRequest::GitHubActivity{request,gate,..})=>(Some((request,gate)),None),
+             other=>(None,other),
+         };
++        let (device,request)=match request{Some(AdmissionRequest::GitHubDevice(admission))=>(Some(admission),None),other=>(None,other)};
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let device_slots=device.as_ref().map(|a|a.slots.clone());
++        let github_device=device.map(|a|a.invocation);
+         let (publication,history,gh_auth,git_read,git_local,version_allocation_source,ordinary)=match request{
+             Some(AdmissionRequest::Publication{request,gate,..})=>(Some((request,gate)),None,None,None,None,None,None),
+             Some(AdmissionRequest::History(admission))=>(None,Some(admission),None,None,None,None,None),
+@@ -1597,8 +1660,8 @@
+             play_cleanup_receipt,play_cleanup_request,play_cleanup_gate,
+             github_activity_receipt,github_activity_request,github_activity_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+-            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
+-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.git_read_endpoints=git_read_endpoints;state.git_local_endpoints=git_local_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
++            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, github_device, github_device_read_gate:device_read_end.map(|(_,gate)|gate), github_device_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
++            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.github_device_endpoints=github_device_endpoints;state.git_read_endpoints=git_read_endpoints;state.git_local_endpoints=git_local_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
+             resources: AsyncMutex::new(Resources {
+                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                 passive: if passive_selected(profile) {
+@@ -1626,6 +1689,8 @@
+                 github_history: history_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 github_auth: gh_auth_slots,
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                github_device: device_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 git_read_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -1735,7 +1800,7 @@
+         let mut observer_end=Instant::now()+CLEANUP_TIME;
+         for owner in owners {
+             owner.fail(BridgeError::shutdown());
+-            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource){
++            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource){
+                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
+             }
+         }
+@@ -2187,6 +2252,9 @@
+ fn github_auth_selected(profile: Profile) -> bool {
+     cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="desktop-shell",feature="custom-protocol",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"))) && matches!(profile, Profile::GitHubAuth)
+ }
++fn github_device_selected(profile: Profile) -> bool {
++    cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="desktop-shell",feature="custom-protocol",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"))) && matches!(profile, Profile::GitHubDevice)
++}
+ fn github_setup_selected(profile: Profile) -> bool {
+     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
+         && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment)
+@@ -2197,7 +2265,7 @@
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+         | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActionsRetry,Profile::GitHubActionsRetry) | (Profile::GitHubPlayCleanup,Profile::GitHubPlayCleanup) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
+-        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
++        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitHubDevice, Profile::GitHubDevice) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+ fn claim_preflight_go(inner: &Inner, owner: &Arc<Owner>, expected: Profile) -> bool {
+@@ -2406,6 +2474,8 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitHubAuth(Arc<Mutex<GitHubAuthRuntimeSlots>>),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitHubDevice(Arc<Mutex<GitHubDeviceRuntimeSlots>>),
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitRead(Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitReadSources>>),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitLocal(Arc<Mutex<crate::installed_runtime::GitLocalRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitLocalSources>>),
+@@ -2414,6 +2484,9 @@
+ }
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    if !github_device_selected(profile) && resources.github_device.is_some() { return Err(BridgeError::cleanup_unknown()); }
++
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     {
+         if git_local::selected(profile) {
+@@ -2453,6 +2526,15 @@
+                 .ok_or_else(BridgeError::cleanup_unknown);
+         }
+         if resources.version_allocation_source.is_some() { return Err(BridgeError::cleanup_unknown()); }
++        if github_device_selected(profile) {
++            if resources.github_auth.is_some() || resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
++                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() {
++                return Err(BridgeError::cleanup_unknown());
++            }
++            return resources.github_device.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubDevice(slots.clone())))
++                .ok_or_else(BridgeError::cleanup_unknown);
++        }
++        if resources.github_device.is_some() { return Err(BridgeError::cleanup_unknown()); }
+         if github_auth_selected(profile) {
+             if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
+                 || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() {
+@@ -2529,6 +2611,8 @@
+             Self::GitHubHistory(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitHubDevice(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitRead(native, sources) => native.try_lock().ok().zip(sources.try_lock().ok())
+                 .map(|(slots, source)| (slots.never_started() && source.not_started(), slots.no_child_effect())),
+@@ -2584,6 +2668,11 @@
+                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                 slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+             },
++            Self::GitHubDevice(native) => {
++                let mut slots = match native.lock() { Ok(slots) => slots,
++                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
++                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
++            },
+         }
+     }
+     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+@@ -2626,6 +2715,8 @@
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitHubDevice(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitRead(native, sources) => native.try_lock().is_ok_and(|slots| slots.settled())
+                 && sources.try_lock().is_ok_and(|source| source.settled()),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -2717,6 +2808,19 @@
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                 Profile::GitHubAuth, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
++            }
++            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
++        },
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        Some(InstalledSettlementSlots::GitHubDevice(native)) => {
++            let (inspection, acquisition) = passive_borrows(resources);
++            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
++                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
++            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++            let owners = lock(&inner.owners); let state = lock(&owner.state);
++            if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
++                Profile::GitHubDevice, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2961,7 +3065,7 @@
+             Ok(Some(native)) => native, Ok(None) => return true,
+             Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
+         };
+-        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed
++        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed || resources.github_device_after.is_some() || resources.github_device_after_failed
+             || resources.version_allocation_source.as_ref().is_some_and(|s| !s.jobs_settled())
+             || resources.git_local.as_ref().is_some_and(|s| !s.jobs_settled()) {
+             owner_unknown!(owner, inner, Some(&*resources), Settlement); return false;
+@@ -3146,6 +3250,8 @@
+     let inspection_history = resources.github_history.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_auth = resources.github_auth.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let inspection_device = resources.github_device.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_git_read = resources.git_read_slots.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -3407,6 +3513,19 @@
+                 }
+                 return Err(BridgeError::unavailable("The fixed gh-auth installed runtime is unavailable."));
+             },
++            Profile::GitHubDevice => {
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                if github_device_selected(profile) {
++                    let result = (|| {
++                        let original = inspection_owner.github_device.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        let native = inspection_device.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        original.inspect(&config, &inspection_owner, native)
++                    })();
++                    if let Err(error) = &result { inspection_owner.fail(error.clone()); }
++                    return result;
++                }
++                return Err(BridgeError::unavailable("The fixed device connection installed runtime is unavailable."));
++            },
+             Profile::GitHubHistory => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_history_selected(profile) {
+@@ -3432,7 +3551,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -3495,6 +3614,8 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_auth = resources.github_auth.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let acquisition_device = resources.github_device.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_git_read = resources.git_read_slots.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_git_local=resources.git_local_slots.clone();
+@@ -3508,7 +3629,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3656,6 +3777,20 @@
+             #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             return Err(AcquisitionError::unsupported("The fixed gh-auth runtime is unavailable"));
+         }
++        if matches!(acquiring_owner.profile, Profile::GitHubDevice) {
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            {
++                let Some(native) = acquisition_device else {
++                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
++                    return Err(AcquisitionError::unsupported("The original device connection custody is missing"));
++                };
++                let result = github_device::acquire_original(&acquiring_inner, &acquiring_owner, &native);
++                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
++                return result;
++            }
++            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++            return Err(AcquisitionError::unsupported("The fixed device connection runtime is unavailable"));
++        }
+         spawn_original(runtime, acquiring_owner).map_err(AcquisitionError::from)
+     }));
+     let _ = acquire_start.send(());
+@@ -3717,6 +3852,12 @@
+             Err(_) => { owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
+         }
+     } else { None };
++    let device_request = if matches!(profile, Profile::GitHubDevice) {
++        match owner.github_device.as_ref().ok_or_else(BridgeError::cleanup_unknown).and_then(github_device::Invocation::request) {
++            Ok(request) => Some(request),
++            Err(_) => { owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
++        }
++    } else { None };
+     let (stdin, stdout, stderr) = match resources.child.as_mut() {
+         Some(child) => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
+         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
+@@ -3738,12 +3879,12 @@
+             Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+         }
+     }else{(None,None)};
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+     let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubPlayCleanup | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+-    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
++    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+     }else{(None,None)};
+     let mut source_post_receive = None;
+@@ -3782,6 +3923,15 @@
+                     },
+                     _ => { owner.fail(BridgeError::cleanup_unknown()); },
+                 }
++            } else if matches!(profile, Profile::GitHubDevice) {
++                let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
++                match (owner.github_device.as_ref(), device_request.as_ref(), history_post_send) {
++                    (Some(auth), Some(request), Some(post)) => {
++                        resources.writer = Some(tokio::spawn(github_device::write_private(stdin, request.clone(), auth.context.clone(),
++                            auth.gate.clone(), ready, wait_returned, post, inner.clone(), owner.clone(), faults.clone())));
++                    },
++                    _ => { owner.fail(BridgeError::cleanup_unknown()); },
++                }
+             } else if matches!(profile,Profile::GitHubHistory){
+                 let (release,wait_returned)=oneshot::channel();resources.history_wait_release=Some(release);
+                 if let Some(post)=history_post_send{
+@@ -3819,6 +3969,12 @@
+         } else if matches!(profile, Profile::GitHubAuth) {
+             match (owner.gh_auth.as_ref(), auth_request.as_ref(), ready_send.take()) {
+                 (Some(auth), Some(request), Some(ready)) => resources.stdout = Some(tokio::spawn(gh_auth::read_private(
++                    stdout, true, request.clone(), auth.mailbox.clone(), Some(ready), faults.clone()))),
++                _ => owner.fail(BridgeError::cleanup_unknown()),
++            }
++        } else if matches!(profile, Profile::GitHubDevice) {
++            match (owner.github_device.as_ref(), device_request.as_ref(), ready_send.take()) {
++                (Some(auth), Some(request), Some(ready)) => resources.stdout = Some(tokio::spawn(github_device::read_private(
+                     stdout, true, request.clone(), auth.mailbox.clone(), Some(ready), faults.clone()))),
+                 _ => owner.fail(BridgeError::cleanup_unknown()),
+             }
+@@ -3850,7 +4006,13 @@
+         }
+     }
+     if let Some(stderr) = stderr {
+-        if matches!(profile, Profile::GitHubAuth) {
++        if matches!(profile, Profile::GitHubDevice) {
++            match (owner.github_device.as_ref(), device_request.as_ref()) {
++                (Some(auth), Some(request)) => resources.stderr = Some(tokio::spawn(github_device::read_private(
++                    stderr, false, request.clone(), auth.mailbox.clone(), None, faults.clone()))),
++                _ => owner.fail(BridgeError::cleanup_unknown()),
++            }
++        } else if matches!(profile, Profile::GitHubAuth) {
+             match (owner.gh_auth.as_ref(), auth_request.as_ref()) {
+                 (Some(auth), Some(request)) => resources.stderr = Some(tokio::spawn(gh_auth::read_private(
+                     stderr, false, request.clone(), auth.mailbox.clone(), None, faults.clone()))),
+@@ -3989,14 +4151,14 @@
+                 history_post_receive.take();
+                 match request {
+                     Ok(reply)=>{
+-                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal)||resources.history_post.is_some()||resources.history_post_return.is_some()
++                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal)||resources.history_post.is_some()||resources.history_post_return.is_some()
+                             ||resources.history_post_join_failed||owner.failed()||Instant::now()>=owner.endpoint(){
+                             let error=lock(&owner.state).error.clone().unwrap_or_else(BridgeError::timeout);
+                             owner.fail(error.clone());let _=reply.send(Err(error));
+                         }else{
+                             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                             {
+-                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();let git_native=resources.git_read_slots.clone();
++                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();let device_native=resources.github_device.clone();let git_native=resources.git_read_slots.clone();
+                                 let original_owner=owner.clone();let source_stop=owner.stop.subscribe();
+                                 let (release,enter)=oneshot::channel();
+                                 resources.history_post_ack=Some(reply);
+@@ -4014,6 +4176,10 @@
+                                         if matches!(original_owner.profile, Profile::GitHubAuth) {
+                                             return original_owner.gh_auth.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
+                                                 .post(&original_owner, auth_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, gh_auth::SourcePost::BeforeGo);
++                                        }
++                                        if matches!(original_owner.profile, Profile::GitHubDevice) {
++                                            return original_owner.github_device.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
++                                                .post(&original_owner, device_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, github_device::SourcePost::BeforeGo);
+                                         }
+                                         let native=native.ok_or_else(BridgeError::cleanup_unknown)?;
+                                         let mut slots=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+@@ -4121,6 +4287,25 @@
+         }
+         if !gh_auth::post_after_work(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+     }
++    if matches!(profile, Profile::GitHubDevice) {
++        // A valid private terminal is necessary BEFORE native consuming close,
++        // but is not sufficient for settlement. Timeout/STOP remains absorbing.
++        let decoded = (|| {
++            if !resources.waited.is_some_and(|status| status.success())
++                || !resources.write_end.is_some_and(|end| end.complete)
++                || resources.out_end.as_ref().is_none_or(|end| end.overflow)
++                || resources.err_end.as_ref().is_none_or(|end| end.overflow) {
++                return Err(BridgeError::cleanup_unknown());
++            }
++            let auth = owner.github_device.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++            let request = device_request.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++            auth.decode(&owner,request)
++        })();
++        if decoded.is_err() {
++            owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown;
++        }
++        if !owner.failed() && !github_device::post_after_work(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
++    }
+     if matches!(profile, Profile::VersionAllocationSource)
+         && !version_allocation::before_native_close(&mut resources, &inner, &owner).await {
+         return DriverEnd::RetainedUnknown;
+@@ -4214,6 +4399,10 @@
+     if matches!(profile, Profile::GitHubAuth) {
+         resources.out_end.take(); resources.err_end.take(); resources.child.take();
+         return DriverEnd::Ready(Ok(ReadOutcome::GitHubAuth)); // Never raw private stdout.
++    }
++    if matches!(profile, Profile::GitHubDevice) {
++        resources.out_end.take(); resources.err_end.take(); resources.child.take();
++        return DriverEnd::Ready(Ok(ReadOutcome::GitHubDevice)); // Never raw private stdout.
+     }
+     if matches!(profile,Profile::GitLocal) {
+         resources.out_end.take();resources.err_end.take();resources.child.take();
+@@ -6541,7 +6730,7 @@
+             actions_retry_receipt:None,actions_retry_request:None,actions_retry_gate:None,
+             play_cleanup_receipt:None,play_cleanup_request:None,play_cleanup_gate:None,
+             github_activity_receipt:None,github_activity_request:None,github_activity_gate:None,
+-            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
++            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, github_device:None, github_device_read_gate:None, github_device_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
+             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+diff --git a/desktop/src-tauri/src/supervisor_gh_auth.rs b/desktop/src-tauri/src/supervisor_gh_auth.rs
+--- a/desktop/src-tauri/src/supervisor_gh_auth.rs
++++ b/desktop/src-tauri/src/supervisor_gh_auth.rs
+@@ -513,7 +513,7 @@
+             state: Mutex::new(ObserverReturn::Fresh),
+         }
+     }
+-    fn receipt(&self, result: GitHubAuthReceipt) -> GitHubAuthReceipt {
++    pub(super) fn receipt(&self, result: GitHubAuthReceipt) -> GitHubAuthReceipt {
+         match self.state.lock() {
+             Ok(state) => match (*state, result) {
+                 (ObserverReturn::Unknown, _) => GitHubAuthReceipt::RetainedUnknown,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -91,6 +91,8 @@
+ #[path = "../src/github_auth_nomination.rs"] mod github_auth_nomination;
+ #[path = "../src/github_auth_native_owner.rs"] mod github_auth_native_owner;
+ #[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
++#[path="../src/github_device_protocol.rs"] mod github_device_protocol;
++#[path="../src/github_device_native.rs"] mod github_device_native;
+ #[path = "../src/github_auth_accounts.rs"] mod github_auth_accounts;
+ #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
+ #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
+diff --git a/desktop/tools/prepare_runtime.py b/desktop/tools/prepare_runtime.py
+--- a/desktop/tools/prepare_runtime.py
++++ b/desktop/tools/prepare_runtime.py
+@@ -51,7 +51,7 @@
+ CURRENT_BOOTSTRAPS = (
+     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
++    "github_auth_bootstrap.py", "github_device_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
+ )
+ APPLE_PROVISIONING_BOOTSTRAP = "apple_provisioning_bootstrap.py"
+ STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
+diff --git a/desktop/tools/stage_macos_installed.py b/desktop/tools/stage_macos_installed.py
+--- a/desktop/tools/stage_macos_installed.py
++++ b/desktop/tools/stage_macos_installed.py
+@@ -150,7 +150,7 @@
+ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
+     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
++    "github_auth_bootstrap.py", "github_device_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
+ }
+ CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
+ CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
+diff --git a/src/mobile_release/_desktop_saved_command_control.py b/src/mobile_release/_desktop_saved_command_control.py
+--- a/src/mobile_release/_desktop_saved_command_control.py
++++ b/src/mobile_release/_desktop_saved_command_control.py
+@@ -33,6 +33,7 @@
+     ArtifactInspection = "artifact-inspection"
+     GitHubHistory = "github-history"
+     GitHubAuth = "github-auth"
++    GitHubDevice = "github-device"
+     GitRead = "git-read"
+     GitLocal = "git-local"
+     GitRemote = "git-remote"
+@@ -80,6 +81,9 @@
+     if domain is SavedCommandDomain.GitRead:
+         from . import _desktop_git_read_protocol
+         return _desktop_git_read_protocol
++    if domain is SavedCommandDomain.GitHubDevice:
++        from . import github_device_protocol
++        return github_device_protocol
+     if domain is SavedCommandDomain.GitHubAuth:
+         from . import _desktop_github_auth_protocol
+         return _desktop_github_auth_protocol
+@@ -143,6 +147,9 @@
+     from ._desktop_git_read_control import GitReadInput
+     if type(source) is GitReadInput and source.domain is SavedCommandDomain.GitRead:
+         return SavedCommandDomain.GitRead
++    from ._desktop_github_device import DeviceInput
++    if type(source) is DeviceInput and source.domain is SavedCommandDomain.GitHubDevice:
++        return SavedCommandDomain.GitHubDevice
+     from ._desktop_github_auth_control import GhAuthInput
+     if type(source) is GhAuthInput and source.domain is SavedCommandDomain.GitHubAuth:
+         return SavedCommandDomain.GitHubAuth
+@@ -319,6 +326,7 @@
+                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
+                            SavedCommandDomain.GitHubHistory: "Original History input changed",
+                            SavedCommandDomain.GitHubAuth: "Original gh-auth input changed",
++                           SavedCommandDomain.GitHubDevice: "Original device connection input changed",
+                            SavedCommandDomain.GitRead: "Original Git read input changed",
+                            SavedCommandDomain.GitLocal: "Original local Git input changed",
+                            SavedCommandDomain.GitRemote: "Original private Git input changed",
+diff --git a/src/mobile_release/_github_connection_transport.py b/src/mobile_release/_github_connection_transport.py
+--- a/src/mobile_release/_github_connection_transport.py
++++ b/src/mobile_release/_github_connection_transport.py
+@@ -48,6 +48,7 @@
+
+
+ class _ExchangeProfile(Enum):
++    DEVICE = "device"
+     STANDARD = "standard"
+     RELEASE_PREPARE = "release-prepare"
+     SETUP = "setup"
+@@ -65,6 +66,8 @@
+
+
+ class _ResponseRole(Enum):
++    DEVICE_START = "device-start"
++    DEVICE_POLL = "device-poll"
+     HOSTED_VERSION_READ = "hosted-version-read"
+     HOSTED_VERSION_HISTORY = "hosted-version-history"
+     HOSTED_VERSION_JOURNAL_READ = "hosted-version-journal-read"
+@@ -165,6 +168,10 @@
+     """Closed private roles, never caller-provided numeric limits."""
+     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
+         raise ValueError("Invalid fixed GitHub response role")
++    if role in {_ResponseRole.DEVICE_START, _ResponseRole.DEVICE_POLL}:
++        if profile is not _ExchangeProfile.DEVICE:
++            raise ValueError("Fixed device role belongs to another action")
++        return 16 * 1024, 64
+     if role in _HOSTED_VERSION_ROLES:
+         if profile is not _ExchangeProfile.HOSTED_VERSION:
+             raise ValueError("Fixed hosted version role belongs to another action")
+@@ -220,6 +227,11 @@
+
+ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
+     limits = _role_limits(profile, role)
++    if profile is _ExchangeProfile.DEVICE:
++        expected = {_ResponseRole.DEVICE_START: "/login/device/code", _ResponseRole.DEVICE_POLL: "/login/oauth/access_token"}.get(role)
++        if method != "POST" or expected is None or path != expected:
++            raise ValueError("Invalid fixed device role or destination")
++        return limits
+     if profile is _ExchangeProfile.HOSTED_VERSION:
+         from .version_hosted import validate_endpoint
+         validate_endpoint(role.value, method, path)
+@@ -432,7 +444,8 @@
+         self.metadata_bytes = 0
+         self.profile = _profile
+         self.requests = 0
+-        self.body_total_limit = (10 * 1024 * 1024 if _profile is _ExchangeProfile.HOSTED_VERSION else
++        self._device_owner = None
++        self.body_total_limit = (16 * 1024 if _profile is _ExchangeProfile.DEVICE else 10 * 1024 * 1024 if _profile is _ExchangeProfile.HOSTED_VERSION else
+                                  2 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_PUSH else
+                                  34 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else
+                                  4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
+@@ -441,6 +454,12 @@
+             raise ReadFailure("network-unavailable")
+
+     def claim_request(self) -> None:
++        if self.profile is _ExchangeProfile.DEVICE:
++            self.remaining()
++            if self.requests != 0:
++                raise ReadFailure("response-limit")
++            self.requests = 1  # A failed send also spends this sole exchange.
++            return
+         # Other existing profiles retain their own original finite schedules.
+         # Allocation adds a second private bound, never a logical retry owner.
+         if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}:
+@@ -450,6 +469,8 @@
+             self.requests += 1
+
+     def remaining(self) -> float:
++        if self._device_owner is not None:
++            self._device_owner.checkpoint()
+         now = self.monotonic()
+         if type(now) not in (int, float) or not math.isfinite(now) or now < self.started or now >= self.end:
+             # A helper budget is NOT proof that the credential expired.
+@@ -532,7 +553,7 @@
+         head.length = maximum + 1 if size is _LONG else size
+         if size is _LONG and head.status == 200:
+             head.error = "response-limit"
+-    if head.status == 200:
++    if head.status == 200 or head.status == 400 and _role in {_ResponseRole.DEVICE_START, _ResponseRole.DEVICE_POLL}:
+         media, present, valid = _single(head.headers, "content-type")
+         if _role in _GIT_PUSH_BINARY:
+             from .git_push_transport import response_media
+@@ -850,7 +871,8 @@
+             delays.append(delay)
+     delay = None if blocked else max(delays) if delays else 60 if recognized else None
+     base = _status_reason(head.status)
+-    if (head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE
++    if (head.status == 400 and _role in {_ResponseRole.DEVICE_START, _ResponseRole.DEVICE_POLL}
++            or head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE
+             or head.status in {409, 422} and _role is _ResponseRole.HOSTED_VERSION_LEDGER_WRITE
+             or head.status == 404 and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_READ
+             or head.status == 204 and _role is _ResponseRole.PLAY_CLEANUP_WRITE
+@@ -996,7 +1018,7 @@
+             return _failed("response-invalid", control)
+         except ReadFailure as error:
+             return _failed(error.reason, control)
+-    if head.status != 200 and not (head.status == 201 and response.role in {_ResponseRole.HOSTED_VERSION_JOURNAL_WRITE, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
++    if head.status != 200 and not (budget.profile is _ExchangeProfile.DEVICE and head.status == 400) and not (head.status == 201 and response.role in {_ResponseRole.HOSTED_VERSION_JOURNAL_WRITE, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
+         # Never read/parse/retain arbitrary error bodies, even JSON-looking ones.
+         if head.status == 403 and control["reason"] == "rate-limited":
+             return _failed("rate-limited", control)
+@@ -1017,7 +1039,14 @@
+                 _json_prelude_checked(raw, budget.remaining)
+             except SecretConfigurationError as error:
+                 raise ReadFailure("response-limit" if error.reason == "resources-unavailable" else "response-invalid") from None
+-        body = _decode_json(raw, limit=response.maximum, nodes=20_000, depth=24)
++        if budget.profile is _ExchangeProfile.DEVICE:
++            from .github_device_protocol import decode, ProtocolError
++            try:
++                body = decode(raw)
++            except ProtocolError:
++                raise ReadFailure("response-invalid") from None
++        else:
++            body = _decode_json(raw, limit=response.maximum, nodes=20_000, depth=24)
+         expected = list if response.role in {_ResponseRole.HOSTED_VERSION_HISTORY, _ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST, _ResponseRole.PULL_REQUEST_LIST} else dict
+         maximum_rows = 1 if response.role is _ResponseRole.HOSTED_VERSION_HISTORY else 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
+         if type(body) is not expected or expected is list and len(body) > maximum_rows:
+@@ -1229,7 +1258,7 @@
+
+
+ def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int,
+-                    _git_remote_role: _ResponseRole | None = None) -> Any:
++                    _git_remote_role: _ResponseRole | None = None, _device: bool = False) -> Any:
+     """One fixed documented wrap, with no suppressed unexpected TLS EOF.
+
+     The live caller supplies the actual SSLContext/option/socket. Inert tests
+@@ -1242,7 +1271,9 @@
+     context.options = int(context.options) & ~option
+     if int(context.options) & option:
+         raise ReadFailure("tls-failed")
+-    fixed_host = "api.github.com"
++    if type(_device) is not bool or _device and _git_remote_role is not None:
++        raise ValueError("Invalid fixed TLS profile")
++    fixed_host = "github.com" if _device else "api.github.com"
+     if _git_remote_role is not None:
+         if type(_git_remote_role) is not _ResponseRole or _git_remote_role not in (_GIT_REMOTE_ROLES | _GIT_PUSH_ROLES):
+             raise ValueError("Invalid fixed Git remote TLS role")
+@@ -1254,21 +1285,24 @@
+     return context.wrap_socket(source, server_hostname=fixed_host, suppress_ragged_eofs=False)
+
+
+-def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_version: str,
++def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, api_version: str,
+                         _profile: _ExchangeProfile = _ExchangeProfile.STANDARD,
+                         _setup_budget: _Budget | None = None,
+                         _git_remote_login: str | None = None,
+                         _git_remote_current: Callable[[], None] | None = None,
+                         _git_remote_failure: Callable[[str], None] | None = None,
+                         _git_remote_control: Callable[[dict[str, Any]], None] | None = None,
+-                        _hosted_ca_sha256: str | None = None) -> Callable[..., ReadResult]:
++                        _hosted_ca_sha256: str | None = None, _device_owner=None) -> Callable[..., ReadResult]:
+     """Private bounded TLS/framing shared by two closed native action profiles.
+
+     This is not a renderer/API URL interface. The calling profile separately
+     claims each fixed endpoint once; this layer cannot grant or retry an action.
+     """
+-    if (api_version not in {"2022-11-28", "2026-03-10"} or type(token) is not str
+-            or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
++    device = _profile is _ExchangeProfile.DEVICE
++    if (api_version not in {"2022-11-28", "2026-03-10"}
++            or device and (token is not None or api_version != "2022-11-28")
++            or not device and (type(token) is not str or not 1 <= len(token) <= 4096
++                               or any(not 0x21 <= ord(c) <= 0x7e for c in token))):
+         raise ValueError("Invalid fixed GitHub transport input")
+     _role_limits(_profile, _ResponseRole.STANDARD)
+     if _profile is _ExchangeProfile.HOSTED_VERSION:
+@@ -1287,15 +1321,25 @@
+         _git_remote_current()
+     elif _git_remote_login is not None or _git_remote_current is not None or _git_remote_failure is not None or _git_remote_control is not None:
+         raise ValueError("Git remote inputs belong to another action")
++    if device:
++        from ._desktop_github_device import DeviceOperation
++        if type(_device_owner) is not DeviceOperation or _setup_budget is None:
++            raise ValueError("Original device owner is unavailable")
++        _device_owner.transport_binding(_setup_budget)
++    elif _device_owner is not None:
++        raise ValueError("Device owner belongs to another action")
+     if _setup_budget is not None:
+-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}
++        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.DEVICE, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}
+                 or _setup_budget.profile is not _profile
+                 or _setup_budget.started != started
+                 or (_profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and not started < _setup_budget.end <= started + 45.0
+-                    or _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS))
++                    or device and not started < _setup_budget.end <= started + READ_SECONDS
++                    or _profile not in {_ExchangeProfile.DEVICE, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} and _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS))
+                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
+             raise ValueError("Invalid same-original Setup budget")
+         _setup_budget._secret_exchange_claimed = True
++        if device:
++            _setup_budget._device_owner = _device_owner
+     # http.client itself imports ssl. Both must stay inside this original live
+     # entry, not at pure frame/schedule import or fixture construction time.
+     import http.client
+@@ -1312,7 +1356,7 @@
+     context.minimum_version = ssl.TLSVersion.TLSv1_2
+     context.keylog_filename = None
+     context.set_alpn_protocols(["http/1.1"])
+-    fixed_ca = (_fixed_ca(runtime_dir, budget, _failure=_git_remote_failure)
++    fixed_ca = (_fixed_ca(runtime_dir, budget, _failure=_device_owner.failure) if device else _fixed_ca(runtime_dir, budget, _failure=_git_remote_failure)
+         if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else _fixed_ca(runtime_dir, budget))
+     if _profile is _ExchangeProfile.HOSTED_VERSION:
+         import hashlib
+@@ -1326,7 +1370,7 @@
+                  _role: _ResponseRole = _ResponseRole.STANDARD, _remote_delivery=None,
+                  _push_body=None, _push_delivery=None) -> ReadResult:
+         _, path_limit = _request_limits(_profile, _role, method, path)
+-        fixed_host = "api.github.com"
++        fixed_host = "github.com" if device else "api.github.com"
+         if _profile is _ExchangeProfile.GIT_PUSH:
+             from .git_push_transport import _Delivery, host, private_headers, validate_body
+             validate_body(_role.value, body, _push_body)
+@@ -1353,6 +1397,9 @@
+                 raise ValueError("Invalid Git remote response sink role")
+         elif _remote_delivery is not None:
+             raise ValueError("Git remote response sink belongs to another action")
++        if device:
++            from .github_device_protocol import validate_body
++            validate_body(_role.value, body)
+         if _profile is _ExchangeProfile.HOSTED_VERSION:
+             from .version_hosted import validate_body
+             validate_body(_role.value, body, path=path)
+@@ -1385,7 +1432,7 @@
+                 or "#" in path or "\\" in path
+                 or method == "GET" and body is not None
+                 or method == "POST" and _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.GIT_PUSH}
+-                and (type(body) is not bytes or not 1 <= len(body) <= (64 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else 384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 32 * 1024 if _profile is _ExchangeProfile.PULL_REQUEST else 2048))):
++                and (type(body) is not bytes or not 1 <= len(body) <= (64 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else 384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 32 * 1024 if _profile is _ExchangeProfile.PULL_REQUEST else 4096 if device else 2048))):
+             raise ValueError("Invalid fixed GitHub transport request")
+         budget.claim_request()  # Before any native/socket send, including a failed one.
+         original_response: list[Any] = [None]
+@@ -1395,16 +1442,19 @@
+         control_observing = [False]
+
+         def observe_failure(reason: str) -> None:
+-            # GitRemote alone carries the SAME Entry's first-F recorder. A
+-            # callback cannot replace cleanup or prevent a claimed close.
+-            if _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
++            # Each admitted private profile carries its SAME original's first-F
++            # recorder. A callback cannot prevent any claimed close attempt.
++            if not device and _profile not in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
+                 return
+             if observing[0]:
+                 close_failed[0] = True
+                 return
+             observing[0] = True
+             try:
+-                _git_remote_failure(reason)
++                if device:
++                    _device_owner.failure(reason)
++                else:
++                    _git_remote_failure(reason)
+             except BaseException:
+                 close_failed[0] = True
+             finally:
+@@ -1443,6 +1493,10 @@
+             elif _profile is _ExchangeProfile.GIT_REMOTE:
+                 from .git_remote_transport import failure_reason
+                 reason = failure_reason(error)
++            elif device:
++                # A device guard/source/parser failure must be observed before
++                # stdlib/finally closes too. Never forward its private text.
++                reason = "response-invalid"
+             else:
+                 return
+             observe_failure(reason)
+@@ -1531,7 +1585,7 @@
+                 self.sock.settimeout(budget.remaining())
+                 self.sock = _wrap_fixed_tls(context, self.sock,
+                                            ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0),
+-                                           _git_remote_role=_role if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else None)
++                                           _git_remote_role=_role if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else None, _device=device)
+
+             def close(self) -> None:
+                 if self._close_claimed:
+@@ -1557,7 +1611,8 @@
+             timeout(budget.remaining())
+             connection.auto_open = 0  # No implicit reconnect after our connect.
+             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+-            headers = private_headers(_role.value, token, _git_remote_login, api_version) if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else (
++            headers = (("Host", "github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
++                       ("Accept", "application/json"), ("Accept-Encoding", "identity"), ("Connection", "close")) if device else private_headers(_role.value, token, _git_remote_login, api_version) if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else (
+                 ("Host", "api.github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
+                 ("Accept", "application/vnd.github+json"), ("X-GitHub-Api-Version", api_version),
+                 ("Accept-Encoding", "identity"), ("Connection", "close"),
+@@ -1575,7 +1630,7 @@
+                 _push_body.send(connection.send, lambda: timeout(budget.remaining()))
+             else:
+                 if body is not None:
+-                    connection.putheader("Content-Type", "application/x-git-upload-pack-request" if _role in _GIT_REMOTE_BINARY else "application/json")
++                    connection.putheader("Content-Type", "application/x-git-upload-pack-request" if _role in _GIT_REMOTE_BINARY else "application/x-www-form-urlencoded" if device else "application/json")
+                     connection.putheader("Content-Length", str(len(body)))
+                 connection.endheaders(body)
+             timeout(budget.remaining())
+@@ -1583,7 +1638,7 @@
+             result = _response_result(response.bounded, budget, _remote_delivery=_remote_delivery,
+                 _remote_failure=observe_failure if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else None,
+                 _push_delivery=_push_delivery)
+-            if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
++            if device or _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
+                 reason = result.control["reason"]
+                 if reason == "none":
+                     reason = result.observation["failure"]
+diff --git a/tests/unit/test_git_remote_transport.py b/tests/unit/test_git_remote_transport.py
+--- a/tests/unit/test_git_remote_transport.py
++++ b/tests/unit/test_git_remote_transport.py
+@@ -305,7 +305,8 @@
+         source = HeadersOnly(raw_http(t.FETCH, b"SYNTHETIC_PRIVATE_BODY", status=401))
+         parsed = h._ResponseBody(source, clock, _role=h._ResponseRole.GIT_REMOTE_FETCH)
+         result = h._response_result(parsed, clock, _remote_delivery=None)
+-        self.assertEqual(result.observation, {"status": 401, "body": None, "failure": "none"})
++        self.assertEqual(result.observation, {"status": None, "body": None, "failure": "unauthorized"})
++        self.assertEqual(result.control["reason"], "unauthorized")
+         self.assertNotIn("SYNTHETIC_PRIVATE", repr(result))
+
+     def test_sink_failure_after_prefix_and_unknown_close_never_retry(self):

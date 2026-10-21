@@ -184,8 +184,8 @@ class InertJourney:
             raise RuntimeError("inert original did not return")
         if number == 4:
             err = {"version": 1, "ok": False, "error": "access_denied",
-                   "message": "Enable agent read access for this project in Desktop Settings."}
-            r = subprocess.CompletedProcess(argv, 4, b"", C._json(err) + b"\n")
+                   "message": "This host or grant does not allow the request. Actions require separate Desktop permission; serve-history allows only five cached reads."}
+            r = subprocess.CompletedProcess(argv, 4, C._json(err) + b"\n", b"")
         else:
             stderr = b""
             if number == 1:
@@ -261,18 +261,46 @@ class CliLocalCheckTests(unittest.TestCase):
                 self.assertFalse(j.cli.calls.returned)
 
     def test_refusal_unknown_or_fake_denial_never_counts_as_finished_invocation(self):
-        for number, mode in ((1, "refused"), (4, "unknown"), (4, "success")):
+        for number, mode in ((1, "refused"), (4, "unknown"), (4, "success"), (4, "wrong-channel"),
+                             (4, "false-ok"), (4, "wrong-error"), (4, "extra-field"),
+                             (4, "boolean-version"), (4, "long-message")):
             def change(n, r):
                 if n != number: return r
                 if mode == "refused":
                     v = C._decode(r.stdout)
                     v["response"]["value"].update(requestState="refused-before-admission", operation=None)
                     return subprocess.CompletedProcess(r.args, 3, C._json(v), r.stderr)
-                return subprocess.CompletedProcess(r.args, 6 if mode == "unknown" else 0, r.stdout, r.stderr)
+                if mode in ("unknown", "success"):
+                    return subprocess.CompletedProcess(r.args, 6 if mode == "unknown" else 0, r.stdout, r.stderr)
+                if mode == "wrong-channel":
+                    return subprocess.CompletedProcess(r.args, 4, b"", r.stdout)
+                v = C._decode(r.stdout)
+                if mode == "false-ok": v["ok"] = True
+                if mode == "wrong-error": v["error"] = "state_unknown"
+                if mode == "extra-field": v["extra"] = "unbound data"
+                if mode == "boolean-version": v["version"] = True
+                if mode == "long-message": v["message"] = "x" * 1025
+                return subprocess.CompletedProcess(r.args, 4, C._json(v), b"")
             with self.subTest(mode=mode), self.journey(change=change) as j:
                 with self.assertRaises(ValueError): self.invoke(j)
                 self.assertEqual(len(j.calls), number + 1)
                 self.assertTrue(j.fixture.inflight and j.cli.calls.failed)
+                self.assertTrue(j.cli.joined)
+                self.assertFalse(j.cli.calls.returned or j.cli.thread.is_alive())
+                self.assertNotIn("denied", [r["phase"] for r in j.driver_read.read()])
+
+    def test_denial_message_is_bounded_data_not_english_identity(self):
+        def change(n, r):
+            if n != 4: return r
+            v = C._decode(r.stdout)
+            v["message"] = "Different public denial wording."
+            return subprocess.CompletedProcess(r.args, 4, C._json(v), b"")
+        with self.journey(change=change) as j:
+            self.invoke(j)
+            self.assertEqual(len(j.calls), 7)
+            self.assertTrue(j.cli.calls.returned and j.cli.joined)
+            self.assertFalse(j.cli.thread.is_alive())
+            self.assertEqual(j.driver_read.read()[-1]["phase"], "done")
 
     def test_missing_original_or_malformed_return_keeps_claim_inflight(self):
         for thrown in (True, False):

@@ -36,6 +36,16 @@ mod version_reserve;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use version_reserve::{NativeReservedVersionHandoff,ReservedVersionStep};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path="edit_owner_service_configuration.rs"]
+mod agent_configuration;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use agent_configuration::Link as ConfigurationAgentLink;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct ConfigurationAgentLink;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
+
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
@@ -970,6 +980,8 @@ struct Session {
     agent_identity: Option<Arc<agent_identity::Link>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     reserved_version: Option<NativeReservedVersionHandoff>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_configuration: Option<Arc<ConfigurationAgentLink>>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1463,7 +1475,7 @@ impl Inner {
             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); }
+        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); }
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
@@ -1668,6 +1680,11 @@ impl Inner {
         if let Some((at, reason)) = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a|
             agent_identity::actions::cancellation_at(&a.session, now).filter(|(at, _)| a.cleanup_start.is_none_or(|prior| *at < prior))) {
             self.trigger_locked(publication, r, id, reason, at);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+            agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+            self.trigger_locked(publication,r,id,reason,at);
         }
         // Evaluate the original phase endpoint before a new native F can clear
         // phase_end. Both events use their actual time; neither extends cleanup.
@@ -2210,6 +2227,12 @@ impl EditOwner {
     fn open_domain_attempt(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
         registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
         images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
+        self.open_domain_attempt_agent(supplied,window,project_id,root,domain,registration,ticket,metadata,images,claimed,None)
+    }
+    fn open_domain_attempt_agent(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+        registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
+        images: Option<ImageOpen>, claimed: &mut bool, agent_configuration: Option<Arc<ConfigurationAgentLink>>) -> Result<DomainStatus, BridgeError> {
+        if agent_configuration.is_some() && (domain!=EditDomain::Configuration||ticket.is_some()||registration.is_some()){return Err(invalid_owner());}
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
@@ -2306,6 +2329,8 @@ impl EditOwner {
             agent_identity,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             reserved_version,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_configuration,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2359,6 +2384,8 @@ impl EditOwner {
             let generation = r.generation.clone();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity::before_claim(&self.inner, &r, &session, &project_id)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_configuration::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
             // Claim is permanent for this invocation BEFORE its projection or
             // queue can fail. No postclaim error is a negative admission fact.
             *claimed = true;
@@ -2379,6 +2406,13 @@ impl EditOwner {
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity::linked(&r);
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if agent_configuration::linked(&r).is_err(){
+                // The permanent claim/installed original are never dropped by
+                // a failed link. Retain Unknown and register original cleanup.
+                session.resource_unknown.store(true,Ordering::SeqCst);
+                if let Some(a)=r.active.as_mut(){a.unknown=true;}
+            }
             self.inner.bump(&mut r, &mut publication);
             self.inner.snapshot_for(&r, domain)? // Admission reply captured BEFORE queue/start.
         };
@@ -2478,6 +2512,12 @@ impl EditOwner {
     fn prepare_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
         counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>,
         agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
+        self.prepare_domain_configuration(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,None)
+    }
+    fn prepare_domain_configuration(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
+        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        if agent_config.is_some() && domain!=EditDomain::Configuration{return Err(invalid_owner());}
         if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
@@ -2553,6 +2593,8 @@ impl EditOwner {
             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Prepare) {
                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
             a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
             a.phase_end = Some(phase_end);
@@ -2621,6 +2663,12 @@ impl EditOwner {
     }
     fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
+        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None)
+    }
+    fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
+        registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
+        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
@@ -2676,6 +2724,8 @@ impl EditOwner {
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -2907,6 +2957,8 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if agent_configuration::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
         sent += 1;
         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
@@ -2993,9 +3045,14 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                 if stderr || discard { continue; } // Still drain to actual EOF.
                 for byte in &buffer[..length] {
                     if discard { break; }
-                    frame.push(*byte);
                     let response_limit = match owner.domain {
-                        EditDomain::Configuration => wire::RESPONSE_LIMIT,
+                        EditDomain::Configuration => {
+                            #[cfg(any(target_os="linux",target_os="macos"))]
+                            if owner.agent_configuration.is_some() { crate::protocol::CONFIGURATION_AGENT_FRAME_BYTES }
+                            else { wire::RESPONSE_LIMIT }
+                            #[cfg(not(any(target_os="linux",target_os="macos")))]
+                            { wire::RESPONSE_LIMIT }
+                        },
                         EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
                         EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
                         EditDomain::ReleaseVersion => version_wire::RESPONSE_LIMIT,
@@ -3003,6 +3060,13 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
                     };
+                    #[cfg(any(target_os="linux",target_os="macos"))]
+                    if owner.agent_configuration.is_some() && frame.len() >= response_limit {
+                        discard=true;failed=true;frame.clear();
+                        inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
+                        continue;
+                    }
+                    frame.push(*byte);
                     if frame.len() > response_limit {
                         discard = true; failed = true; frame.clear();
                         inner.trigger(&owner.id, Reason::OutputLimit, Instant::now()); inner.unknown(&owner.id);
@@ -3010,7 +3074,13 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                         count += 1;
                         let parsed = if count <= 3 {
                             match owner.domain {
-                                EditDomain::Configuration => wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery),
+                                EditDomain::Configuration => {
+                                    #[cfg(any(target_os="linux",target_os="macos"))]
+                                    if owner.agent_configuration.is_some() { wire::decode_agent_configuration(&frame, &owner.id) }
+                                    else { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
+                                    #[cfg(not(any(target_os="linux",target_os="macos")))]
+                                    { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
+                                },
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
                                 EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
                                 EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
@@ -3122,7 +3192,8 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;} }
+    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
+      if !invalid&&a.cleanup_start.is_none()&&agent_configuration::frame(a,&frame,&mut publication).is_err(){invalid=true;} }
     let mut terminal = false;
     let mut uncertain = false;
     if !invalid {
@@ -3463,7 +3534,7 @@ fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
 }
 fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if owner.reserved_version.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+    if owner.reserved_version.is_some()||owner.agent_configuration.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
     end
 }
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
@@ -4428,6 +4499,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             if a.projection.native_reason==Reason::None{a.projection.native_reason=Reason::CallerLost;}
             if owner.resource_unknown.load(Ordering::SeqCst){a.unknown=true;}
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let configuration_chain_current=agent_configuration::retirement_publication(&mut a,&mut publication);
         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
             // IDs only, bounded by the native 64-project picker registry. No
             // retained private history or guessed recovery controller.
@@ -4501,7 +4574,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         inner.bump(&mut r, &mut publication);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
-          agent_identity::actions::retired(&r, &a.session, a.unknown); }
+          agent_identity::actions::retired(&r, &a.session, a.unknown);
+          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current); }
     }
     guard.completed = true;
     })();

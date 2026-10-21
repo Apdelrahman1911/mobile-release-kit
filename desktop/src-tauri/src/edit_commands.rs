@@ -78,10 +78,29 @@ pub(crate) struct ConfigurationRecoveryOpen { pub project_id: String, pub intent
 pub(crate) struct ConfigurationRecoveryApply {
     pub session_id: String, pub plan_token: String, pub intent: crate::edit_protocol::RecoveryIntent,
 }
-pub(crate) enum ConfigurationOpen { Edit(Open), Recover(ConfigurationRecoveryOpen) }
-pub(crate) enum ConfigurationPrepare { Edit(PrepareConfigEdit), Recover(crate::edit_protocol::PrepareConfigurationRecovery) }
-pub(crate) enum ConfigurationApply { Edit(Apply), Recover(ConfigurationRecoveryApply) }
+#[derive(Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum AgentConfigurationIntent { AgentConfiguration }
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct AgentConfigurationRequest {
+    pub intent:AgentConfigurationIntent,
+    pub origin:crate::service_configuration_protocol::Query,
+}
+pub(crate) fn agent_configuration_allow(body:&Value)->Result<crate::service_configuration_protocol::Allow,BridgeError>{
+    let a:crate::service_configuration_protocol::Allow=decode(body,4096)?;
+    if a.consent_version!=crate::service_configuration_protocol::CONSENT{return Err(BridgeError::invalid());}Ok(a)
+}
+pub(crate) fn agent_configuration_query(body:&Value)->Result<crate::service_configuration_protocol::Query,BridgeError>{decode(body,4096)}
+pub(crate) fn agent_configuration_status(body:&Value)->Result<Option<crate::service_configuration_protocol::Query>,BridgeError>{
+    if body.as_object().is_some_and(|v|v.is_empty()){status(body)?;Ok(None)}
+    else{agent_configuration_query(body).map(Some)}
+}
+pub(crate) enum ConfigurationOpen { Edit(Open), Recover(ConfigurationRecoveryOpen), Agent(AgentConfigurationRequest) }
+pub(crate) enum ConfigurationPrepare { Edit(PrepareConfigEdit), Recover(crate::edit_protocol::PrepareConfigurationRecovery), Agent(AgentConfigurationRequest) }
+pub(crate) enum ConfigurationApply { Edit(Apply), Recover(ConfigurationRecoveryApply), Agent(AgentConfigurationRequest) }
 pub(crate) fn configuration_open(body: &Value) -> Result<ConfigurationOpen, BridgeError> {
+    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationOpen::Agent);}
     if body.get("intent").is_some() {
         let value: ConfigurationRecoveryOpen = decode(body, 256)?;
         if !crate::protocol::valid_id(&value.project_id) { return Err(BridgeError::invalid()); }
@@ -89,6 +108,7 @@ pub(crate) fn configuration_open(body: &Value) -> Result<ConfigurationOpen, Brid
     } else { open(body).map(ConfigurationOpen::Edit) }
 }
 pub(crate) fn configuration_prepare(body: &Value) -> Result<ConfigurationPrepare, BridgeError> {
+    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationPrepare::Agent);}
     if body.get("intent").is_some() {
         let value: crate::edit_protocol::PrepareConfigurationRecovery = decode(body, 256)?;
         if !token(&value.session_id) || !token(&value.revision) { return Err(BridgeError::invalid()); }
@@ -96,6 +116,7 @@ pub(crate) fn configuration_prepare(body: &Value) -> Result<ConfigurationPrepare
     } else { prepare(body).map(ConfigurationPrepare::Edit) }
 }
 pub(crate) fn configuration_apply(body: &Value) -> Result<ConfigurationApply, BridgeError> {
+    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationApply::Agent);}
     if body.get("intent").is_some() {
         let value: ConfigurationRecoveryApply = decode(body, 256)?;
         if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }

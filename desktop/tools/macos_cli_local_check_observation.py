@@ -279,10 +279,16 @@ def _journey(f, run_owned, env, state, calls):
         calls.check()  # The preclaimed original may return, but cannot advance after STOP.
         c.current_cli()
         if kind is None:
-            error = _decode(result.stderr)
-            need(result.returncode == 4 and result.stdout == b""
-                 and error == {"version": 1, "ok": False, "error": "access_denied",
-                               "message": "Enable agent read access for this project in Desktop Settings."}, "cli-revoke-not-denied")
+            # The ordinary CLI writes its one JSON result, including a
+            # pre-admission denial, to stdout. Public prose is bounded DATA;
+            # only the closed error code/shape and exit status identify denial.
+            need(result.returncode == 4 and result.stderr == b"", "cli-revoke-not-denied")
+            error = _decode(result.stdout)
+            need(_keys(error, "version", "ok", "error", "message")
+                 and type(error["version"]) is int and error["version"] == 1
+                 and error["ok"] is False and error["error"] == "access_denied"
+                 and type(error["message"]) is str
+                 and 0 < len(error["message"].encode("utf-8")) <= 1024, "cli-revoke-not-denied")
             return None
         instance, value = _response(result, argv, kind)
         need(receipt or result.stderr == b"", "cli-unexpected-stderr")

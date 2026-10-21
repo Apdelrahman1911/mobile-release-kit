@@ -5,6 +5,10 @@ Plan reviewed independently by Versions; Root authorized implementation.
 
 ## User-visible scope
 
+`mrk capabilities` describes the complete compiled interface without contacting
+the service. Its local text/JSON output limit is 32 KiB, including the newline;
+this does not change IPC frame limits, operation quotas, or authorizations.
+
 The **existing signed `mrk` executable** gains one explicit entry on macOS
 64-bit arm64/x64:
 

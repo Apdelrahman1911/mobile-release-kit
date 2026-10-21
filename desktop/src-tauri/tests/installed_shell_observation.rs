@@ -32,8 +32,14 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
+#[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
 #[path="../src/service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
+#[path="../src/service_store_protocol.rs"]
+mod service_store_protocol;
+#[path="../src/service_store_requests.rs"]
+mod service_store_requests;
 #[path="../src/service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
 #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
@@ -91,6 +97,8 @@ mod service_version_reserve_requests;
 #[path = "../src/github_auth_nomination.rs"] mod github_auth_nomination;
 #[path = "../src/github_auth_native_owner.rs"] mod github_auth_native_owner;
 #[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
+#[path="../src/github_device_protocol.rs"] mod github_device_protocol;
+#[path="../src/github_device_native.rs"] mod github_device_native;
 #[path = "../src/github_auth_accounts.rs"] mod github_auth_accounts;
 #[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
 #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;

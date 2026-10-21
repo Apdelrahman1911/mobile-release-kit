@@ -8,6 +8,8 @@ use crate::edit_owner::SavedEditStamp;
 #[path = "credential_upload_key_recovery.rs"]
 pub(in crate::asset_session) mod recovery;
 pub(crate) use recovery::{request as recovery_request, RecoveryRequest};
+#[path="credential_upload_key_delegation.rs"]
+pub(in crate::asset_session) mod delegation;
 
 // Nonshipping selector is consumed INSIDE the same bodies. Registration alone
 // cannot enable renderer status/prepare/create; ordinary qualification is unchanged.
@@ -223,8 +225,10 @@ pub(in crate::asset_session) struct Consent {
     prepared: Arc<PreparedSetup>,
     revision: u32,
     admission: Admission,
+    agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>,
 }
 impl Consent {
+    pub(in crate::asset_session) fn agent(&self) -> Option<&Arc<crate::service_upload_key_requests::NativeLink>> { self.agent.as_ref() }
     pub(super) fn qualified(&self,document:&DocumentBinding)->bool {self.admission.qualified(document) && self.admission.same(&self.prepared.admission)}
     pub(super) fn preparation(&self) -> &Arc<PreparedSetup> {
         &self.prepared
@@ -997,6 +1001,7 @@ impl DocumentBinding {
     pub(in crate::asset_session) async fn prepare_upload_key_setup_selected(&self,
         request:ContextRequest,app_data:&std::path::Path,selection:Qualification) -> Result<UploadKeyStatus,AssetError> {
         let admission=selection.admit(self,SelectedAction::Prepare,Some(app_data))?;
+        crate::asset_session::agent_upload_key::gui_available(&self.lock())?;
         self.reconcile();
         let (flight, ticket) = {
             let mut state = self.lock();
@@ -1196,6 +1201,12 @@ impl DocumentBinding {
         self.create_upload_key_selected(request,Qualification::Ordinary)
     }
     pub(in crate::asset_session) fn create_upload_key_selected(&self,request:CreateRequest,selection:Qualification)->Result<UploadKeyStatus,AssetError> {
+        self.create_upload_key_origin(request,selection,None)
+    }
+    pub(in crate::asset_session) fn create_upload_key_delegated(&self,request:CreateRequest,link:Arc<crate::service_upload_key_requests::NativeLink>)->Result<UploadKeyStatus,AssetError> {
+        self.create_upload_key_origin(request,Qualification::Ordinary,Some(link))
+    }
+    fn create_upload_key_origin(&self,request:CreateRequest,selection:Qualification,agent:Option<Arc<crate::service_upload_key_requests::NativeLink>>)->Result<UploadKeyStatus,AssetError> {
         let admission=selection.admit(self,SelectedAction::Create,None)?;
         let (consent, service, tools) = {
             let mut state = self.lock();
@@ -1237,6 +1248,8 @@ impl DocumentBinding {
                 .upload_key_tool_loan(&self.inner.session_identity)
                 .map_err(|_| AssetError::new(Reason::Unqualified))?
                 .ok_or_else(|| AssetError::new(Reason::Unqualified))?;
+            if let Some(link)=&agent { crate::asset_session::agent_upload_key::consume(self,&state,link,crate::service_upload_key_protocol::Kind::GenerateNew)?; }
+            else { crate::asset_session::agent_upload_key::gui_available(&state)?; }
             if prepared
                 .attempted
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1249,6 +1262,7 @@ impl DocumentBinding {
                     admission,
                     prepared,
                     revision: request.expected_revision,
+                    agent,
                 },
                 service,
                 tools,

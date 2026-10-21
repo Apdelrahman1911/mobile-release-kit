@@ -73,7 +73,7 @@ fn reply_must_bind_same_instance_request_project_and_fixed_framing() {
 fn compiled_catalogue_names_only_separately_allowed_index_changes_and_stays_bounded() {
     let bytes = super::super::capabilities(true).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(bytes.len() <= 12 * 1024);
+    assert!(bytes.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let git = &value["gitIndex"];
     assert_eq!(git["scope"], "desktop-selected-stage-or-unstage");
     assert_eq!(git["readGrantAuthorizesWrites"], false);

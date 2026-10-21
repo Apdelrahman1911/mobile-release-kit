@@ -150,7 +150,7 @@ GIT_OBSERVATION_BOOTSTRAPS = FETCH_OBSERVATION_BOOTSTRAPS | PUSH_OBSERVATION_BOO
 CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
+    "github_auth_bootstrap.py", "github_device_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py", "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
 }
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"

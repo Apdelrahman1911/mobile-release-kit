@@ -56,10 +56,11 @@ impl Persisted {
 }
 
 struct Grant { id: Id, projects: BTreeSet<Id>, expires: Instant,
-    reserve_read: Arc<crate::service_version_reserve_requests::ReadPermission> }
+    reserve_read: Arc<crate::service_version_reserve_requests::ReadPermission>,
+    upload_key_read: Arc<crate::service_upload_key_requests::ReadPermission> }
 // Only the original Grant drop/replacement revokes. Cloned facets do not own
 // consent and their Drop cannot revoke/renew the original.
-impl Drop for Grant { fn drop(&mut self) { self.reserve_read.revoke(Instant::now()); } }
+impl Drop for Grant { fn drop(&mut self) { let at=Instant::now(); self.reserve_read.revoke(at); self.upload_key_read.revoke(at); } }
 struct State {
     revision: Revision, saved: Persisted,
     // Runtime aliases are NEVER persisted or restored. Each genuine native
@@ -78,22 +79,31 @@ pub(crate) struct ReadAccessStatus { pub(crate) enabled: bool, pub(crate) remain
 mod local_checks;
 #[path = "application_service_agent_android_build.rs"]
 mod agent_android_build;
+#[path="service_store_application.rs"]
+mod agent_store;
 #[path = "application_service_agent_ios_archive.rs"]
 mod agent_ios_archive;
 #[path = "application_service_request_catalogue.rs"]
 mod request_catalogue;
 #[path="service_git_application.rs"]
 mod git_index;
+#[path="service_configuration_application.rs"]
+mod agent_configuration;
 #[path="service_version_reserve_application.rs"]
 mod agent_version_reserve;
 #[path="service_play_cleanup_application.rs"]
 mod agent_play_cleanup;
+#[path="application_service_upload_key_requests.rs"]
+mod upload_key;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
     history_lease: Option<Arc<HistoryLease>>,
     git_index_requests: Arc<crate::service_git_requests::Inbox>,
     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+    store_requests: Arc<crate::service_store_requests::Inbox>,
     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+    upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
+    configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
@@ -126,13 +136,16 @@ impl ApplicationService {
         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
         for operation in &mut saved.operations { operation.stale = true; }
         let instance = Id::random()?;
+        let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
+        let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+        let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -185,7 +198,7 @@ impl ApplicationService {
     /// Permanent original-service read fence. Native observation callbacks must
     /// not wait for the state mutex, which real store IO can hold. No Allow or
     /// later successful write clears this flag; original cleanup still runs.
-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence(); }
     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
         // Nonblocking: an old facet must not survive an unobserved state
         // poison while another caller still has not attempted lock().
@@ -349,6 +362,7 @@ impl ApplicationService {
         let intent_at = Instant::now();
         self.read_publication_current()?;
         let read_epoch = self.version_reserve_requests.read_permission_epoch()?;
+        let upload_key_epoch = self.upload_key_requests.read_epoch()?;
         if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_some_and(|life| life.is_zero() || life > MAX_ACCESS) { return Err(Error::InvalidRequest); }
         let mut state = self.lock()?; self.check(&state)?;
         let selected: BTreeSet<_> = projects.into_iter().collect();
@@ -359,22 +373,25 @@ impl ApplicationService {
             _ => return Err(Error::AccessDenied),
         };
         let next = Grant { id: Id::random()?, projects: selected, expires,
-            reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)) };
+            reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)),
+            upload_key_read: Arc::new(crate::service_upload_key_requests::ReadPermission::new(expires)) };
         // Reject a revoke which overtook original validation/IO. On failure
         // next drops (revoking only itself); the old Grant remains untouched.
         self.read_publication_current()?;
         self.version_reserve_requests.publish_read_permission(&next.reserve_read, read_epoch)?;
+        self.upload_key_requests.publish_read(&next.upload_key_read, upload_key_epoch)?;
         self.read_publication_current()?;
-        if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); }
+        if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); old.upload_key_read.revoke(intent_at); }
         state.grant = Some(next);
         let status = access_status(&state);
         self.read_publication_current()?; Ok(status)
     }
     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
         let at = Instant::now();
-        self.version_reserve_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+        self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+        let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
         let mut state = self.lock()?;
-        if let Some(old) = &state.grant { old.reserve_read.revoke(at); }
+        if let Some(old) = &state.grant { old.reserve_read.revoke(at); old.upload_key_read.revoke(at); }
         state.grant = None; Ok(())
     }
     pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> {
@@ -415,6 +432,13 @@ impl ApplicationService {
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
+                p::RequestBody::UploadKeyScope(q) => return self.upload_key_scope(client,&q.project_id),
+                p::RequestBody::UploadKeySubmit(v) => return self.upload_key_submit(client,v.clone()),
+                p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
+                p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
+                p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
+                p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
+                p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
@@ -457,6 +481,11 @@ impl ApplicationService {
                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
+                p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
+                p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
+                p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
+                p::RequestBody::ConfigurationStatus(q) => return self.configuration_query(client,q,false),
+                p::RequestBody::ConfigurationCancel(q) => return self.configuration_query(client,q,true),
                 p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
                 p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
                 _ => {},
@@ -467,6 +496,9 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
+                p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
@@ -516,7 +548,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

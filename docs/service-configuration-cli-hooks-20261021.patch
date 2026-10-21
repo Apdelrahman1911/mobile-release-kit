@@ -1,0 +1,1137 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -288,6 +288,7 @@
+     "revoke_agent_git_commit",
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
++    "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -5,6 +5,7 @@
+   "windows": ["main"],
+   "local": true,
+   "permissions": [
++    "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+     "allow-agent-git-commit-access",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -84,6 +84,8 @@
+ mod request_catalogue;
+ #[path="service_git_application.rs"]
+ mod git_index;
++#[path="service_configuration_application.rs"]
++mod agent_configuration;
+ #[path="service_version_reserve_application.rs"]
+ mod agent_version_reserve;
+ #[path="service_play_cleanup_application.rs"]
+@@ -94,6 +96,7 @@
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
++    configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+@@ -126,13 +129,14 @@
+         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
+         for operation in &mut saved.operations { operation.stale = true; }
+         let instance = Id::random()?;
++        let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, configuration_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -185,7 +189,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.configuration_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -457,6 +461,11 @@
+                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
+                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
+                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
++                p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
++                p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
++                p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
++                p::RequestBody::ConfigurationStatus(q) => return self.configuration_query(client,q,false),
++                p::RequestBody::ConfigurationCancel(q) => return self.configuration_query(client,q,true),
+                 p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
+                 p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
+                 _ => {},
+@@ -467,6 +476,7 @@
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
++                p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+@@ -516,7 +526,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.configuration_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_host.rs b/desktop/src-tauri/src/application_service_host.rs
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -599,6 +599,14 @@
+         let service = state.service.clone().ok_or(Error::Unavailable)?;
+         service.native_history_current()?;
+         Ok(service)
++    }
++    // Memory-only consumer lookup after the existing Host lock; OFF Doc/Edit.
++    // Does not initialize, renew READ, fabricate a native registration or run IO.
++    pub(crate) fn configuration_service(&self)->Result<Arc<ApplicationService>,Error>{
++        let state=self.lock()?;state.available()?;
++        if state.phase!=Phase::Listening{return Err(Error::Unavailable);}
++        let service=state.service.clone().ok_or(Error::Unavailable)?;
++        service.native_history_current()?;Ok(service)
+     }
+     pub(crate) fn snapshot_ticket(&self, original: &NativeProject) -> Result<Option<SnapshotTicket>, Error> {
+         let state = self.lock()?; state.available()?;
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -59,6 +59,7 @@
+         additional_requests.extend(self.git_index_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.identity_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.version_reserve_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.configuration_requests.catalogue(project)?);
+         let view = data::Catalogue {
+             schema_version: 2,
+             scope: data::Scope::CurrentHostRetainedRequests,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1138,6 +1138,12 @@
+         && !state.session && !state.lock_pending && assets_can_exit_locked(state)
+         && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
+ }
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_service_configuration.rs"]
++mod agent_configuration;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_configuration::ConfigurationAgentGate;
++
+ struct Inner {
+     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+     session_identity: Arc<()>,
+@@ -2172,6 +2178,8 @@
+             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+@@ -3936,6 +3944,11 @@
+     }
+     pub(crate) fn configuration_edit_admit_published<T>(&self,
+         action: impl FnOnce(&DesktopBridge, &RegistrationPublisher) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
++        self.configuration_edit_admit_checked(|_,_|Ok(()),|bridge,publisher,()|action(bridge,publisher))
++    }
++    fn configuration_edit_admit_checked<T,U>(&self,
++        before:impl FnOnce(&DocumentState,&RegistrationPublisher)->Result<U,BridgeError>,
++        action:impl FnOnce(&DesktopBridge,&RegistrationPublisher,U)->Result<T,BridgeError>)->Result<T,BridgeError>{
+         let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+         let result = (|| {
+         let mut state = self.lock();
+@@ -3946,6 +3959,7 @@
+         if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
+             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
+         if project_path_pending(&state) || images::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
++        let admitted=before(&state,&publisher)?; // Agent READ may not invalidate/STOP an active peer.
+         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+         state.saved_input = None;
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+@@ -3957,7 +3971,7 @@
+         self.inner.bridge.project_recovery.ensure_idle()?;
+         self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?; self.inner.bridge.upload_key.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+-        action(&self.inner.bridge, &publisher)
++        action(&self.inner.bridge, &publisher,admitted)
+         })();
+         finish_registration_publisher(publisher); result
+     }
+diff --git a/desktop/src-tauri/src/edit_commands.rs b/desktop/src-tauri/src/edit_commands.rs
+--- a/desktop/src-tauri/src/edit_commands.rs
++++ b/desktop/src-tauri/src/edit_commands.rs
+@@ -78,10 +78,29 @@
+ pub(crate) struct ConfigurationRecoveryApply {
+     pub session_id: String, pub plan_token: String, pub intent: crate::edit_protocol::RecoveryIntent,
+ }
+-pub(crate) enum ConfigurationOpen { Edit(Open), Recover(ConfigurationRecoveryOpen) }
+-pub(crate) enum ConfigurationPrepare { Edit(PrepareConfigEdit), Recover(crate::edit_protocol::PrepareConfigurationRecovery) }
+-pub(crate) enum ConfigurationApply { Edit(Apply), Recover(ConfigurationRecoveryApply) }
++#[derive(Deserialize)]
++#[serde(rename_all="kebab-case")]
++pub(crate) enum AgentConfigurationIntent { AgentConfiguration }
++#[derive(Deserialize)]
++#[serde(rename_all="camelCase",deny_unknown_fields)]
++pub(crate) struct AgentConfigurationRequest {
++    pub intent:AgentConfigurationIntent,
++    pub origin:crate::service_configuration_protocol::Query,
++}
++pub(crate) fn agent_configuration_allow(body:&Value)->Result<crate::service_configuration_protocol::Allow,BridgeError>{
++    let a:crate::service_configuration_protocol::Allow=decode(body,4096)?;
++    if a.consent_version!=crate::service_configuration_protocol::CONSENT{return Err(BridgeError::invalid());}Ok(a)
++}
++pub(crate) fn agent_configuration_query(body:&Value)->Result<crate::service_configuration_protocol::Query,BridgeError>{decode(body,4096)}
++pub(crate) fn agent_configuration_status(body:&Value)->Result<Option<crate::service_configuration_protocol::Query>,BridgeError>{
++    if body.as_object().is_some_and(|v|v.is_empty()){status(body)?;Ok(None)}
++    else{agent_configuration_query(body).map(Some)}
++}
++pub(crate) enum ConfigurationOpen { Edit(Open), Recover(ConfigurationRecoveryOpen), Agent(AgentConfigurationRequest) }
++pub(crate) enum ConfigurationPrepare { Edit(PrepareConfigEdit), Recover(crate::edit_protocol::PrepareConfigurationRecovery), Agent(AgentConfigurationRequest) }
++pub(crate) enum ConfigurationApply { Edit(Apply), Recover(ConfigurationRecoveryApply), Agent(AgentConfigurationRequest) }
+ pub(crate) fn configuration_open(body: &Value) -> Result<ConfigurationOpen, BridgeError> {
++    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationOpen::Agent);}
+     if body.get("intent").is_some() {
+         let value: ConfigurationRecoveryOpen = decode(body, 256)?;
+         if !crate::protocol::valid_id(&value.project_id) { return Err(BridgeError::invalid()); }
+@@ -89,6 +108,7 @@
+     } else { open(body).map(ConfigurationOpen::Edit) }
+ }
+ pub(crate) fn configuration_prepare(body: &Value) -> Result<ConfigurationPrepare, BridgeError> {
++    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationPrepare::Agent);}
+     if body.get("intent").is_some() {
+         let value: crate::edit_protocol::PrepareConfigurationRecovery = decode(body, 256)?;
+         if !token(&value.session_id) || !token(&value.revision) { return Err(BridgeError::invalid()); }
+@@ -96,6 +116,7 @@
+     } else { prepare(body).map(ConfigurationPrepare::Edit) }
+ }
+ pub(crate) fn configuration_apply(body: &Value) -> Result<ConfigurationApply, BridgeError> {
++    if body.get("intent").and_then(Value::as_str)==Some("agent-configuration"){return decode(body,4096).map(ConfigurationApply::Agent);}
+     if body.get("intent").is_some() {
+         let value: ConfigurationRecoveryApply = decode(body, 256)?;
+         if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
+diff --git a/desktop/src-tauri/src/edit_owner.rs b/desktop/src-tauri/src/edit_owner.rs
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -35,6 +35,16 @@
+ mod version_reserve;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ pub(crate) use version_reserve::{NativeReservedVersionHandoff,ReservedVersionStep};
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path="edit_owner_service_configuration.rs"]
++mod agent_configuration;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use agent_configuration::Link as ConfigurationAgentLink;
++#[cfg(not(any(target_os = "linux", target_os = "macos")))]
++pub(crate) struct ConfigurationAgentLink;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
+
+ const NATIVE_EDIT_QUALIFIED: bool = false;
+ const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
+@@ -970,6 +980,8 @@
+     agent_identity: Option<Arc<agent_identity::Link>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     reserved_version: Option<NativeReservedVersionHandoff>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    agent_configuration: Option<Arc<ConfigurationAgentLink>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_failure: Mutex<Option<(Reason, Instant)>>,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -1463,7 +1475,7 @@
+             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); }
++        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); }
+         self.changes.send_replace(registry.revision);
+         self.changed.notify_waiters();
+     }
+@@ -1668,6 +1680,11 @@
+         if let Some((at, reason)) = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a|
+             agent_identity::actions::cancellation_at(&a.session, now).filter(|(at, _)| a.cleanup_start.is_none_or(|prior| *at < prior))) {
+             self.trigger_locked(publication, r, id, reason, at);
++        }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
++            agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
++            self.trigger_locked(publication,r,id,reason,at);
+         }
+         // Evaluate the original phase endpoint before a new native F can clear
+         // phase_end. Both events use their actual time; neither extends cleanup.
+@@ -2210,6 +2227,12 @@
+     fn open_domain_attempt(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+         registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
+         images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
++        self.open_domain_attempt_agent(supplied,window,project_id,root,domain,registration,ticket,metadata,images,claimed,None)
++    }
++    fn open_domain_attempt_agent(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
++        registration: Option<RegisteredEditRoot>, mut ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
++        images: Option<ImageOpen>, claimed: &mut bool, agent_configuration: Option<Arc<ConfigurationAgentLink>>) -> Result<DomainStatus, BridgeError> {
++        if agent_configuration.is_some() && (domain!=EditDomain::Configuration||ticket.is_some()||registration.is_some()){return Err(invalid_owner());}
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
+@@ -2306,6 +2329,8 @@
+             agent_identity,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             reserved_version,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_configuration,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2359,6 +2384,8 @@
+             let generation = r.generation.clone();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity::before_claim(&self.inner, &r, &session, &project_id)?;
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_configuration::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
+             // Claim is permanent for this invocation BEFORE its projection or
+             // queue can fail. No postclaim error is a negative admission fact.
+             *claimed = true;
+@@ -2379,6 +2406,13 @@
+                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity::linked(&r);
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if agent_configuration::linked(&r).is_err(){
++                // The permanent claim/installed original are never dropped by
++                // a failed link. Retain Unknown and register original cleanup.
++                session.resource_unknown.store(true,Ordering::SeqCst);
++                if let Some(a)=r.active.as_mut(){a.unknown=true;}
++            }
+             self.inner.bump(&mut r, &mut publication);
+             self.inner.snapshot_for(&r, domain)? // Admission reply captured BEFORE queue/start.
+         };
+@@ -2478,6 +2512,12 @@
+     fn prepare_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+         counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>,
+         agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
++        self.prepare_domain_configuration(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,None)
++    }
++    fn prepare_domain_configuration(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
++        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
++        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_config.is_some() && domain!=EditDomain::Configuration{return Err(invalid_owner());}
+         if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+@@ -2553,6 +2593,8 @@
+             if !agent_identity::actions::consume(a, agent_action, crate::agent_identity_requests::actions::Kind::Prepare) {
+                 self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+             }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
+             a.prepare_counters = Some(counters);
+             a.claimed_seq = 1;
+             a.phase_end = Some(phase_end);
+@@ -2621,6 +2663,12 @@
+     }
+     fn apply_domain_action(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+         registration: Option<WorkflowRegistration>, recovery_intent: bool, agent_action: Option<&Arc<crate::agent_identity_requests::Entry>>) -> Result<DomainStatus, BridgeError> {
++        self.apply_domain_configuration(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,None)
++    }
++    fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
++        registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
++        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
+         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+         let result = (|| {
+@@ -2676,6 +2724,8 @@
+             }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+             a.claimed_seq = 2;
+@@ -2907,6 +2957,8 @@
+         };
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if agent_configuration::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
+         sent += 1;
+         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
+@@ -2993,9 +3045,14 @@
+                 if stderr || discard { continue; } // Still drain to actual EOF.
+                 for byte in &buffer[..length] {
+                     if discard { break; }
+-                    frame.push(*byte);
+                     let response_limit = match owner.domain {
+-                        EditDomain::Configuration => wire::RESPONSE_LIMIT,
++                        EditDomain::Configuration => {
++                            #[cfg(any(target_os="linux",target_os="macos"))]
++                            if owner.agent_configuration.is_some() { crate::protocol::CONFIGURATION_AGENT_FRAME_BYTES }
++                            else { wire::RESPONSE_LIMIT }
++                            #[cfg(not(any(target_os="linux",target_os="macos")))]
++                            { wire::RESPONSE_LIMIT }
++                        },
+                         EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
+                         EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
+                         EditDomain::ReleaseVersion => version_wire::RESPONSE_LIMIT,
+@@ -3003,6 +3060,13 @@
+                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
+                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
+                     };
++                    #[cfg(any(target_os="linux",target_os="macos"))]
++                    if owner.agent_configuration.is_some() && frame.len() >= response_limit {
++                        discard=true;failed=true;frame.clear();
++                        inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
++                        continue;
++                    }
++                    frame.push(*byte);
+                     if frame.len() > response_limit {
+                         discard = true; failed = true; frame.clear();
+                         inner.trigger(&owner.id, Reason::OutputLimit, Instant::now()); inner.unknown(&owner.id);
+@@ -3010,7 +3074,13 @@
+                         count += 1;
+                         let parsed = if count <= 3 {
+                             match owner.domain {
+-                                EditDomain::Configuration => wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery),
++                                EditDomain::Configuration => {
++                                    #[cfg(any(target_os="linux",target_os="macos"))]
++                                    if owner.agent_configuration.is_some() { wire::decode_agent_configuration(&frame, &owner.id) }
++                                    else { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
++                                    #[cfg(not(any(target_os="linux",target_os="macos")))]
++                                    { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
++                                },
+                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
+                                 EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
+                                 EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
+@@ -3122,7 +3192,8 @@
+     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
+     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;} }
++    { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
++      if !invalid&&a.cleanup_start.is_none()&&agent_configuration::frame(a,&frame,&mut publication).is_err(){invalid=true;} }
+     let mut terminal = false;
+     let mut uncertain = false;
+     if !invalid {
+@@ -3463,7 +3534,7 @@
+ }
+ fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    if owner.reserved_version.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    if owner.reserved_version.is_some()||owner.agent_configuration.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+     end
+ }
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+@@ -4428,6 +4499,8 @@
+             if a.projection.native_reason==Reason::None{a.projection.native_reason=Reason::CallerLost;}
+             if owner.resource_unknown.load(Ordering::SeqCst){a.unknown=true;}
+         }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let configuration_chain_current=agent_configuration::retirement_publication(&mut a,&mut publication);
+         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
+             // IDs only, bounded by the native 64-project picker registry. No
+             // retained private history or guessed recovery controller.
+@@ -4501,7 +4574,8 @@
+         inner.bump(&mut r, &mut publication);
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+-          agent_identity::actions::retired(&r, &a.session, a.unknown); }
++          agent_identity::actions::retired(&r, &a.session, a.unknown);
++          agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current); }
+     }
+     guard.completed = true;
+     })();
+diff --git a/desktop/src-tauri/src/edit_protocol.rs b/desktop/src-tauri/src/edit_protocol.rs
+--- a/desktop/src-tauri/src/edit_protocol.rs
++++ b/desktop/src-tauri/src/edit_protocol.rs
+@@ -579,10 +579,19 @@
+ }
+
+ pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+-    if bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
++    decode_configuration(bytes, session, false)
++}
++// Private native selection; no request/child may choose this decoder. Full
++// bounded-frame parse precedes raw.clone/from_value and any queue retention.
++pub(crate) fn decode_agent_configuration(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
++    decode_configuration(bytes, session, true)
++}
++fn decode_configuration(bytes: &[u8], session: &str, agent: bool) -> Result<ChildFrame, BridgeError> {
++    let limit = if agent { crate::protocol::CONFIGURATION_AGENT_FRAME_BYTES } else { RESPONSE_LIMIT };
++    if bytes.len() > limit || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+     let body = &bytes[..bytes.len() - 1];
+     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| *b == b'\r' || *b == b'\n') { return Err(BridgeError::protocol()); }
+-    let value = strict_json(body)?;
++    let value = if agent { crate::protocol::strict_configuration_agent_frame_json(body)? } else { strict_json(body)? };
+     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session {
+         return Err(BridgeError::protocol());
+     }
+@@ -590,6 +599,8 @@
+     match value["kind"].as_str() {
+         Some("opened") if seq == 0 => {
+             if !keys(&value["result"], &["revision", "base", "scopeResources"]) { return Err(BridgeError::protocol()); }
++            if agent { crate::service_configuration_protocol::derivation_bound(&value["result"]["base"])
++                .map_err(|_| BridgeError::protocol())?; }
+             let result: Opened = serde_json::from_value(value["result"].clone()).map_err(|_| BridgeError::protocol())?;
+             if !token(&result.revision) || !(result.base.is_null() || result.base.is_object())
+                 || bounded(&result.base, CONFIG_LIMIT).is_err() || result.scope_resources != ResourceState::Settled { return Err(BridgeError::protocol()); }
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -7,6 +7,8 @@
+ use std::{ffi::OsString, io::Write, path::PathBuf};
+ #[path = "installed_cli_identity.rs"]
+ mod identity;
++#[path="installed_cli_configuration.rs"]
++mod configuration;
+ #[path = "installed_cli_identity_actions.rs"]
+ mod identity_actions;
+ #[path = "installed_cli_local_checks.rs"]
+@@ -41,6 +43,11 @@
+   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk configuration-read PROJECT_ID OBSERVATION_REVISION [--json]\n\
++  mrk configuration-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION --stdin [--json]\n\
++  mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
++  mrk configuration-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk configuration-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -107,6 +114,7 @@
+ Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
+ The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
+ Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
++Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
+ There is no arbitrary edit, toolkit signing, credential or publishing route.\n";
+
+ struct Options { request: p::Request, json: bool }
+@@ -242,6 +250,9 @@
+                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                 "commands": IDENTITY_ACTION_COMMANDS,
+             },
++            "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
++                "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
++                "excludes":["identity","version","enabled-platforms","commands","credentials","signing","recovery"],"nativeAvailabilityChecked":false},
+             "gitIndex": {"scope":"desktop-selected-stage-or-unstage", "defaultEnabled":false,"oneUse":true,
+                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+@@ -258,7 +269,7 @@
+                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+                 "includesPrivateDraft":false,"hooks":false,"signing":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":git_commit::COMMANDS},
+-            "gitRepository": {"actions":["initialize","branch-create","branch-switch","branch-rename","fast-forward"],
++            "gitRepository": {"actions":["initialize","branch-create","branch-switch","branch-rename","fast-forward","set-upstream"],
+                 "defaultEnabled":false,"oneUse":true,"sharesGitGrantAnd32Requests":true,"requiresRunningDesktop":true,
+                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"fetch":false,"push":false,"nativeAvailabilityChecked":false,
+                 "commands":git_repository::COMMANDS},
+@@ -267,7 +278,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","configuration"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -293,7 +304,7 @@
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -391,6 +402,7 @@
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
++        p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
+@@ -423,6 +435,7 @@
+     // argument contents are neither echoed nor included in a public response.
+     let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
++    if configuration::recognizes(&args){return configuration::run(args);}
+     if identity::recognizes(&args) { return identity::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+@@ -514,7 +527,7 @@
+         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
+         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
+-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 160);
++        assert_eq!(caps["requestDiscovery"]["maxRequests"], 192); // Original 160 plus 32 Configuration metadata rows.
+     }
+     #[test]
+     fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -255,6 +255,7 @@
+     let response = service.dispatch(&client, request);
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
++        p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -4,6 +4,8 @@
+ #![forbid(unsafe_code)]
+
+ mod service_protocol;
++mod service_configuration_protocol;
++mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+ #[path="service_version_reserve_requests.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -123,6 +123,8 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod git_local_state;
+ mod service_protocol;
++mod service_configuration_protocol;
++mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+ #[path="service_version_reserve_requests.rs"]
+diff --git a/desktop/src-tauri/src/protocol.rs b/desktop/src-tauri/src/protocol.rs
+--- a/desktop/src-tauri/src/protocol.rs
++++ b/desktop/src-tauri/src/protocol.rs
+@@ -149,6 +149,16 @@
+     strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
+ }
+
++// Only the new automated Config slice uses this fixed, smaller entry to
++// the SAME Seed. Ordinary Config/other protocol limits stay unchanged. The
++// envelope allowance is separate from its 256KiB/4096-node/depth20 base.
++pub(crate) const CONFIGURATION_AGENT_FRAME_BYTES: usize = 272 * 1024;
++pub(crate) const CONFIGURATION_AGENT_FRAME_NODES: usize = 4160;
++pub(crate) fn strict_configuration_agent_frame_json(bytes: &[u8]) -> Result<Value, BridgeError> {
++    if bytes.len() > CONFIGURATION_AGENT_FRAME_BYTES { return Err(BridgeError::protocol()); }
++    strict_json_with_limits(bytes, CONFIGURATION_AGENT_FRAME_NODES, 24)
++}
++
+ // Fixed native VersionAllocations state only. No renderer namespace/decoder
+ // selection and no widening of the ordinary passive protocol's limits.
+ pub(crate) fn strict_version_allocation_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -209,6 +209,11 @@
+     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
++    #[serde(rename="configuration.read")] ConfigurationRead(crate::service_configuration_protocol::Read),
++    #[serde(rename="configuration.prepare")] ConfigurationPrepare(crate::service_configuration_protocol::Prepare),
++    #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
++    #[serde(rename="configuration.status")] ConfigurationStatus(crate::service_configuration_protocol::Query),
++    #[serde(rename="configuration.cancel")] ConfigurationCancel(crate::service_configuration_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -276,6 +281,7 @@
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
+     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
++    ConfigurationRequest(crate::service_configuration_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+@@ -334,6 +340,9 @@
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
++    if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
++    if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
++    if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
+@@ -406,6 +415,10 @@
+             let mut seen = std::collections::BTreeSet::new();
+             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
+         }
++        ResponseBody::ConfigurationRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_configuration_protocol::STATUS_BYTES{return Err(Error::InvalidRequest);}
++        },
+         ResponseBody::VersionReserveRequest(row) => {
+             row.validate()?;
+             if row.origin.service_instance != response.service_instance
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -10,7 +10,8 @@
+ pub(crate) const DETAIL_LIMIT: usize = local::LIMIT + build::LIMIT;
+ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_LIMIT
+     + crate::agent_identity_requests::LIMIT
+-    + crate::service_version_reserve_protocol::REQUEST_LIMIT;
++    + crate::service_version_reserve_protocol::REQUEST_LIMIT
++    + crate::service_configuration_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -167,6 +168,7 @@
+     GitRemote,
+     Identity,
+     VersionReservation,
++    Configuration,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -174,6 +176,7 @@
+             Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
++            Self::Configuration => 3,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -184,6 +187,7 @@
+             Self::GitRemote => "git-remote-status",
+             Self::Identity => "identity-request-status",
+             Self::VersionReservation => "version-reserve-status",
++            Self::Configuration => "configuration-status",
+         }
+     }
+ }
+@@ -245,7 +249,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 3];
++        let mut counts = [0usize; 4];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -258,6 +262,7 @@
+         if counts[0] > crate::service_git_protocol::REQUEST_LIMIT
+             || counts[1] > crate::agent_identity_requests::LIMIT
+             || counts[2] > crate::service_version_reserve_protocol::REQUEST_LIMIT
++            || counts[3] > crate::service_configuration_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1174,6 +1174,12 @@
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
+     let args = match edit_commands::configuration_open(request_body(&request)?)? {
++        edit_commands::ConfigurationOpen::Agent(args)=>{
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            return state.document.agent_configuration_command(window,args.origin,crate::service_configuration_requests::Kind::Read);
++            #[cfg(not(any(target_os="linux",target_os="macos")))]
++            {let _=args;return Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."));}
++        },
+         edit_commands::ConfigurationOpen::Edit(args) => args,
+         edit_commands::ConfigurationOpen::Recover(args) => return state.bridge.open_configuration_recovery(&state.document, window, args),
+     };
+@@ -1191,6 +1197,12 @@
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
+     let args = match edit_commands::configuration_prepare(request_body(&request)?)? {
++        edit_commands::ConfigurationPrepare::Agent(args)=>{
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            return state.document.agent_configuration_command(window,args.origin,crate::service_configuration_requests::Kind::Prepare);
++            #[cfg(not(any(target_os="linux",target_os="macos")))]
++            {let _=args;return Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."));}
++        },
+         edit_commands::ConfigurationPrepare::Edit(args) => args,
+         edit_commands::ConfigurationPrepare::Recover(args) => return state.bridge.prepare_configuration_recovery(&state.document, window, args),
+     };
+@@ -1206,6 +1218,12 @@
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
+     let args = match edit_commands::configuration_apply(request_body(&request)?)? {
++        edit_commands::ConfigurationApply::Agent(args)=>{
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            return state.document.agent_configuration_command(window,args.origin,crate::service_configuration_requests::Kind::Apply);
++            #[cfg(not(any(target_os="linux",target_os="macos")))]
++            {let _=args;return Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."));}
++        },
+         edit_commands::ConfigurationApply::Edit(args) => args,
+         edit_commands::ConfigurationApply::Recover(args) => return state.bridge.apply_configuration_recovery(&state.document, window, args),
+     };
+@@ -1586,6 +1604,34 @@
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
+ }
++#[tauri::command]
++async fn agent_configuration_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let origin=edit_commands::agent_configuration_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_configuration_status(origin.as_ref())?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_configuration_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=edit_commands::agent_configuration_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_configuration_apply(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_configuration(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=edit_commands::agent_configuration_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_configuration(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
++}
++
+ #[tauri::command]
+ async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+@@ -3217,6 +3263,11 @@
+ impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
+
+ #[deny(unused_variables, unused_assignments)]
++#[cfg(any(target_os="linux",target_os="macos"))]
++struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();}}
++
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+     #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3229,6 +3280,8 @@
+     let git_index_guard = GitIndexRelayGuard { document: document.clone(), closed: false };
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let configuration_guard=ConfigurationAgentRelayGuard(document.clone());
+     let mut revisions = edits.subscribe();
+     let mut assets = document.subscribe();
+     let mut diagnostics = document.environment_diagnostics_subscribe();
+@@ -3293,6 +3346,10 @@
+         let mut tool_acquisition_guard = tool_acquisition_guard;
+         let mut project_recovery_guard = project_recovery_guard;
+         let mut artifact_inspection_guard = artifact_inspection_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let _configuration_guard=configuration_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut configuration_revision=None;
+         let mut ios_archive_guard = ios_archive_guard;
+         if enter.await.is_err() { return; }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3346,6 +3403,14 @@
+             // SAME retained relay owns the call; no detached writer is created.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let _ = application_history.publish_identity_history();
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(Some(status))=document.agent_configuration_relay(){
++                let key=(status.service_instance.clone(),status.revision);
++                if configuration_revision.as_ref()!=Some(&key){
++                    let _=app.emit_to(MAIN_WINDOW,"mrk:agent-configuration",&status);
++                    configuration_revision=Some(key);
++                }
++            }
+             // Fixed DATA tap in this SAME retained relay; no new task, Git
+             // command, status IPC, Store write or native read is introduced.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -5277,6 +5342,7 @@
+             allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
++            agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
+             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+             agent_git_commit_access, allow_agent_git_commit, revoke_agent_git_commit,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -32,6 +32,8 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "../src/git_local_state.rs"] mod git_local_state;
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
++#[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
++#[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
+ #[path="../src/service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+ #[path="../src/service_version_reserve_requests.rs"]
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,3 +1,4 @@
++import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
+ import { GitPushNewBranch } from './components/GitPushNewBranch.tsx';
+ import { GitPush } from './components/GitPush.tsx';
+ import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
+@@ -503,6 +504,7 @@
+     recoveryUnavailable: () => playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
+     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
++    onDelegatedSave: (receipt) => dispatch({ type: 'delegated-config-save-final', projectId: receipt.request.runtimeProjectId, receipt }),
+     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
+     onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
+   }));
+@@ -2167,6 +2169,7 @@
+         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+         {page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
++        <ServiceConfigurationAccess controller={configEdit.agent} detailed={page === 'settings'} onShow={() => navigate('settings')} />
+         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
+           onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
+           recoveryReason={workspace.selectedId ? configEdit.inspectRecoveryReason(workspace.selectedId) : 'Select an original registered project first.'}
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,3 +1,4 @@
++import { createConfigurationApi } from './serviceConfigurationProtocol.ts';
+ import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+ import { STORE_EXECUTE_EVENT, encodeLocalStoreExecuteRequest, parseLocalStoreExecuteStatus, localStoreExecuteError, type StoreExecuteCommand } from './localStoreExecuteProtocol.ts';
+@@ -106,7 +107,7 @@
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -706,6 +707,7 @@
+         return structuredClone(result);
+       } catch (error) { throw githubSetupError(error); }
+     },
++    agentConfiguration: createConfigurationApi(mode, invoke, listen),
+     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+     openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+     prepareConfigRecovery: (sessionId, revision) => call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, intent: 'recover' }),
+diff --git a/desktop/src/configEdit.ts b/desktop/src/configEdit.ts
+--- a/desktop/src/configEdit.ts
++++ b/desktop/src/configEdit.ts
+@@ -82,6 +82,7 @@
+   'projectId' | 'sessionId' | 'ownerGeneration' | 'phase' | 'nativeFinality' | 'coreOutcome'>;
+
+ export interface ConfigEditState {
++  delegationPending?: boolean;
+   mode: BridgeMode;
+   listening: boolean;
+   initialized: boolean;
+@@ -105,6 +106,7 @@
+ };
+
+ export type ConfigEditAction =
++  | { type: 'delegation-pending'; value: boolean }
+   | { type: 'connect'; mode: BridgeMode }
+   | { type: 'listening' }
+   | { type: 'read-start' }
+@@ -240,6 +242,7 @@
+
+ export function configEditReducer(state: ConfigEditState, action: ConfigEditAction): ConfigEditState {
+   switch (action.type) {
++    case 'delegation-pending': return !!state.delegationPending === action.value ? state : { ...state, delegationPending: action.value };
+     case 'connect': return { ...state, mode: action.mode };
+     case 'listening': return { ...state, listening: true };
+     case 'read-start': return { ...state, readPending: true };
+@@ -319,6 +322,7 @@
+ };
+
+ export function nativeStartReason(state: ConfigEditState): string | null {
++  if (state.delegationPending) return 'An original CLI configuration request is pending. Review or stop it in the same Desktop.';
+   if (state.mode === 'preview') return 'Browser preview cannot open a native save session or simulate saving.';
+   if (state.mode !== 'native') return 'Saving requires the native desktop bridge.';
+   if (state.integrityFailed) return 'Native save status did not match the reviewed contract. Saving is disabled; your draft is retained.';
+@@ -353,6 +357,7 @@
+ // Synchronous renderer exclusion before an opposite-domain Open reply/event.
+ // This is a refusal only; the shared native registry is still the real owner.
+ export function configurationOwnerReason(state: ConfigEditState, projectId: string): string | null {
++  if (state.delegationPending) return 'The original CLI configuration request is pending; keep its review and native calls.';
+   if (state.nativeBlocked || state.integrityFailed || state.generationLost || state.observationIssue) {
+     return 'Configuration edit ownership is unverified. Observe the original native status; do not open a competing workflow edit.';
+   }
+diff --git a/desktop/src/configEditController.ts b/desktop/src/configEditController.ts
+--- a/desktop/src/configEditController.ts
++++ b/desktop/src/configEditController.ts
+@@ -1,3 +1,5 @@
++import { ConfigurationServiceController } from './serviceConfigurationController.ts';
++import type { DelegatedConfigurationSave } from './serviceConfigurationController.ts';
+ // Closed renderer-side orchestration. Testable with inert DTO promises; the
+ // original native owner, never this object or a JS future, owns real resources.
+ import { sameJson } from './catalog.ts';
+@@ -16,6 +18,7 @@
+   recoveryUnavailable?: () => string | null;
+   onRecovered?: (completion: ConfigRecoveryCompletion) => void;
+   otherEditReason?: (projectId: string) => string | null;
++  onDelegatedSave?: (receipt: DelegatedConfigurationSave) => void;
+   onConfirmedSave: (receipt: ConfirmedConfigSave) => void;
+   onRecoveryRequired?: (attention: ConfigRecoveryAttention) => void;
+ }
+@@ -42,7 +45,16 @@
+   private recoveryVisible = true;
+   private recoveryCompletion: { binding: ConfigRecoveryBinding; statusRevision: number } | null = null;
+
+-  constructor(context: EditContext) { this.context = context; }
++  readonly agent: ConfigurationServiceController;
++  constructor(context: EditContext) {
++    this.context = context;
++    this.agent = new ConfigurationServiceController({
++      project: context.project, selected: () => context.selectedProject?.() ?? null,
++      otherReason: (id) => context.recoveryUnavailable?.() ?? context.otherEditReason?.(id) ?? null,
++      native: () => this.state, observe: (status) => this.receive(status, 'reply'), checkNative: () => this.checkStatus(),
++      busy: (value) => this.change({type: 'delegation-pending', value}), saved: (receipt) => context.onDelegatedSave?.(receipt),
++    });
++  }
+
+   getSnapshot = (): ConfigEditState => this.state;
+
+@@ -65,7 +77,7 @@
+     if (this.disposed || this.api) return;
+     this.api = api;
+     this.change({ type: 'connect', mode: api.mode });
+-    if (api.mode === 'native') await this.checkStatus();
++    if (api.mode === 'native') { await this.checkStatus(); await this.agent.connect(api); }
+   }
+
+   // Coalesce concurrent reads. No periodic polling, heartbeat, new process,
+@@ -178,6 +190,7 @@
+           if (project && !project.saveRecoveryRequired) this.context.onRecoveryRequired?.(attention);
+         }
+         this.processRecovery();
++        this.agent.process();
+         let attempt = this.state.attempt;
+         if (!attempt) continue;
+         const owner = attempt.projection;
+@@ -268,14 +281,15 @@
+     if (this.disposed || value === this.recoveryVisible) return;
+     this.recoveryVisible = value; this.recoveryInvalidate();
+   }
+-  serviceIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
+-  selectionIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
+-  shutdownIntent(): void { if (!this.disposed) this.recoveryInvalidate(); }
++  serviceIntent(): void { if (!this.disposed) { this.agent.invalidate(); this.recoveryInvalidate(); } }
++  selectionIntent(): void { if (!this.disposed) { this.agent.invalidate(); this.recoveryInvalidate(); } }
++  shutdownIntent(): void { if (!this.disposed) { this.agent.invalidate(); void this.agent.revoke(); this.recoveryInvalidate(); } }
+   snapshotIntent(projectId: string): void {
+     if (!this.disposed && (projectId === this.state.recovery?.binding.projectId || projectId === this.recoveryCompletion?.binding.projectId)) this.recoveryInvalidate();
+   }
+   beforeWorkspaceAction(action: WorkspaceAction): void {
+     if (this.disposed) return;
++    this.agent.beforeWorkspaceAction(action);
+     if (action.type === 'select' || action.type === 'switch' ||
+         (action.projectId === this.state.recovery?.binding.projectId || action.projectId === this.recoveryCompletion?.binding.projectId) &&
+         ['snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal', 'forget-removal', 'reset',
+@@ -419,6 +433,7 @@
+
+   dispose(): void {
+     if (this.disposed) return;
++    this.agent.dispose();
+     this.recoveryCompletion = null;
+     const recovery = this.state.recovery;
+     if (this.api?.mode === 'native' && recovery?.sessionId && recovery.projection && !recovery.closeClaimed &&
+diff --git a/desktop/src/drafts.ts b/desktop/src/drafts.ts
+--- a/desktop/src/drafts.ts
++++ b/desktop/src/drafts.ts
+@@ -1,3 +1,5 @@
++import type { DelegatedConfigurationSave } from './serviceConfigurationController.ts';
++import { changedConfiguration, settingsFromConfig } from './serviceConfigurationProtocol.ts';
+ import { validInitializationCompletion } from './projectInitialization.ts';
+ import type { ConfirmedInitialization } from './projectInitialization.ts';
+ import { blockingAncestor, getValue, sameJson, setValue } from './catalog.ts';
+@@ -135,6 +137,7 @@
+   | { type: 'project-identity-intent'; projectId: string }
+   | { type: 'git-local-intent'; projectId: string }
+   | { type: 'initialization-final'; projectId: string; completion: ConfirmedInitialization }
++  | { type: 'delegated-config-save-final'; projectId: string; receipt: DelegatedConfigurationSave }
+   | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
+   | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention }
+   | { type: 'config-recovery-final'; projectId: string; completion: ConfigRecoveryCompletion };
+@@ -379,6 +382,37 @@
+       // Its redacted preview cannot establish raw equality to the input draft.
+       // Keep baseline/draft/undo and all counters; only explicit refresh then
+       // user-confirmed discard may adopt observed saved configuration.
++      break;
++    }
++    case 'delegated-config-save-final': {
++      const receipt = action.receipt, {request, projection, before, after, statusRevision} = receipt;
++      const original = request.original, prepared = projection.prepared, review = request.review;
++      const result = normalEditResult(projection);
++      if (!original || !review || !request.change || !prepared || !result || !projection.applySubmitted || !projection.checkout ||
++        request.runtimeProjectId !== action.projectId || projection.projectId !== action.projectId ||
++        projection.sessionId !== original.sessionId || projection.ownerGeneration !== original.ownerGeneration ||
++        projection.checkout.revision !== original.revision || prepared.revision !== original.revision || prepared.planToken !== review.planToken ||
++        !isU32(statusRevision) || statusRevision <= review.nativeStatusRevision ||
++        !sameJson(projection.checkout.base, before) || !sameJson(changedConfiguration(before, request.change), after) ||
++        !sameJson(settingsFromConfig(before) as unknown as JsonValue, review.before as unknown as JsonValue) ||
++        !sameJson(settingsFromConfig(after) as unknown as JsonValue, review.after as unknown as JsonValue) ||
++        session.lastSave && (session.lastSave.sessionId === projection.sessionId || session.lastSave.statusRevision >= statusRevision)) return state;
++      const matches = session === receipt.expectedSession && session.revision === receipt.draftRevision && session.baselineGeneration === receipt.baselineGeneration &&
++        session.observationGeneration === receipt.observationGeneration && session.snapshotRequest === null && session.baseline === before &&
++        !!session.draft && sameJson(session.draft, before) && !isDirty(session) && !session.saveRecoveryRequired && !session.saveRecoveryNeedsReload;
++      const advance = matches && result === 'saved';
++      const generation = advance ? session.baselineGeneration + 1 : session.baselineGeneration;
++      const revision = advance ? session.revision + 1 : session.revision;
++      const lastSave: SavedDraftRevision = {sessionId: projection.sessionId, statusRevision, draftRevision: matches ? revision : receipt.draftRevision,
++        baselineGeneration: receipt.baselineGeneration, resultingBaselineGeneration: matches ? generation : null, result};
++      // A CLI write never replaces a newer/dirty/ABA form. Its actual completion
++      // remains visible and stale saved-file evidence is retired in either case.
++      next = {...session, lastSave, snapshotRequest: null, snapshotPredatesSave: true, savedConfigContent: null};
++      if (!matches) { next = {...next, sourceChanged: true}; break; }
++      next = {...next, baseline: advance ? structuredClone(after) : session.baseline, draft: advance ? structuredClone(after) : session.draft,
++        baselineGeneration: generation, revision, draftOrigin: advance ? 'saved' : session.draftOrigin, sourceChanged: false,
++        validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
++        review: null, reviewRequest: null, reviewError: null, suggestion: null, suggestionRequest: null, suggestionError: null, editError: null};
+       break;
+     }
+     case 'config-save-final': {
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -424,6 +424,7 @@
+   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
++  readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
+   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
+   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;

@@ -141,7 +141,7 @@ fn merge<T>(old: Fact<T>, new: Fact<T>) -> Fact<T> {
 fn empty_status(revision: u32, reason: Reason) -> Status {
     Status { schema_version: 1, revision,
         capability: Capability { read_only_session_available: reason == Reason::None, reason,
-            device_login: DeviceLogin::PublisherUnconfigured, storage: "session-only".into() },
+            device_login: if crate::github_device_protocol::configured().is_some(){DeviceLogin::NotQualified}else{DeviceLogin::PublisherUnconfigured}, storage: "session-only".into() },
         session: None, operation: None, account: unobserved(), repository: unobserved(), automation: unobserved(),
         facts: UnobservedFacts { remote_mutation_available: false, dispatch_available: false,
             repository_actions_settings_observation: "not-run".into(), environment_observation: "not-run".into(),
@@ -604,6 +604,16 @@ impl ConnectionState {
         self.private.as_ref().and_then(|session| session.gh_hold.as_ref())
             .is_some_and(|hold| hold.matches(original, context))
     }
+    pub(crate) fn device_current(&self, original:&std::sync::Arc<crate::asset_session::OriginalWork>, context:&crate::github_device_protocol::Context)->bool{
+        self.private.as_ref().is_some_and(|p|p.project_id==context.project_id&&p.repository==context.repository&&p.generation==context.generation
+            &&p.retirement.is_none()&&p.ticket.is_some()&&p.gh_selection.is_none()&&p.gh_hold.as_ref().is_some_and(|h|h.device_matches(original,context)))
+    }
+    pub(crate) fn device_wait(&self,original:&std::sync::Arc<crate::asset_session::OriginalWork>,context:&crate::github_device_protocol::Context)->Option<crate::supervisor::GitHubAuthHttpWait>{
+        if !self.device_current(original,context){return None}self.private.as_ref()?.ticket.as_ref().map(GitHubReadTicket::gh_auth_wait)
+    }
+    pub(crate) fn device_retains(&self,original:&std::sync::Arc<crate::asset_session::OriginalWork>,context:&crate::github_device_protocol::Context)->bool{
+        self.private.as_ref().and_then(|p|p.gh_hold.as_ref()).is_some_and(|h|h.device_matches(original,context))
+    }
     pub(crate) fn local_git_read_session(&self, project: &str, generation: u32, now: Instant) -> Option<LocalGitReadSession> {
         if self.unknown || self.exhausted || self.native_work_pending()
             || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted
@@ -900,13 +910,28 @@ impl ConnectionState {
         self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
                               Some(selected), Some(hold), generation, supervisor, now, wall)
     }
+    pub(crate) fn connect_device(&mut self,context:crate::github_device_protocol::Context,token:String,expiry:Option<Instant>,end:Instant,
+        hold:GitHubAuthConnectionHold,supervisor:&Supervisor,now:Instant,wall:SystemTime)->Result<Status,BridgeError>{
+        if !hold.device_target(&context,end)||!context.valid(){return Err(refused(Reason::TargetChanged))}
+        let gate=hold.device_gate().ok_or_else(||refused(Reason::TargetChanged))?;
+        self.connect_bound(ConnectTokenArgs{project_id:context.project_id,repository:context.repository,token},None,Some(hold),
+            Some((end,expiry,gate)),context.generation,supervisor,now,wall)
+    }
     fn connect_selected(&mut self, args: ConnectTokenArgs, gh_selection: Option<auth_provider::SelectedAccount>,
         gh_hold: Option<GitHubAuthConnectionHold>, generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        self.connect_bound(args,gh_selection,gh_hold,None,generation,supervisor,now,wall)
+    }
+    fn connect_bound(&mut self,args:ConnectTokenArgs,gh_selection:Option<auth_provider::SelectedAccount>,gh_hold:Option<GitHubAuthConnectionHold>,
+        device:Option<(Instant,Option<Instant>,crate::asset_session::GitHubDeviceGoGate)>,generation:u32,supervisor:&Supervisor,now:Instant,wall:SystemTime)->Result<Status,BridgeError>{
         self.room()?;
         if self.private.is_some() { return Err(refused(Reason::Busy)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
         let Some(sequence) = self.next_session.checked_add(1) else { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); };
-        let clock = CredentialClock::new(now, wall).ok_or_else(|| refused(Reason::RuntimeUnavailable))?;
+        let mut clock = CredentialClock::new(now, wall).ok_or_else(|| refused(Reason::RuntimeUnavailable))?;
+        if let Some((_,Some(expiry),_))=&device {
+            if *expiry<=now{return Err(refused(Reason::Expired))}
+            if *expiry<clock.end {clock.end=*expiry;clock.display=display_utc(wall.checked_add(expiry.duration_since(now)).ok_or_else(||refused(Reason::RuntimeUnavailable))?).ok_or_else(||refused(Reason::RuntimeUnavailable))?;}
+        }
         // Allocate private/session/stop/unknown metadata before synchronous
         // admission. No fallible decode or registration follows ticket creation.
         let id = format!("github-session-{sequence}");
@@ -917,8 +942,9 @@ impl ConnectionState {
             clock, token: Some(args.token),
             gh_selection, gh_hold, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
         let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None };
-        let ticket = supervisor.start_github_readonly(&private.repository, None, None,
-            private.token.as_deref().ok_or_else(|| refused(Reason::InvalidInput))?).map_err(admission_error)?;
+        let token=private.token.as_deref().ok_or_else(||refused(Reason::InvalidInput))?;
+        let ticket=match device {Some((end,_,gate))=>supervisor.start_github_device_readonly(&private.repository,token,end,gate),
+            None=>supervisor.start_github_readonly(&private.repository,None,None,token)}.map_err(admission_error)?;
         operation.id.push_str(ticket.operation_id());
         private.ticket = Some(ticket);
         self.private = Some(private); self.next_session = sequence;

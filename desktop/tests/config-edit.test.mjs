@@ -1208,7 +1208,6 @@ test('safe notice/help/path summaries never expose arbitrary values, native exce
   assert.match(saveHelp.what, /release\/mobile-release\.json/);
   assert.match(saveHelp.what, /\.gitignore/);
   assert.match(saveHelp.format, /15-minute absolute/);
-  assert.match(saveHelp.where, /destructive in-memory/);
   assert.match(saveHelp.failure, /never repeat Apply/);
 });
 

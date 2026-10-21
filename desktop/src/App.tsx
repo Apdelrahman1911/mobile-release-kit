@@ -1,3 +1,6 @@
+import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
+import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
+import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
 import { GitPushNewBranch } from './components/GitPushNewBranch.tsx';
 import { GitPush } from './components/GitPush.tsx';
 import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
@@ -6,6 +9,9 @@ import { LocalStoreExecuteController, localStoreExecuteOwnerReason } from './loc
 import { LocalStoreExecute } from './components/LocalStoreExecute.tsx';
 import { LocalStorePrepareController, localStorePrepareOwnerReason } from './localStorePrepare.ts';
 import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
+import { AgentStoreAccess } from './components/AgentStoreAccess.tsx';
+import { AgentStoreAccessController } from './agentStoreAccessController.ts';
+import { storeReviewFromState } from './agentStoreAccess.ts';
 import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
 import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
 import { ReleaseRehearsal } from './components/ReleaseRehearsal.tsx';
@@ -122,6 +128,9 @@ import { GitFetch } from './components/GitFetch.tsx';
 import { GitRepositoryController } from './gitRepositoryController.ts';
 import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
+import { GitHubDeviceConnectionController } from './githubDeviceConnectionController.ts';
+import type { GitHubDeviceApi } from './githubDeviceConnectionProtocol.ts';
+import { GitHubDeviceConnection } from './components/GitHubDeviceConnection.tsx';
 import { GitHubGhEntryController } from './githubGhEntryController.ts';
 import type { GitHubGhApi } from './githubGhEntryProtocol.ts';
 import { GitHubPreflightController, githubPreflightOwnerReason } from './githubPreflightController.ts';
@@ -245,6 +254,7 @@ export function App() {
   const localHistoryControllerRef = useRef<LocalReleaseHistoryController | null>(null);
   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
+  const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
   const appleProvisioningControllerRef = useRef<AppleProvisioningController | null>(null);
@@ -336,7 +346,12 @@ export function App() {
   const githubGhEntryRef = useRef<GitHubGhEntryController | null>(null);
   const githubGhApiRef = useRef<GitHubGhApi | null>(null);
   const githubGhAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
-  const githubGhBusy = useCallback(() => githubGhEntryRef.current?.ownerReason() ?? null, []);
+  const githubDeviceRef = useRef<GitHubDeviceConnectionController | null>(null);
+  const githubDeviceApiRef = useRef<GitHubDeviceApi | null>(null);
+  const githubDeviceAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+  const githubGhOnlyBusy = useCallback(() => githubGhEntryRef.current?.ownerReason() ?? null, []);
+  const githubDeviceBusy = useCallback(() => githubDeviceRef.current?.ownerReason() ?? null, []);
+  const githubGhBusy = useCallback(() => githubGhOnlyBusy() ?? githubDeviceBusy(), [githubGhOnlyBusy,githubDeviceBusy]);
   const githubPublicationControllerRef = useRef<GitHubPublicationController | null>(null);
   const githubRemoteSetupControllerRef = useRef<GitHubRemoteSetupController | null>(null);
   const githubPreflightControllerRef = useRef<GitHubPreflightController | null>(null);
@@ -369,7 +384,8 @@ export function App() {
   const storePrepareBusy = useCallback(() => localStorePrepareControllerRef.current ? localStorePrepareOwnerReason(localStorePrepareControllerRef.current.getSnapshot()) : null, []);
   const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
-  const storeWithoutAppleBusy = useCallback(() => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy]);
+  const agentStoreBusy=useCallback(()=>agentStoreControllerRef.current?.ownerReason()??null,[]);
+  const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
   const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? null, []);
   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
   const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
@@ -413,6 +429,7 @@ export function App() {
         projectGeneration: connectionProjectGeneration.current, repository: applicationRepositoryRef.current,
       } : null);
     githubGhEntryRef.current?.syncContext();
+    githubDeviceRef.current?.syncContext();
     versionEnrollmentRef.current?.syncContext();
     versionReserveRef.current?.syncContext();
     repositoryCreateRef.current?.syncContext();
@@ -428,7 +445,7 @@ export function App() {
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
-    githubGhEntryRef.current?.beforeContextIntent();
+    githubGhEntryRef.current?.beforeContextIntent(); githubDeviceRef.current?.beforeContextIntent();
     retireIdentity();
     externalObserverRef.current?.beforeWorkspaceAction();
     cliReadAccessControllerRef.current?.invalidateContext();
@@ -503,6 +520,7 @@ export function App() {
     recoveryUnavailable: () => playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
+    onDelegatedSave: (receipt) => dispatch({ type: 'delegated-config-save-final', projectId: receipt.request.runtimeProjectId, receipt }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
     onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
   }));
@@ -562,6 +580,12 @@ export function App() {
   }));
   githubGhEntryRef.current = githubGhEntry;
   const githubGhState = useSyncExternalStore(githubGhEntry.subscribe, githubGhEntry.getSnapshot, githubGhEntry.getSnapshot);
+  const [githubDevice] = useState(() => new GitHubDeviceConnectionController(githubConnection, {
+    current: () => ({api:githubDeviceApiRef.current,port:connectionPortRef.current,
+      context:connectionControllerRef.current?.getSnapshot().context??null,blocked:githubDeviceAdmission.current()}),
+  }));
+  githubDeviceRef.current=githubDevice;
+  useSyncExternalStore(githubDevice.subscribe,githubDevice.getSnapshot,githubDevice.getSnapshot);
   const originalConnection = connectionState.status ?? connectionState.retained;
   const [repositoryCreate] = useState(() => new GitHubRepositoryCreateController(
     githubConnection.getSnapshot, () => repositoryCreateAdmission.current()));
@@ -749,6 +773,16 @@ export function App() {
   }, undefined, savedCommandBusy));
   assetControllerRef.current = assetSession;
   const assetState = useSyncExternalStore(assetSession.subscribe, assetSession.getSnapshot, assetSession.getSnapshot);
+  const [agentUploadKey] = useState(() => new AgentUploadKeyAccessController({ current: () => {
+    const service = pathService.current, selected = workspaceRef.current.selectedId;
+    const project = selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] ?? null : null;
+    const assets = assetSession.getSnapshot();
+    return { port: service.api?.mode === 'native' ? service.api.agentUploadKeyAccess ?? null : null,
+      nativeSession: service.api?.mode === 'native' ? service : null, projectId: project ? selected : null, project, assets,
+      generateReady: assetSession.canConfirmUploadKey(assets), blockedReason: savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) };
+  } }));
+  useSyncExternalStore(agentUploadKey.subscribe, agentUploadKey.getSnapshot, agentUploadKey.getSnapshot);
+  useEffect(() => { agentUploadKey.syncContext(); });
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
@@ -898,11 +932,14 @@ export function App() {
   // This coupled entry excludes only its own picker work and the existing
   // Connect latch. That controller independently checks its original idle
   // session before latching, then retains the exact handoff before native IPC.
-  githubGhAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+  githubGhAdmission.current = () => githubDeviceBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
     savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before connecting another account.' : null);
+  githubDeviceAdmission.current = () => githubGhOnlyBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+    savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+    (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared ? 'Finish the prepared review before browser sign-in.' : null);
   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
     playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
   const [artifactInspection] = useState(() => new ArtifactInspectionController({
@@ -983,7 +1020,7 @@ export function App() {
   const appleProvisioningState = useSyncExternalStore(appleProvisioning.subscribe, appleProvisioning.getSnapshot, appleProvisioning.getSnapshot);
   const [localStore] = useState(() => new LocalStorePreflightController({
     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStoreControllerRef.current=localStore;
   const localStoreState=useSyncExternalStore(localStore.subscribe,localStore.getSnapshot,localStore.getSnapshot);
@@ -1000,10 +1037,29 @@ export function App() {
     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
     // Exclude this controller's own intent from reciprocal admission.
-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStorePrepareControllerRef.current=localStorePrepare;
   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
+  // One permission, not one per platform/panel. Attach only the existing
+  // installed port; neither mounting nor context reconciliation sends work.
+  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='access-check'?localStore:localStorePrepare).delegatePrepared(r,r.statusRevision),current:()=>{
+    const service=cliService.current,current=workspaceRef.current;
+    const project=current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
+    const id=project?.project.id??null;
+    const access=storeReviewFromState(localStore.getSnapshot(),'access-check',id);
+    const prepare=storeReviewFromState(localStorePrepare.getSnapshot(),'candidate-prepare',id);
+    return {port:service.api?.mode==='native'?service.api.agentStoreAccess??null:null,
+      nativeSession:service.api?.mode==='native'?service:null,projectId:id,epoch:project??service,
+      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[])],
+      blockedReason:appleProvisioningBusy()??storeReconcileBusy()??storeExecuteBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+  }}));
+  agentStoreControllerRef.current=agentStoreAccess;
+  useSyncExternalStore(agentStoreAccess.subscribe,agentStoreAccess.getSnapshot,agentStoreAccess.getSnapshot);
+  useEffect(()=>{agentStoreAccess.syncContext();});
+  useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
+  const agentStoreReason=agentStoreAccess.ownerReason();
+
   const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
     project: () => {
       if(assetSession.getSnapshot().scope.platform!=='ios'&&assetSession.getSnapshot().scope.stage==='candidate')return androidBuild.getSnapshot().project;
@@ -1012,7 +1068,7 @@ export function App() {
     }, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot, tools: androidBuild.getSnapshot,
     // Same reciprocal admission, excluding only this original's own slot.
-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStoreExecuteControllerRef.current=localStoreExecute;
   const localStoreExecuteState=useSyncExternalStore(localStoreExecute.subscribe,localStoreExecute.getSnapshot,localStoreExecute.getSnapshot);
@@ -1024,7 +1080,7 @@ export function App() {
     }, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
     // Same reciprocal admission, excluding only this original's own slot.
-    otherOperationReason: () => appleProvisioningBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStoreReconcileControllerRef.current=localStoreReconcile;
   const localStoreReconcileState=useSyncExternalStore(localStoreReconcile.subscribe,localStoreReconcile.getSnapshot,localStoreReconcile.getSnapshot);
@@ -1370,7 +1426,7 @@ export function App() {
     if (originalGit) { setBootError({ code: 'git_read_busy', message: originalGit, retryable: false }); return; }
     const originalGh = githubGhBusy();
     if (originalGh) { setBootError({ code: 'github_cli_busy', message: originalGh, retryable: false }); return; }
-    githubGhEntry.beforeContextIntent();
+    githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
     const originalIdentity = identityBusy();
     if (originalIdentity) {
       setBootError({ code: 'identity_busy', message: originalIdentity, retryable: false }); return;
@@ -1408,8 +1464,8 @@ export function App() {
     connectionHelpGeneration.current = helpGeneration;
     githubConnection.setHelp(null);
     githubConnection.setContext(null);
-    connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
-    githubGhEntry.attach(null, null); // Refuses replacement if an original read intervened.
+    connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null; githubDeviceApiRef.current = null;
+    githubGhEntry.attach(null, null); githubDevice.attach(null, null); // Refuses replacement if an original read intervened.
     void githubConnection.attach(null);
     void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null);
     void githubPreflight.connect(null);
@@ -1449,9 +1505,11 @@ export function App() {
       connectionPortRef.current = port;
       connectionHandoffRef.current = connection.mode === 'native' ? { port, submit: connection.connectGitHubToken } : null;
       githubGhApiRef.current = connection.mode === 'native' ? connection.githubGhEntry ?? null : null;
+      githubDeviceApiRef.current = connection.mode === 'native' ? connection.githubDevice ?? null : null;
       // No account discovery or Connect on attach. Availability/status remains
       // an explicit read; failed rebind retains old original controls.
       githubGhEntry.attach(githubGhApiRef.current, port);
+      githubDevice.attach(githubDeviceApiRef.current, port);
       // Fixed read-only Status may expose an unavailable native gate. Working
       // passive appInfo is neither credential admission nor TLS qualification.
       void githubConnection.attach(port);
@@ -1504,17 +1562,17 @@ export function App() {
         identityRef.current?.ui.sync();
         cliReadAccessControllerRef.current?.invalidateContext();
         cliReadAccessControllerRef.current?.syncContext();
-        githubGhEntry.beforeContextIntent();
-        connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
-        githubGhEntry.attach(null, null);
+        githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
+        connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null; githubDeviceApiRef.current = null;
+        githubGhEntry.attach(null, null); githubDevice.attach(null, null);
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); githubPlayCleanup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       passivePending.current -= 1; setPassivePending(passivePending.current);
-      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
+      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); githubDevice.syncContext(); }
     }
-  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubDevice, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
 
   // Before bootstrap: retire consent on the actual saved/key projection, and
   // keep the view responsive to peer-owner changes without renewing an intent.
@@ -1595,7 +1653,7 @@ export function App() {
 
   useEffect(() => {
     void bootstrap();
-    return () => { githubGhEntry.beforeContextIntent(); githubGhApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; syncGitReadRef.current(); retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+    return () => { githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent(); githubGhApiRef.current = null; githubDeviceApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; syncGitReadRef.current(); retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
@@ -1636,6 +1694,7 @@ export function App() {
   useEffect(() => () => iosArchive.dispose(), [iosArchive]);
   useEffect(() => () => releaseEvidence.dispose(), [releaseEvidence]);
   useEffect(() => () => githubGhEntry.dispose(), [githubGhEntry]);
+  useEffect(() => () => githubDevice.dispose(), [githubDevice]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => () => githubPublication.dispose(), [githubPublication]);
   useEffect(() => () => repositoryCreate.dispose(), [repositoryCreate]);
@@ -1658,6 +1717,7 @@ export function App() {
   useEffect(() => { if (api) void versionEdit.connect(api); }, [api, versionEdit]);
   useEffect(() => () => versionEdit.dispose(), [versionEdit]);
   useEffect(() => { if (api) void assetSession.connect(api); }, [api, assetSession]);
+  useEffect(() => () => agentUploadKey.dispose(), [agentUploadKey]);
   useEffect(() => () => assetSession.dispose(), [assetSession]);
 
   useEffect(() => {
@@ -1682,7 +1742,7 @@ export function App() {
       retireIdentity();
       externalObserverRef.current?.beforeWorkspaceAction();
       cliReadAccessControllerRef.current?.invalidateContext();
-      githubGhEntryRef.current?.beforeContextIntent();
+      githubGhEntryRef.current?.beforeContextIntent(); githubDeviceRef.current?.beforeContextIntent();
       void toolAcquisitionControllerRef.current?.cancel();
       void appleProvisioningControllerRef.current?.cancel();
       initializationControllerRef.current?.requestClose();
@@ -1802,7 +1862,7 @@ export function App() {
 
   const changeApplicationRepository = (value: string) => {
     if (versionEnrollmentBusy()) return;
-    githubGhEntry.beforeContextIntent();
+    githubGhEntry.beforeContextIntent(); githubDevice.beforeContextIntent();
     retireIdentity();
     if (value === applicationRepositoryRef.current) return;
     externalObserver.beforeWorkspaceAction();
@@ -2059,6 +2119,7 @@ export function App() {
       <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
+        <AgentStoreAccess controller={agentStoreAccess}/>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {identityBinding && identityState && identityBusy() && <div className={`notice ${identityBinding.rebindFailed || identityState.issue ? 'notice-warning' : 'notice-info'}`} role={identityBinding.rebindFailed || identityState.issue ? 'alert' : 'status'}>
@@ -2122,8 +2183,8 @@ export function App() {
           onShow={() => navigate('dashboard')} />}
         {page !== 'releases' && <>
           <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact onShow={()=>navigate('releases')}/>
-          <LocalStorePreflight state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
-          <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+          <LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+          <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
         </>}
@@ -2142,6 +2203,7 @@ export function App() {
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
         {(page !== 'environment' || environmentState.platform !== 'android' || environmentState.operation !== 'build') &&
           <PrepareBuildEnvironment {...toolPreparationView} compact />}
+        {page !== 'github' && <GitHubDeviceConnection controller={githubDevice} compact onShow={() => navigate('github')} />}
         {page !== 'github' && <GitHubGhEntry controller={githubGhEntry} compact
           originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined}
           onShow={() => navigate('github')} />}
@@ -2167,6 +2229,7 @@ export function App() {
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
+        <ServiceConfigurationAccess controller={configEdit.agent} detailed={page === 'settings'} onShow={() => navigate('settings')} />
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
           onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
           recoveryReason={workspace.selectedId ? configEdit.inspectRecoveryReason(workspace.selectedId) : 'Select an original registered project first.'}
@@ -2257,7 +2320,8 @@ export function App() {
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
-          nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
+          nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
+          delegation={<AgentUploadKeyAccess controller={agentUploadKey} />} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
@@ -2265,8 +2329,8 @@ export function App() {
             <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
             handoff={connectionHandoffRef.current}
-            ghEntry={<GitHubGhEntry controller={githubGhEntry}
-              originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} />} />
+            ghEntry={<><GitHubGhEntry controller={githubGhEntry}
+              originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} /><GitHubDeviceConnection controller={githubDevice} /></>} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
@@ -2341,8 +2405,8 @@ export function App() {
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
           storeOperations={<>
             <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
-            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
-            <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+            <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           </>}

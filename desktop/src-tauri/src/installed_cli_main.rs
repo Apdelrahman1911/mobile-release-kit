@@ -2,10 +2,21 @@
 //! client. Only explicit serve-history enters the original shared Host library;
 //! it never creates a WebView, document, release engine or background daemon.
 #![forbid(unsafe_code)]
+// Match the library's expansion budget for the shared finite capability JSON.
+// This is a compiler setting, not an IPC, output, or execution-limit change.
+#![recursion_limit = "256"]
 
 mod service_protocol;
+mod service_upload_key_protocol;
+mod service_upload_key_requests;
+mod service_configuration_protocol;
+mod service_configuration_requests;
 #[path="service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
+#[path="service_store_protocol.rs"]
+mod service_store_protocol;
+#[path="service_store_requests.rs"]
+mod service_store_requests;
 #[path="service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
 #[path="service_play_cleanup_protocol.rs"]

@@ -17,6 +17,7 @@ impl Admitted {
 }
 impl LocalStorePreflightOwner {
     pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::local_store_preflight(runtime) } }
+    pub(crate) fn agent_store_original(&self)->&SavedCommandOwner{&self.saved}
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

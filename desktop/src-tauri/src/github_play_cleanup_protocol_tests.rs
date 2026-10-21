@@ -155,15 +155,17 @@ fn explicit_closed_command_does_not_accept_desktop_release_markers_or_auto_confi
     assert!(raw_input("github_play_cleanup_status", b"{\"x\":1,\"x\":2}").is_err());
 }
 #[test]
-fn exact_fixed_allowances_use_checked_remaining_document_budget() {
+fn exact_fixed_allowances_preserve_separate_document_and_cleanup_bounds() {
     assert_eq!(
         crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES,
         16 * 1024 * 1024
     );
     assert_eq!(REMOTE_WORK_BYTES, 16 * 1024 * 1024);
     assert_eq!(RETAINED_LIMIT, 8 * 1024 * 1024);
-    assert_eq!(SESSION_LIMIT, 64 * 1024 * 1024);
-    assert_eq!(admission_bytes(24 * 1024 * 1024), Some(SESSION_LIMIT));
-    assert!(admission_bytes(24 * 1024 * 1024 + 1).is_none());
+    assert_eq!(DOCUMENT_LIMIT, 64 * 1024 * 1024);
+    assert_eq!(SESSION_LIMIT, 104 * 1024 * 1024);
+    assert_eq!(admission_bytes(0), Some(40 * 1024 * 1024));
+    assert_eq!(admission_bytes(DOCUMENT_LIMIT), Some(SESSION_LIMIT));
+    assert!(admission_bytes(DOCUMENT_LIMIT + 1).is_none());
     assert!(admission_bytes(usize::MAX).is_none());
 }

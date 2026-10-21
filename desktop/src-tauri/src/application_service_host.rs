@@ -600,6 +600,14 @@ impl ApplicationHost {
         service.native_history_current()?;
         Ok(service)
     }
+    // Memory-only consumer lookup after the existing Host lock; OFF Doc/Edit.
+    // Does not initialize, renew READ, fabricate a native registration or run IO.
+    pub(crate) fn configuration_service(&self)->Result<Arc<ApplicationService>,Error>{
+        let state=self.lock()?;state.available()?;
+        if state.phase!=Phase::Listening{return Err(Error::Unavailable);}
+        let service=state.service.clone().ok_or(Error::Unavailable)?;
+        service.native_history_current()?;Ok(service)
+    }
     pub(crate) fn snapshot_ticket(&self, original: &NativeProject) -> Result<Option<SnapshotTicket>, Error> {
         let state = self.lock()?; state.available()?;
         if state.service.is_none() { return Ok(None); }
