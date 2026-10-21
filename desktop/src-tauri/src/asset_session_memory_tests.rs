@@ -102,7 +102,7 @@ fn actual_document_plus_apple_future_fits_original_session_limit() {
     assert!(larger.checked_add(future).unwrap()>SESSION_BYTES);
     state.retiring=true;
     assert!(matches!(lookup_memory::retained_document_bytes(&document.inner,&state),
-        Err(lookup_memory::Problem::CleanupUnknown)));
+        Err(keyring::Problem::CleanupUnknown)));
 }
 
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
