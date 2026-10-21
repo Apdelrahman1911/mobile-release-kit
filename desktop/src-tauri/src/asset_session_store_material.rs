@@ -314,6 +314,19 @@ mod tests {
             }
             let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
             assert!(original.current(&state,7,&root)&&original.prepare_matches(&c,7,&root));assert!(!original.prepare_current(&c,7,&root));
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            {
+                let same=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
+                crate::asset_session::agent_store::preparation::tests::assert_stage_pins(&original,&same,&c,true);
+                // Same public record/key values, different actual Payload Arc.
+                let replacement=Arc::new(Payload{kind:Kind::AppleReviewContact,material:None,fields:Some(commands::own_fields(Kind::AppleReviewContact,
+                    &serde_json::json!({"contactFirstName":"Fictional","contactLastName":"Reviewer","contactEmail":"review@example.invalid","contactPhone":"+15555550100"})).ok().unwrap())});
+                let held=std::mem::replace(&mut state.records[1].payload,replacement);
+                let other=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
+                crate::asset_session::agent_store::preparation::tests::assert_stage_pins(&original,&other,&c,false);
+                state.records[1].payload=held;
+            }
+
             let parts=original.parts().unwrap();assert_eq!(parts.len(),if demo{11}else{9});
             assert_eq!(parts[3].0,"contact-first-name");assert_eq!(parts[3].1.as_ptr(),state.records[1].payload.fields.as_ref().unwrap().borrow_value("contactFirstName").unwrap().as_ptr());
             assert_eq!(parts[7].0,"commitment-key-base64");assert_eq!(parts[7].1.as_ptr(),state.records[2].payload.fields.as_ref().unwrap().borrow_value("keyBase64").unwrap().as_ptr());

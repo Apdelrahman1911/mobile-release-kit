@@ -346,3 +346,128 @@ fn store_preparation_read_end_and_delayed_earlier_revoke_keep_original_clock() {
     );
     assert_eq!(f.link.entry.status().unwrap().phase, flow::Phase::Unknown);
 }
+
+// Fixed six-frame DATA delivery into the existing core decoder, not a helper
+// process, ACK publisher or proof of any native/Store return.
+fn stage_terminal(
+    c: &prepare_wire::Context,
+    terminal: serde_json::Value,
+    operation: &str,
+) -> Result<prepare_wire::Terminal, BridgeError> {
+    let head = match c.later.as_ref().unwrap().stage {
+        prepare_wire::StoreStage::ExternalTesting => 9,
+        prepare_wire::StoreStage::ProductionSubmit => 13,
+    };
+    let rows = [
+        ("accepted", serde_json::json!({"schemaVersion":1,"context":c})),
+        ("lease-ready", serde_json::json!({})),
+        ("history-head", serde_json::json!({"sequence":head-2,"sha256":"a".repeat(64)})),
+        ("prepare-pending", serde_json::json!({"sequence":head-1,"sha256":"b".repeat(64)})),
+        ("prepare-settled", serde_json::json!({"head":{"sequence":head,"sha256":"c".repeat(64)},"phase":"prepared"})),
+        ("terminal", terminal),
+    ];
+    let mut decoder = prepare_wire::Decoder::new();
+    let mut returned = None;
+    for (sequence, (kind, payload)) in rows.into_iter().enumerate() {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol":prepare_wire::PROTOCOL,"operationId":operation,
+            "ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),
+            "requestSha256":"d".repeat(64),"sequence":sequence,"kind":kind,"payload":payload
+        })).unwrap();
+        bytes.push(b'\n');
+        match decoder.decode(&bytes, operation, &"b".repeat(32), c, &"c".repeat(32), &"d".repeat(64))? {
+            prepare_wire::Frame::Accepted => assert_eq!(sequence, 0),
+            prepare_wire::Frame::Event(_) => assert!((1..=4).contains(&sequence)),
+            prepare_wire::Frame::Terminal(t) => { assert_eq!(sequence, 5); returned = Some(t); }
+        }
+    }
+    assert!(decoder.finish());
+    Ok(returned.unwrap())
+}
+
+#[test]
+fn store_stage_prepare_uses_actual_core_decoder_lineage_and_distinct_report() {
+    for ios in [false, true] {
+        for production in [false, true] {
+            use flow::Kind as K;
+            let kind = match (ios, production) {
+                (false, false) => K::AndroidExternalTesting,
+                (true, false) => K::IosExternalTesting,
+                (false, true) => K::AndroidProductionSubmit,
+                (true, true) => K::IosProductionSubmit,
+            };
+            let raw = prepare_wire::tests::stage_input(ios, production);
+            let input = Input::parse(kind, &raw).unwrap();
+            let context = input.context();
+            let Context::LocalStorePrepare(c) = &context else { unreachable!() };
+            let selected = input.selection().unwrap();
+            assert!(kind.prepares_intent());
+            assert!(!kind.candidate());
+            assert_eq!(selected.later.as_ref().unwrap().stage, kind.stage().unwrap().1);
+            assert!(Input::parse(if ios { K::IosCandidate } else { K::AndroidCandidate }, &raw).is_err());
+            let operation = prepare_wire::tests::STAGE_ID.replace('-', "");
+            let review = flow::Review {
+                review_id: s::Id::parse(&operation).unwrap(),
+                operation: p::Operation { operation_id: s::Id::parse(&operation).unwrap(), owner_generation: id('b'), status_revision: 3 },
+            };
+            assert!(flow::ordinary_review(&selected, &review).is_none());
+            let start = |consent: &str| prepare_wire::start(&serde_json::json!({
+                "operationId":operation,"ownerGeneration":"b".repeat(32),"consentVersion":consent
+            }));
+            assert!(start(c.consent()).unwrap().matches_context(c));
+            assert!(!start(prepare_wire::tests::context().consent()).unwrap().matches_context(c));
+            // A delegation consent is not the native original's consent.
+            assert!(start(kind.consent()).is_err());
+
+            let value = prepare_wire::tests::stage_complete(ios, production);
+            let t = Terminal::LocalStorePrepare(stage_terminal(c, value.clone(), &operation).unwrap());
+            let report = project_report(&t, &context, &selected, &review).unwrap();
+            assert!(report.valid_for(&selected, &review));
+            assert!(report.bounded_capacity());
+            let projected = serde_json::to_value(&report).unwrap();
+            assert_eq!(projected["kind"], "stage-prepare");
+            assert_eq!(projected["report"]["operationId"], prepare_wire::tests::STAGE_ID);
+            assert_eq!(projected["report"]["headSequence"], if production { 13 } else { 9 });
+            assert_eq!(projected["report"]["limitations"], serde_json::json!(flow::STAGE_LIMITATIONS));
+            for field in ["sourceCommit", "sourceTree", "account", "supplementalAssignments", "context", "lifetime"] {
+                assert!(projected["report"].get(field).is_none());
+            }
+            let mut different = selected.clone();
+            different.later.as_mut().unwrap().predecessor_receipt_sha256 = "e".repeat(64);
+            assert!(project_report(&t, &context, &different, &review).is_err());
+            let mut wrong_owner = review.clone();
+            wrong_owner.review_id = id('a'); wrong_owner.operation.operation_id = id('a');
+            assert!(project_report(&t, &context, &selected, &wrong_owner).is_err());
+            for cut in 0..7 {
+                let mut bad = value.clone();
+                match cut {
+                    0 => bad["result"]["preparedIntent"]["operationId"] = "42345678-1234-4234-8234-123456789abc".into(),
+                    1 => bad["result"]["preparedIntent"]["predecessorReceiptSha256"] = "e".repeat(64).into(),
+                    2 => bad["result"]["preparedIntent"]["stage"] = (if production { "external-testing" } else { "production-submit" }).into(),
+                    3 => bad["result"]["headSequence"] = serde_json::json!(if production { 12 } else { 8 }),
+                    4 => bad["lifetime"]["commands"] = serde_json::json!(if ios { 14 } else { 13 }),
+                    5 => bad["lifetime"]["commandDispatched"] = false.into(),
+                    _ => bad["result"]["preparedIntent"]["destination"]["channel"] = "internal".into(),
+                }
+                assert!(stage_terminal(c, bad, &operation).is_err(), "{kind:?}/{cut}");
+            }
+        }
+    }
+}
+
+#[test]
+fn store_stage_public_uuid_relation_matches_original_native_uuid4_mapper() {
+    let original = prepare_wire::tests::STAGE_ID.replace('-', "");
+    for version in [b'3', b'4', b'5'] {
+        for variant in [b'7', b'8', b'9', b'a', b'b', b'c'] {
+            let mut raw = original.clone().into_bytes(); raw[12] = version; raw[16] = variant;
+            let raw = String::from_utf8(raw).unwrap();
+            let id = s::Id::parse(&raw).unwrap();
+            let uuid = format!("{}-{}-{}-{}-{}", &raw[..8], &raw[8..12], &raw[12..16], &raw[16..20], &raw[20..]);
+            let native = crate::android_build_protocol::candidate_uuid(&raw);
+            assert_eq!(flow::stage_operation_matches(&uuid, &id), native.as_deref() == Some(uuid.as_str()));
+            assert_eq!(native.is_some(), version == b'4' && matches!(variant, b'8' | b'9' | b'a' | b'b'));
+            assert!(!flow::stage_operation_matches("12345678-1234-4234-8234-123456789abc", &id));
+        }
+    }
+}

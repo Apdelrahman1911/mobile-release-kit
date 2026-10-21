@@ -8,7 +8,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub(crate) const RAW_LIMIT: usize = 8192;
-// All seven closed Prepare shapes fit below this existing strict-reader limit.
+// All eleven closed Prepare shapes fit below this existing strict-reader limit.
 pub(crate) const RAW_NODES: usize = 128;
 pub(crate) const RAW_DEPTH: usize = 8;
 pub(crate) const STATUS_LIMIT: usize = store::STATUS_LIMIT;
@@ -17,6 +17,11 @@ pub(crate) type Submit = store::Submit;
 pub(crate) type Query = store::Query;
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
+}
+// Absence is the original seven-kind spelling. An explicitly present field
+// must contain the complete later-stage tuple, never null or a partial tuple.
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +34,10 @@ pub(crate) enum Kind {
     AndroidVersions,
     IosVersions,
     PairedVersions,
+    AndroidExternalTesting,
+    IosExternalTesting,
+    AndroidProductionSubmit,
+    IosProductionSubmit,
 }
 impl Kind {
     pub fn inventory(self) -> bool {
@@ -40,6 +49,19 @@ impl Kind {
     pub fn candidate(self) -> bool {
         matches!(self, Self::AndroidCandidate | Self::IosCandidate)
     }
+    pub fn stage(self) -> Option<(store::Platform, Stage)> {
+        use store::Platform::{Android, Ios};
+        match self {
+            Self::AndroidExternalTesting => Some((Android, Stage::ExternalTesting)),
+            Self::IosExternalTesting => Some((Ios, Stage::ExternalTesting)),
+            Self::AndroidProductionSubmit => Some((Android, Stage::ProductionSubmit)),
+            Self::IosProductionSubmit => Some((Ios, Stage::ProductionSubmit)),
+            _ => None,
+        }
+    }
+    pub fn prepares_intent(self) -> bool {
+        self.candidate() || self.stage().is_some()
+    }
     pub fn consent(self) -> &'static str {
         match self {
             Self::AndroidAccess => "agent-android-store-access-once-v1",
@@ -49,14 +71,57 @@ impl Kind {
             Self::AndroidVersions => "agent-android-current-versions-edit-once-v1",
             Self::IosVersions => "agent-ios-current-versions-read-once-v1",
             Self::PairedVersions => "agent-paired-current-versions-edit-once-v1",
+            Self::AndroidExternalTesting => "agent-android-external-testing-prepare-once-v1",
+            Self::IosExternalTesting => "agent-ios-external-testing-prepare-once-v1",
+            Self::AndroidProductionSubmit => "agent-android-production-submit-prepare-once-v1",
+            Self::IosProductionSubmit => "agent-ios-production-submit-prepare-once-v1",
         }
     }
     pub fn action(self) -> crate::service_protocol::Action {
-        if self.candidate() {
+        if self.prepares_intent() {
             crate::service_protocol::Action::Release
         } else {
             crate::service_protocol::Action::ObserveProject
         }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Stage {
+    ExternalTesting,
+    ProductionSubmit,
+}
+impl Stage {
+    pub fn prepared_head(self) -> u32 {
+        match self {
+            Self::ExternalTesting => 9,
+            Self::ProductionSubmit => 13,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StageSelection {
+    pub stage: Stage,
+    pub predecessor_operation_id: String,
+    pub predecessor_receipt_sha256: String,
+}
+fn uuid4(v: &str) -> bool {
+    store::uuid(v) && v.as_bytes()[14] == b'4' && matches!(v.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
+}
+impl StageSelection {
+    fn valid_for(&self, candidate: &str) -> bool {
+        uuid4(candidate)
+            && uuid4(&self.predecessor_operation_id)
+            && store::sha(&self.predecessor_receipt_sha256)
+            && match self.stage {
+                Stage::ExternalTesting => self.predecessor_operation_id == candidate,
+                Stage::ProductionSubmit => self.predecessor_operation_id != candidate,
+            }
+    }
+    fn bounded_capacity(&self) -> bool {
+        self.predecessor_operation_id.capacity() <= 36
+            && self.predecessor_receipt_sha256.capacity() <= 64
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,16 +132,22 @@ pub(crate) struct Selection {
     pub saved_version: store::Version,
     #[serde(deserialize_with = "nullable")]
     pub candidate: Option<store::Candidate>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub later: Option<StageSelection>,
 }
 impl Selection {
     pub fn valid(&self) -> bool {
         self.saved_config.valid()
             && self.saved_version.valid()
-            && match &self.candidate {
-                Some(c) => {
+            && match (&self.candidate, &self.later, self.kind.stage()) {
+                (Some(c), None, None) => {
                     self.kind.candidate() && store::uuid(&c.operation_id) && store::sha(&c.sha256)
                 }
-                None => !self.kind.candidate(),
+                (None, None, None) => !self.kind.prepares_intent(),
+                (Some(c), Some(later), Some((_, stage))) => {
+                    later.stage == stage && store::sha(&c.sha256) && later.valid_for(&c.operation_id)
+                }
+                _ => false,
             }
     }
     pub(crate) fn bounded_capacity(&self) -> bool {
@@ -88,6 +159,7 @@ impl Selection {
                 .candidate
                 .as_ref()
                 .is_none_or(|c| c.operation_id.capacity() <= 36 && c.sha256.capacity() <= 64)
+            && self.later.as_ref().is_none_or(StageSelection::bounded_capacity)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,14 +174,106 @@ impl Review {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase", deny_unknown_fields)]
+pub(crate) enum StageDestination {
+    Android { channel: String, release_status: String },
+    IosExternal { channel: String },
+    IosProduction { channel: String, automatic_release: bool },
+}
+impl StageDestination {
+    fn valid_for(&self, platform: store::Platform, stage: Stage) -> bool {
+        match (platform, stage, self) {
+            (store::Platform::Android, Stage::ExternalTesting, Self::Android { channel, release_status }) => {
+                !channel.trim().is_empty() && channel.chars().count() <= 100
+                    && !channel.contains(['\0', '\r', '\n'])
+                    && !matches!(channel.as_str(), "internal" | "production")
+                    && release_status == "completed"
+            }
+            (store::Platform::Android, Stage::ProductionSubmit, Self::Android { channel, release_status }) => {
+                channel == "production" && release_status == "draft"
+            }
+            (store::Platform::Ios, Stage::ExternalTesting, Self::IosExternal { channel }) => channel == "testflight-external",
+            (store::Platform::Ios, Stage::ProductionSubmit, Self::IosProduction { channel, automatic_release }) => channel == "app-store-review" && !automatic_release,
+            _ => false,
+        }
+    }
+    fn bounded_capacity(&self) -> bool {
+        match self {
+            Self::Android { channel, release_status } => channel.capacity() <= 400 && release_status.capacity() <= 9,
+            Self::IosExternal { channel } | Self::IosProduction { channel, .. } => channel.capacity() <= 18,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StageLimitation {
+    NonPublishing,
+    PrepareNotExecute,
+    CurrentStoreSnapshotMayChange,
+    OriginalBinaryReused,
+    PriorNativeFinalityNotEstablished,
+    SavedInputsNotAtomic,
+}
+pub(crate) const STAGE_LIMITATIONS: [StageLimitation; 6] = [
+    StageLimitation::NonPublishing,
+    StageLimitation::PrepareNotExecute,
+    StageLimitation::CurrentStoreSnapshotMayChange,
+    StageLimitation::OriginalBinaryReused,
+    StageLimitation::PriorNativeFinalityNotEstablished,
+    StageLimitation::SavedInputsNotAtomic,
+];
+// Pure DATA parity with the native UUID4 mapper, not native construction.
+// Native projection separately compares against candidate_uuid(original ID).
+pub(crate) fn stage_operation_matches(uuid: &str, operation: &Id) -> bool {
+    uuid4(uuid) && uuid.bytes().filter(|b| *b != b'-').eq(operation.as_str().bytes())
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StageReport {
+    pub platform: store::Platform,
+    pub stage: Stage,
+    pub operation_id: String,
+    pub head_sequence: u32,
+    pub candidate_operation_id: String,
+    pub candidate_sha256: String,
+    pub predecessor_operation_id: String,
+    pub predecessor_receipt_sha256: String,
+    pub intent_sha256: String,
+    pub store_precondition_sha256: String,
+    pub destination: StageDestination,
+    pub limitations: [StageLimitation; 6],
+}
+impl StageReport {
+    fn valid_for(&self, s: &Selection, r: &Review) -> bool {
+        let (Some(c), Some(later)) = (&s.candidate, &s.later) else { return false; };
+        s.valid() && s.kind.stage() == Some((self.platform, self.stage)) && later.stage == self.stage
+            && stage_operation_matches(&self.operation_id, &r.operation.operation_id)
+            && self.operation_id != c.operation_id && self.operation_id != later.predecessor_operation_id
+            && self.candidate_operation_id == c.operation_id && self.candidate_sha256 == c.sha256
+            && self.predecessor_operation_id == later.predecessor_operation_id
+            && self.predecessor_receipt_sha256 == later.predecessor_receipt_sha256
+            && store::sha(&self.intent_sha256) && store::sha(&self.store_precondition_sha256)
+            && (self.stage.prepared_head()..=511).contains(&self.head_sequence)
+            && self.destination.valid_for(self.platform, self.stage)
+            && self.limitations == STAGE_LIMITATIONS
+    }
+    fn bounded_capacity(&self) -> bool {
+        [&self.operation_id, &self.candidate_operation_id, &self.predecessor_operation_id].iter().all(|v| v.capacity() <= 36)
+            && [&self.candidate_sha256, &self.predecessor_receipt_sha256, &self.intent_sha256, &self.store_precondition_sha256].iter().all(|v| v.capacity() <= 64)
+            && self.destination.bounded_capacity()
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Report {
     Ordinary { report: store::Report },
     CurrentVersions { inventory: Inventory },
+    StagePrepare { report: StageReport },
 }
 impl Report {
     pub(crate) fn bounded_capacity(&self) -> bool {
         match self {
+            Self::StagePrepare { report } => report.bounded_capacity(),
             Self::CurrentVersions { inventory } => inventory.bounded_capacity(),
             Self::Ordinary { report } => match report {
                 store::Report::AccessCheck {
@@ -136,6 +300,7 @@ impl Report {
     }
     pub fn valid_for(&self, s: &Selection, r: &Review) -> bool {
         match self {
+            Self::StagePrepare { report } => report.valid_for(s, r),
             Self::CurrentVersions { inventory } => {
                 inventory.valid()
                     && matches!(

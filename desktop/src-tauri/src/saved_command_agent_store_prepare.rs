@@ -10,7 +10,7 @@ pub(crate) enum Input {
 }
 impl Input {
     pub fn parse(kind: flow::Kind, value: &serde_json::Value) -> Result<Self, BridgeError> {
-        let input = if kind.candidate() {
+        let input = if kind.prepares_intent() {
             Self::Candidate(prepare_wire::prepare(value)?.context())
         } else {
             Self::Access(store_wire::prepare(value)?.context())
@@ -38,7 +38,7 @@ impl Input {
 }
 fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
     use flow::Kind as K;
-    let (kind, config, v, candidate) = match c {
+    let (kind, config, v, candidate, later) = match c {
         Context::LocalStorePreflight(c) => {
             use store_wire::AccessPlatform as P;
             let kind = match (c.platform, c.query.is_none(), c.ios_record.is_some()) {
@@ -61,13 +61,17 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                 },
                 version(&c.saved_version),
                 None,
+                None,
             )
         }
-        Context::LocalStorePrepare(c) if c.later.is_none() => (
-            if c.platform == prepare_wire::Platform::Android {
-                K::AndroidCandidate
-            } else {
-                K::IosCandidate
+        Context::LocalStorePrepare(c) => (
+            match (c.platform, c.later.as_ref().map(|l| l.stage)) {
+                (prepare_wire::Platform::Android, None) => K::AndroidCandidate,
+                (prepare_wire::Platform::Ios, None) => K::IosCandidate,
+                (prepare_wire::Platform::Android, Some(prepare_wire::StoreStage::ExternalTesting)) => K::AndroidExternalTesting,
+                (prepare_wire::Platform::Ios, Some(prepare_wire::StoreStage::ExternalTesting)) => K::IosExternalTesting,
+                (prepare_wire::Platform::Android, Some(prepare_wire::StoreStage::ProductionSubmit)) => K::AndroidProductionSubmit,
+                (prepare_wire::Platform::Ios, Some(prepare_wire::StoreStage::ProductionSubmit)) => K::IosProductionSubmit,
             },
             p::Content {
                 bytes: c.saved_config.bytes,
@@ -78,6 +82,14 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                 operation_id: c.candidate_operation_id.clone(),
                 sha256: c.candidate_sha256.clone(),
             }),
+            c.later.as_ref().map(|l| flow::StageSelection {
+                stage: match l.stage {
+                    prepare_wire::StoreStage::ExternalTesting => flow::Stage::ExternalTesting,
+                    prepare_wire::StoreStage::ProductionSubmit => flow::Stage::ProductionSubmit,
+                },
+                predecessor_operation_id: l.predecessor_operation_id.clone(),
+                predecessor_receipt_sha256: l.predecessor_receipt_sha256.clone(),
+            }),
         ),
         _ => return Err(refused()),
     };
@@ -86,6 +98,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
         saved_config: config,
         saved_version: v,
         candidate,
+        later,
     };
     if !value.bounded_capacity() {
         return Err(refused());
@@ -215,6 +228,9 @@ fn project_report(
     if let Some(old) = flow::ordinary_review(selection, review) {
         return report(t, &old).map(|report| flow::Report::Ordinary { report });
     }
+    if selection.kind.stage().is_some() {
+        return project_stage_report(t, context, selection, review);
+    }
     let (Terminal::LocalStorePreflight(t), Context::LocalStorePreflight(context)) = (t, context)
     else {
         return Err(refused());
@@ -273,6 +289,57 @@ fn project_report(
     }
     let report = flow::Report::CurrentVersions { inventory };
     if !report.valid_for(selection, review) {
+        return Err(refused());
+    }
+    Ok(report)
+}
+fn project_stage_report(
+    terminal: &Terminal,
+    context: &Context,
+    selected: &flow::Selection,
+    review: &flow::Review,
+) -> Result<flow::Report, BridgeError> {
+    let (Terminal::LocalStorePrepare(t), Context::LocalStorePrepare(c)) = (terminal, context) else {
+        return Err(refused());
+    };
+    if c.later.is_none() || selection(context)? != *selected {
+        return Err(refused());
+    }
+    // Only the original decoded terminal reaches the actual Saved retirement
+    // callback. Recheck its native UUID4 mapping, then project a closed subset;
+    // no caller/status row supplies an operation, secret or old finality.
+    let actual_uuid = crate::android_build_protocol::candidate_uuid(review.operation.operation_id.as_str())
+        .ok_or_else(refused)?;
+    let bytes = crate::edit_protocol::bounded(t.result.as_ref().ok_or_else(refused)?, prepare_wire::STATUS_LIMIT)?;
+    let result: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+    let intent = result.get("preparedIntent").ok_or_else(refused)?;
+    let (platform, scope) = match c.platform {
+        prepare_wire::Platform::Android => (p::Platform::Android, "local-android-store-stage-prepare"),
+        prepare_wire::Platform::Ios => (p::Platform::Ios, "local-ios-store-stage-prepare"),
+    };
+    if result.get("scope").and_then(serde_json::Value::as_str) != Some(scope)
+        || intent.get("operationId").and_then(serde_json::Value::as_str) != Some(actual_uuid.as_str())
+        || intent.get("version") != Some(&serde_json::json!({"name":c.saved_version.name,"build":c.saved_version.build}))
+    {
+        return Err(refused());
+    }
+    let projected = serde_json::json!({
+        "platform":platform,"headSequence":result.get("headSequence").ok_or_else(refused)?,
+        "stage":intent.get("stage").ok_or_else(refused)?,"operationId":actual_uuid,
+        "candidateOperationId":intent.get("candidateOperationId").ok_or_else(refused)?,
+        "candidateSha256":intent.get("candidateSha256").ok_or_else(refused)?,
+        "predecessorOperationId":intent.get("predecessorOperationId").ok_or_else(refused)?,
+        "predecessorReceiptSha256":intent.get("predecessorReceiptSha256").ok_or_else(refused)?,
+        "intentSha256":intent.get("intentSha256").ok_or_else(refused)?,
+        "storePreconditionSha256":intent.get("storePreconditionSha256").ok_or_else(refused)?,
+        "destination":intent.get("destination").ok_or_else(refused)?,
+        "limitations":intent.get("limitations").ok_or_else(refused)?,
+    });
+    let bounded = crate::edit_protocol::bounded(&projected, flow::STATUS_LIMIT)?;
+    let report = flow::Report::StagePrepare {
+        report: serde_json::from_slice(&bounded).map_err(|_| refused())?,
+    };
+    if !report.valid_for(selected, review) || !report.bounded_capacity() {
         return Err(refused());
     }
     Ok(report)
@@ -475,10 +542,13 @@ impl SavedCommandOwner {
         if !Arc::ptr_eq(&held, &material) {
             return Err(refused());
         }
-        let (consent, candidate) = {
+        let (consent, intent) = {
             let r = self.inner.lock();
             let p = r.prepared.as_ref().ok_or_else(refused)?;
             if !start_matches(p, Some(entry)) {
+                return Err(refused());
+            }
+            if selection(&p.projection.context)? != entry.scope.selection {
                 return Err(refused());
             }
             match &p.projection.context {
@@ -500,19 +570,19 @@ impl SavedCommandOwner {
                     },
                     false,
                 ),
-                Context::LocalStorePrepare(c) if c.later.is_none() => (c.consent(), true),
+                Context::LocalStorePrepare(c) if entry.scope.selection.kind.prepares_intent() => (c.consent(), true),
                 _ => return Err(refused()),
             }
         };
         let args = serde_json::json!({"operationId":review.operation.operation_id.as_str(), "ownerGeneration":review.operation.owner_generation.as_str(), "consentVersion":consent});
-        if candidate {
+        if intent {
             if !material.accepts_prepare_consent(&prepare_wire::start(&args)?) {
                 return Err(refused());
             }
         } else if !material.accepts_access_consent(&store_wire::start(&args)?) {
             return Err(refused());
         }
-        let witness = if candidate {
+        let witness = if intent {
             None
         } else {
             material.version_inventory_witness()?

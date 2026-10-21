@@ -18,6 +18,7 @@ fn status() -> flow::Status {
             saved_config: r.saved_config,
             saved_version: r.saved_version,
             candidate: None,
+            later: None,
         },
         phase: flow::Phase::Queued,
         settlement: p::Settlement::Pending,
@@ -31,6 +32,53 @@ fn status() -> flow::Status {
         result: None,
         do_not_replay: true,
     }
+}
+
+#[test]
+fn store_prepare_cli_later_stage_results_keep_fixed_calls_and_nonpublishing_limits() {
+    for (kind, platform, stage) in [
+        (flow::Kind::AndroidExternalTesting, store::Platform::Android, flow::Stage::ExternalTesting),
+        (flow::Kind::IosExternalTesting, store::Platform::Ios, flow::Stage::ExternalTesting),
+        (flow::Kind::AndroidProductionSubmit, store::Platform::Android, flow::Stage::ProductionSubmit),
+        (flow::Kind::IosProductionSubmit, store::Platform::Ios, flow::Stage::ProductionSubmit),
+    ] {
+        let mut s = status();
+        let native = p::Id::parse("22345678123442348234123456789abc").unwrap();
+        let candidate = "12345678-1234-4234-8234-123456789abc";
+        let predecessor = if stage == flow::Stage::ExternalTesting { candidate } else { "32345678-1234-4234-8234-123456789abc" };
+        s.selection.kind = kind;
+        s.selection.candidate = Some(store::Candidate { operation_id: candidate.into(), sha256: "a".repeat(64) });
+        s.selection.later = Some(flow::StageSelection { stage, predecessor_operation_id: predecessor.into(), predecessor_receipt_sha256: "b".repeat(64) });
+        s.phase = flow::Phase::Final; s.settlement = p::Settlement::Settled; s.prepare_returned = true;
+        s.start_grant_id = Some(id(9)); s.start_submitted = true; s.outcome = Some(store::Outcome::Complete);
+        let r = flow::Review { review_id: native.clone(), operation: store::Operation { operation_id: native.clone(), owner_generation: id(11), status_revision: 3 } };
+        s.prepared = Some(r.clone()); s.operation = Some(r.operation.clone());
+        let destination = match (platform, stage) {
+            (store::Platform::Android, flow::Stage::ExternalTesting) => serde_json::json!({"channel":"Closed testing team","releaseStatus":"completed"}),
+            (store::Platform::Android, flow::Stage::ProductionSubmit) => serde_json::json!({"channel":"production","releaseStatus":"draft"}),
+            (store::Platform::Ios, flow::Stage::ExternalTesting) => serde_json::json!({"channel":"testflight-external"}),
+            (store::Platform::Ios, flow::Stage::ProductionSubmit) => serde_json::json!({"channel":"app-store-review","automaticRelease":false}),
+        };
+        s.result = Some(serde_json::from_value(serde_json::json!({"kind":"stage-prepare","report":{
+            "platform":platform,"stage":stage,"operationId":"22345678-1234-4234-8234-123456789abc","headSequence":stage.prepared_head(),
+            "candidateOperationId":candidate,"candidateSha256":"a".repeat(64),"predecessorOperationId":predecessor,"predecessorReceiptSha256":"b".repeat(64),
+            "intentSha256":"c".repeat(64),"storePreconditionSha256":"d".repeat(64),"destination":destination,"limitations":flow::STAGE_LIMITATIONS,
+        }})).unwrap());
+        let q = s.origin.clone();
+        let r = response(s);
+        let (code, bytes) = preparation::output(&r, &q, Some((true, &id(9), &native)), true).unwrap();
+        assert_eq!(code, 0);
+        let decoded = p::decode_response(&bytes[..bytes.len()-1], &r.request_id, &r.service_instance).unwrap();
+        let p::ResponseBody::StorePreparation(s) = &decoded.response else { unreachable!() };
+        s.validate().unwrap();
+        assert_eq!(s.selection.kind, kind);
+        assert!(s.result.as_ref().unwrap().valid_for(&s.selection, s.prepared.as_ref().unwrap()));
+        assert!(output(&r, &q, Some((&id(9), &native)), true).is_err()); // old store-submit cannot adopt it.
+    }
+    let catalogue: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 11);
+    assert_eq!(catalogue["store"]["stagePreparationIsExecution"], false);
+    assert_eq!(catalogue["store"]["kinds"], serde_json::json!(["access-check","candidate-prepare","execute","reconcile"]));
 }
 fn response(s: flow::Status) -> p::Response {
     p::Response {

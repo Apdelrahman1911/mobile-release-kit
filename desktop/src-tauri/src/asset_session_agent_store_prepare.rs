@@ -33,33 +33,65 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
 struct Pins {
     context: Weak<NativeContext>,
     primary: Weak<Payload>,
-    second: Option<Weak<Payload>>,
+    supplemental: [Option<(RecordKey, Weak<Payload>)>; 3],
 }
 impl Pins {
-    fn capture(m: &Arc<SelectedStoreMaterial>, paired: bool) -> Result<Self, BridgeError> {
+    fn capture(m: &Arc<SelectedStoreMaterial>, input: &Input) -> Result<Self, BridgeError> {
+        use crate::{local_store_preflight_protocol as access, local_store_prepare_protocol as prepare};
+        let expected = match input {
+            Input::Access(c) => match &c.ios_record {
+                Some(r) if access::paired_versions::selected(c) => [Some((r.record_id.as_str(), r.record_revision, Kind::AscP8)), None, None],
+                None if c.platform != access::AccessPlatform::Both => [None, None, None],
+                _ => return Err(public(Error::Conflict)),
+            },
+            Input::Candidate(c) => match &c.later {
+                Some(later) if c.platform == prepare::Platform::Ios => {
+                    let a = later.supplemental_assignments.as_ref().ok_or_else(|| public(Error::Conflict))?;
+                    [Some((a.review_contact.record_id.as_str(), a.review_contact.record_revision, Kind::AppleReviewContact)),
+                     Some((a.commitment.record_id.as_str(), a.commitment.record_revision, Kind::OperationCommitment)),
+                     a.review_demo.as_ref().map(|r| (r.record_id.as_str(), r.record_revision, Kind::AppleReviewDemo))]
+                }
+                Some(later) if later.supplemental_assignments.is_some() => return Err(public(Error::Conflict)),
+                _ => [None, None, None],
+            },
+        };
         let (c, p) = m.census_parts();
         let mut rest = m.supplemental_census();
-        let second = rest.next().map(|(_, p)| Arc::downgrade(p));
-        if rest.next().is_some() || second.is_some() != paired {
+        let mut supplemental = std::array::from_fn(|_| None);
+        for (slot, wanted) in supplemental.iter_mut().zip(expected) {
+            match (wanted, rest.next()) {
+                (Some((id, revision, kind)), Some((key, payload)))
+                    if key.id.0 == id && key.revision == revision && payload.kind == kind => {
+                        *slot = Some((key.clone(), Arc::downgrade(payload)));
+                    }
+                (None, None) => (),
+                _ => return Err(public(Error::Conflict)),
+            }
+        }
+        if rest.next().is_some() {
             return Err(public(Error::Conflict));
         }
         Ok(Self {
             context: Arc::downgrade(c),
             primary: Arc::downgrade(p),
-            second,
+            supplemental,
         })
     }
     fn matches(&self, m: &Arc<SelectedStoreMaterial>) -> bool {
         let (c, p) = m.census_parts();
         let mut rest = m.supplemental_census();
-        self.context.as_ptr() == Arc::as_ptr(c)
-            && self.primary.as_ptr() == Arc::as_ptr(p)
-            && match (&self.second, rest.next()) {
-                (None, None) => true,
-                (Some(a), Some((_, b))) => a.as_ptr() == Arc::as_ptr(b),
-                _ => false,
+        if self.context.as_ptr() != Arc::as_ptr(c) || self.primary.as_ptr() != Arc::as_ptr(p) {
+            return false;
+        }
+        for pin in &self.supplemental {
+            match (pin, rest.next()) {
+                (None, None) => (),
+                (Some((key, payload)), Some((current, original)))
+                    if key == current && payload.as_ptr() == Arc::as_ptr(original) => (),
+                _ => return false,
             }
-            && rest.next().is_none()
+        }
+        rest.next().is_none()
     }
 }
 pub(in crate::asset_session) struct Grant {
@@ -72,7 +104,7 @@ pub(in crate::asset_session) struct Grant {
 }
 impl DocumentBinding {
     fn preparation_owner(&self, kind: flow::Kind) -> &SavedCommandOwner {
-        self.store_delegate_owner(if kind.candidate() {
+        self.store_delegate_owner(if kind.prepares_intent() {
             p::Kind::CandidatePrepare
         } else {
             p::Kind::AccessCheck
@@ -85,7 +117,7 @@ impl DocumentBinding {
     ) -> crate::local_store_preflight_protocol::Availability {
         self.store_delegate_gate(
             s,
-            if kind.candidate() {
+            if kind.prepares_intent() {
                 p::Kind::CandidatePrepare
             } else {
                 p::Kind::AccessCheck
@@ -195,7 +227,7 @@ impl DocumentBinding {
                 .map_err(|_| public(Error::Conflict))?;
             let material = self.preparation_material(&s, &input, registration, &root)?;
             self.preparation_budget(&s, &input, &material)?;
-            let pins = Pins::capture(&material, args.kind == flow::Kind::PairedVersions)?;
+            let pins = Pins::capture(&material, &input)?;
             let native = self.service_project_locked(&s, input.project())?;
             let edit = self
                 .inner
@@ -575,7 +607,7 @@ pub(in crate::asset_session::agent_store) fn flush_preparation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::asset_session) mod tests {
     use super::*;
     #[test]
     fn store_preparation_raw_uses_original_closed_input_and_bounded_nodes() {
@@ -611,8 +643,15 @@ mod tests {
             AndroidVersions,
             IosVersions,
             PairedVersions,
+            AndroidExternalTesting,
+            IosExternalTesting,
+            AndroidProductionSubmit,
+            IosProductionSubmit,
         ] {
-            let mut prepare = if kind.candidate() {
+            let mut prepare = if let Some((platform, stage)) = kind.stage() {
+                crate::local_store_prepare_protocol::tests::stage_input(
+                    platform == p::Platform::Ios, stage == flow::Stage::ProductionSubmit)
+            } else if kind.candidate() {
                 serde_json::to_value(crate::local_store_prepare_protocol::tests::context()).unwrap()
             } else {
                 serde_json::to_value(crate::local_store_preflight_protocol::tests::context())
@@ -645,6 +684,7 @@ mod tests {
                     prepare["iosRecord"] =
                         serde_json::json!({"recordId":"d".repeat(32),"recordRevision":2});
                 }
+                AndroidExternalTesting | IosExternalTesting | AndroidProductionSubmit | IosProductionSubmit => (),
             }
             let raw=serde_json::to_vec(&serde_json::json!({"kind":kind,"prepare":prepare,"consentVersion":flow::PREPARE_CONSENT})).unwrap();
             let input: AllowPrepare = decode(&raw).unwrap();
@@ -656,6 +696,15 @@ mod tests {
                     .kind,
                 kind
             );
+            if kind.stage().is_some() {
+                for other in [AndroidCandidate, IosCandidate, AndroidAccess, IosAccess, PairedVersions] {
+                    assert!(Input::parse(other, &input.prepare).is_err());
+                }
+                for field in ["stage", "platform", "predecessorReceiptSha256", "predecessorOperationId"] {
+                    let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove(field);
+                    assert!(Input::parse(kind, &missing).is_err(), "{field}");
+                }
+            }
         }
         // Rejected before Document/native selection. No hidden full Value
         // tree or arbitrary private fields may outgrow this same RAW quote.
@@ -672,7 +721,7 @@ mod tests {
         use std::mem::size_of;
         // Old and new grant cells may coexist. Original material descendants
         // remain in the unchanged native Document/Store census, never here as
-        // omitted loans. Both extra records are weak identities only.
+        // omitted loans. All three supplemental records are weak identities only.
         let cells = size_of::<Grant>()
             + size_of::<super::super::Grant>()
             + size_of::<Input>()
@@ -680,7 +729,7 @@ mod tests {
             + size_of::<queue::Scope>();
         // Fixed bounded roots plus copied small context/publication records for
         // both grants; no payload is owned by these weak identity records.
-        let heaps = 8 * 4096 + 16 * 1024;
+        let heaps = 8 * 4096 + 16 * 1024 + 3 * 32;
         // The remaining 32KiB of the SAME 128KiB fixed term is tested in
         // the actual Saved binding fixture; it is not a second reservation.
         assert!(cells + heaps <= 96 * 1024, "{cells}+{heaps}");
@@ -688,5 +737,41 @@ mod tests {
         assert_eq!(flow::RAW_NODES, 128);
         assert_eq!(flow::RAW_DEPTH, 8);
         assert_eq!(p::DOCUMENT_BACKING, 2 * 1024 * 1024);
+    }
+    /// Called only by the existing actual material DATA fixture. It does not
+    /// make a Document, loan, native receipt or successfully current() result.
+    pub(in crate::asset_session) fn assert_stage_pins(
+        original: &Arc<SelectedStoreMaterial>,
+        compared: &Arc<SelectedStoreMaterial>,
+        context: &crate::local_store_prepare_protocol::Context,
+        same: bool,
+    ) {
+        let input = Input::Candidate(context.clone());
+        let pins = Pins::capture(original, &input).unwrap();
+        assert!(pins.matches(original));
+        assert_eq!(pins.matches(compared), same);
+        assert!(pins.supplemental.iter().flatten().all(|(k, _)| k.id.0.capacity() <= 32));
+        for cut in 0..5 {
+            let mut p = Pins::capture(original, &input).unwrap();
+            match cut {
+                0 => p.supplemental[0] = None,
+                1 => p.supplemental.swap(0, 1),
+                2 => p.supplemental[0].as_mut().unwrap().0.revision += 1,
+                3 => p.supplemental[0].as_mut().unwrap().1 = Weak::new(),
+                _ => p.primary = Weak::new(),
+            }
+            assert!(!p.matches(original));
+        }
+        let mut wrong = context.clone();
+        wrong.later.as_mut().unwrap().supplemental_assignments.as_mut().unwrap().review_contact.record_revision += 1;
+        assert!(Pins::capture(original, &Input::Candidate(wrong)).is_err());
+        let mut old_candidate = context.clone(); old_candidate.later = None;
+        assert!(Pins::capture(original, &Input::Candidate(old_candidate)).is_err());
+        let mut demo = context.clone();
+        let a = demo.later.as_mut().unwrap().supplemental_assignments.as_mut().unwrap();
+        a.review_demo = if a.review_demo.is_some() { None } else {
+            Some(crate::local_store_prepare_protocol::StageRecord { record_id: "b".repeat(32), record_revision: 4 })
+        };
+        assert!(Pins::capture(original, &Input::Candidate(demo)).is_err());
     }
 }

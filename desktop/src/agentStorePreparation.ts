@@ -5,6 +5,7 @@ import {localStoreRequest,type LocalStoreProject} from './localStorePreflight.ts
 import {localStorePrepareRequest} from './localStorePrepare.ts';
 import {parseLocalStoreRequest} from './localStorePreflightProtocol.ts';
 import {parseLocalStorePrepareRequest} from './localStorePrepareProtocol.ts';
+import {nativeStageOperationId,STAGE_PREPARE_LIMITS,type LocalStoreStage,type StagePreparedIntent} from './localStoreStageProtocol.ts';
 import {validStoreReport,type StoreReview} from './agentStoreAccess.ts';
 import {parseIOSCurrentVersions,type IOSCurrentVersions} from './iosStoreVersions.ts';
 import {parseAndroidCurrentVersions,type AndroidCurrentVersions} from './androidStoreVersions.ts';
@@ -12,20 +13,26 @@ import type {AssetDisplayState} from './assetSessionTypes.ts';
 import type {LocalHistoryState} from './localReleaseHistory.ts';
 import type {PrepareLocalStorePreflight} from './localStorePreflightTypes.ts';
 import type {PrepareLocalStoreIntent} from './localStorePrepareTypes.ts';
-export const storePreparationKinds=['android-access','ios-access','android-candidate','ios-candidate','android-versions','ios-versions','paired-versions'] as const;
+export const storePreparationKinds=['android-access','ios-access','android-candidate','ios-candidate','android-versions','ios-versions','paired-versions','android-external-testing','ios-external-testing','android-production-submit','ios-production-submit'] as const;
 export type PreparationKind=typeof storePreparationKinds[number];
 export interface StorePreparationInput {readonly kind:PreparationKind;readonly prepare:PrepareLocalStorePreflight|PrepareLocalStoreIntent}
-export interface StoreSelection {readonly kind:PreparationKind;readonly savedConfig:StoreReview['savedConfig'];readonly savedVersion:StoreReview['savedVersion'];readonly candidate:StoreReview['candidate']}
+export interface StageSelection {readonly stage:LocalStoreStage;readonly predecessorOperationId:string;readonly predecessorReceiptSha256:string}
+export interface StoreSelection {readonly kind:PreparationKind;readonly savedConfig:StoreReview['savedConfig'];readonly savedVersion:StoreReview['savedVersion'];readonly candidate:StoreReview['candidate'];readonly later?:StageSelection}
 export interface StoreOperation {readonly operationId:string;readonly ownerGeneration:string;readonly statusRevision:number}
 export interface PreparationReview {readonly reviewId:string;readonly operation:StoreOperation}
 export interface PreparationOrigin {readonly projectId:string;readonly serviceInstance:string;readonly requestId:string}
 export type CurrentInventory={readonly platform:'ios';readonly current:IOSCurrentVersions}|{readonly platform:'android';readonly current:AndroidCurrentVersions}|{readonly platform:'both';readonly ios:IOSCurrentVersions;readonly android:AndroidCurrentVersions};
+export interface StoreStageReport {
+ readonly platform:'android'|'ios';readonly stage:LocalStoreStage;readonly operationId:string;readonly headSequence:number;
+ readonly candidateOperationId:string;readonly candidateSha256:string;readonly predecessorOperationId:string;readonly predecessorReceiptSha256:string;
+ readonly intentSha256:string;readonly storePreconditionSha256:string;readonly destination:StagePreparedIntent['destination'];readonly limitations:typeof STAGE_PREPARE_LIMITS;
+}
 export interface PreparationStatus {
  readonly schemaVersion:1;readonly origin:PreparationOrigin;readonly prepareGrantId:string;readonly selectionId:string;readonly revision:number;readonly selection:StoreSelection;
  readonly phase:'queued'|'preparing'|'prepared'|'starting'|'running'|'stopping'|'finishing'|'final'|'unknown';readonly settlement:'pending'|'settled'|'unknown';readonly reason:string;
  readonly prepared:PreparationReview|null;readonly operation:StoreOperation|null;readonly startGrantId:string|null;readonly prepareReturned:boolean;readonly startSubmitted:boolean;
  readonly outcome:'complete'|'failed'|'refused'|'cancelled'|'timed-out'|'unknown'|null;
- readonly result:{readonly kind:'ordinary';readonly report:Readonly<Record<string,unknown>>}|{readonly kind:'current-versions';readonly inventory:CurrentInventory}|null;readonly doNotReplay:true;
+ readonly result:{readonly kind:'ordinary';readonly report:Readonly<Record<string,unknown>>}|{readonly kind:'current-versions';readonly inventory:CurrentInventory}|{readonly kind:'stage-prepare';readonly report:StoreStageReport}|null;readonly doNotReplay:true;
 }
 export interface StorePreparationAccess {
  readonly schemaVersion:1;readonly serviceInstance:string|null;readonly projectId:string|null;readonly permission:'prepare'|'start'|null;readonly grantId:string|null;readonly reviewId:string|null;
@@ -38,22 +45,41 @@ const n=(v:unknown,min:number,max:number):v is number=>typeof v==='number'&&Numb
 const keys=(v:unknown,k:readonly string[]):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===k.length&&k.every(p=>Object.hasOwn(v,p));
 const one=(v:unknown,ss:readonly string[])=>typeof v==='string'&&ss.includes(v);
 function freeze<T>(v:T):T{if(v&&typeof v==='object'){for(const item of Object.values(v))freeze(item);Object.freeze(v);}return v;}
-const candidate=(k:PreparationKind)=>k.endsWith('-candidate');
+const candidate=(k:PreparationKind)=>k==='android-candidate'||k==='ios-candidate';
+export const storePreparationStage=(k:PreparationKind):LocalStoreStage|null=>k==='android-external-testing'||k==='ios-external-testing'?'external-testing':k==='android-production-submit'||k==='ios-production-submit'?'production-submit':null;
+export const storePreparationPreparesIntent=(k:PreparationKind)=>candidate(k)||storePreparationStage(k)!==null;
 const kind=(v:unknown):v is PreparationKind=>one(v,storePreparationKinds);
-function selection(v:unknown):v is StoreSelection{return keys(v,['kind','savedConfig','savedVersion','candidate'])&&kind(v.kind)
+const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v)&&v!=='00000000-0000-0000-0000-000000000000';
+const uuid4=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
+function selection(v:unknown):v is StoreSelection{
+ if(!(keys(v,['kind','savedConfig','savedVersion','candidate'])||keys(v,['kind','savedConfig','savedVersion','candidate','later']))||!kind(v.kind))return false;
+ const stage=storePreparationStage(v.kind);
+ return keys(v,['kind','savedConfig','savedVersion','candidate',...(stage?['later']:[])])
  &&keys(v.savedConfig,['bytes','sha256'])&&n(v.savedConfig.bytes,1,524288)&&sha(v.savedConfig.sha256)
  &&keys(v.savedVersion,['bytes','sha256','name','build'])&&n(v.savedVersion.bytes,1,65536)&&sha(v.savedVersion.sha256)&&n(v.savedVersion.build,1,2100000000)&&typeof v.savedVersion.name==='string'&&/^[A-Za-z0-9.+-]{1,64}$/.test(v.savedVersion.name)
- &&(candidate(v.kind)?keys(v.candidate,['operationId','sha256'])&&typeof v.candidate.operationId==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v.candidate.operationId)&&v.candidate.operationId!=='00000000-0000-0000-0000-000000000000'&&sha(v.candidate.sha256):v.candidate===null);}
+ &&(storePreparationPreparesIntent(v.kind)?keys(v.candidate,['operationId','sha256'])&&uuid(v.candidate.operationId)&&sha(v.candidate.sha256):v.candidate===null)
+ &&(!stage||keys(v.candidate,['operationId','sha256'])&&uuid4(v.candidate.operationId)&&keys(v.later,['stage','predecessorOperationId','predecessorReceiptSha256'])&&v.later.stage===stage&&uuid4(v.later.predecessorOperationId)&&sha(v.later.predecessorReceiptSha256)&&(stage==='external-testing'?v.later.predecessorOperationId===v.candidate.operationId:v.later.predecessorOperationId!==v.candidate.operationId));}
 const operation=(v:unknown):v is StoreOperation=>keys(v,['operationId','ownerGeneration','statusRevision'])&&id(v.operationId)&&id(v.ownerGeneration)&&n(v.statusRevision,1,0xffff_fffe);
 const review=(v:unknown):v is PreparationReview=>keys(v,['reviewId','operation'])&&id(v.reviewId)&&operation(v.operation);
 const origin=(v:unknown):v is PreparationOrigin=>keys(v,['projectId','serviceInstance','requestId'])&&Object.values(v).every(id);
+function stageReport(v:unknown,s:StoreSelection,r:PreparationReview):boolean{
+ const stage=storePreparationStage(s.kind),later=s.later,c=s.candidate,ios=s.kind.startsWith('ios-');
+ if(!stage||!later||!c||!keys(v,['platform','stage','operationId','headSequence','candidateOperationId','candidateSha256','predecessorOperationId','predecessorReceiptSha256','intentSha256','storePreconditionSha256','destination','limitations'])
+  ||v.platform!==(ios?'ios':'android')||v.stage!==stage||!uuid4(v.operationId)||v.operationId!==nativeStageOperationId(r.operation.operationId)||v.operationId===c.operationId||v.operationId===later.predecessorOperationId
+  ||v.candidateOperationId!==c.operationId||v.candidateSha256!==c.sha256||v.predecessorOperationId!==later.predecessorOperationId||v.predecessorReceiptSha256!==later.predecessorReceiptSha256
+  ||!sha(v.intentSha256)||!sha(v.storePreconditionSha256)||!n(v.headSequence,stage==='external-testing'?9:13,511)||!sameOfflineData(v.limitations,STAGE_PREPARE_LIMITS))return false;
+ if(ios)return sameOfflineData(v.destination,stage==='external-testing'?{channel:'testflight-external'}:{channel:'app-store-review',automaticRelease:false});
+ return keys(v.destination,['channel','releaseStatus'])&&(stage==='production-submit'?sameOfflineData(v.destination,{channel:'production',releaseStatus:'draft'}):
+  typeof v.destination.channel==='string'&&v.destination.channel.trim().length>0&&[...v.destination.channel].length<=100&&!/[\0\r\n]/.test(v.destination.channel)&&!['internal','production'].includes(v.destination.channel)&&v.destination.releaseStatus==='completed');
+}
 function report(v:unknown,s:StoreSelection,r:PreparationReview):boolean{
+ if(keys(v,['kind','report'])&&v.kind==='stage-prepare')return stageReport(v.report,s,r);
  if(keys(v,['kind','inventory'])&&v.kind==='current-versions'){
   const i=v.inventory;
   if(keys(i,['platform','current']))return s.kind==='ios-versions'&&i.platform==='ios'&&!!parseIOSCurrentVersions(i.current)||s.kind==='android-versions'&&i.platform==='android'&&!!parseAndroidCurrentVersions(i.current);
   return s.kind==='paired-versions'&&keys(i,['platform','android','ios'])&&i.platform==='both'&&!!parseIOSCurrentVersions(i.ios)&&!!parseAndroidCurrentVersions(i.android);
  }
- if(!keys(v,['kind','report'])||v.kind!=='ordinary'||s.kind.endsWith('-versions'))return false;
+ if(!keys(v,['kind','report'])||v.kind!=='ordinary'||s.kind.endsWith('-versions')||storePreparationStage(s.kind)!==null)return false;
  return validStoreReport(v.report,{kind:candidate(s.kind)?'candidate-prepare':'access-check',platform:s.kind.startsWith('ios-')?'ios':'android',...r.operation,savedConfig:s.savedConfig,savedVersion:s.savedVersion,candidate:s.candidate});
 }
 const reasons=['none','user-cancelled','permission-revoked','expired','context-changed','shutdown','busy','unavailable','native-refused','command-failed','command-incomplete','timed-out','cleanup-unknown','history-unavailable'];
@@ -83,13 +109,15 @@ export function parseStorePreparationAccess(raw:unknown):StorePreparationAccess|
 }catch{return null;}}
 export function storePreparationSelection(input:StorePreparationInput):StoreSelection{
  const p=input.prepare,v=p.savedVersion;
- return {kind:input.kind,savedConfig:p.savedConfig,savedVersion:{bytes:v.bytes,sha256:v.sha256,name:v.name,build:v.build},candidate:'candidateOperationId' in p?{operationId:p.candidateOperationId,sha256:p.candidateSha256}:null};
+ return {kind:input.kind,savedConfig:p.savedConfig,savedVersion:{bytes:v.bytes,sha256:v.sha256,name:v.name,build:v.build},candidate:'candidateOperationId' in p?{operationId:p.candidateOperationId,sha256:p.candidateSha256}:null,
+  ...('stage' in p?{later:{stage:p.stage,predecessorOperationId:p.predecessorOperationId,predecessorReceiptSha256:p.predecessorReceiptSha256}}:{})};
 }
 export function parseStorePreparationInput(raw:unknown):StorePreparationInput|null{try{
  const v=copyBoundedComparisonData(raw,8192,256);if(!keys(v,['kind','prepare'])||!kind(v.kind))return null;
- const p=candidate(v.kind)?parseLocalStorePrepareRequest(v.prepare):parseLocalStoreRequest(v.prepare);if(!p)return null;
- if(candidate(v.kind)){
-  if('stage' in p||!('candidateOperationId'in p)||(p.platform??'android')!==(v.kind==='ios-candidate'?'ios':'android'))return null;
+ const p=storePreparationPreparesIntent(v.kind)?parseLocalStorePrepareRequest(v.prepare):parseLocalStoreRequest(v.prepare);if(!p)return null;
+ if(storePreparationPreparesIntent(v.kind)){
+  const stage=storePreparationStage(v.kind);
+  if(!('candidateOperationId'in p)||(p.platform??'android')!==(v.kind.startsWith('ios-')?'ios':'android')||(stage?'stage' in p?p.stage!==stage:true:'stage' in p))return null;
  }else{
   const q='query' in p?p.query:undefined,platform=p.platform??'android';
   if(v.kind==='android-access'&&(platform!=='android'||q!==undefined)||v.kind==='ios-access'&&(platform!=='ios'||q!==undefined)
@@ -99,13 +127,15 @@ export function parseStorePreparationInput(raw:unknown):StorePreparationInput|nu
 }catch{return null;}}
 export function storePreparationInput(k:PreparationKind,project:LocalStoreProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null):StorePreparationInput|null{
  if(!kind(k))return null;
- if(candidate(k))return parseStorePreparationInput({kind:k,prepare:localStorePrepareRequest(project,assets,history)});
+ if(storePreparationPreparesIntent(k))return parseStorePreparationInput({kind:k,prepare:localStorePrepareRequest(project,assets,history)});
  const base=localStoreRequest(project,assets);if(!base)return null;
  return parseStorePreparationInput({kind:k,prepare:k==='android-versions'?{...base,platform:'android',query:'android-current-versions'}:k==='ios-versions'?{...base,query:'ios-current-versions'}:base});
 }
 export const storePreparationConsent=(k:PreparationKind)=>({
  'android-access':'agent-android-store-access-once-v1','ios-access':'agent-ios-store-access-once-v1','android-candidate':'agent-android-store-candidate-prepare-once-v1','ios-candidate':'agent-ios-store-candidate-prepare-once-v1',
  'android-versions':'agent-android-current-versions-edit-once-v1','ios-versions':'agent-ios-current-versions-read-once-v1','paired-versions':'agent-paired-current-versions-edit-once-v1',
+ 'android-external-testing':'agent-android-external-testing-prepare-once-v1','ios-external-testing':'agent-ios-external-testing-prepare-once-v1',
+ 'android-production-submit':'agent-android-production-submit-prepare-once-v1','ios-production-submit':'agent-ios-production-submit-prepare-once-v1',
 }[k]);
 export function createStorePreparationPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):StorePreparationPort{
  const send=(name:string,body:object)=>{const b=new TextEncoder().encode(JSON.stringify(body));return b.length<=8192?invoke(name,b):Promise.reject({code:'invalid-input'});};
@@ -125,6 +155,6 @@ export function storePreparationPeerReason(input:StorePreparationInput|null,r:Pr
   if(!s||s.mode!=='native'||s.pending||s.callersPending||s.blocked||s.unconfirmed||s.acknowledged||s.consentUntil!==null||!s.status||typeof s.status!=='object')return reason;
   const state=s.status as Record<string,unknown>,op=state.operation as Record<string,unknown>|null;
   if(!op||op.operationId!==r.operation.operationId||op.ownerGeneration!==r.operation.ownerGeneration||op.phase!=='awaiting-consent'||op.intentUsable!==true)return reason;
-  return sameOfflineData(op.context,{...input.prepare,platform:input.prepare.platform??'android',operation:candidate(input.kind)?'local-store-prepare':'local-store-preflight'})?null:reason;
+  return sameOfflineData(op.context,{...input.prepare,platform:input.prepare.platform??'android',operation:storePreparationPreparesIntent(input.kind)?'local-store-prepare':'local-store-preflight'})?null:reason;
  }catch{return reason;}
 }

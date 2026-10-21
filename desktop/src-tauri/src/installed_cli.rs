@@ -348,6 +348,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
                 "nativePrepareCommand":"store-prepare","separateStartCommand":"store-start","prepareAuthorizesStart":false,
+                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit"],"stagePreparationIsExecution":false,
                 "currentInventory":["android","ios","paired"],"inventoryIsAllocationAuthority":false,"pairedInventoryRequiresTwoCurrentLoans":true,
                 "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
                 "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":true,"oldSubmitQueryVariants":false,"nativeAvailabilityChecked":false},

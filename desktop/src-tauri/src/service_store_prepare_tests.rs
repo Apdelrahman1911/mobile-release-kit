@@ -12,9 +12,18 @@ fn selected(kind: flow::Kind) -> flow::Selection {
         kind,
         saved_config: r.saved_config,
         saved_version: r.saved_version,
-        candidate: kind.candidate().then(|| p::Candidate {
+        candidate: kind.prepares_intent().then(|| p::Candidate {
             operation_id: "12345678-1234-4234-8234-123456789abc".into(),
             sha256: "e".repeat(64),
+        }),
+        later: kind.stage().map(|(_, stage)| flow::StageSelection {
+            stage,
+            predecessor_operation_id: if stage == flow::Stage::ExternalTesting {
+                "12345678-1234-4234-8234-123456789abc"
+            } else {
+                "32345678-1234-4234-8234-123456789abc"
+            }.into(),
+            predecessor_receipt_sha256: "f".repeat(64),
         }),
     }
 }
@@ -306,30 +315,42 @@ fn prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history() {
                 .returned(Ok(()))
                 .unwrap();
         } else {
+            let kind = if (n / 2) % 5 == 0 {
+                flow::Kind::PairedVersions
+            } else {
+                STAGE_KINDS[(n / 2) % 5 - 1]
+            };
             f.inbox
-                .allow_preparation(scope(&f, flow::Kind::PairedVersions), id('3'))
+                .allow_preparation(scope(&f, kind), id('3'))
                 .unwrap();
             f.inbox
                 .submit_preparation(input.clone(), Instant::now())
                 .unwrap();
             let e = f.inbox.preparation_entry(&input.origin).unwrap();
             let c = f.inbox.claim_preparation().unwrap().unwrap();
-            prepared(&e);
+            let review = if kind.stage().is_some() { stage_review() } else { r() };
+            e.attach(review.clone(), e.scope.expires).unwrap();
+            e.installed().unwrap();
+            e.native(queue::Native {
+                operation: review.operation.clone(), state: OperationState::Prepared,
+                reason: p::Reason::None, outcome: None, result: None, retired: false,
+            });
             c.returned(true);
-            e.allow_start(&r(), id('6')).unwrap();
+            e.allow_start(&review, id('6')).unwrap();
             let mut start_input = input.clone();
             start_input.grant_id = id('6');
-            start_input.review_id = id('a');
+            start_input.review_id = review.review_id.clone();
             e.submit_start(start_input, Instant::now()).unwrap();
             let c = f.inbox.claim_preparation().unwrap().unwrap();
             c.returned(true);
             let mut ndata = finished(&f);
-            ndata.result = Some(flow::Report::CurrentVersions {
+            ndata.operation.operation_id = review.operation.operation_id;
+            ndata.result = Some(if kind.stage().is_some() { stage_report(&e.scope.selection) } else { flow::Report::CurrentVersions {
                 inventory: inventory::Inventory::Both {
                     android: android(),
                     ios: ios(),
                 },
-            });
+            }});
             e.native(ndata);
             let h = e.claim_history().unwrap().unwrap();
             if n + 1 == p::REQUEST_LIMIT {
@@ -449,16 +470,20 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     // 32-byte DATA. Entry includes its inline row and both Native enum cells.
     let scope_cells =
         size_of::<queue::PrepareEntry>() + size_of::<queue::Scope>() + size_of::<Control>();
-    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + 32 * 24 + 512; // paths, scalars, all IDs, Arc/watch bookkeeping.
+    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + 36 + 64 + 32 * 24 + 512; // includes the new bounded predecessor tuple, never a second row.
     assert!(
         scope_cells + scope_heap <= 8192,
         "{scope_cells}+{scope_heap}"
     );
-    let report_heap = 2 * (64 + 32 + 64 + 64)
+    let original_report_heap = 2 * (64 + 32 + 64 + 64)
         + 16 * size_of::<p::Finding>()
         + 8 * size_of::<p::Limitation>()
         + 36
         + 3 * 64;
+    // Three UUIDs, four hashes and the largest actual UTF-8 destination.
+    // Six limitations are inline fixed DATA, no Vec capacity to discard.
+    let stage_report_heap = 3 * 36 + 4 * 64 + 400 + 9;
+    let report_heap = original_report_heap.max(stage_report_heap);
     assert!(size_of::<queue::Native>() + report_heap <= 8192);
     assert!(
         size_of::<flow::Status>() + size_of::<flow::Access>() + scope_heap + report_heap
@@ -487,4 +512,145 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     assert!(usize::MAX.checked_add(complete).is_none());
     let original_limit = crate::service_request_catalogue::ADDITIONAL_LIMIT;
     assert!(original_limit >= p::REQUEST_LIMIT); // no added queue/catalogue allowance.
+}
+
+const STAGE_KINDS: [flow::Kind; 4] = [
+    flow::Kind::AndroidExternalTesting, flow::Kind::IosExternalTesting,
+    flow::Kind::AndroidProductionSubmit, flow::Kind::IosProductionSubmit,
+];
+fn stage_review() -> flow::Review {
+    let operation = Id::parse("22345678123442348234123456789abc").unwrap();
+    flow::Review { review_id: operation.clone(), operation: p::Operation {
+        operation_id: operation, owner_generation: id('b'), status_revision: 3,
+    }}
+}
+fn stage_report(s: &flow::Selection) -> flow::Report {
+    let (platform, stage) = s.kind.stage().unwrap();
+    let candidate = s.candidate.as_ref().unwrap();
+    let later = s.later.as_ref().unwrap();
+    flow::Report::StagePrepare { report: flow::StageReport {
+        platform, stage, operation_id: "22345678-1234-4234-8234-123456789abc".into(),
+        head_sequence: stage.prepared_head(), candidate_operation_id: candidate.operation_id.clone(),
+        candidate_sha256: candidate.sha256.clone(), predecessor_operation_id: later.predecessor_operation_id.clone(),
+        predecessor_receipt_sha256: later.predecessor_receipt_sha256.clone(),
+        intent_sha256: "a".repeat(64), store_precondition_sha256: "b".repeat(64),
+        destination: match (platform, stage) {
+            (p::Platform::Android, flow::Stage::ExternalTesting) => flow::StageDestination::Android { channel: "🧪".repeat(100), release_status: "completed".into() },
+            (p::Platform::Android, flow::Stage::ProductionSubmit) => flow::StageDestination::Android { channel: "production".into(), release_status: "draft".into() },
+            (p::Platform::Ios, flow::Stage::ExternalTesting) => flow::StageDestination::IosExternal { channel: "testflight-external".into() },
+            (p::Platform::Ios, flow::Stage::ProductionSubmit) => flow::StageDestination::IosProduction { channel: "app-store-review".into(), automatic_release: false },
+        },
+        limitations: flow::STAGE_LIMITATIONS,
+    }}
+}
+#[test]
+fn later_prepare_preserves_seven_wire_shapes_and_requires_exact_kind_and_present_tuple() {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OriginalSelection<'a> {
+        kind: flow::Kind, saved_config: &'a p::Content, saved_version: &'a p::Version, candidate: &'a Option<p::Candidate>,
+    }
+    let mut consents = std::collections::BTreeSet::new();
+    for kind in [flow::Kind::AndroidAccess, flow::Kind::IosAccess, flow::Kind::AndroidCandidate, flow::Kind::IosCandidate,
+        flow::Kind::AndroidVersions, flow::Kind::IosVersions, flow::Kind::PairedVersions] {
+        let s = selected(kind);
+        assert!(s.valid());
+        assert_eq!(serde_json::to_vec(&s).unwrap(), serde_json::to_vec(&OriginalSelection {
+            kind, saved_config: &s.saved_config, saved_version: &s.saved_version, candidate: &s.candidate,
+        }).unwrap());
+        let mut explicit_null = serde_json::to_value(&s).unwrap();
+        explicit_null["later"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<flow::Selection>(explicit_null).is_err());
+        let mut hybrid = s;
+        hybrid.later = selected(STAGE_KINDS[0]).later;
+        assert!(!hybrid.valid());
+        consents.insert(kind.consent());
+    }
+    for kind in STAGE_KINDS {
+        let s = selected(kind);
+        assert!(s.valid() && s.bounded_capacity());
+        assert!(!kind.candidate() && kind.prepares_intent());
+        assert!(flow::ordinary_review(&s, &stage_review()).is_none());
+        assert!(consents.insert(kind.consent())); // no candidate/access/other-stage consent reuse.
+        let encoded = serde_json::to_value(&s).unwrap();
+        assert_eq!(serde_json::from_value::<flow::Selection>(encoded.clone()).unwrap(), s);
+        let mut absent = encoded.clone();
+        absent.as_object_mut().unwrap().remove("later");
+        assert!(!serde_json::from_value::<flow::Selection>(absent).unwrap().valid());
+        let mut null = encoded;
+        null["later"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<flow::Selection>(null).is_err());
+        for wrong in [flow::Kind::AndroidCandidate, flow::Kind::IosVersions] {
+            let mut other = s.clone(); other.kind = wrong; assert!(!other.valid());
+        }
+        let mut wrong_stage = s.clone();
+        wrong_stage.later.as_mut().unwrap().stage = if s.later.as_ref().unwrap().stage == flow::Stage::ExternalTesting {
+            flow::Stage::ProductionSubmit
+        } else { flow::Stage::ExternalTesting };
+        assert!(!wrong_stage.valid());
+    }
+}
+#[test]
+fn later_prepare_report_stays_owned_and_waits_for_original_start_and_history() {
+    for kind in STAGE_KINDS {
+        let f = Fixture::new();
+        let (e, caller) = enter(&f, kind);
+        let review = stage_review();
+        e.attach(review.clone(), e.scope.expires).unwrap(); e.installed().unwrap();
+        assert!(e.allow_start(&review, id('6')).is_err());
+        caller.returned(true);
+        e.allow_start(&review, id('6')).unwrap();
+        let mut input = f.input(); input.grant_id = id('6'); input.review_id = review.review_id.clone();
+        e.submit_start(input, Instant::now()).unwrap();
+        let start = f.inbox.claim_preparation().unwrap().unwrap();
+        let report = stage_report(&e.scope.selection);
+        assert!(report.valid_for(&e.scope.selection, &review) && report.bounded_capacity());
+        let mut bad_id = review.clone(); bad_id.operation.operation_id = id('a');
+        assert!(!report.valid_for(&e.scope.selection, &bad_id));
+        let native = queue::Native { operation: review.operation.clone(), state: OperationState::Succeeded,
+            reason: p::Reason::None, outcome: Some(p::Outcome::Complete), result: Some(report), retired: true };
+        // Same real Entry methods with inert return DATA, not a physical native receipt.
+        e.native(native);
+        assert!(e.claim_history().unwrap().is_none() && e.status().unwrap().result.is_none());
+        start.returned(true);
+        let history = e.claim_history().unwrap().unwrap();
+        assert_eq!(e.status().unwrap().phase, flow::Phase::Finishing);
+        history.returned(Ok(())).unwrap();
+        let original = e.status().unwrap(); original.validate().unwrap();
+        assert_eq!(original.phase, flow::Phase::Final);
+        let bytes = serde_json::to_vec(&original).unwrap(); assert!(bytes.len() <= flow::STATUS_LIMIT);
+        assert_eq!(serde_json::from_slice::<flow::Status>(&bytes).unwrap(), original);
+        let mut changed = original.clone();
+        if let Some(flow::Report::StagePrepare { report }) = &mut changed.result {
+            report.predecessor_receipt_sha256 = "9".repeat(64);
+        }
+        assert!(changed.validate().is_err()); assert_eq!(e.status().unwrap(), original);
+        let mut other = selected(flow::Kind::AndroidCandidate);
+        other.candidate = e.scope.selection.candidate.clone();
+        assert!(!original.result.as_ref().unwrap().valid_for(&other, &review));
+    }
+}
+#[test]
+fn later_prepare_excess_capacity_and_wrong_terminal_tuple_never_gain_success() {
+    for excessive in [false, true] {
+        let f = Fixture::new();
+        let (e, caller) = enter(&f, flow::Kind::AndroidExternalTesting);
+        let review = stage_review();
+        e.attach(review.clone(), e.scope.expires).unwrap(); e.installed().unwrap(); caller.returned(true);
+        e.allow_start(&review, id('6')).unwrap();
+        let mut input = f.input(); input.grant_id = id('6'); input.review_id = review.review_id.clone();
+        e.submit_start(input, Instant::now()).unwrap(); f.inbox.claim_preparation().unwrap().unwrap().returned(true);
+        let mut report = stage_report(&e.scope.selection);
+        let flow::Report::StagePrepare { report: stage } = &mut report else { unreachable!() };
+        if excessive { stage.intent_sha256.reserve(8192); } else { stage.head_sequence = 8; }
+        assert_eq!(report.valid_for(&e.scope.selection, &review), excessive);
+        e.native(queue::Native { operation: review.operation, state: OperationState::Succeeded,
+            reason: p::Reason::None, outcome: Some(p::Outcome::Complete), result: Some(report), retired: true });
+        assert_eq!(e.status().unwrap().phase, flow::Phase::Unknown);
+        assert!(e.pending() && e.status().unwrap().result.is_none() && e.claim_history().unwrap().is_none());
+    }
+    let f = Fixture::new();
+    let mut over = scope(&f, flow::Kind::IosProductionSubmit);
+    Arc::get_mut(&mut over).unwrap().selection.later.as_mut().unwrap().predecessor_operation_id.reserve(8192);
+    assert!(f.inbox.allow_preparation(over, id('3')).is_err());
 }

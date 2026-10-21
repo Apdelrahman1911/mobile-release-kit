@@ -1,6 +1,6 @@
 import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
 import { StorePreparationController } from './agentStorePreparationController.ts';
-import { storePreparationInput, storePreparationPeerReason } from './agentStorePreparation.ts';
+import { storePreparationInput, storePreparationPeerReason, storePreparationPreparesIntent } from './agentStorePreparation.ts';
 import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
 import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
 import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
@@ -1151,8 +1151,8 @@ export function App() {
     const observation=project?localStoreProjectObservation(project,releaseVersion.getSnapshot()):null;
     const input=storePreparationInput(kind,observation,assetSession.getSnapshot(),localHistory.getSnapshot());
     const peer=storePreparationControllerRef.current?.peer()??null;
-    const peers=storePreparationPeerReason(peer&&!peer.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
-      storePreparationPeerReason(peer?.input.kind.endsWith('-candidate')?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()));
+    const peers=storePreparationPeerReason(peer&&!storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
+      storePreparationPeerReason(peer&&storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()));
     return {port:service.api?.mode==='native'?service.api.agentStorePreparation??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',input,
       blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??storeExecuteBusy()??storeReconcileBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
