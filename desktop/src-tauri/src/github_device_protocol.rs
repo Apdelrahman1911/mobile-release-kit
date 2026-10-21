@@ -374,12 +374,14 @@ enum ParsedReply<'a> {
         #[serde(rename = "expiresIn", deserialize_with = "present")]
         expires_in: Option<u32>,
     },
-    Pending,
-    SlowDown,
-    Expired,
-    Denied,
-    ClientRefused,
-    Invalid,
+    // Empty structs, not unit variants: Serde's internally tagged unit
+    // visitor ignores extra fields even with deny_unknown_fields.
+    Pending {},
+    SlowDown {},
+    Expired {},
+    Denied {},
+    ClientRefused {},
+    Invalid {},
 }
 fn present<'de, D, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -451,12 +453,12 @@ fn validate_terminal(value: &ParsedTerminal<'_>, role: Role) -> Result<(), Bridg
                 })
         }
         Some(
-            ParsedReply::Pending
-            | ParsedReply::SlowDown
-            | ParsedReply::Expired
-            | ParsedReply::Denied,
+            ParsedReply::Pending {}
+            | ParsedReply::SlowDown {}
+            | ParsedReply::Expired {}
+            | ParsedReply::Denied {},
         ) => role == Role::Poll,
-        Some(ParsedReply::ClientRefused | ParsedReply::Invalid) => true,
+        Some(ParsedReply::ClientRefused {} | ParsedReply::Invalid {}) => true,
         None => false,
     };
     if valid {
@@ -526,12 +528,12 @@ impl Terminal {
                 token: Zeroizing::new(token.into()),
                 expires: expires_in,
             },
-            ParsedReply::Pending => Reply::Pending,
-            ParsedReply::SlowDown => Reply::SlowDown,
-            ParsedReply::Expired => Reply::Refused(Reason::Expired),
-            ParsedReply::Denied => Reply::Refused(Reason::Denied),
-            ParsedReply::ClientRefused => Reply::Refused(Reason::ClientRefused),
-            ParsedReply::Invalid => Reply::Refused(Reason::ResponseInvalid),
+            ParsedReply::Pending {} => Reply::Pending,
+            ParsedReply::SlowDown {} => Reply::SlowDown,
+            ParsedReply::Expired {} => Reply::Refused(Reason::Expired),
+            ParsedReply::Denied {} => Reply::Refused(Reason::Denied),
+            ParsedReply::ClientRefused {} => Reply::Refused(Reason::ClientRefused),
+            ParsedReply::Invalid {} => Reply::Refused(Reason::ResponseInvalid),
         })
     }
 }
@@ -595,6 +597,35 @@ mod tests {
             raw.clone() + "\n",
         ] {
             assert!(request.terminal(Zeroizing::new(bad.into_bytes())).is_err());
+        }
+        for kind in [
+            "pending",
+            "slow-down",
+            "expired",
+            "denied",
+            "client-refused",
+            "invalid",
+        ] {
+            let tag = format!("\"{kind}\"");
+            let frame = raw.replace("\"pending\"", &tag);
+            let reply = request
+                .terminal(Zeroizing::new(frame.as_bytes().to_vec()))
+                .unwrap()
+                .result()
+                .unwrap();
+            assert!(matches!(
+                (kind, reply),
+                ("pending", Reply::Pending)
+                    | ("slow-down", Reply::SlowDown)
+                    | ("expired", Reply::Refused(Reason::Expired))
+                    | ("denied", Reply::Refused(Reason::Denied))
+                    | ("client-refused", Reply::Refused(Reason::ClientRefused))
+                    | ("invalid", Reply::Refused(Reason::ResponseInvalid))
+            ));
+            for extra in ["token", "deviceCode", "unexpected"] {
+                let bad = frame.replace(&tag, &format!("{tag},\"{extra}\":\"private\""));
+                assert!(request.terminal(Zeroizing::new(bad.into_bytes())).is_err());
+            }
         }
     }
 }

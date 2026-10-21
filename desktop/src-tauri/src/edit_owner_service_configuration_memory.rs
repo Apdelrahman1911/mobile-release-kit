@@ -527,8 +527,15 @@ mod tests {
         let mut p = data();
         p.checkout = Some(c::Checkout {
             revision: "b".repeat(32),
-            base: Value::String(String::with_capacity(REPRESENTATION - 4096)),
+            base: Value::String(String::new()),
         });
+        // Count the actual inline projection and existing capacities, not a
+        // guessed fixed header size. Each side fits alone; together they do not.
+        let checkout_capacity = REPRESENTATION.checked_sub(projection(&p).unwrap()).unwrap() / 2;
+        p.checkout.as_mut().unwrap().base = Value::String(String::with_capacity(checkout_capacity));
+        let before = projection(&p).unwrap();
+        assert!(before < REPRESENTATION);
+        let prepared_capacity = REPRESENTATION.checked_sub(before).unwrap() + 1;
         let reply = ChildFrame::Prepared(c::PreparedReply {
             revision: "b".repeat(32),
             plan_token: "c".repeat(32),
@@ -539,12 +546,13 @@ mod tests {
                 create_release_directory: false,
                 rewrites_config_formatting: false,
                 ignore_additions: Vec::new(),
-                preview: Value::String(String::with_capacity(8192)),
+                preview: Value::String(String::with_capacity(prepared_capacity)),
             },
         });
-        assert!(projection(&p).unwrap() < REPRESENTATION);
+        assert!(prospective(&data(), &reply).is_ok());
         assert!(prospective(&p, &reply).is_err());
         assert!(p.prepared.is_none()); // original is neither discarded nor replaced
+        assert_eq!(projection(&p).unwrap(), before);
         assert_eq!(
             FUTURE,
             6 * REPRESENTATION + 2 * c::REQUEST_LIMIT + 2 * c::STATUS_LIMIT + 1024 * 1024
