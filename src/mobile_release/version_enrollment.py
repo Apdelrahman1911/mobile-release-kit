@@ -225,8 +225,11 @@ def _snapshot(body: dict, commit: str, target: Target) -> allocation.LedgerSnaps
     try:
         raw = base64.b64decode(encoded.replace("\n", ""), validate=True)
         need(len(raw) == size and allocation.blob_sha(raw) == body.get("sha"), "ledger-invalid")
-        value = policy._object(_decode_json(raw, limit=allocation.MAX_LEDGER_BYTES, nodes=20_000, depth=16),
-                               {"schemaVersion", "protocol", "genesis", "reservations"})
+        value = _decode_json(raw, limit=allocation.MAX_LEDGER_BYTES, nodes=20_000, depth=16)
+        keys = {"schemaVersion", "protocol", "genesis", "reservations"}
+        if type(value) is dict and value.get("schemaVersion") == 5:
+            keys.add("tagBindings")
+        value = policy._object(value, keys)
         genesis = allocation.Genesis.parse(value["genesis"])
         need(genesis.repository_id == target.repository_id, "authority-changed")
         authority = allocation.AuthorityRegistration(genesis.project_id, target.repository,

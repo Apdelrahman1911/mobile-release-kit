@@ -54,6 +54,8 @@ class _ExchangeProfile(Enum):
     SETUP = "setup"
     PUBLICATION = "publication"
     HOSTED_VERSION = "hosted-version"
+    HOSTED_VERSION_TAG_RESERVE = "hosted-version-tag-reserve"
+    HOSTED_VERSION_TAG_BIND = "hosted-version-tag-bind"
     VERSION_ALLOCATION = "version-allocation"
     VERSION_ENROLLMENT = "version-enrollment"
     REPOSITORY_CREATE = "repository-create"
@@ -73,6 +75,9 @@ class _ResponseRole(Enum):
     HOSTED_VERSION_JOURNAL_READ = "hosted-version-journal-read"
     HOSTED_VERSION_JOURNAL_WRITE = "hosted-version-journal-write"
     HOSTED_VERSION_LEDGER_WRITE = "hosted-version-ledger-write"
+    HOSTED_VERSION_TAG_READ = "hosted-version-tag-read"
+    HOSTED_VERSION_TAG_CLAIM = "hosted-version-tag-claim"
+    HOSTED_VERSION_TAG_CREATE = "hosted-version-tag-create"
     GIT_PUSH_ACCOUNT = "git-push-account"
     GIT_PUSH_REPOSITORY = "git-push-repository"
     GIT_PUSH_ADVERTISEMENT = "git-push-advertisement"
@@ -82,6 +87,7 @@ class _ResponseRole(Enum):
     GIT_REMOTE_ADVERTISEMENT = "git-remote-advertisement"
     GIT_REMOTE_LS_REFS = "git-remote-ls-refs"
     GIT_REMOTE_FETCH = "git-remote-fetch"
+    VERSION_TAG_READ = "version-tag-read"
     PLAY_CLEANUP_READ = "play-cleanup-read"
     PLAY_CLEANUP_CONFIG = "play-cleanup-config"
     PLAY_CLEANUP_WRITE = "play-cleanup-write"
@@ -107,6 +113,7 @@ class _ResponseRole(Enum):
     VERSION_ALLOCATION_COMPARE = "version-allocation-compare"
     VERSION_ALLOCATION_LEDGER_READ = "version-allocation-ledger-read"
     VERSION_ALLOCATION_LEDGER_WRITE = "version-allocation-ledger-write"
+    VERSION_ALLOCATION_TAG = "version-allocation-tag"
     PUBLICATION_READ = "publication-read"
     PUBLICATION_CREATE = "publication-create"
     PUBLICATION_LIST = "publication-list"
@@ -127,6 +134,9 @@ class _ResponseRole(Enum):
     SETUP_VARIABLE_READ = "setup-variable-read"
     SETUP_VARIABLE_CREATE = "setup-variable-create"
     SETUP_VARIABLE_REPLACE = "setup-variable-replace"
+
+
+_HOSTED_PROFILES = frozenset({_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.HOSTED_VERSION_TAG_RESERVE, _ExchangeProfile.HOSTED_VERSION_TAG_BIND})
 
 
 _HOSTED_VERSION_ROLES = frozenset({_ResponseRole.HOSTED_VERSION_READ, _ResponseRole.HOSTED_VERSION_HISTORY,
@@ -154,7 +164,7 @@ _ENROLLMENT_ROLES = frozenset({_ResponseRole.VERSION_ENROLLMENT_ACCOUNT, _Respon
 _PUBLICATION_ROLES = frozenset({_ResponseRole.PUBLICATION_READ, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.PUBLICATION_LIST})
 _ALLOCATION_ROLES = frozenset({_ResponseRole.VERSION_ALLOCATION_REPOSITORY, _ResponseRole.VERSION_ALLOCATION_REF,
     _ResponseRole.VERSION_ALLOCATION_COMPARE, _ResponseRole.VERSION_ALLOCATION_LEDGER_READ,
-    _ResponseRole.VERSION_ALLOCATION_LEDGER_WRITE})
+    _ResponseRole.VERSION_ALLOCATION_LEDGER_WRITE, _ResponseRole.VERSION_ALLOCATION_TAG})
 
 
 _VARIABLE_ROLES = frozenset({_ResponseRole.SETUP_VARIABLE_READ, _ResponseRole.SETUP_VARIABLE_CREATE, _ResponseRole.SETUP_VARIABLE_REPLACE})
@@ -172,8 +182,13 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         if profile is not _ExchangeProfile.DEVICE:
             raise ValueError("Fixed device role belongs to another action")
         return 16 * 1024, 64
+    if role in {_ResponseRole.HOSTED_VERSION_TAG_READ, _ResponseRole.HOSTED_VERSION_TAG_CLAIM, _ResponseRole.HOSTED_VERSION_TAG_CREATE}:
+        if (profile is not _ExchangeProfile.HOSTED_VERSION_TAG_BIND
+                and not (profile is _ExchangeProfile.HOSTED_VERSION_TAG_RESERVE and role is _ResponseRole.HOSTED_VERSION_TAG_READ)):
+            raise ValueError("Fixed hosted tag role belongs to another action")
+        return MAX_BODY_BYTES, 1024
     if role in _HOSTED_VERSION_ROLES:
-        if profile is not _ExchangeProfile.HOSTED_VERSION:
+        if profile not in _HOSTED_PROFILES or (profile is _ExchangeProfile.HOSTED_VERSION_TAG_BIND and role is not _ResponseRole.HOSTED_VERSION_READ):
             raise ValueError("Fixed hosted version role belongs to another action")
         return MAX_BODY_BYTES, 1024
     if role in _GIT_PUSH_ROLES:
@@ -184,7 +199,7 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         if profile is not _ExchangeProfile.GIT_REMOTE:
             raise ValueError("Fixed Git remote role belongs to another action")
         return (32 * 1024 * 1024 if role is _ResponseRole.GIT_REMOTE_FETCH else MAX_BODY_BYTES, 256)
-    if role in {_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE}:
+    if role in {_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE, _ResponseRole.VERSION_TAG_READ}:
         if profile is not _ExchangeProfile.PLAY_CLEANUP:
             raise ValueError("Fixed Play cleanup role belongs to another action")
         return (768 * 1024 if role is _ResponseRole.PLAY_CLEANUP_CONFIG else MAX_BODY_BYTES, 2048)
@@ -232,7 +247,7 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
         if method != "POST" or expected is None or path != expected:
             raise ValueError("Invalid fixed device role or destination")
         return limits
-    if profile is _ExchangeProfile.HOSTED_VERSION:
+    if profile in _HOSTED_PROFILES:
         from .version_hosted import validate_endpoint
         validate_endpoint(role.value, method, path)
         return limits
@@ -437,7 +452,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS)
+        self.end = started + (45.0 if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 60.0 if _profile in {*_HOSTED_PROFILES, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -445,7 +460,7 @@ class _Budget:
         self.profile = _profile
         self.requests = 0
         self._device_owner = None
-        self.body_total_limit = (16 * 1024 if _profile is _ExchangeProfile.DEVICE else 10 * 1024 * 1024 if _profile is _ExchangeProfile.HOSTED_VERSION else
+        self.body_total_limit = (16 * 1024 if _profile is _ExchangeProfile.DEVICE else 10 * 1024 * 1024 if _profile in _HOSTED_PROFILES else
                                  2 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_PUSH else
                                  34 * 1024 * 1024 if _profile is _ExchangeProfile.GIT_REMOTE else
                                  4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
@@ -462,9 +477,9 @@ class _Budget:
             return
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}:
+        if self.profile in {*_HOSTED_PROFILES, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP}:
             self.remaining()
-            if self.requests >= (19 if self.profile is _ExchangeProfile.PLAY_CLEANUP else 44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+            if self.requests >= (19 if self.profile is _ExchangeProfile.PLAY_CLEANUP else 25 if self.profile is _ExchangeProfile.HOSTED_VERSION_TAG_BIND else 45 if self.profile is _ExchangeProfile.HOSTED_VERSION_TAG_RESERVE else 44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 
@@ -874,7 +889,9 @@ def _header_control(head: _Head, budget: _Budget, *,
     if (head.status == 400 and _role in {_ResponseRole.DEVICE_START, _ResponseRole.DEVICE_POLL}
             or head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_WRITE
             or head.status in {409, 422} and _role is _ResponseRole.HOSTED_VERSION_LEDGER_WRITE
-            or head.status == 404 and _role is _ResponseRole.HOSTED_VERSION_JOURNAL_READ
+            or head.status == 404 and _role in {_ResponseRole.HOSTED_VERSION_JOURNAL_READ, _ResponseRole.HOSTED_VERSION_TAG_READ, _ResponseRole.VERSION_TAG_READ}
+            or head.status in {409, 422} and _role is _ResponseRole.HOSTED_VERSION_TAG_CLAIM
+            or head.status in {201, 409, 422} and _role is _ResponseRole.HOSTED_VERSION_TAG_CREATE
             or head.status == 204 and _role is _ResponseRole.PLAY_CLEANUP_WRITE
             or head.status in {201, 409, 422} and _role is _ResponseRole.ACTIONS_RETRY_WRITE
             or head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
@@ -890,6 +907,7 @@ def _header_control(head: _Head, budget: _Budget, *,
             or head.status == 409 and _role is _ResponseRole.SETUP_WORKFLOW_WRITE
             or head.status == 422 and _role is _ResponseRole.SETUP_ENVIRONMENT_WRITE
             or head.status in {409, 422} and _role is _ResponseRole.VERSION_ALLOCATION_LEDGER_WRITE
+            or head.status == 404 and _role is _ResponseRole.VERSION_ALLOCATION_TAG
             or head.status == 404 and _role is _ResponseRole.SETUP_SECRET_METADATA_READ):
         base = "none"  # Only these already-bound response roles admit the status.
     if invalid:
@@ -1018,7 +1036,7 @@ def _response_result(response: _ResponseBody, budget: _Budget, *, _remote_delive
             return _failed("response-invalid", control)
         except ReadFailure as error:
             return _failed(error.reason, control)
-    if head.status != 200 and not (budget.profile is _ExchangeProfile.DEVICE and head.status == 400) and not (head.status == 201 and response.role in {_ResponseRole.HOSTED_VERSION_JOURNAL_WRITE, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
+    if head.status != 200 and not (budget.profile is _ExchangeProfile.DEVICE and head.status == 400) and not (head.status == 201 and response.role in {_ResponseRole.HOSTED_VERSION_JOURNAL_WRITE, _ResponseRole.HOSTED_VERSION_TAG_CREATE, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
         # Never read/parse/retain arbitrary error bodies, even JSON-looking ones.
         if head.status == 403 and control["reason"] == "rate-limited":
             return _failed("rate-limited", control)
@@ -1305,12 +1323,12 @@ def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, 
                                or any(not 0x21 <= ord(c) <= 0x7e for c in token))):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
-    if _profile is _ExchangeProfile.HOSTED_VERSION:
+    if _profile in _HOSTED_PROFILES:
         if type(_hosted_ca_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", _hosted_ca_sha256) is None:
             raise ValueError("Pinned hosted GitHub trust is unavailable")
     elif _hosted_ca_sha256 is not None:
         raise ValueError("Hosted trust belongs to another profile")
-    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, _ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH, _ExchangeProfile.SETUP, *_HOSTED_PROFILES, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY, _ExchangeProfile.PLAY_CLEANUP} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH}:
         from .git_remote_transport import _LOGIN
@@ -1358,7 +1376,7 @@ def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, 
     context.set_alpn_protocols(["http/1.1"])
     fixed_ca = (_fixed_ca(runtime_dir, budget, _failure=_device_owner.failure) if device else _fixed_ca(runtime_dir, budget, _failure=_git_remote_failure)
         if _profile in {_ExchangeProfile.GIT_REMOTE, _ExchangeProfile.GIT_PUSH} else _fixed_ca(runtime_dir, budget))
-    if _profile is _ExchangeProfile.HOSTED_VERSION:
+    if _profile in _HOSTED_PROFILES:
         import hashlib
         if hashlib.sha256(fixed_ca.encode("ascii")).hexdigest() != _hosted_ca_sha256:
             raise ValueError("Pinned hosted GitHub trust changed")
@@ -1400,7 +1418,7 @@ def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, 
         if device:
             from .github_device_protocol import validate_body
             validate_body(_role.value, body)
-        if _profile is _ExchangeProfile.HOSTED_VERSION:
+        if _profile in _HOSTED_PROFILES:
             from .version_hosted import validate_body
             validate_body(_role.value, body, path=path)
         if _profile is _ExchangeProfile.SETUP:
@@ -1422,7 +1440,9 @@ def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, 
         elif _profile is _ExchangeProfile.VERSION_ENROLLMENT:
             from .version_enrollment import validate_body
             validate_body(_role.value, body, path=path)
-        methods = {"GET", "PUT"} if _profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.SETUP, _ExchangeProfile.VERSION_ALLOCATION} else {"GET", "POST"}
+        methods = {"GET", "PUT"} if _profile in {*_HOSTED_PROFILES, _ExchangeProfile.SETUP, _ExchangeProfile.VERSION_ALLOCATION} else {"GET", "POST"}
+        if _profile is _ExchangeProfile.HOSTED_VERSION_TAG_BIND:
+            methods = {"GET", "PUT", "POST"}  # Closed role/path/body already admitted.
         if _profile in {_ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.ACTIVITY}:
             methods = {"GET"}
         if _profile is _ExchangeProfile.SETUP and _role in _VARIABLE_ROLES:

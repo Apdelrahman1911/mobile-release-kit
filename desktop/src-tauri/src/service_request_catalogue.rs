@@ -179,6 +179,7 @@ pub enum AdditionalFamily {
     PlayCleanup,
     AppleProvisioning,
     VersionEdit,
+    VersionTag,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
@@ -189,7 +190,7 @@ impl AdditionalFamily {
             Self::AndroidUploadKey => 3,
             Self::Configuration => 4,
             Self::Store => 5,
-            Self::PlayCleanup => 6,
+            Self::PlayCleanup | Self::VersionTag => 6,
             Self::AppleProvisioning=>7,
             Self::VersionEdit=>8,
         }
@@ -208,6 +209,7 @@ impl AdditionalFamily {
             Self::PlayCleanup => "play-cleanup-status",
             Self::AppleProvisioning=>"apple-provisioning-status",
             Self::VersionEdit=>"version-edit-status",
+            Self::VersionTag => "version-tag-status",
         }
     }
 }
@@ -642,4 +644,17 @@ mod tests {
             !text.contains("mrk ios-archive-start") && !text.contains("mrk ios-archive-prepare")
         );
     }
+    #[test]
+    fn future_tag_discovery_shares_cleanup_namespace_and_routes_exact_status() {
+        let mut v=view(vec![]);v.schema_version=2;
+        v.additional_requests=Some(vec![AdditionalRequest {family:AdditionalFamily::VersionTag,request_id:id(3)}]);
+        v.validate().unwrap();assert_eq!(LIMIT,352); // Apple and VersionEdit namespaces remain separately counted.
+        assert!(human(&v).contains("mrk version-tag-status"));assert!(!human(&v).contains("mrk version-tag-submit"));
+        v.additional_requests.as_mut().unwrap().push(AdditionalRequest {family:AdditionalFamily::PlayCleanup,request_id:id(3)});
+        assert!(v.validate().is_err()); // same ID cannot appear through a family alias.
+        v.additional_requests=Some((0..33).map(|n|AdditionalRequest {
+            family:if n%2==0 {AdditionalFamily::VersionTag} else {AdditionalFamily::PlayCleanup},request_id:id(n+10)
+        }).collect());assert!(v.validate().is_err()); // One32, not32 per purpose.
+    }
+
 }

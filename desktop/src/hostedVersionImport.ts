@@ -1,5 +1,6 @@
 // Pasted workflow output is UNVERIFIED proposed DATA. These comparisons do not
 // inspect a ledger, reserve a number, grant a native edit, or establish CI use.
+import { futureVersionTag } from './futureVersionTag.ts';
 import { connectionBounded, connectionKeys } from './githubConnectionProtocol.ts';
 import { sameGitLocalData } from './gitLocalProtocol.ts';
 import type { GitReadController, GitReadView } from './gitReadController.ts';
@@ -11,7 +12,7 @@ export interface HostedVersionProposal {
   readonly candidateId: string; readonly rowSha256: string;
   readonly sourceCommit: string; readonly sourceRef: string; readonly configSha256: string;
   readonly path: string; readonly beforeSha256: string; readonly afterSha256: string;
-  readonly name: string; readonly build: string; readonly commitTrailer: string;
+  readonly name: string; readonly build: string; readonly commitTrailer: string; readonly futureTag?: string;
 }
 export interface HostedImportGitSource {
   readonly session: object | null; readonly projectId: string | null; readonly epoch: number;
@@ -55,8 +56,8 @@ export function parseHostedVersionProposal(raw: unknown): HostedVersionProposal 
     const v: unknown = JSON.parse(body);
     if (!connectionBounded(v, HOSTED_VERSION_IMPORT_LIMIT, 128, 6) || !connectionKeys(v, ['schemaVersion', 'status', 'candidateId', 'rowSha256',
       'sourceCommit', 'sourceRef', 'configSha256', 'version', 'releaseEligibility', 'historicalUniqueness', 'sourceWrite',
-      'authorityVariable', 'commitTrailer', 'versionFile']) || v.schemaVersion !== 1 || v.status !== 'reserved' ||
-      v.releaseEligibility !== 'not-established' || v.historicalUniqueness !== 'not-established' || v.sourceWrite !== 'not-performed' ||
+      'authorityVariable', 'commitTrailer', 'versionFile', ...(v && typeof v === 'object' && Object.hasOwn(v, 'futureTag') ? ['futureTag'] : [])]) || v.schemaVersion !== 1 || v.status !== 'reserved' ||
+      v.releaseEligibility !== 'not-established' || v.historicalUniqueness !== 'not-established' || v.sourceWrite !== 'not-performed' || Object.hasOwn(v, 'futureTag') && !futureVersionTag(v.futureTag) ||
       typeof v.candidateId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$(?![\s\S])/.test(v.candidateId) ||
       !hash(v.rowSha256) || !oid(v.sourceCommit) || !branch(v.sourceRef) || !hash(v.configSha256) || !text(v.authorityVariable, 4096) ||
       v.commitTrailer !== `MRK-Version-Reservation: ${v.candidateId} ${v.rowSha256}` ||
@@ -73,7 +74,7 @@ export function parseHostedVersionProposal(raw: unknown): HostedVersionProposal 
     // Offsets and the protected-variable text are deliberately NOT retained.
     return Object.freeze({ candidateId: v.candidateId, rowSha256: v.rowSha256, sourceCommit: v.sourceCommit, sourceRef: v.sourceRef,
       configSha256: v.configSha256, path: v.versionFile.path, beforeSha256: v.versionFile.beforeSha256,
-      afterSha256: v.versionFile.afterSha256, name: v.version.name, build: String(v.version.build), commitTrailer: v.commitTrailer });
+      afterSha256: v.versionFile.afterSha256, name: v.version.name, build: String(v.version.build), commitTrailer: v.commitTrailer, ...(Object.hasOwn(v, 'futureTag') ? { futureTag: v.futureTag as string } : {}) });
   } catch { return null; }
 }
 export function hostedProposalCheckoutMatches(p: HostedVersionProposal, c: VersionCheckout): boolean {

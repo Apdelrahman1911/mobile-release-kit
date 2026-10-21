@@ -1,3 +1,4 @@
+import { futureVersionTag } from './futureVersionTag.ts';
 import type { LocalStoreProject } from './localStorePreflight.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 
@@ -5,10 +6,10 @@ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 // are selected by native code; these strings cannot construct a handoff.
 export type VersionIncrement = 'build' | 'patch' | 'minor' | 'major';
 export interface VersionReserveOptions { readonly reference: string; readonly increment: VersionIncrement;
-  readonly newCandidate: boolean; readonly acknowledgeLimitations: boolean }
+  readonly newCandidate: boolean; readonly acknowledgeLimitations: boolean; readonly futureTag?: string }
 export interface VersionCiReference { readonly authoritySettings: string; readonly commitTrailer: string }
 export interface ReservedVersion { readonly id: string; readonly candidateId: string; readonly name: string; readonly build: number;
-  readonly ci?: VersionCiReference }
+  readonly ci?: VersionCiReference; readonly futureTag?: string }
 export interface VersionReserveStatus {
   readonly schemaVersion: 1; readonly revision: number; readonly projectId: string | null; readonly operationId: string | null;
   readonly phase: 'idle' | 'reading' | 'reviewed' | 'reserving' | 'reserved' | 'refused' | 'cleanup-unknown';
@@ -18,6 +19,8 @@ export interface VersionReserveStatus {
 }
 const exact = (v: unknown, keys: readonly string[]): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v) &&
   Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
+const tagKeys = (v: unknown, keys: readonly string[]): v is Record<string, unknown> =>
+  exact(v, keys) || exact(v, [...keys, 'futureTag']) && futureVersionTag(v.futureTag);
 export const reserveProject = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v) && !/\s/.test(v);
 export const reserveId = (v: unknown): v is string => typeof v === 'string' && v.length === 32 && /^[0-9a-f]+$/.test(v) && v !== '0'.repeat(32);
 const integer = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0) && v >= 0 && v <= max;
@@ -32,15 +35,16 @@ export function reserveBranch(v: unknown): v is string {
 export function parseReserveOptions(raw: unknown): VersionReserveOptions | null {
   try {
     const v = copyBoundedComparisonData(raw, 1024, 16);
-    return exact(v, ['reference', 'increment', 'newCandidate', 'acknowledgeLimitations']) && reserveBranch(v.reference) &&
+    return tagKeys(v, ['reference', 'increment', 'newCandidate', 'acknowledgeLimitations']) && reserveBranch(v.reference) &&
       increment(v.increment) && typeof v.newCandidate === 'boolean' && v.acknowledgeLimitations === true ?
-      Object.freeze({ reference: v.reference, increment: v.increment, newCandidate: v.newCandidate, acknowledgeLimitations: true }) : null;
+      Object.freeze({ reference: v.reference, increment: v.increment, newCandidate: v.newCandidate, acknowledgeLimitations: true,
+        ...(Object.hasOwn(v, 'futureTag') ? { futureTag: v.futureTag as string } : {}) }) : null;
   } catch { return null; }
 }
 export function parseReservedVersion(raw: unknown): ReservedVersion | null {
   try {
     const v = copyBoundedComparisonData(raw, 2048, 24);
-    if (!(exact(v, ['id', 'candidateId', 'name', 'build']) || exact(v, ['id', 'candidateId', 'name', 'build', 'ci']))) return null;
+    if (!(tagKeys(v, ['id', 'candidateId', 'name', 'build']) || tagKeys(v, ['id', 'candidateId', 'name', 'build', 'ci']))) return null;
     const ci = Object.hasOwn(v, 'ci') ? parseVersionCiReference(v.ci, v.candidateId) : undefined;
     if (Object.hasOwn(v, 'ci') && !ci) return null;
     return reserveId(v.id) && typeof v.candidateId === 'string' &&
@@ -49,7 +53,7 @@ export function parseReservedVersion(raw: unknown): ReservedVersion | null {
       typeof v.name === 'string' && v.name.length <= 64 &&
       /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?$(?![\s\S])/.test(v.name) &&
       integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build,
-        ...(ci ? { ci } : {}) }) : null;
+        ...(ci ? { ci } : {}), ...(Object.hasOwn(v, 'futureTag') ? { futureTag: v.futureTag as string } : {}) }) : null;
   } catch { return null; }
 }
 export function parseVersionCiReference(raw: unknown, candidateId: unknown): VersionCiReference | null {
@@ -81,9 +85,10 @@ export function parseVersionReserveStatus(raw: unknown): VersionReserveStatus | 
     let review: VersionReserveStatus['review'] = null;
     if (phase === 'reviewed') {
       const r = v.review;
-      if (!exact(r, ['id', 'reference', 'increment', 'newCandidate']) || !reserveId(r.id) || r.id !== v.operationId ||
+      if (!tagKeys(r, ['id', 'reference', 'increment', 'newCandidate']) || !reserveId(r.id) || r.id !== v.operationId ||
           !reserveBranch(r.reference) || !increment(r.increment) || typeof r.newCandidate !== 'boolean') return null;
-      review = Object.freeze({ id: r.id, reference: r.reference, increment: r.increment, newCandidate: r.newCandidate });
+      review = Object.freeze({ id: r.id, reference: r.reference, increment: r.increment, newCandidate: r.newCandidate,
+        ...(Object.hasOwn(r, 'futureTag') ? { futureTag: r.futureTag as string } : {}) });
     } else if (v.review !== null) return null;
     const reservation = phase === 'reserved' ? parseReservedVersion(v.reservation) : null;
     if (phase === 'reserved' ? !reservation || reservation.id !== v.operationId : v.reservation !== null) return null;

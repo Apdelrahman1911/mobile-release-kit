@@ -64,7 +64,7 @@ impl ApplicationService {
         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
         additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
-        additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::PlayCleanup,request_id}));
+        additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|(purpose, request_id)| data::AdditionalRequest {family:match purpose {crate::service_play_cleanup_protocol::Purpose::PlayCleanup => data::AdditionalFamily::PlayCleanup, crate::service_play_cleanup_protocol::Purpose::VersionTag => data::AdditionalFamily::VersionTag},request_id}));
         let view = data::Catalogue {
             schema_version: 2,
             scope: data::Scope::CurrentHostRetainedRequests,
@@ -298,7 +298,7 @@ mod tests {
         service.service_version_reserve_submit(&first, reserved.clone()).unwrap();
         let cleanup_point = service.play_cleanup_point("project-1").unwrap();
         let cleanup_input = cleanup::Submit {
-            origin: cleanup::Query {project_id: project.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap()},
+            origin: cleanup::Query {purpose: cleanup::Purpose::PlayCleanup,project_id: project.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap()},
             consent_id: Id::random().unwrap(),
         };
         let cleanup_scope = service.play_cleanup_requests.scope(
@@ -591,7 +591,7 @@ mod tests {
         let cleanup_review = Arc::new(());
         let cleanup_point = service.play_cleanup_point("project-2").unwrap();
         let cleanup_input = crate::service_play_cleanup_protocol::Submit {
-            origin: crate::service_play_cleanup_protocol::Query {
+            origin: crate::service_play_cleanup_protocol::Query {purpose: crate::service_play_cleanup_protocol::Purpose::PlayCleanup,
                 project_id: other.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap(),
             },
             consent_id: Id::random().unwrap(),

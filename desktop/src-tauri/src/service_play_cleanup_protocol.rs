@@ -7,6 +7,11 @@ pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
 pub(crate) const REVIEW_MS: u64 = 120_000;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Purpose { #[default] PlayCleanup, VersionTag }
+impl Purpose { pub(crate) fn is_cleanup(&self) -> bool { *self == Self::PlayCleanup } }
+
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
 }
@@ -16,6 +21,8 @@ pub(crate) struct Query {
     pub(crate) project_id: Id,
     pub(crate) service_instance: Id,
     pub(crate) request_id: Id,
+    #[serde(default, skip_serializing_if = "Purpose::is_cleanup")]
+    pub(crate) purpose: Purpose,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,6 +38,8 @@ pub(crate) struct Access {
     pub(crate) consent_id: Id,
     pub(crate) enabled: bool,
     pub(crate) remaining_ms: u64,
+    #[serde(default, skip_serializing_if = "Purpose::is_cleanup")]
+    pub(crate) purpose: Purpose,
 }
 impl Access {
     pub(crate) fn valid(&self) -> bool {

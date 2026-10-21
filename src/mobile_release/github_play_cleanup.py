@@ -50,7 +50,7 @@ REASONS = activity.REASONS | frozenset({"source-changed", "source-tree-unavailab
     "configuration-invalid", "caller-mismatch", "workflow-unavailable", "permission-unconfirmed",
     "counter-unavailable", "protection-unsupported", "authority-changed", "authority-rewound",
     "ledger-invalid", "journal-invalid", "cleanup-unavailable", "cleanup-claimed", "review-changed",
-    "journal-unavailable", "journal-full", "previous-attempt", "unresolved"})
+    "journal-unavailable", "journal-full", "previous-attempt", "unresolved", "tag-exists"})
 canonical = policy.canonical
 
 
@@ -71,17 +71,29 @@ class Target:
     scope: activity.Target
     tooling_sha: str
     marker: str
+    version_tag: object | None = None
+    pending_purpose: str | None = None
 
     @classmethod
     def parse(cls, value: object) -> Target:
-        row = obj(value, {"scope", "toolingRepository", "toolingSha", "marker"})
+        from .github_version_tag import Selection
+        tag = Selection.parse(value["versionTag"]) if type(value) is dict and "versionTag" in value else None
+        pending = value.get("purpose") if type(value) is dict else None
+        require(pending is None or pending == "version-tag" and tag is None)
+        row = obj(value, {"scope", "toolingRepository", "toolingSha", "marker"} | ({"versionTag"} if tag is not None else set()) | ({"purpose"} if pending is not None else set()))
         require(row["toolingRepository"] == TOOLING_REPOSITORY)
         return cls(activity.Target.parse(row["scope"]), hex_text(row["toolingSha"], 40),
-                   hex_text(row["marker"], 32))
+                   hex_text(row["marker"], 32), tag, pending)
 
     def value(self) -> dict:
         return {"scope": self.scope.value(), "toolingRepository": TOOLING_REPOSITORY,
-                "toolingSha": self.tooling_sha, "marker": self.marker}
+                "toolingSha": self.tooling_sha, "marker": self.marker,
+                **({"versionTag": self.version_tag.value()} if self.version_tag is not None else {}),
+                **({"purpose": self.pending_purpose} if self.pending_purpose is not None else {})}
+
+    @property
+    def purpose(self):
+        return "version-tag" if self.version_tag is not None or self.pending_purpose is not None else "play-cleanup"
 
     @property
     def repository(self) -> str:
@@ -91,7 +103,8 @@ class Target:
         return (self.scope.project_binding == other.scope.project_binding
             and self.scope.account_id == other.scope.account_id
             and self.scope.repository_id == other.scope.repository_id
-            and self.repository.lower() == other.repository.lower())
+            and self.repository.lower() == other.repository.lower()
+            and self.purpose == other.purpose)
 
 
 def canonical_caller(target: Target) -> bytes:
@@ -143,6 +156,9 @@ def identity_data(config: dict, platform: str) -> dict:
 
 
 def confirmation(prepared: Prepared) -> str:
+    if prepared.target.version_tag is not None:
+        from .github_version_tag import confirmation as tag_confirmation
+        return tag_confirmation(prepared)
     return ("Dispatch one hosted Play edit cleanup for candidate " + prepared.candidate["candidateId"]
         + " in " + prepared.target.repository + "? This is nonpublishing but mutating: the protected workflow "
         "may decrypt its retained edit ID, consume its one-use cleanup claim and delete that Play edit. "
@@ -179,9 +195,9 @@ class Prepared:
     authority: allocation.AuthorityRegistration
     checkpoint: allocation.Checkpoint
     ledger_blob: str
-    journal_blob: str
-    journal_sha256: str
-    journal_revision: int
+    journal_blob: str | None
+    journal_sha256: str | None
+    journal_revision: int | None
     candidate: dict
 
     def value(self) -> dict:
@@ -190,16 +206,20 @@ class Prepared:
             "savedConfigSha256": self.saved_config_sha256, "workflowId": self.workflow_id,
             "callerSha256": self.caller_sha256, "authority": self.authority.value(),
             "checkpoint": self.checkpoint.value(), "ledgerBlob": self.ledger_blob,
-            "journalBlob": self.journal_blob, "journalSha256": self.journal_sha256,
-            "journalRevision": self.journal_revision, "candidate": dict(self.candidate),
+             **({"journalBlob": self.journal_blob, "journalSha256": self.journal_sha256,
+                "journalRevision": self.journal_revision} if self.target.version_tag is None else {}), "candidate": dict(self.candidate),
             "confirmation": confirmation(self)}
 
     @classmethod
     def parse(cls, value: object) -> Prepared:
+        if type(value) is dict and type(value.get("target")) is dict and "versionTag" in value["target"]:
+            from .github_version_tag import parse_prepared
+            return parse_prepared(value)
         row = obj(value, {"target", "accountLogin", "branch", "sourceSha", "sourceTree", "savedConfigSha256",
             "workflowId", "callerSha256", "authority", "checkpoint", "ledgerBlob", "journalBlob",
             "journalSha256", "journalRevision", "candidate", "confirmation"})
         target = Target.parse(row["target"])
+        require(target.pending_purpose is None)
         authority = allocation.AuthorityRegistration.parse(row["authority"])
         checkpoint = allocation.Checkpoint.parse(row["checkpoint"])
         candidate = candidate_data(row["candidate"])
@@ -226,12 +246,21 @@ def digest(prepared: Prepared) -> str:
 def once_key(prepared: Prepared) -> tuple[str, ...]:
     """No account name, local-project alias, branch or marker can evade this."""
     Prepared.parse(prepared.value())
+    if prepared.target.version_tag is not None:
+        # Stable exclusion; F/row/T are the immutable BODY, never another key.
+        return ("version-tag", prepared.target.scope.repository_id, prepared.authority.project_id,
+            prepared.authority.ledger_id, prepared.authority.genesis_sha256, prepared.candidate["candidateId"])
     return (prepared.target.scope.repository_id, prepared.authority.project_id,
         prepared.authority.ledger_id, prepared.authority.genesis_sha256,
         prepared.candidate["candidateId"], prepared.candidate["attemptId"])
 
 
 def dispatch_body(prepared: Prepared) -> bytes:
+    if prepared.target.version_tag is not None:
+        from .github_version_tag import dispatch_body as tag_body
+        raw = tag_body(prepared)
+        require(len(raw) <= 1024)
+        return raw
     c = prepared.candidate
     raw = canonical({"ref": prepared.branch, "inputs": {"operation": "recover-play-edit",
         "platform": c["platform"], "confirmation": "recover-play-edit:" + c["candidateId"] + ":" + c["attemptId"]}})
@@ -271,7 +300,11 @@ class Operation:
         except SecretConfigurationError as error:
             raise Refused("response-limit" if error.reason == "resources-unavailable" else "response-invalid") from None
 
-    def take(self, step: str, suffix: str, *, body: bytes | None = None, config: bool = False):
+    def take(self, step: str, suffix: str, *, body: bytes | None = None, config: bool = False, missing: bool = False):
+        if missing:
+            from .version_future_tag import reference
+            need(self.target.version_tag is not None and body is None and suffix.startswith("git/ref/tags/"))
+            reference("refs/" + suffix.removeprefix("git/ref/"))
         need(step not in self.steps and len(self.steps) < self.maximum, "response-limit")
         self.steps.add(step)  # Original attempt is consumed before the call.
         request = HttpRequest("POST" if body is not None else "GET",
@@ -289,6 +322,9 @@ class Operation:
         if row["failure"] != "none":
             raise Refused(row["failure"] if row["failure"] in REASONS else "response-invalid")
         need(type(row["status"]) is int)
+        if missing and row["status"] == 404:
+            need(row["body"] is None)
+            return None
         if row["status"] != (204 if body is not None else 200):
             raise Refused({401: "unauthorized", 403: "forbidden", 404: "not-found-or-inaccessible",
                 409: "review-changed", 422: "cleanup-unavailable", 429: "rate-limited"}.get(row["status"],
@@ -504,8 +540,16 @@ def reason(error: BaseException) -> str:
     return value if value in REASONS else "response-invalid"
 
 
+def _operation(target, source, exchange, *, dispatch=False):
+    if target.version_tag is not None:
+        from .github_version_tag import Operation as TagOperation
+        return TagOperation(target, source, exchange, dispatch=dispatch)
+    return Operation(target, source, exchange, dispatch=dispatch)
+
+
 def prepare(target: Target, source: Source, exchange: Exchange) -> tuple[Prepared, dict]:
-    op = Operation(target, source, exchange)
+    require(target.pending_purpose is None)
+    op = _operation(target, source, exchange)
     try:
         return op.prepare(), op.control
     except (ValueError, TypeError, KeyError, UnicodeError, OverflowError, RecursionError, ConfigurationError, ValidationError, ReadFailure) as error:
@@ -514,7 +558,7 @@ def prepare(target: Target, source: Source, exchange: Exchange) -> tuple[Prepare
 
 def dispatch(prepared: Prepared, source: Source, exchange: Exchange, journal: Journal) -> dict:
     prepared = Prepared.parse(prepared.value())
-    op = Operation(prepared.target, source, exchange, dispatch=True)
+    op = _operation(prepared.target, source, exchange, dispatch=True)
     result = {"effect": "not-sent", "reason": "none", "claimed": False, "acknowledged": False,
               "observed": None, "control": _control()}
     try:
@@ -544,6 +588,9 @@ def pending_record(value: object) -> dict:
 
 
 def observation(value: object) -> dict:
+    if type(value) is dict and value.get("assurance") == "later-binding-read-not-creation-proof":
+        from .github_version_tag import observation as tag_observation
+        return tag_observation(value)
     row = obj(value, {"counterCommit", "journalSha256", "journalRevision", "pendingTuple", "assurance"})
     hex_text(row["counterCommit"], 40); hex_text(row["journalSha256"], 64)
     policy._integer(row["journalRevision"], (1 << 64) - 1, 1)
@@ -555,6 +602,9 @@ def observation(value: object) -> dict:
 def observe(record: dict, exchange: Exchange) -> dict:
     original = pending_record(record)
     prepared = Prepared.parse(original["prepared"])
+    if prepared.target.version_tag is not None:
+        from .github_version_tag import observe as tag_observe
+        return tag_observe(original, exchange)
     op = Operation(prepared.target, None, exchange)
     result = {"effect": "unresolved", "reason": "unresolved", "claimed": original["claimed"],
         "acknowledged": original["acknowledged"], "observed": None, "control": _control()}
@@ -593,6 +643,8 @@ def action_result(value: object, prepared: Prepared, kind: str) -> dict:
         and (not row["acknowledged"] or row["claimed"]))
     _check_control(row["control"])
     seen = None if row["observed"] is None else observation(row["observed"])
+    if seen is not None:
+        require((seen["assurance"] == "later-binding-read-not-creation-proof") == (prepared.target.version_tag is not None))
     effect = row["effect"]
     if effect == "not-sent":
         require(kind == "dispatch" and not row["claimed"] and not row["acknowledged"] and seen is None and row["reason"] != "none")

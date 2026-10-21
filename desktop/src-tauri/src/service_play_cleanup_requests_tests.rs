@@ -43,6 +43,7 @@ impl Fixture {
                 project_id: id(2),
                 service_instance: id(1),
                 request_id: id(n),
+                purpose: p::Purpose::PlayCleanup,
             },
             consent_id: self.scope.consent_id.clone(),
         }
@@ -64,7 +65,7 @@ fn retained_ids_are_project_bound_and_never_expire_claim_or_forget_an_original()
     // This genuine memory-scope revocation would be observed by status().
     // Discovery must not cause that state transition as a read side effect.
     f.scope.revoke(p::Reason::Expired, Instant::now());
-    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![id(4)]);
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![(p::Purpose::PlayCleanup, id(4))]);
     assert!(f.inbox.retained_ids(&id(1), &id(9)).unwrap().is_empty());
     assert_eq!(f.inbox.retained_ids(&id(9), &id(2)), Err(Error::Conflict));
     assert_eq!(row_data(), before);
@@ -72,7 +73,7 @@ fn retained_ids_are_project_bound_and_never_expire_claim_or_forget_an_original()
     assert_eq!(stopped.state, p::State::Expired);
     assert!(stopped.do_not_replay);
     let after = row_data();
-    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![id(4)]);
+    assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![(p::Purpose::PlayCleanup, id(4))]);
     assert_eq!(row_data(), after);
     assert!(f.inbox.claim().unwrap().is_none());
     f.inbox.close(Instant::now());
@@ -325,4 +326,31 @@ fn poisoned_or_fenced_original_inbox_invalidates_already_claimed_link() {
     assert_eq!(link.entry().watchdog_stop().unwrap().unwrap().0, true);
     drop(claim);
     assert!(f.inbox.access().is_err());
+}
+
+#[test]
+fn tag_and_cleanup_share_one_grant_and_namespace_but_never_each_others_consent() {
+    for purpose in [p::Purpose::PlayCleanup, p::Purpose::VersionTag] {
+        let f = Fixture::new();
+        let scope = f.inbox.scope_for(purpose, id(2), "project-1".into(), id(3), f.scope.end,
+            f.read.clone(), Arc::downgrade(&f.doc), Arc::downgrade(&f.review), tokio::sync::watch::channel(0).0, 1);
+        let access = f.inbox.allow(scope.clone()).unwrap();
+        assert_eq!(access.purpose, purpose);
+        let mut input = f.submit(4); input.origin.purpose = purpose;
+        let mut wrong = input.clone(); wrong.origin.purpose = match purpose {
+            p::Purpose::PlayCleanup => p::Purpose::VersionTag, p::Purpose::VersionTag => p::Purpose::PlayCleanup,
+        };
+        assert!(f.inbox.submit(wrong.clone()).is_err());
+        let queued = f.inbox.submit(input.clone()).unwrap();
+        assert_eq!(f.inbox.submit(input.clone()).unwrap(), queued);
+        assert!(f.inbox.query(&wrong.origin, true).is_err()); // Must not STOP another family.
+        assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![(purpose,id(4))]);
+        assert!(f.inbox.allow(f.scope.clone()).is_err()); // SAME occupied owner.
+        let claim=f.inbox.claim().unwrap().unwrap(); let link=claim.link().clone();
+        link.arm("github-play-cleanup-1").unwrap(); claim.handoff("github-play-cleanup-1").unwrap();
+        link.entry().unknown();
+        assert_eq!(f.inbox.submit(input).unwrap().state, p::State::Unknown);
+        assert_eq!(f.inbox.retained_ids(&id(1), &id(2)).unwrap(), vec![(purpose,id(4))]);
+        assert!(f.inbox.claim().unwrap().is_none());
+    }
 }

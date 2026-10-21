@@ -37,6 +37,7 @@ fn lost_reply_preserves_original_ids_and_ack_is_not_cleanup_in_human_or_json() {
         project_id: id("a"),
         service_instance: id("b"),
         request_id: id("c"),
+        purpose: cleanup::Purpose::PlayCleanup,
     };
     let uncertain = unconfirmed(&q, Error::StateUnknown, true);
     let v: serde_json::Value = serde_json::from_slice(&uncertain).unwrap();
@@ -81,4 +82,21 @@ fn actual_capability_catalogue_keeps_fixed_limit_and_separate_mutating_consent()
     assert_eq!(cleanup["publishing"], false);
     assert_eq!(cleanup["mutating"], true);
     assert_eq!(cleanup["commands"], serde_json::json!(COMMANDS));
+}
+
+#[test]
+fn original_collector_routes_tag_ids_and_lost_ack_to_exact_typed_status_only() {
+    let words = super::super::collect_arguments(args(&format!("version-tag-submit {} {} {} --reviewed --json",id("a").as_str(),id("b").as_str(),id("c").as_str())).into_iter());
+    assert!(recognizes(&words));assert!(matches!(parse(&words).unwrap().command,Command::Submit {purpose:cleanup::Purpose::VersionTag,..}));
+    let q=cleanup::Query {project_id:id("a"),service_instance:id("b"),request_id:id("c"),purpose:cleanup::Purpose::VersionTag};
+    let text=receipt(&q);assert!(text.contains("mrk version-tag-status"));assert!(!text.contains("play-cleanup-status"));
+    let lost=unconfirmed(&q,Error::StateUnknown,true);
+    let v:serde_json::Value=serde_json::from_slice(&lost).unwrap();assert_eq!(v["request"]["purpose"],"version-tag");assert_eq!(v["doNotReplay"],true);
+    for cmd in TAG_COMMANDS.into_iter().skip(1) {
+        let words=args(&format!("{cmd} {} {} {} --json",id("a").as_str(),id("b").as_str(),id("c").as_str()));
+        assert!(parse(&words).is_ok()); let mut extra=words;extra.push("--force".into());assert!(parse(&extra).is_err());
+    }
+    let bytes=super::super::capabilities(true).unwrap();assert!(bytes.len()<=crate::installed_cli::CAPABILITIES_BYTES);
+    let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();assert_eq!(v["versionTag"]["commands"],serde_json::json!(TAG_COMMANDS));
+    assert_eq!(v["versionTag"]["nativeAvailabilityChecked"],false);
 }

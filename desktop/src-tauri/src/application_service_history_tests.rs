@@ -49,6 +49,7 @@ fn history_allowlist_precedes_every_dispatch_family_and_service_lock() {
         service_instance: service.instance().clone(),
         project_id: project.clone(),
         request_id: id.clone(),
+        purpose: crate::service_play_cleanup_protocol::Purpose::PlayCleanup,
     };
     let identity_query = crate::agent_identity_requests::Query {
         service_instance: service.instance().clone(),

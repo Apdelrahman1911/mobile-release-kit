@@ -68,6 +68,8 @@ _DIAGNOSTICS = {
     "google": "Hosted Android/shared reservation requires the selected protected MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 service-account key (at most 16 KiB). This fixed reader does not accept WIF/ambient ADC. Normal candidate WIF is unchanged.",
     "play-pending": "A temporary Play edit has an unconfirmed outcome in the hosted journal. Preserve the journal and original operation. Do not retry, recreate an edit, reset or clear the fence; automatic remote cleanup recovery is not available here.",
     "play-recovery": "Known Play edit cleanup is not confirmed. Preserve the exact journal, capsule and original key version. Configure the dedicated protected recovery key before use. A spent/unknown attempt cannot retry or clear the fence; no counter was allocated.",
+    "tag-exists": "The selected future tag already exists. It was not moved, adopted or replaced; preserve the candidate and any retained binding claim.",
+    "tag-unconfirmed": "The future tag binding is not confirmed. Preserve the immutable claim; a loaded or uncertain attempt never sends again or chooses another final commit.",
     "read": "The original bounded hosted operation did not finish. Preserve its journal and candidate; do not replay an uncertain write.",
 }
 
@@ -180,6 +182,10 @@ class Envelope:
 
 def validate_endpoint(role: str, method: str, path: str) -> None:
     """Called only after the original transport admits its closed enum role."""
+    from . import version_hosted_tag as tag
+    if role in tag.ROLES:
+        tag.validate_endpoint(role, method, path)
+        return
     need(role in _ROLES)
     _, tail = wire._path(path)
     if role == JOURNAL_WRITE:
@@ -204,6 +210,10 @@ def validate_endpoint(role: str, method: str, path: str) -> None:
 
 
 def validate_body(role: str, body: object, *, path: str) -> None:
+    from . import version_hosted_tag as tag
+    if role in tag.ROLES:
+        tag.validate_body(role, body, path=path)
+        return
     if role == LEDGER_WRITE:
         wire.validate_body(wire.ROLE_LEDGER_WRITE, body, path=path)
     elif role == JOURNAL_WRITE:
@@ -227,11 +237,13 @@ def validate_body(role: str, body: object, *, path: str) -> None:
 
 class _Remote:
     """Fixed repository, one original budget/exchange, no retry or generic CLI."""
+    _limit = MAX_REQUESTS
+
     def __init__(self, authority, source, send):
         self.authority, self.source, self.send = authority, source, send
         self.prefix = "/repos/" + authority.repository
         self.calls = 0
-        self.max_calls = MAX_REQUESTS
+        self.max_calls = self._limit
         self.stopped = False
 
     def exchange(self, role, request):
@@ -241,7 +253,7 @@ class _Remote:
         validate_body(role, request.body, path=request.path)
         self.source.remaining()
         self.calls += 1
-        need(self.calls <= self.max_calls <= MAX_REQUESTS)
+        need(self.calls <= self.max_calls <= self._limit)
         try:
             result = self.send(role, request)
             self.source.remaining()  # includes actual TLS close, not receipt time
@@ -566,11 +578,8 @@ class _Source(ci._Read):
         self.remaining()
 
 
-def _admit(context):
-    confirmation = "reserve-version:" + context.platform + (":temporary-play-edit" if context.platform != "ios" else "")
-    need(context.stage == "candidate" and context.platform in _PLATFORMS and context.current_job == "version_reserve"
-         and context.confirmation == confirmation and context.selected_platform == context.platform
-         and os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version", "admission")
+def _settings(context):
+
     need(all(not os.environ.get(key, "") for key in ("MOBILE_RELEASE_RECOVERY_RUN_ID",
         "MOBILE_RELEASE_RECOVERY_CONFIRMATION", "MOBILE_RELEASE_DESKTOP_REQUEST", "MOBILE_RELEASE_DESKTOP_SOURCE_SHA",
         "MOBILE_RELEASE_DESKTOP_EXPECTED_REF")), "admission")
@@ -581,10 +590,22 @@ def _admit(context):
     settings = ci.Settings.parse(os.environ.get(ci.AUTHORITY_ENV, ""))
     need(settings.authority.repository == context.repository["fullName"]
          and settings.authority.repository_id == context.repository["id"], "authority")
+    return settings
+
+
+def _admit(context):
+    from .version_future_tag import hosted_selector
+    need(context.stage == "candidate" and context.platform in _PLATFORMS and context.current_job == "version_reserve"
+         and context.selected_platform == context.platform, "admission")
+    try:
+        future = hosted_selector(os.environ.get("MOBILE_RELEASE_OPERATION"), context.platform, context.confirmation)
+    except ValueError:
+        raise Refused("admission") from None
+    settings = _settings(context)
     policy = p.VersionPolicy.parse(_decode_json(os.environ.get(POLICY_ENV, "").encode("ascii"),
         limit=16 * 1024, nodes=256, depth=6, exact=True))
     need(policy.schema_version == _SCHEMAS[context.platform] and policy.mode == "automatic", "admission")
-    policy.increment_for(context.authority["ref"])
+    policy.increment_for(future or context.authority["ref"])
     return settings, policy
 
 
@@ -598,14 +619,21 @@ def _attempt(remote, context):
     client.attempt(expected, "candidate")
 
 
-def _live(source, tooling, token):
+def _live(source, tooling, token, *, operation="reserve-version"):
     from . import _github_connection_transport as http
-    profile = http._ExchangeProfile.HOSTED_VERSION
+    profiles = {"reserve-version": http._ExchangeProfile.HOSTED_VERSION,
+                "reserve-future-tag": http._ExchangeProfile.HOSTED_VERSION_TAG_RESERVE,
+                "bind-version-tag": http._ExchangeProfile.HOSTED_VERSION_TAG_BIND}
+    need(operation in profiles, "admission")
+    profile = profiles[operation]
     expected_ca = source.checked_ca(tooling)
     exchange = http._make_live_exchange(token, started=source.started,
         runtime_dir=str(tooling / "desktop/cpython-source-inputs"), api_version="2026-03-10", _profile=profile,
         _hosted_ca_sha256=expected_ca)
-    roles = {role: next(item for item in http._ResponseRole if item.value == role) for role in _ROLES}
+    from .version_hosted_tag import READ as TAG_READ, CLAIM, CREATE
+    allowed = (_ROLES if operation == "reserve-version" else _ROLES | {TAG_READ}
+               if operation == "reserve-future-tag" else {READ, TAG_READ, CLAIM, CREATE})
+    roles = {role: next(item for item in http._ResponseRole if item.value == role) for role in allowed}
     return lambda role, request: exchange(request.method, request.path, request.body, _role=roles[role])
 
 
@@ -625,7 +653,8 @@ def _reserve(source, settings, selected_policy, remote, material):
     else:
         source.remaining()
     request = journal.choose(lambda candidate: a.AllocationRequest(settings.authority.project_id, candidate,
-        source.identity, source.binding, source.base, source.enabled, selected_policy, context_revision))
+        source.identity, source.binding, source.base, source.enabled, selected_policy, context_revision,
+        getattr(source, "future_tag", None)))
     if source.enabled == ("ios",):
         inventory = material.observe(source, context_revision)
         need(type(inventory) is ios.CurrentInventory, "store")
@@ -660,6 +689,9 @@ def _reserve(source, settings, selected_policy, remote, material):
             remote.source_current()
             remote.journal_current(journal.commit)
             return remote.exchange(LEDGER_WRITE, http)
+        if role == wire.ROLE_TAG:
+            from .version_hosted_tag import READ as TAG_READ
+            return remote.exchange(TAG_READ, http)
         return remote.exchange(READ, http)
 
     transport = wire._FixedAllocationTransport(request, settings.authority, journal.checkpoint(settings.authority),
@@ -680,7 +712,8 @@ def _reserve(source, settings, selected_policy, remote, material):
         {"name": outcome.reservation.version.name, "build": str(outcome.reservation.version.build)})
     source.remaining()
     row = outcome.reservation
-    return {"schemaVersion": 1, "status": "reserved", "candidateId": request.candidate_id,
+    return {**({"futureTag": request.future_tag} if request.future_tag is not None else {}),
+        "schemaVersion": 1, "status": "reserved", "candidateId": request.candidate_id,
         "rowSha256": row.sha256, "sourceCommit": source.binding.commit,
         "sourceRef": source.binding.ref, "configSha256": request.source.configuration_sha256,
         "version": p.version_value(row.version), "releaseEligibility": "not-established",
@@ -715,9 +748,16 @@ def reserve(app_root: Path, tooling_root: Path):
                 guard.activate()
             source = _Source(root, context, guard)
             source.capture()
+            from .version_future_tag import hosted_selector
+            source.future_tag = hosted_selector(os.environ.get("MOBILE_RELEASE_OPERATION"), selected, context.confirmation)
             material = Material(tooling, platform=selected)
             source.material = material
-            remote = _Remote(settings.authority, source, _live(source, tooling, os.environ[TOKEN_ENV]))
+            if source.future_tag is None:
+                remote = _Remote(settings.authority, source, _live(source, tooling, os.environ[TOKEN_ENV]))
+            else:
+                from .version_hosted_tag import _ReservationRemote
+                remote = _ReservationRemote(settings.authority, source,
+                    _live(source, tooling, os.environ[TOKEN_ENV], operation="reserve-future-tag"))
             result = _reserve(source, settings, policy, remote, material)
     finally:
         scope.__exit__(*sys.exc_info())
@@ -728,8 +768,12 @@ def reserve(app_root: Path, tooling_root: Path):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     try:
-        need(argv == ["reserve"], "admission")
-        result = reserve(Path(os.environ.get("MOBILE_RELEASE_APP_ROOT", "")),
+        need(argv in (["reserve"], ["bind-version-tag"]), "admission")
+        action = reserve
+        if argv == ["bind-version-tag"]:
+            from .version_hosted_tag import bind
+            action = bind
+        result = action(Path(os.environ.get("MOBILE_RELEASE_APP_ROOT", "")),
                          Path(os.environ.get("MOBILE_RELEASE_TOOLING_ROOT", "")))
         # Explicit output DATA only. Do not append credentials/raw provider data
         # to Actions output files or automatically commit a project source.

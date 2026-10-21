@@ -2,6 +2,7 @@ import { useId, useSyncExternalStore } from 'react';
 import type { VersionReserveController } from '../versionReserveController.ts';
 import type { VersionIncrement } from '../versionReserve.ts';
 import { versionReserveHelp } from '../versionReserve.ts';
+import { FutureVersionTagFields } from './FutureVersionTagFields.tsx';
 import { AgentVersionReserveAccess } from './AgentVersionReserveAccess.tsx';
 
 // No effect/mount API calls. Root retains this original controller on navigation.
@@ -20,6 +21,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
         <label htmlFor={`${id}-branch`}>Checked-out branch</label>
         <input id={`${id}-branch`} value={state.options.reference} placeholder="refs/heads/main" maxLength={211} autoComplete="off" spellCheck={false}
           onChange={(e) => configure({ reference: e.target.value })} />
+        <FutureVersionTagFields id={id} options={state.options} configure={value => controller.configure(value)} />
         <label htmlFor={`${id}-increment`}>Version change</label>
         <select id={`${id}-increment`} value={state.options.increment} onChange={(e) => configure({ increment: e.target.value as VersionIncrement })}>
           <option value="build">Build only — keep the marketing version</option><option value="patch">Patch — for example 1.2.3 → 1.2.4</option>
@@ -37,11 +39,13 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
       status?.phase === 'reviewed' ? 'Choices reviewed — no number reserved by this review' : 'No current usable reservation'}</p>
     {state.stale && status && <p>This earlier observation is not permission to reserve or edit.</p>}
     {status?.reservation && <p>Candidate version: <strong>{status.reservation.name} · Build {status.reservation.build}</strong>. This is not a Store acceptance or a saved-file receipt.</p>}
+    {status?.reservation?.futureTag && <p>Future policy tag: <code>{status.reservation.futureTag}</code>. Not yet bound by this reservation; the candidate build remains branch-triggered.</p>}
     {!compact && status?.reservation?.ci && <details>
       <summary>Use this reserved version in GitHub Actions</summary>
       <p>These settings let CI check and use the number already reserved here. Copying them does not configure CI or reserve again. To reserve in GitHub Actions instead, use the separate protected <code>reserve-version</code> workflow with its required credentials and approvals.</p>
       <ol><li>In Desktop, choose “Open reserved version for review”, validate and review the values, then confirm Save. Commit only that version-file change, directly after the source you reserved. Include the message below. Commit other setup changes before reserving.</li>
         <li>In the application repository, set the protected Actions variable <code>MOBILE_RELEASE_VERSION_AUTHORITY</code> from the settings below once. Keep the existing setting for the same counter; do not reset it to bypass a refusal.</li>
+        {status.reservation.futureTag && <li>After pushing that exact commit, separately review and bind the future tag. The updated pinned workflow must confirm its immutable binding before a fresh candidate build; Reserve and Save never publish it.</li>}
         <li>Run the candidate workflow on that exact commit, using tooling that supports this check. Its original Store/build approvals and recovery rules still apply.</li></ol>
       <label htmlFor={`${id}-ci-message`}>Commit message · copy after reviewing the version-only diff</label>
       <textarea id={`${id}-ci-message`} readOnly rows={4} value={`Save reserved version\n\n${status.reservation.ci.commitTrailer}\n`} />

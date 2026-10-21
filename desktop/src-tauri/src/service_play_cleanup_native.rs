@@ -114,7 +114,8 @@ impl DocumentBinding {
             return Err(public(Error::Conflict));
         }
         service.native_history_current().map_err(public)?; // Atomic only; never Service.lock.
-        let scope = service.play_cleanup_requests().scope(
+        let scope = service.play_cleanup_requests().scope_for(
+            review.purpose,
             point.saved.project_id,
             native.runtime_id,
             Id::parse(&review.id).map_err(public)?,

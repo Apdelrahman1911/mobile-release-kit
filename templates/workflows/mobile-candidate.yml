@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Build, reserve only, or explicitly clean one encrypted known Play edit (no allocation)
+        description: Build, reserve, bind one future tag, or explicitly clean one encrypted known Play edit
         required: false
         default: candidate
         type: choice
         options:
         - candidate
         - reserve-version
+        - reserve-future-tag
+        - bind-version-tag
         - recover-play-edit
       platform:
         description: Platforms enabled in the saved configuration
@@ -21,7 +23,7 @@ on:
         - ios
         - both
       confirmation:
-        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit); recover-play-edit:<candidateUUID>:<attemptUUID>
+        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit); recover-play-edit:<candidateUUID>:<attemptUUID>; reserve-future-tag:<ios|android|both>[:temporary-play-edit]:refs/tags/T; bind-version-tag:<platform>:<candidateUUID>:<rowSHA256>:<finalSHA>
         required: true
         type: string
       recovery_run_id:
@@ -72,7 +74,7 @@ jobs:
       desktop_source_sha: ${{ inputs.desktop_source_sha }}
       desktop_expected_ref: ${{ inputs.desktop_expected_ref }}
   reserve_version:
-    if: inputs.operation == 'reserve-version' || inputs.operation == 'recover-play-edit'
+    if: inputs.operation == 'reserve-version' || inputs.operation == 'reserve-future-tag' || inputs.operation == 'bind-version-tag' || inputs.operation == 'recover-play-edit'
     permissions:
       actions: read
       contents: read

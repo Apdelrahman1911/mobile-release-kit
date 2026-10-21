@@ -19,6 +19,7 @@ pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * (4096 + std::mem::
 
 /// Issued only for the genuine retained prepared Consent, never a public view.
 pub(crate) struct NativeScope {
+    pub(crate) purpose: p::Purpose,
     pub(crate) project_id: Id,
     pub(crate) runtime_id: String,
     pub(crate) consent_id: Id,
@@ -45,6 +46,7 @@ impl NativeScope {
         input_revision: u64,
     ) -> Self {
         Self {
+            purpose: p::Purpose::PlayCleanup,
             project_id,
             runtime_id,
             consent_id,
@@ -288,7 +290,8 @@ impl NativeLink {
         if self.entry.failed.load(Ordering::Acquire) || row.status.state == p::State::Unknown {
             return Err(Error::StateUnknown);
         }
-        if row.armed != armed
+        if self.entry.input.origin.purpose != self.scope.purpose
+            || row.armed != armed
             || !row.claimed
             || row.joined
             || row.first.is_some()
@@ -482,7 +485,7 @@ impl Inbox {
     }
     /// Discovery copies immutable original IDs only. In particular, it must
     /// not sample status, expire a scope, claim work or discard stopped rows.
-    pub(crate) fn retained_ids(&self, instance: &Id, project: &Id) -> Result<Vec<Id>, Error> {
+    pub(crate) fn retained_ids(&self, instance: &Id, project: &Id) -> Result<Vec<(p::Purpose, Id)>, Error> {
         let book = self.lock()?;
         if instance != &self.instance {
             return Err(Error::Conflict);
@@ -497,7 +500,7 @@ impl Inbox {
         }
         Ok(book.entries.iter()
             .filter(|entry| &entry.input.origin.project_id == project)
-            .map(|entry| entry.input.origin.request_id.clone())
+            .map(|entry| (entry.input.origin.purpose, entry.input.origin.request_id.clone()))
             .collect())
     }
     pub(crate) fn scope(
@@ -524,6 +527,34 @@ impl Inbox {
             changes,
             input_revision,
         ))
+    }
+    pub(crate) fn scope_for(
+        &self,
+        purpose: p::Purpose,
+        project_id: Id,
+        runtime_id: String,
+        consent_id: Id,
+        end: Instant,
+        read: Arc<ReadPermission>,
+        document: Weak<()>,
+        review: Weak<()>,
+        changes: tokio::sync::watch::Sender<u32>,
+        input_revision: u64,
+    ) -> Arc<NativeScope> {
+        let mut original = NativeScope::new(
+            project_id,
+            runtime_id,
+            consent_id,
+            end,
+            read,
+            self.failed.clone(),
+            document,
+            review,
+            changes,
+            input_revision,
+        );
+        original.purpose = purpose;
+        Arc::new(original)
     }
     pub(crate) fn allow(&self, scope: Arc<NativeScope>) -> Result<p::Access, Error> {
         if !scope.valid(Instant::now()) {
@@ -570,6 +601,7 @@ impl Inbox {
             service_instance: self.instance.clone(),
             project_id: scope.project_id.clone(),
             consent_id: scope.consent_id.clone(),
+            purpose: scope.purpose,
             enabled,
             remaining_ms: if enabled {
                 scope
@@ -624,7 +656,7 @@ impl Inbox {
             .scope
             .as_ref()
             .filter(|s| {
-                s.project_id == input.origin.project_id
+                s.purpose == input.origin.purpose && s.project_id == input.origin.project_id
                     && s.consent_id == input.consent_id
                     && s.valid(Instant::now())
             })

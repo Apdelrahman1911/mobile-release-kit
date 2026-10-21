@@ -303,3 +303,6 @@ test('listener teardown failure does not silently reconnect a fresh native port'
   const h=await attached();h.unlistenThrows=true;h.controller.connect(null);assert.equal(h.state.uncertain,true);h.controller.connect({...h.port});
   assert.equal(h.count('status'),1);assert.ok(h.controller.ownerReason());
 });
+
+// Reuse these inert original fixtures for the typed future-tag facet.
+export { attached,harness,review,allowed,prepared,target,idle,operation,pending,flush };

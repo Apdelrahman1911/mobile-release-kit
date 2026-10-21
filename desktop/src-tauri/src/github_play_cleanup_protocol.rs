@@ -12,6 +12,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
+#[path = "github_version_tag_protocol.rs"]
+pub(crate) mod version_tag;
+pub(crate) use version_tag::{Candidate, Observation};
+pub(crate) use crate::service_play_cleanup_protocol::Purpose;
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some) // Omitted old fields only; present null is never a fallback.
+}
 pub(crate) use crate::github_publication_protocol::Source;
 pub(crate) use crate::version_enrollment_protocol::{Authority, Checkpoint, Version};
 pub(crate) const PROTOCOL: &str = "mrk-github-play-cleanup/1";
@@ -85,6 +92,7 @@ pub(crate) enum Reason {
     JournalInvalid,
     CleanupUnavailable,
     CleanupClaimed,
+    TagExists,
     ReviewChanged,
     Unauthorized,
     Forbidden,
@@ -139,6 +147,7 @@ pub(crate) enum Effect {
 pub(crate) enum Platform {
     Android,
     Both,
+    Ios,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -171,20 +180,27 @@ pub(crate) struct Target {
     pub(crate) tooling_repository: String,
     pub(crate) tooling_sha: String,
     pub(crate) marker: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub(crate) version_tag: Option<version_tag::Selection>,
+    #[serde(default, rename="purpose", skip_serializing_if="Option::is_none", deserialize_with="present")]
+    pub(crate) pending_purpose: Option<Purpose>,
 }
 impl Target {
+    pub(crate) fn purpose(&self) -> Purpose { if self.version_tag.is_some() || self.pending_purpose.is_some() {Purpose::VersionTag} else {Purpose::PlayCleanup} }
     pub(crate) fn valid(&self) -> bool {
         self.scope.valid()
             && self.tooling_repository == crate::github_release_protocol::TOOLING_REPOSITORY
             && hex(&self.tooling_sha, 40)
             && hex(&self.marker, 32)
+            && self.version_tag.as_ref().is_none_or(version_tag::Selection::valid)
+            && self.pending_purpose.is_none_or(|v| v == Purpose::VersionTag && self.version_tag.is_none())
     }
     pub(crate) fn publisher_bound(&self) -> bool {
         self.valid()
             && Some(self.tooling_sha.as_str()) == crate::github_release_protocol::TOOLING_SHA
     }
     pub(crate) fn same_scope(&self, other: &Self) -> bool {
-        self.scope.project_binding == other.scope.project_binding
+        self.purpose() == other.purpose() && self.scope.project_binding == other.scope.project_binding
             && self.scope.account_id == other.scope.account_id
             && self.scope.repository_id == other.scope.repository_id
             && self
@@ -193,7 +209,7 @@ impl Target {
                 .eq_ignore_ascii_case(&other.scope.repository)
     }
     fn heap(&self) -> Option<usize> {
-        self.scope.heap()?.checked_add(strings(&[
+        self.scope.heap()?.checked_add(self.version_tag.as_ref().map_or(Some(0), version_tag::Selection::heap)?)?.checked_add(strings(&[
             &self.tooling_repository,
             &self.tooling_sha,
             &self.marker,
@@ -242,7 +258,7 @@ fn uuid(s: &str) -> bool {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Candidate {
+pub(crate) struct CleanupCandidate {
     pub(crate) candidate_id: String,
     pub(crate) attempt_id: String,
     pub(crate) request_sha256: String,
@@ -253,7 +269,7 @@ pub(crate) struct Candidate {
     pub(crate) base_version: Version,
     pub(crate) capsule_sha256: String,
 }
-impl Candidate {
+impl CleanupCandidate {
     fn valid(&self) -> bool {
         uuid(&self.candidate_id)
             && uuid(&self.attempt_id)
@@ -291,15 +307,19 @@ pub(crate) struct Prepared {
     pub(crate) authority: Authority,
     pub(crate) checkpoint: Checkpoint,
     pub(crate) ledger_blob: String,
-    pub(crate) journal_blob: String,
-    pub(crate) journal_sha256: String,
-    pub(crate) journal_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub(crate) journal_blob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub(crate) journal_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub(crate) journal_revision: Option<u64>,
     pub(crate) candidate: Candidate,
     pub(crate) confirmation: String,
 }
 impl Prepared {
     fn confirmation(&self) -> String {
-        format!("Dispatch one hosted Play edit cleanup for candidate {} in {}? This is nonpublishing but mutating: the protected workflow may decrypt its retained edit ID, consume its one-use cleanup claim and delete that Play edit. It does not reserve a version or build, sign or release. The configured branch {} is mutable; authorized writers can replace its workflow after review. Its actual dispatch head may differ from the reviewed head; the workflow must separately validate the original candidate source. A dispatch acknowledgement does not prove cleanup or identify a run. Stopping cannot undo a sent request.", self.candidate.candidate_id, self.target.scope.repository, self.branch)
+        if let Some(c) = self.candidate.tag() { return version_tag::confirmation(self, c); }
+        format!("Dispatch one hosted Play edit cleanup for candidate {} in {}? This is nonpublishing but mutating: the protected workflow may decrypt its retained edit ID, consume its one-use cleanup claim and delete that Play edit. It does not reserve a version or build, sign or release. The configured branch {} is mutable; authorized writers can replace its workflow after review. Its actual dispatch head may differ from the reviewed head; the workflow must separately validate the original candidate source. A dispatch acknowledgement does not prove cleanup or identify a run. Stopping cannot undo a sent request.", self.candidate.candidate_id(), self.target.scope.repository, self.branch)
     }
     pub(crate) fn valid(&self) -> bool {
         // Reuse the existing closed authority/checkpoint/version shape parser.
@@ -308,14 +328,14 @@ impl Prepared {
             authority: self.authority.clone(),
             checkpoint: self.checkpoint.clone(),
             blob: self.ledger_blob.clone(),
-            version: self.candidate.base_version.clone(),
+            version: self.candidate.base_version().clone(),
         };
-        self.target.valid()
-            && self.candidate.valid()
+        self.target.valid() && self.target.pending_purpose.is_none()
+            && self.candidate.valid() && version_tag::prepared_shape(self)
             && offer.valid()
             && login(&self.account_login)
             && branch(&self.branch)
-            && self.candidate.source.source_ref == format!("refs/heads/{}", self.branch)
+            && self.candidate.source().source_ref == format!("refs/heads/{}", self.branch)
             && self
                 .authority
                 .repository
@@ -325,19 +345,16 @@ impl Prepared {
                 &self.source_sha,
                 &self.source_tree,
                 &self.ledger_blob,
-                &self.journal_blob,
             ]
             .iter()
             .all(|v| hex(v, 40))
             && [
                 &self.saved_config_sha256,
                 &self.caller_sha256,
-                &self.journal_sha256,
             ]
             .iter()
             .all(|v| hex(v, 64))
             && numeric_id(&self.workflow_id)
-            && self.journal_revision > 0
             && self.confirmation == self.confirmation()
             && canonical(self).is_ok_and(|v| v.len() <= PREPARED_LIMIT)
     }
@@ -355,14 +372,16 @@ impl Prepared {
             &self.authority.project_id,
             &self.authority.ledger_id,
             &self.authority.genesis_sha256,
-            &self.candidate.candidate_id,
-            &self.candidate.attempt_id,
+            self.candidate.candidate_id(),
+            match &self.candidate { Candidate::PlayCleanup(c) => &c.attempt_id, Candidate::VersionTag(_) => "version-tag" },
         )
     }
     pub(crate) fn heap(&self) -> Option<usize> {
         self.target
             .heap()?
             .checked_add(self.candidate.heap()?)?
+            .checked_add(self.journal_blob.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.journal_sha256.as_ref().map_or(0, String::capacity))?
             .checked_add(strings(&[
                 &self.account_login,
                 &self.branch,
@@ -379,8 +398,6 @@ impl Prepared {
                 &self.checkpoint.head_sha256,
                 &self.checkpoint.commit,
                 &self.ledger_blob,
-                &self.journal_blob,
-                &self.journal_sha256,
                 &self.confirmation,
             ])?)
     }
@@ -411,6 +428,7 @@ pub(crate) struct Request {
 impl Request {
     pub(crate) fn valid(&self) -> bool {
         self.target.valid()
+            && (self.target.pending_purpose.is_none() || self.kind == Kind::Pending)
             && matches!(self.kind, Kind::Prepare | Kind::Dispatch) == self.source.is_some()
             && self.source.as_ref().is_none_or(Source::valid)
             && (self.kind == Kind::Prepare) == self.home.is_none()
@@ -545,14 +563,14 @@ pub(crate) enum PendingTuple {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Observation {
+pub(crate) struct CleanupObservation {
     pub(crate) counter_commit: String,
     pub(crate) journal_sha256: String,
     pub(crate) journal_revision: u64,
     pub(crate) pending_tuple: PendingTuple,
     assurance: String,
 }
-impl Observation {
+impl CleanupObservation {
     fn valid(&self) -> bool {
         hex(&self.counter_commit, 40)
             && hex(&self.journal_sha256, 64)
@@ -580,7 +598,7 @@ impl Cleanup {
             || !self.control.valid()
             || !self.reason.core()
             || self.acknowledged && !self.claimed
-            || self.observed.as_ref().is_some_and(|v| !v.valid())
+            || self.observed.as_ref().is_some_and(|v| !v.valid() || v.purpose() != r.target.purpose())
         {
             return false;
         }
@@ -826,6 +844,10 @@ pub(crate) struct PrepareArgs {
     pub(crate) session_id: String,
     pub(crate) expected_revision: u32,
     pub(crate) expected_connection_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub(crate) version_tag: Option<version_tag::Selection>,
+    #[serde(default)]
+    pub(crate) purpose: Purpose,
 }
 pub(crate) type PendingArgs = PrepareArgs;
 #[derive(Deserialize)]
@@ -835,6 +857,8 @@ pub(crate) struct StartArgs {
     pub(crate) expected_revision: u32,
     pub(crate) consent_id: String,
     pub(crate) confirm: bool,
+    #[serde(default, skip_serializing_if = "Purpose::is_cleanup")]
+    pub(crate) purpose: Purpose,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -880,6 +904,8 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
             if !valid_id(&a.session_id)
                 || !rev(a.expected_revision)
                 || !rev(a.expected_connection_revision)
+                || a.version_tag.as_ref().is_some_and(|v| !v.valid())
+                || a.purpose == Purpose::VersionTag && (name.ends_with("prepare") || a.version_tag.is_some())
             {
                 return Err(BridgeError::invalid());
             }

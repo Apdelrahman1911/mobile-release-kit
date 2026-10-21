@@ -14,7 +14,15 @@ from ._github_connection_transport import _Budget, _ExchangeProfile, _ResponseRo
 
 def validate_endpoint(role: _ResponseRole, method: str, path: str) -> None:
     p.require(type(path) is str and path.isascii() and len(path) <= 2048
-        and role in (_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE))
+        and role in (_ResponseRole.PLAY_CLEANUP_READ, _ResponseRole.PLAY_CLEANUP_CONFIG, _ResponseRole.PLAY_CLEANUP_WRITE, _ResponseRole.VERSION_TAG_READ))
+    if role is _ResponseRole.VERSION_TAG_READ:
+        from .version_future_tag import reference
+        parts = path.split("/", 4)
+        p.require(method == "GET" and len(parts) == 5 and parts[:2] == ["", "repos"])
+        p.coordinate(parts[2] + "/" + parts[3])
+        p.require(parts[4].startswith("git/ref/tags/"))
+        reference("refs/" + parts[4].removeprefix("git/ref/"))
+        return
     if path == "/user":
         p.require(method == "GET" and role is _ResponseRole.PLAY_CLEANUP_READ)
         return
@@ -52,6 +60,11 @@ def validate_body(role: _ResponseRole, body: object) -> None:
     value = p.obj(_decode_json(body, limit=1024, nodes=12, depth=3, exact=True), {"ref", "inputs"})
     p.branch(value["ref"])
     inputs = p.obj(value["inputs"], {"operation", "platform", "confirmation"})
+    if inputs["operation"] == "bind-version-tag":
+        from .version_hosted_tag import Intent
+        selected = Intent.parse(inputs["confirmation"])
+        p.require(selected.platform == inputs["platform"] and p.canonical(value) == body)
+        return
     p.require(inputs["operation"] == "recover-play-edit" and inputs["platform"] in ("android", "both"))
     confirmation = inputs["confirmation"]
     p.require(type(confirmation) is str)
@@ -73,6 +86,13 @@ def request_role(target: p.Target, source: p.Source | None, retained: p.Prepared
         role = _ResponseRole.PLAY_CLEANUP_WRITE
     else:
         p.require(request.method == "GET")
+        if request.path.startswith(base + "/git/ref/tags/"):
+            p.require(target.version_tag is not None and kind in ("prepare", "dispatch", "observe"))
+            if retained is not None:
+                p.require(request.path == base + "/git/ref/" + retained.candidate["futureTag"].removeprefix("refs/"))
+            role = _ResponseRole.VERSION_TAG_READ
+            validate_endpoint(role, request.method, request.path); validate_body(role, request.body)
+            return role
         role = (_ResponseRole.PLAY_CLEANUP_CONFIG if request.path.startswith(base + "/contents/release/mobile-release.json?")
                 else _ResponseRole.PLAY_CLEANUP_READ)
         if request.path.startswith(base + "/branches/"):
@@ -88,7 +108,7 @@ def request_role(target: p.Target, source: p.Source | None, retained: p.Prepared
                 base + "/actions/workflows/mobile-candidate.yml",
                 base + "/branches/" + p.allocation.LEDGER_BRANCH + "/protection",
                 base + "/git/ref/heads/" + p.allocation.LEDGER_BRANCH,
-                base + "/contents/" + p.hosted.JOURNAL_PATH + "?ref=" + retained.checkpoint.commit})
+                base + "/contents/" + (p.hosted.JOURNAL_PATH if target.version_tag is None else p.allocation.LEDGER_PATH) + "?ref=" + retained.checkpoint.commit})
         elif kind == "observe":
             # No source reads/run search/POST in a later journal observation.
             tail = request.path[len(base) + 1:] if request.path.startswith(base + "/") else ""

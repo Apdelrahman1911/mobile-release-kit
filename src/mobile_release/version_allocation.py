@@ -24,6 +24,7 @@ from . import version_policy as policy
 from . import ios_store_versions as current_ios
 from . import android_store_versions as current_android
 from . import paired_store_versions as current_pair
+from . import version_future_tag as future_tag
 from ._desktop_github_engine import _check_control, _decode_json
 from ._github_connection_transport import ReadFailure, ReadResult, _control
 from .api._github_connection import _coordinate, _id, _repository
@@ -35,7 +36,8 @@ PROTOCOL = "mrk-version-allocation/1"
 PROTOCOL_V2 = "mrk-version-allocation/2"
 PROTOCOL_V3 = "mrk-version-allocation/3"
 PROTOCOL_V4 = "mrk-version-allocation/4"
-_PROTOCOLS = {1: PROTOCOL, 2: PROTOCOL_V2, 3: PROTOCOL_V3, 4: PROTOCOL_V4}
+PROTOCOL_V5 = future_tag.PROTOCOL
+_PROTOCOLS = {1: PROTOCOL, 2: PROTOCOL_V2, 3: PROTOCOL_V3, 4: PROTOCOL_V4, 5: PROTOCOL_V5}
 LEDGER_BRANCH = "mrk-version-allocations"
 LEDGER_PATH = "release/.mrk-version-allocations-v1.json"
 MAX_RESERVATIONS = 64
@@ -47,7 +49,7 @@ CurrentInventory = current_ios.CurrentInventory | current_android.CurrentInvento
 StoreObservations = tuple[policy.StoreObservation | CurrentInventory, ...]
 REASONS = policy.REASONS | frozenset({"none", "authority-unavailable", "authority-untrusted",
     "authority-changed", "authority-missing", "authority-rewound", "ledger-invalid", "ledger-full",
-    "candidate-binding-conflict", "conditional-conflict", "pending-unresolved", "journal-unavailable",
+    "candidate-binding-conflict", "conditional-conflict", "pending-unresolved", "journal-unavailable", "tag-exists",
     "source-changed", "invalid-allocation", "unauthorized", "forbidden", "rate-limited",
     "target-changed", "not-found-or-inaccessible",
     "network-unavailable", "tls-failed", "response-invalid", "response-limit", "expired", "cancelled"})
@@ -104,6 +106,7 @@ class AllocationRequest:
     enabled_platforms: tuple[str, ...]
     version_policy: policy.VersionPolicy = policy.VersionPolicy()
     store_context_revision: str | None = None
+    future_tag: str | None = None
 
     def __post_init__(self) -> None:
         _project_id(self.project_id)
@@ -118,6 +121,15 @@ class AllocationRequest:
             policy._match(self.store_context_revision, policy._DIGEST)
         else:
             _need(self.store_context_revision is None)
+        future_tag.validate_request(self)
+
+    @property
+    def wire_version(self) -> int:
+        return future_tag.request_version(self)
+
+    @property
+    def policy_ref(self) -> str:
+        return future_tag.policy_reference(self)
 
     @classmethod
     def parse(cls, value: object) -> AllocationRequest:
@@ -125,12 +137,15 @@ class AllocationRequest:
         selected = policy.VersionPolicy.parse(value.get("policy"))
         row = policy._object(value, {"projectId", "candidateId", "identityRevision", "source",
                                      "baseVersion", "platforms", "policy"}
-                             | ({"storeContextRevision"} if selected.schema_version != 1 else set()))
+                             | ({"storeContextRevision"} if selected.schema_version != 1 else set())
+                             | ({"futureTag"} if "futureTag" in value else set()))
+        if "futureTag" in row:
+            future_tag.reference(row["futureTag"])  # Null is not an alias to the old shape.
         _need(type(row["platforms"]) is list and len(row["platforms"]) <= 2)
         enabled = policy.platforms(tuple(row["platforms"]))
         return cls(row["projectId"], row["candidateId"], row["identityRevision"],
                    policy.SourceBinding.parse(row["source"]), policy.parse_version(row["baseVersion"], enabled),
-                   enabled, selected, row.get("storeContextRevision"))
+                   enabled, selected, row.get("storeContextRevision"), row.get("futureTag"))
 
     def value(self) -> dict[str, Any]:
         result = {"projectId": self.project_id, "candidateId": self.candidate_id,
@@ -139,12 +154,15 @@ class AllocationRequest:
                 "policy": self.version_policy.value()}
         if self.version_policy.schema_version != 1:
             result["storeContextRevision"] = self.store_context_revision
+        if self.future_tag is not None:
+            result["futureTag"] = self.future_tag
         return result
 
     @property
     def sha256(self) -> str:
         return _hash({1: b"mrk:allocation-request:1\0", 2: b"mrk:allocation-request:2\0",
-                      3: b"mrk:allocation-request:3\0", 4: b"mrk:allocation-request:4\0"}[self.version_policy.schema_version], self.value())
+                      3: b"mrk:allocation-request:3\0", 4: b"mrk:allocation-request:4\0",
+                      5: b"mrk:allocation-request:5\0"}[self.wire_version], self.value())
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +292,8 @@ class Reservation:
     @property
     def sha256(self) -> str:
         return _hash({1: b"mrk:allocation-reservation:1\0", 2: b"mrk:allocation-reservation:2\0",
-                      3: b"mrk:allocation-reservation:3\0", 4: b"mrk:allocation-reservation:4\0"}[self.request.version_policy.schema_version], self._value())
+                      3: b"mrk:allocation-reservation:3\0", 4: b"mrk:allocation-reservation:4\0",
+                      5: b"mrk:allocation-reservation:5\0"}[self.request.wire_version], self._value())
 
     def value(self) -> dict[str, Any]:
         return {**self._value(), "sha256": self.sha256}
@@ -284,6 +303,7 @@ class Reservation:
 class Ledger:
     genesis: Genesis
     reservations: tuple[Reservation, ...] = ()
+    tag_bindings: tuple[future_tag.Binding, ...] = ()
 
     def __post_init__(self) -> None:
         _need(type(self.genesis) is Genesis and type(self.reservations) is tuple
@@ -297,6 +317,7 @@ class Ledger:
             _need(item.version == expected and item.version.build > allocated.build, "ledger-invalid")
             candidates.add(item.request.candidate_id)
             previous, allocated = item.sha256, item.version
+        future_tag.validate_ledger(self.reservations, self.tag_bindings)
 
     @property
     def head_sha256(self) -> str:
@@ -309,9 +330,12 @@ class Ledger:
     def value(self) -> dict[str, Any]:
         # Existing rows/genesis never change. A newer policy changes the envelope
         # and adds only its domain-separated row; older clients must refuse it.
-        schema = max((item.request.version_policy.schema_version for item in self.reservations), default=1)
-        return {"schemaVersion": schema, "protocol": _PROTOCOLS[schema], "genesis": self.genesis.value(),
+        schema = max((item.request.wire_version for item in self.reservations), default=1)
+        result = {"schemaVersion": schema, "protocol": _PROTOCOLS[schema], "genesis": self.genesis.value(),
                 "reservations": [item.value() for item in self.reservations]}
+        if schema == 5:
+            result["tagBindings"] = [item.value() for item in self.tag_bindings]
+        return result
 
     def to_bytes(self) -> bytes:
         raw = policy.canonical(self.value()) + b"\n"
@@ -323,12 +347,17 @@ class Ledger:
         try:
             _need(type(raw) is bytes and 0 < len(raw) <= MAX_LEDGER_BYTES
                   and raw.endswith(b"\n") and raw.count(b"\n") == 1, "ledger-invalid")
-            row = policy._object(_decode_json(raw[:-1], limit=MAX_LEDGER_BYTES - 1, nodes=20_000, depth=16, exact=True),
-                                 {"schemaVersion", "protocol", "genesis", "reservations"})
+            value = _decode_json(raw[:-1], limit=MAX_LEDGER_BYTES - 1, nodes=20_000, depth=16, exact=True)
+            _need(type(value) is dict, "ledger-invalid")
+            row = policy._object(value, {"schemaVersion", "protocol", "genesis", "reservations"}
+                                 | ({"tagBindings"} if value.get("schemaVersion") == 5 else set()))
             _need(type(row["schemaVersion"]) is int and (row["schemaVersion"], row["protocol"])
                   in _PROTOCOLS.items()
                   and type(row["reservations"]) is list and len(row["reservations"]) <= MAX_RESERVATIONS, "ledger-invalid")
-            result = cls(Genesis.parse(row["genesis"]), tuple(Reservation.parse(item) for item in row["reservations"]))
+            bindings = row.get("tagBindings", [])
+            _need(type(bindings) is list and len(bindings) <= MAX_RESERVATIONS, "ledger-invalid")
+            result = cls(Genesis.parse(row["genesis"]), tuple(Reservation.parse(item) for item in row["reservations"]),
+                         tuple(future_tag.Binding.parse(item) for item in bindings))
             result.admit(authority)
             _need(result.to_bytes() == raw, "ledger-invalid")
             return result
@@ -357,7 +386,7 @@ class Ledger:
         _need(len(self.reservations) < MAX_RESERVATIONS, "ledger-full")
         item = Reservation(len(self.reservations) + 1, self.head_sha256, request,
                            _propose(request, self.last_version, observations, now), observations, now)
-        result = Ledger(self.genesis, (*self.reservations, item))
+        result = Ledger(self.genesis, (*self.reservations, item), self.tag_bindings)
         result.to_bytes()
         return result
 
@@ -365,10 +394,10 @@ class Ledger:
 def _propose(request: AllocationRequest, allocated: ReleaseVersion,
              observations: StoreObservations, now: int) -> ReleaseVersion:
     if request.version_policy.schema_version != 1:
-        return current_inventory_policy(request).propose(request.version_policy, source=request.source.ref, base=request.base_version,
+        return current_inventory_policy(request).propose(request.version_policy, source=request.policy_ref, base=request.base_version,
             allocated=allocated, enabled=request.enabled_platforms, identity_revision=request.identity_revision,
             context_revision=request.store_context_revision, observations=observations, now=now)
-    return policy.propose_version(request.version_policy, source=request.source.ref, base=request.base_version,
+    return policy.propose_version(request.version_policy, source=request.policy_ref, base=request.base_version,
         allocated=allocated, enabled=request.enabled_platforms, identity_revision=request.identity_revision,
         observations=observations, now=now)
 
@@ -426,7 +455,7 @@ class PendingAllocation:
         policy._match(self.expected_blob, policy._SHA)
 
     def value(self) -> dict[str, Any]:
-        schema = self.reservation.request.version_policy.schema_version
+        schema = self.reservation.request.wire_version
         return {"schemaVersion": schema, "protocol": _PROTOCOLS[schema], "authority": self.authority.value(),
                 "checkpoint": self.checkpoint.value(), "expectedBlob": self.expected_blob,
                 "reservation": self.reservation.value()}
@@ -485,7 +514,7 @@ def conditional_write_body(pending: PendingAllocation, after: Ledger) -> bytes:
     _need(type(pending) is PendingAllocation and type(after) is Ledger and bool(after.reservations))
     after.admit(pending.authority, pending.checkpoint)
     _need(after.reservations[-1] == pending.reservation)
-    before = Ledger(after.genesis, after.reservations[:-1])
+    before = Ledger(after.genesis, after.reservations[:-1], after.tag_bindings)
     _need(blob_sha(before.to_bytes()) == pending.expected_blob)
     raw = policy.canonical({"message": "Reserve Mobile Release Kit candidate version", "branch": LEDGER_BRANCH,
                             "sha": pending.expected_blob, "content": base64.b64encode(after.to_bytes()).decode("ascii")})
@@ -495,9 +524,14 @@ def conditional_write_body(pending: PendingAllocation, after: Ledger) -> bytes:
 
 class Schedule:
     """One finite read/conditional-write schedule; no user-selected endpoint."""
-    def __init__(self, authority: AuthorityRegistration, checkpoint: Checkpoint, *, reconcile: bool = False) -> None:
+    def __init__(self, authority: AuthorityRegistration, checkpoint: Checkpoint, *, reconcile: bool = False,
+                 future_tag: str | None = None) -> None:
         _need(type(authority) is AuthorityRegistration and type(checkpoint) is Checkpoint and type(reconcile) is bool)
+        if future_tag is not None:
+            policy.source_ref(future_tag)
+            _need(future_tag.startswith("refs/tags/"))
         self.authority, self.checkpoint, self.reconcile = authority, checkpoint, reconcile
+        self.future_tag = future_tag
         self.steps: list[str] = []
         self.before_commit: str | None = None
         self.after_commit: str | None = None
@@ -507,7 +541,9 @@ class Schedule:
         if len(self.steps) < len(prefix):
             allowed = {prefix[len(self.steps)]}
         else:
-            allowed = {"ledger-before": {"repository-after"} if self.reconcile else {"write", "repository-after"},
+            allowed = {"ledger-before": {"repository-after"} if self.reconcile else
+                       {"tag-before" if self.future_tag is not None else "write", "repository-after"},
+                       "tag-before": {"write"},
                        "write": {"ref-after"}, "ref-after": {"compare-after"},
                        "compare-after": {"ledger-after"}, "ledger-after": {"repository-after"}}.get(self.steps[-1], set())
         _need(step in allowed and len(self.steps) < MAX_REQUESTS)
@@ -529,6 +565,9 @@ class Schedule:
             commit = self.before_commit if step == "ledger-before" else self.after_commit
             _need(commit is not None and reference == commit)
             path = root + "/contents/" + LEDGER_PATH + "?ref=" + commit
+        elif step == "tag-before":
+            _need(self.future_tag is not None and not self.reconcile)
+            path = root + "/git/ref/" + self.future_tag.removeprefix("refs/")
         else:
             _need(step == "write" and not self.reconcile and type(body) is bytes and 0 < len(body) <= MAX_HTTP_BYTES)
             path = root + "/contents/" + LEDGER_PATH
@@ -624,7 +663,7 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
             raise VersionAllocationError("journal-unavailable") from None
 
     try:
-        request.version_policy.increment_for(request.source.ref)
+        request.version_policy.increment_for(request.policy_ref)
         _need(type(authority) is AuthorityRegistration, "authority-unavailable")
         _need(authority.protected_branch, "authority-untrusted")
         _need(authority.project_id == request.project_id, "authority-changed")
@@ -636,7 +675,7 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
             _need(type(pending) is PendingAllocation and pending.authority == authority, "journal-unavailable")
             _need(pending.reservation.request == request, "candidate-binding-conflict")
         _need(transport is not None, "authority-unavailable")
-        schedule = Schedule(authority, checkpoint, reconcile=pending is not None)
+        schedule = Schedule(authority, checkpoint, reconcile=pending is not None, future_tag=request.future_tag)
 
         def take(step: str, reference: str | None = None, *, body: bytes | None = None) -> tuple[int, dict[str, Any] | None]:
             nonlocal control, write_claimed
@@ -658,6 +697,8 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
             if status != 200:
                 _need(row["body"] is None, "response-invalid")
                 if step == "write" and status in {409, 422}:
+                    return status, None
+                if step == "tag-before" and status == 404:
                     return status, None
                 raise VersionAllocationError({401: "unauthorized", 403: "forbidden", 404: "authority-missing",
                                                429: "rate-limited"}.get(status, "network-unavailable" if status >= 500 else "response-invalid"))
@@ -689,6 +730,14 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
                 _need(existing is not None, "response-invalid")
                 persist(journal.record_reused, authority, existing, checkpoint)
             return outcome("reserved", "none", existing)
+        if request.future_tag is not None:
+            status, body = take("tag-before")
+            if status == 200:
+                _need(body.get("ref") == request.future_tag and type(body.get("object")) is dict
+                      and body["object"].get("type") in {"commit", "tag"}, "response-invalid")
+                policy._match(body["object"].get("sha"), policy._SHA)
+                raise VersionAllocationError("tag-exists")
+            _need(status == 404 and body is None, "response-invalid")
         after = before.ledger.append(request, observations, now=clock())
         pending = PendingAllocation(authority, before.checkpoint, before.blob, after.reservations[-1])
         # Creation/settlement is owned by the adapter. An exception here never
@@ -713,6 +762,7 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
         after_commit = _ref_commit(read("ref-after"))
         _ancestry(read("compare-after", after_commit), before_commit, after_commit)
         final = _snapshot(read("ledger-after", after_commit), after_commit, authority, before.checkpoint)
+        _need(future_tag.preserves(after, final.ledger), "authority-rewound")
         _repository_identity(read("repository-after"), authority)
         existing = final.ledger.find(request)
         _need(existing == pending.reservation, "pending-unresolved")

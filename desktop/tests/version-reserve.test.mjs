@@ -128,3 +128,6 @@ test('joined native review refusal remains a refusal, not a lost ACK or automati
   assert.equal(h.c.getSnapshot().unknown,false);assert.equal(h.c.ownerReason(),null);assert.notEqual(h.c.reserveReason(),null);
   assert.equal(h.calls.length,1);assert.equal(h.edits.length,0);
 });
+
+// Reuse these inert original fixtures for the typed future-tag facet.
+export { setup,options,frame,reserved,flush };

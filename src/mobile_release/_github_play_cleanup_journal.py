@@ -47,8 +47,8 @@ class Journal(Custodian):
             p.require(intent in names)
             raw = self._read(intent)
             row = p.obj(self.decode(raw, p.MAX_RECORD_BYTES), {"protocol", "prepared"})
-            p.require(row["protocol"] == p.PROTOCOL)
             prepared = p.Prepared.parse(row["prepared"])
+            p.require(row["protocol"] == self.protocol(prepared))
             p.require(prepared.target.marker == marker)
             key = p.once_key(prepared)
             p.require(key not in keys); keys.add(key)
@@ -66,6 +66,11 @@ class Journal(Custodian):
             self.attempts[marker] = {"data": p.pending_record(data), "digest": digest}
         p.require(seen == names and names == self._names())
 
+    @staticmethod
+    def protocol(prepared):
+        from .github_version_tag import PROTOCOL
+        return p.PROTOCOL if prepared.target.version_tag is None else PROTOCOL
+
     def create_intent(self, value: dict) -> None:
         prepared = p.Prepared.parse(value)
         p.need(not self.used and self.selected is None, "previous-attempt")
@@ -75,7 +80,7 @@ class Journal(Custodian):
             for record in self.attempts.values()), "previous-attempt")
         marker = prepared.target.marker
         p.need(marker not in self.attempts, "previous-attempt")
-        raw = p.canonical({"protocol": p.PROTOCOL, "prepared": prepared.value()}) + b"\n"
+        raw = p.canonical({"protocol": self.protocol(prepared), "prepared": prepared.value()}) + b"\n"
         p.require(len(raw) <= p.MAX_RECORD_BYTES)
         self.used = True  # Before possible create; no replacement after an unknown return.
         try:

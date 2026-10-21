@@ -52,7 +52,7 @@ export class VersionReserveController {
       const c = this.readContext(), s = this.state.status, r = this.reviewed;
       const review = !this.state.stale && !this.state.unknown && r?.epoch === this.epoch && r.options === this.state.options &&
         s?.phase === 'reviewed' && s.projectId === c.projectId && s.review?.id === r.id && s.revision === r.cli.revision &&
-        s.review.reference === r.options.reference && s.review.increment === r.options.increment && s.review.newCandidate === r.options.newCandidate ? r.cli : null;
+        s.review.reference === r.options.reference && s.review.increment === r.options.increment && s.review.newCandidate === r.options.newCandidate && s.review.futureTag === r.options.futureTag ? r.cli : null;
       return { port: c.cliAccessPort ?? null, nativeSession: c.nativeSession, projectId: c.projectId, preview: c.preview,
         epoch: this.epoch, options: this.state.options, enabled: this.state.enabled, review,
         blockedReason: this.nativeOwnerReason() ?? unavailable(c) ?? c.blockedReason };
@@ -105,9 +105,10 @@ export class VersionReserveController {
     // at Review; no invalid field is defaulted into a native policy.
     if (typeof options.reference !== 'string' || options.reference.length > 211 ||
         !['build', 'patch', 'minor', 'major'].includes(options.increment) || typeof options.newCandidate !== 'boolean' ||
-        typeof options.acknowledgeLimitations !== 'boolean') return false;
+        typeof options.acknowledgeLimitations !== 'boolean' ||
+        options.futureTag !== undefined && (typeof options.futureTag !== 'string' || options.futureTag.length > 210)) return false;
     const next = Object.freeze({ reference: options.reference, increment: options.increment, newCandidate: options.newCandidate,
-      acknowledgeLimitations: options.acknowledgeLimitations });
+      acknowledgeLimitations: options.acknowledgeLimitations, ...(options.futureTag !== undefined ? { futureTag: options.futureTag } : {}) });
     if (JSON.stringify(next) === JSON.stringify(this.state.options)) return false;
     this.beforeContextIntent(); this.patch({ options: next, issue: null }); return true;
   }
@@ -115,7 +116,7 @@ export class VersionReserveController {
     const c = this.readContext();
     return this.disposed ? 'This controller is retired.' : this.ownerReason() ?? unavailable(c) ??
       (!this.state.enabled ? 'Manual versions are selected.' : !c.projectId ? 'Choose a saved native Android or iOS project.' : c.blockedReason) ??
-      (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch (for example refs/heads/main) and acknowledge the Store limits.' : null);
+      (!parseReserveOptions(this.state.options) ? 'Enter the exact checked-out branch, any selected future full tag, and acknowledge the Store limits.' : null);
   }
   reserveReason(): string | null {
     const s = this.state.status;
@@ -174,6 +175,9 @@ export class VersionReserveController {
     if (work.kind === 'review' || work.kind === 'reserve') {
       if (s.projectId !== work.context.projectId || s.operationId === null || work.operationId !== null && work.operationId !== s.operationId ||
           ![work.kind === 'review' ? 'reviewed' : 'reserved', 'refused', 'cleanup-unknown'].includes(s.phase)) { this.unknown(); return; }
+      if (s.phase === 'reviewed' && (s.review!.reference !== work.options.reference || s.review!.increment !== work.options.increment ||
+          s.review!.newCandidate !== work.options.newCandidate || s.review!.futureTag !== work.options.futureTag) ||
+          s.phase === 'reserved' && s.reservation!.futureTag !== work.options.futureTag) { this.unknown(); return; }
     } else if (work.kind === 'cancel' && s.operationId !== work.operationId) { this.unknown(); return; }
     const before = this.state.status;
     if (before && s.revision < before.revision) return;
@@ -185,7 +189,7 @@ export class VersionReserveController {
     if (s.phase === 'cleanup-unknown') { this.patch({ status: s }); this.unknown(); return; }
     // Descriptor parsing can invoke Proxy traps: rematch original epoch/API
     // afterwards. Stale replies remain original DATA, never a new intent.
-    const current = this.current(work) && (s.projectId === null || s.projectId === work.context.projectId) && !this.state.unknown;
+    const current = this.current(work) && (s.phase !== 'reserved' || s.reservation!.futureTag === work.options.futureTag) && (s.projectId === null || s.projectId === work.context.projectId) && !this.state.unknown;
     if (work.kind === 'review' && s.phase === 'reviewed' && current) this.reviewed = { epoch: work.epoch, id: s.review!.id, options: work.options,
       cli: Object.freeze({ id: s.review!.id, revision: s.revision, options: work.options }) };
     else if (s.phase !== 'reviewed') this.reviewed = null;

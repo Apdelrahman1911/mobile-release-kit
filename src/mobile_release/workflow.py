@@ -952,6 +952,23 @@ class Transport:
             raise
 
 
+def _future_version_selection(platform: str) -> bool:
+    # Only the new, fixed version job inputs. This never changes actual source
+    # authority or accepts an arbitrary workflow ref/SHA.
+    from .version_future_tag import hosted_selector
+    from .version_hosted_tag import Intent
+    operation = os.environ.get("MOBILE_RELEASE_OPERATION", "")
+    confirmation = os.environ.get("MOBILE_RELEASE_CONFIRMATION", "")
+    try:
+        if operation == "reserve-future-tag":
+            return hosted_selector(operation, platform, confirmation) is not None
+        if operation == "bind-version-tag":
+            return Intent.parse(confirmation).platform == platform
+    except ValueError:
+        return False
+    return False
+
+
 @dataclass(frozen=True)
 class Context:
     stage: str
@@ -982,7 +999,8 @@ class Context:
                   and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
                  or (os.environ.get("MOBILE_RELEASE_OPERATION") == "recover-play-edit"
                      and re.fullmatch(r"recover-play-edit:[0-9a-f-]{36}:[0-9a-f-]{36}",
-                                      os.environ.get("MOBILE_RELEASE_CONFIRMATION", "")) is not None)))
+                                      os.environ.get("MOBILE_RELEASE_CONFIRMATION", "")) is not None)
+                 or _future_version_selection(platform)))
         _require(stage in STAGES and (platform in PLATFORMS or paired_reserve), "workflow stage/platform is invalid")
         _require(os.environ.get("GITHUB_ACTIONS") == "true", "workflow orchestration is restricted to GitHub Actions")
         _require(os.environ.get("GITHUB_SERVER_URL", "https://github.com") == "https://github.com" and os.environ.get("GITHUB_API_URL", "https://api.github.com") == "https://api.github.com", "workflow recovery currently supports github.com only")

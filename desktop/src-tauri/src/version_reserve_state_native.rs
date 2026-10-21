@@ -142,7 +142,7 @@ impl Capture {
     fn select_original(&mut self, mut template: Value, selection: &Selection) -> Result<()> {
         need(
             self.failure.is_none()
-                && closed(
+                && super::future_tag::fields(
                     &template,
                     &[
                         "identityRevision",

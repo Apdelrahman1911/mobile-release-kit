@@ -250,8 +250,8 @@ class GitHubSetupTests(unittest.TestCase):
             "toolingSha": "b" * 40, "marker": "e" * 32})
         source = Source.from_saved(json.dumps(draft()).encode(), target)
         self.assertEqual(source.files[2], candidate["content"].encode())
-        self.assertEqual([line.strip() for line in candidate["content"].splitlines() if line.strip().startswith("- ")][:3],
-                         ["- candidate", "- reserve-version", "- recover-play-edit"])
+        self.assertEqual([line.strip() for line in candidate["content"].splitlines() if line.strip().startswith("- ")][:5],
+                         ["- candidate", "- reserve-version", "- reserve-future-tag", "- bind-version-tag", "- recover-play-edit"])
         self.assertIn("default: candidate", candidate["content"])
         self.assertIn("operation: ${{ inputs.operation }}", candidate["content"])
         self.assertIn("recover-play-edit:<candidateUUID>:<attemptUUID>", candidate["content"])

@@ -44,6 +44,7 @@ fn input(s: &ApplicationService, scope: &requests::NativeScope) -> wire::Submit 
             project_id: scope.project_id.clone(),
             service_instance: s.instance().clone(),
             request_id: Id::random().unwrap(),
+            purpose: scope.purpose,
         },
         consent_id: scope.consent_id.clone(),
     }

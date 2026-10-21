@@ -1,5 +1,7 @@
 // Closed comparison DATA for the existing Connection/Setup owner. No edit ID,
 // encrypted capsule, token, workflow input or provider target comes from UI.
+import { versionTagSelection, versionTagCandidate, isVersionTagCandidate, versionTagConfirmation, versionTagObservation, targetPurpose } from './githubVersionTagProtocol.ts';
+import type { VersionTagSelection, VersionTagCandidate, VersionTagObservation } from './githubVersionTagProtocol.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, connectionNumericId as numeric, connectionOpaqueId as id,
   connectionUtc as utc, sameConnectionData as same } from './githubConnectionProtocol.ts';
@@ -10,7 +12,7 @@ export const PLAY_CLEANUP_EVENT = 'github-play-cleanup-status';
 export const PLAY_CLEANUP_REASONS = ['none','invalid-input','target-changed','selection-changed','source-changed',
   'source-tree-unavailable','source-unsupported','configuration-invalid','caller-mismatch','workflow-unavailable',
   'permission-unconfirmed','counter-unavailable','protection-unsupported','authority-changed','authority-rewound',
-  'ledger-invalid','journal-invalid','cleanup-unavailable','cleanup-claimed','review-changed','unauthorized','forbidden',
+  'ledger-invalid','journal-invalid','cleanup-unavailable','cleanup-claimed','tag-exists','review-changed','unauthorized','forbidden',
   'not-found-or-inaccessible','rate-limited','network-unavailable','tls-failed','response-invalid','response-limit',
   'expired','cancelled','journal-unavailable','previous-attempt','journal-full','unresolved','resources-unavailable',
   'runtime-unavailable','unqualified','publisher-unconfigured','not-connected','busy','cleanup-unknown','consent-expired'] as const;
@@ -19,7 +21,7 @@ export type PlayCleanupKind = 'prepare'|'dispatch'|'pending'|'observe';
 export type PlayCleanupEffect = 'none'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'unresolved'|'observed-unconfirmed';
 export interface PlayCleanupTarget {
   scope:{projectBinding:string;repository:string;accountId:string;repositoryId:string};
-  toolingRepository:string;toolingSha:string;marker:string;
+  toolingRepository:string;toolingSha:string;marker:string;versionTag?:VersionTagSelection;purpose?:'version-tag';
 }
 export interface PlayCleanupCandidate {
   candidateId:string;attemptId:string;requestSha256:string;localProjectId:string;platform:'android'|'both';
@@ -30,21 +32,21 @@ export interface PlayCleanupPrepared {
   target:PlayCleanupTarget;accountLogin:string;branch:string;sourceSha:string;sourceTree:string;savedConfigSha256:string;
   workflowId:string;callerSha256:string;
   authority:{projectId:string;repository:string;repositoryId:string;ledgerId:string;genesisSha256:string;protectedBranch:true};
-  checkpoint:{sequence:number;headSha256:string;commit:string};ledgerBlob:string;journalBlob:string;journalSha256:string;
-  journalRevision:number;candidate:PlayCleanupCandidate;confirmation:string;
+  checkpoint:{sequence:number;headSha256:string;commit:string};ledgerBlob:string;journalBlob?:string;journalSha256?:string;
+  journalRevision?:number;candidate:PlayCleanupCandidate|VersionTagCandidate;confirmation:string;
 }
 export interface PlayCleanupPending {prepared:PlayCleanupPrepared;claimed:boolean;acknowledged:boolean}
 export interface PlayCleanupConsent {id:string;expiresAt:string;prepared:PlayCleanupPrepared;agentAllowed:boolean}
-export interface PlayCleanupAgentAccess {serviceInstance:string;projectId:string;consentId:string;enabled:boolean;remainingMs:number}
+export interface PlayCleanupAgentAccess {serviceInstance:string;projectId:string;consentId:string;enabled:boolean;remainingMs:number;purpose?:'version-tag'|'play-cleanup'}
 export interface PlayCleanupObservation {counterCommit:string;journalSha256:string;journalRevision:number;
   pendingTuple:'same-unclaimed'|'same-claimed'|'different'|'not-present';assurance:'later-journal-read-not-cleanup-proof'}
 export interface PlayCleanupOperation {id:string;projectId:string;kind:PlayCleanupKind;target:PlayCleanupTarget;
   phase:'running'|'stopping'|'settled'|'cleanup-unknown';reason:PlayCleanupReason;effect:PlayCleanupEffect}
 export interface PlayCleanupStatus {schemaVersion:1;revision:number;sessionId:string|null;available:boolean;reason:PlayCleanupReason;
   operation:PlayCleanupOperation|null;consent:PlayCleanupConsent|null;pending:PlayCleanupPending[];
-  observed:PlayCleanupObservation|null;acknowledged:boolean;agentAccess:PlayCleanupAgentAccess|null}
-export interface PlayCleanupPrepare {sessionId:string;expectedRevision:number;expectedConnectionRevision:number}
-export interface PlayCleanupStart {sessionId:string;expectedRevision:number;consentId:string;confirm:true}
+  observed:PlayCleanupObservation|VersionTagObservation|null;acknowledged:boolean;agentAccess:PlayCleanupAgentAccess|null}
+export interface PlayCleanupPrepare {sessionId:string;expectedRevision:number;expectedConnectionRevision:number;versionTag?:VersionTagSelection;purpose?:'version-tag'}
+export interface PlayCleanupStart {sessionId:string;expectedRevision:number;consentId:string;confirm:true;purpose?:'version-tag'|'play-cleanup'}
 export interface PlayCleanupPort {
   readonly mode:'native';status():Promise<unknown>;prepare(a:PlayCleanupPrepare):Promise<unknown>;start(a:PlayCleanupStart):Promise<unknown>;
   pending(a:PlayCleanupPrepare):Promise<unknown>;observe(a:{sessionId:string;expectedRevision:number;marker:string}):Promise<unknown>;
@@ -60,7 +62,7 @@ const hex=(v:unknown,n:number):v is string=>typeof v==='string'&&v.length===n&&!
 const serviceId=(v:unknown):v is string=>hex(v,32)&&v!=='0'.repeat(32);
 const uuid=(v:unknown):v is string=>typeof v==='string'&&v.length===36&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 function target(v:unknown):v is PlayCleanupTarget {
-  return keys(v,['scope','toolingRepository','toolingSha','marker'])&&keys(v.scope,['projectBinding','repository','accountId','repositoryId'])&&
+  return (keys(v,['scope','toolingRepository','toolingSha','marker'])||keys(v,['scope','toolingRepository','toolingSha','marker','versionTag'])&&versionTagSelection(v.versionTag)||keys(v,['scope','toolingRepository','toolingSha','marker','purpose'])&&v.purpose==='version-tag')&&keys(v.scope,['projectBinding','repository','accountId','repositoryId'])&&
     hex(v.scope.projectBinding,64)&&coordinate(v.scope.repository)&&numeric(v.scope.accountId)&&numeric(v.scope.repositoryId)&&
     v.toolingRepository==='Apdelrahman1911/mobile-release-kit'&&hex(v.toolingSha,40)&&hex(v.marker,32);
 }
@@ -73,20 +75,26 @@ function candidate(v:unknown):v is PlayCleanupCandidate {
   const b=v.baseVersion;return keys(b,['name','build'])&&typeof b.name==='string'&&b.name.length>0&&b.name.length<=64&&
     !/[^A-Za-z0-9.+-]/.test(b.name)&&integer(b.build,2_100_000_000)&&b.build>0;
 }
-export function playCleanupConfirmation(p:Pick<PlayCleanupPrepared,'candidate'|'target'|'branch'>):string {
+export function playCleanupConfirmation(p:Pick<PlayCleanupPrepared,'candidate'|'target'|'branch'> & Partial<Pick<PlayCleanupPrepared,'sourceSha'>>):string {
+  if(isVersionTagCandidate(p.candidate))return versionTagConfirmation(p,p.candidate);
   return `Dispatch one hosted Play edit cleanup for candidate ${p.candidate.candidateId} in ${p.target.scope.repository}? This is nonpublishing but mutating: the protected workflow may decrypt its retained edit ID, consume its one-use cleanup claim and delete that Play edit. It does not reserve a version or build, sign or release. The configured branch ${p.branch} is mutable; authorized writers can replace its workflow after review. Its actual dispatch head may differ from the reviewed head; the workflow must separately validate the original candidate source. A dispatch acknowledgement does not prove cleanup or identify a run. Stopping cannot undo a sent request.`;
 }
 function prepared(v:unknown):v is PlayCleanupPrepared {
-  if(!keys(v,['target','accountLogin','branch','sourceSha','sourceTree','savedConfigSha256','workflowId','callerSha256','authority','checkpoint','ledgerBlob','journalBlob','journalSha256','journalRevision','candidate','confirmation'])||
-    !target(v.target)||!login(v.accountLogin)||!branch(v.branch)||!candidate(v.candidate)||v.candidate.source.ref!==`refs/heads/${v.branch}`||
-    ![v.sourceSha,v.sourceTree,v.ledgerBlob,v.journalBlob].every(s=>hex(s,40))||
-    ![v.savedConfigSha256,v.callerSha256,v.journalSha256].every(s=>hex(s,64))||!numeric(v.workflowId)||!positive(v.journalRevision))return false;
-  const a=v.authority,c=v.checkpoint;
+  const common=['target','accountLogin','branch','sourceSha','sourceTree','savedConfigSha256','workflowId','callerSha256','authority','checkpoint','ledgerBlob','candidate','confirmation'];
+  const tagged=keys(v,common)&&target(v.target)&&!!v.target.versionTag&&versionTagCandidate(v.candidate);
+  if(!tagged&&(!keys(v,[...common,'journalBlob','journalSha256','journalRevision'])||!target(v.target)||v.target.versionTag!==undefined||v.target.purpose!==undefined||
+      !candidate(v.candidate)||!hex(v.journalBlob,40)||!hex(v.journalSha256,64)||!positive(v.journalRevision)))return false;
+  const item=v as unknown as PlayCleanupPrepared;
+  if(!login(item.accountLogin)||!branch(item.branch)||item.candidate.source.ref!==`refs/heads/${item.branch}`||
+    ![item.sourceSha,item.sourceTree,item.ledgerBlob].every(s=>hex(s,40))||![item.savedConfigSha256,item.callerSha256].every(s=>hex(s,64))||!numeric(item.workflowId))return false;
+  if(tagged){const c=item.candidate as VersionTagCandidate,t=item.target.versionTag!;
+    if(t.candidateId!==c.candidateId||t.rowSha256!==c.rowSha256||t.finalCommit!==item.sourceSha||item.sourceSha===c.source.commit||item.savedConfigSha256!==c.identityRevision)return false;}
+  const a=item.authority,c=item.checkpoint;
   return keys(a,['projectId','repository','repositoryId','ledgerId','genesisSha256','protectedBranch'])&&(serviceId(a.projectId)||uuid(a.projectId))&&
     coordinate(a.repository)&&numeric(a.repositoryId)&&uuid(a.ledgerId)&&hex(a.genesisSha256,64)&&a.protectedBranch===true&&
-    a.repository.toLowerCase()===v.target.scope.repository.toLowerCase()&&a.repositoryId===v.target.scope.repositoryId&&
+    a.repository.toLowerCase()===item.target.scope.repository.toLowerCase()&&a.repositoryId===item.target.scope.repositoryId&&
     keys(c,['sequence','headSha256','commit'])&&integer(c.sequence,64)&&hex(c.headSha256,64)&&hex(c.commit,40)&&
-    (c.sequence!==0||c.headSha256===a.genesisSha256)&&v.confirmation===playCleanupConfirmation(v as unknown as PlayCleanupPrepared)&&
+    (c.sequence!==0||c.headSha256===a.genesisSha256)&&item.confirmation===playCleanupConfirmation(item)&&
     new TextEncoder().encode(JSON.stringify(v)).length<=4096;
 }
 function pending(v:unknown):v is PlayCleanupPending {
@@ -102,27 +110,30 @@ export function parsePlayCleanupStatus(raw:unknown):PlayCleanupStatus|null {
     if(o!==null&&(!keys(o,['id','projectId','kind','target','phase','reason','effect'])||!id(o.id)||!id(o.projectId)||
       !one(o.kind,['prepare','dispatch','pending','observe'])||!target(o.target)||!one(o.phase,['running','stopping','settled','cleanup-unknown'])||
       !one(o.reason,PLAY_CLEANUP_REASONS)||!one(o.effect,['none','not-sent','potentially-applied','acknowledged-unconfirmed','unresolved','observed-unconfirmed'])||
-      v.sessionId===null||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||
+      v.sessionId===null||o.target.purpose!==undefined&&o.kind!=='pending'||o.phase!=='settled'&&v.available||o.phase==='cleanup-unknown'&&o.reason!=='cleanup-unknown'||
       one(o.kind,['prepare','pending'])&&o.effect!=='none'))return null;
     const c=v.consent;
     if(c!==null&&(!keys(c,['id','expiresAt','prepared','agentAllowed'])||!hex(c.id,32)||!utc(c.expiresAt)||!prepared(c.prepared)||
       typeof c.agentAllowed!=='boolean'||!o||o.kind!=='prepare'||o.phase!=='settled'||o.reason!=='none'||!same(c.prepared.target,o.target)))return null;
     const a=v.agentAccess;
-    if(a!==null&&(!keys(a,['serviceInstance','projectId','consentId','enabled','remainingMs'])||!serviceId(a.serviceInstance)||!serviceId(a.projectId)||
+    if(a!==null&&(!(keys(a,['serviceInstance','projectId','consentId','enabled','remainingMs'])||keys(a,['serviceInstance','projectId','consentId','enabled','remainingMs','purpose'])&&one(a.purpose,['play-cleanup','version-tag']))||!serviceId(a.serviceInstance)||!serviceId(a.projectId)||
       !serviceId(a.consentId)||typeof a.enabled!=='boolean'||!integer(a.remainingMs,120000)||a.enabled!==(a.remainingMs>0)||
-      !c||!c.agentAllowed||a.consentId!==c.id))return null;
+      !c||!c.agentAllowed||a.consentId!==c.id||(a.purpose??'play-cleanup')!==targetPurpose((c.prepared as PlayCleanupPrepared).target)))return null;
     if((a!==null)!==(c!==null&&c.agentAllowed===true))return null;
     if(!Array.isArray(v.pending)||v.pending.length>32)return null;
     const markers=new Set<string>(),tuples=new Set<string>();
     for(const p of v.pending){if(!pending(p))return null;const t=p.prepared.target,au=p.prepared.authority,ca=p.prepared.candidate;
-      const tuple=[t.scope.repositoryId,au.projectId,au.ledgerId,au.genesisSha256,ca.candidateId,ca.attemptId].join(':');
+      const tuple=[t.scope.repositoryId,au.projectId,au.ledgerId,au.genesisSha256,ca.candidateId,isVersionTagCandidate(ca)?'version-tag':ca.attemptId].join(':');
       if(markers.has(t.marker)||tuples.has(tuple))return null;markers.add(t.marker);tuples.add(tuple);}
     const op=o as unknown as PlayCleanupOperation|null;
     if(v.acknowledged&&(!op||op.phase!=='settled'||!one(op.kind,['dispatch','observe'])))return null;
-    if(v.observed!==null&&(!op||op.kind!=='observe'||op.phase!=='settled'||op.effect!=='observed-unconfirmed'||op.reason!=='none'||
-      !keys(v.observed,['counterCommit','journalSha256','journalRevision','pendingTuple','assurance'])||!hex(v.observed.counterCommit,40)||
-      !hex(v.observed.journalSha256,64)||!positive(v.observed.journalRevision)||!one(v.observed.pendingTuple,['same-unclaimed','same-claimed','different','not-present'])||
-      v.observed.assurance!=='later-journal-read-not-cleanup-proof'))return null;
+    if(v.observed!==null){
+      if(!op||op.kind!=='observe'||op.phase!=='settled'||op.effect!=='observed-unconfirmed'||op.reason!=='none')return null;
+      if(op.target.versionTag){if(!versionTagObservation(v.observed))return null;}
+      else if(!keys(v.observed,['counterCommit','journalSha256','journalRevision','pendingTuple','assurance'])||!hex(v.observed.counterCommit,40)||
+        !hex(v.observed.journalSha256,64)||!positive(v.observed.journalRevision)||!one(v.observed.pendingTuple,['same-unclaimed','same-claimed','different','not-present'])||
+        v.observed.assurance!=='later-journal-read-not-cleanup-proof')return null;
+    }
     if(op?.effect==='observed-unconfirmed'&&v.observed===null||op?.effect==='acknowledged-unconfirmed'&&!v.acknowledged||
       one(op?.effect,['not-sent','potentially-applied'])&&(op?.kind!=='dispatch'||v.acknowledged||v.observed!==null)||
       op?.effect==='unresolved'&&(op.kind!=='observe'||v.observed!==null)||op?.kind==='dispatch'&&op.effect==='none')return null;
@@ -133,8 +144,8 @@ export function encodePlayCleanupRequest(name:PlayCleanupCommand,raw:unknown):Ui
   try {
     const v=copyBoundedComparisonData(raw,1024,48);
     const ok=name==='github_play_cleanup_status'?keys(v,[]):name==='github_play_cleanup_cancel'?keys(v,['operationId'])&&id(v.operationId):
-      one(name,['github_play_cleanup_prepare','github_play_cleanup_pending'])?keys(v,['sessionId','expectedRevision','expectedConnectionRevision'])&&id(v.sessionId)&&rev(v.expectedRevision)&&rev(v.expectedConnectionRevision):
-      one(name,['github_play_cleanup_start','github_play_cleanup_allow_agent'])?keys(v,['sessionId','expectedRevision','consentId','confirm'])&&id(v.sessionId)&&rev(v.expectedRevision)&&hex(v.consentId,32)&&v.confirm===true:
+      one(name,['github_play_cleanup_prepare','github_play_cleanup_pending'])?(keys(v,['sessionId','expectedRevision','expectedConnectionRevision'])||keys(v,['sessionId','expectedRevision','expectedConnectionRevision','versionTag'])&&versionTagSelection(v.versionTag)||name==='github_play_cleanup_pending'&&keys(v,['sessionId','expectedRevision','expectedConnectionRevision','purpose'])&&v.purpose==='version-tag')&&id(v.sessionId)&&rev(v.expectedRevision)&&rev(v.expectedConnectionRevision):
+      one(name,['github_play_cleanup_start','github_play_cleanup_allow_agent'])?(keys(v,['sessionId','expectedRevision','consentId','confirm'])||keys(v,['sessionId','expectedRevision','consentId','confirm','purpose'])&&one(v.purpose,['play-cleanup','version-tag']))&&id(v.sessionId)&&rev(v.expectedRevision)&&hex(v.consentId,32)&&v.confirm===true:
       name==='github_play_cleanup_discard'?keys(v,['sessionId','expectedRevision','consentId'])&&id(v.sessionId)&&rev(v.expectedRevision)&&hex(v.consentId,32):
       name==='github_play_cleanup_observe'&&keys(v,['sessionId','expectedRevision','marker'])&&id(v.sessionId)&&rev(v.expectedRevision)&&hex(v.marker,32);
     if(!ok)return null;const b=new TextEncoder().encode(JSON.stringify(v));return b.length<=1024?b:null;
@@ -176,6 +187,7 @@ export const PLAY_CLEANUP_HELP:Readonly<Record<PlayCleanupReason,string>>=Object
   'ledger-invalid':'The shared version history could not be verified. Preserve it; no cleanup or version was assumed.',
   'journal-invalid':'The retained cleanup record could not be verified. Keep its files and do not repeat a possibly sent request.',
   'cleanup-unavailable':'No single supported previous Google Play draft was found for this project. Nothing will be created to make one.',
+  'tag-exists':'The future tag already exists. It will not be adopted, replaced or moved.',
   'cleanup-claimed':'Cleanup was already claimed for this draft. Check the original attempt; it cannot be claimed again here.',
   'review-changed':'The reviewed cleanup changed or expired. Close it and check previous attempts before reviewing again.',
   unauthorized:'GitHub rejected the selected account. Finish the original task before reconnecting.',

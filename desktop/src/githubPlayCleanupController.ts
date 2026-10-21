@@ -1,5 +1,7 @@
 // Presentation of the SAME native Connection/Setup calls. No HTTP, scheduler,
 // cleanup executor, credential, candidate selector or new native operation owner.
+import { versionTagSelection, targetPurpose } from './githubVersionTagProtocol.ts';
+import type { VersionTagSelection } from './githubVersionTagProtocol.ts';
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
 import { isDirty } from './drafts.ts';
@@ -13,11 +15,11 @@ interface Capture {context:Context;project:ProjectSession}
 interface Revocation {sessionId:string;revision:number;consent:PlayCleanupConsent}
 interface Original {port:PlayCleanupPort;live:boolean;unlisten:(()=>void)|null;status:PlayCleanupStatus|null;fresh:boolean;closeCheck:object|null;revocation:Revocation|null;stopId:string|null}
 interface Work {owner:Original;kind:'subscribe'|'status'|'start'|'allow'|'cancel'|'discard';ended:boolean;promise:Promise<unknown>|null}
-interface Attempt {owner:Original;work:Work;capture:Capture;epoch:object;kind:PlayCleanupKind;target:PlayCleanupTarget|null;
+interface Attempt {versionTag:VersionTagSelection|null;purpose:'play-cleanup'|'version-tag';owner:Original;work:Work;capture:Capture;epoch:object;kind:PlayCleanupKind;target:PlayCleanupTarget|null;
   revision:number;previousId:string|null;operationId:string|null;marker:string|null;sent:boolean;replyOk:boolean;stopWanted:boolean;stopSent:boolean;consent:PlayCleanupConsent|null}
 interface Review {owner:Original;capture:Capture;epoch:object;consent:PlayCleanupConsent}
 interface Delegation {owner:Original;work:Work;review:Review;revision:number;sent:boolean;replyOk:boolean}
-export interface PlayCleanupView {native:boolean;status:PlayCleanupStatus|null;confirmed:boolean;pending:boolean;allowing:boolean;
+export interface PlayCleanupView {versionTag:VersionTagSelection|null;native:boolean;status:PlayCleanupStatus|null;confirmed:boolean;pending:boolean;allowing:boolean;
   observing:boolean;cancelling:boolean;discarding:boolean;uncertain:boolean;error:PlayCleanupReason|null;originalRepository:string|null}
 function immutable<T>(v:T):T {if(v&&typeof v==='object'&&!Object.isFrozen(v)){Object.values(v).forEach(immutable);Object.freeze(v);}return v;}
 function context(view:GitHubConnectionViewState):Context|null {
@@ -52,7 +54,7 @@ function advances(a:PlayCleanupStatus,b:PlayCleanupStatus):boolean {
 }
 
 export class GitHubPlayCleanupController {
-  private state:PlayCleanupView=immutable({native:false,status:null,confirmed:false,pending:false,allowing:false,observing:false,
+  private state:PlayCleanupView=immutable({versionTag:null,native:false,status:null,confirmed:false,pending:false,allowing:false,observing:false,
     cancelling:false,discarding:false,uncertain:false,error:null,originalRepository:null});
   private listeners=new Set<()=>void>();
   private desired:PlayCleanupPort|null=null;
@@ -77,6 +79,14 @@ export class GitHubPlayCleanupController {
     this.connection=connection;this.selectedProject=selectedProject;this.peer=peer;this.now=now;
   }
   getSnapshot=():PlayCleanupView=>this.state;
+  configureVersionTag(value:VersionTagSelection|null):void {
+    if(this.disposed)return;
+    if(value!==null&&(!value||typeof value!=='object'||
+      ['candidateId','rowSha256','finalCommit'].some(k=>typeof value[k as keyof VersionTagSelection]!=='string'||value[k as keyof VersionTagSelection].length>64)))return;
+    const selected=value===null?null:immutable({candidateId:value.candidateId,rowSha256:value.rowSha256,finalCommit:value.finalCommit});
+    if(same(this.state.versionTag,selected))return;
+    this.state=immutable({...this.state,versionTag:selected});this.invalidate(); // before any publication/reentrant caller
+  }
   subscribe=(f:()=>void):(()=>void)=>{this.listeners.add(f);return()=>{this.listeners.delete(f);};};
   private capture():Capture|null {const c=context(this.connection()),p=this.selectedProject();return c&&p&&p.project.id===c.projectId?{context:c,project:p}:null;}
   private update(patch:Partial<PlayCleanupView>={}):void {
@@ -114,7 +124,8 @@ export class GitHubPlayCleanupController {
   private origin(a:Attempt,s:PlayCleanupStatus):boolean {
     const o=s.operation,c=a.capture.context;
     return a.sent&&s.revision>a.revision&&s.sessionId===c.sessionId&&!!o&&o.id!==a.previousId&&(!a.operationId||o.id===a.operationId)&&
-      o.projectId===c.projectId&&o.kind===a.kind&&inContext(o.target,c)&&(a.target===null||same(o.target,a.target))&&
+      o.projectId===c.projectId&&o.kind===a.kind&&targetPurpose(o.target)===a.purpose&&
+      (a.kind!=='prepare'||same(o.target.versionTag??null,a.versionTag))&&inContext(o.target,c)&&(a.target===null||same(o.target,a.target))&&
       (a.marker===null||a.marker===o.target.marker)&&(a.consent===null||same(o.target,a.consent.prepared.target));
   }
   private receive(o:Original,raw:unknown):PlayCleanupStatus|null {
@@ -208,9 +219,9 @@ export class GitHubPlayCleanupController {
   ownerReason():string|null {
     if(this.unknown)return PLAY_CLEANUP_HELP['cleanup-unknown'];
     if(this.attempt||this.delegation||this.work.size||this.original?.status?.operation&&this.original.status.operation.phase!=='settled')
-      return 'The original Google Play cleanup task is still active. Check status or Stop it before another task.';
+      return 'The original hosted dispatch task is still active. Check status or Stop it before another task.';
     if(this.original?.closeCheck)return 'Check task status to refresh the original review. Close has not been repeated.';
-    if(this.original?.status?.consent)return 'Run, delegate or close the original cleanup review before another task.';
+    if(this.original?.status?.consent)return 'Run, delegate or close the original hosted review before another task.';
     return null;
   }
   private startReason():string|null {
@@ -227,8 +238,9 @@ export class GitHubPlayCleanupController {
     if(s.consent&&!this.currentConsent())return s.consent.agentAllowed?'This cleanup is delegated to the CLI. Revoke permission before a new review.':'Close the previous or expired review before preparing another.';
     if(!s.available)return PLAY_CLEANUP_HELP[s.reason];return this.peer();
   }
-  prepareReason():string|null {return this.startReason()??(this.currentConsent()?'Run, delegate or close the current review first.':null);}
-  dispatchReason():string|null {return this.startReason()??(!this.currentConsent()?'Review this saved project’s previous draft first.':!this.state.confirmed?'Confirm the cleanup and its workflow effects below.':null);}
+  prepareReason():string|null {return this.startReason()??(this.currentConsent()?'Run, delegate or close the current review first.':
+    this.state.versionTag&&!versionTagSelection(this.state.versionTag)?'Enter the retained candidate ID, row SHA-256 and pushed final commit. These select a review; they are not source authority.':null);}
+  dispatchReason():string|null {return this.startReason()??(!this.currentConsent()?'Review the selected saved-project workflow action first.':!this.state.confirmed?'Confirm the exact workflow action and its effects below.':null);}
   allowAgentReason():string|null {return this.dispatchReason();}
   pendingReason():string|null {return this.startReason()??(this.currentConsent()?'Close this review before checking previous requests.':null);}
   observeReason(row:PlayCleanupPending):string|null {
@@ -242,7 +254,7 @@ export class GitHubPlayCleanupController {
     const connectionRevision=source.status.revision;
     const selected=kind==='observe'?row:null;
     const w:Work={owner:o,kind:'start',ended:false,promise:null};this.work.add(w);
-    const a:Attempt={owner:o,work:w,capture:c,epoch,kind,target:kind==='dispatch'?consent!.prepared.target:selected?.prepared.target??null,
+    const a:Attempt={versionTag:this.state.versionTag,purpose:kind==='dispatch'?targetPurpose(consent!.prepared.target):selected?targetPurpose(selected.prepared.target):this.state.versionTag?'version-tag':'play-cleanup',owner:o,work:w,capture:c,epoch,kind,target:kind==='dispatch'?consent!.prepared.target:selected?.prepared.target??null,
       revision:s.revision,previousId:s.operation?.id??null,operationId:null,marker,sent:false,replyOk:false,stopWanted:false,stopSent:false,
       consent:kind==='dispatch'?consent:null};
     this.attempt=a;this.review=null;this.update({confirmed:false,error:null,originalRepository:c.context.repository});
@@ -263,9 +275,9 @@ export class GitHubPlayCleanupController {
       void promise.then(v=>{const accepted=this.receive(o,v);a.replyOk=accepted!==null&&this.origin(a,accepted);if(!a.replyOk)this.fail('response-invalid');},e=>failed(e,false)).finally(()=>this.finish(w));
     }catch(e){failed(e,true);this.finish(w);}
   }
-  prepare():void {this.begin('prepare',null,(p,a,expectedConnectionRevision)=>p.prepare({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,expectedConnectionRevision}));}
-  dispatch():void {const c=this.currentConsent();if(!c||this.dispatchReason())return;this.begin('dispatch',c.prepared.target.marker,(p,a)=>p.start({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,consentId:a.consent!.id,confirm:true}));}
-  loadPending():void {this.begin('pending',null,(p,a,expectedConnectionRevision)=>p.pending({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,expectedConnectionRevision}));}
+  prepare():void {this.begin('prepare',null,(p,a,expectedConnectionRevision)=>p.prepare({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,expectedConnectionRevision,...(a.versionTag?{versionTag:a.versionTag}:{})}));}
+  dispatch():void {const c=this.currentConsent();if(!c||this.dispatchReason())return;this.begin('dispatch',c.prepared.target.marker,(p,a)=>p.start({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,consentId:a.consent!.id,confirm:true,...(a.purpose==='version-tag'?{purpose:'version-tag' as const}:{})}));}
+  loadPending():void {this.begin('pending',null,(p,a,expectedConnectionRevision)=>p.pending({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,expectedConnectionRevision,...(a.purpose==='version-tag'?{purpose:'version-tag' as const}:{})}));}
   observe(row:PlayCleanupPending):void {this.begin('observe',row.prepared.target.marker,(p,a)=>p.observe({sessionId:a.capture.context.sessionId,expectedRevision:a.revision,marker:a.marker!}),row);}
   allowAgent():void {
     if(this.allowAgentReason())return;
@@ -280,7 +292,7 @@ export class GitHubPlayCleanupController {
     }
     d.sent=true;
     try{
-      const promise=o.port.allowAgent({sessionId:r.capture.context.sessionId,expectedRevision:s.revision,consentId:r.consent.id,confirm:true});
+      const promise=o.port.allowAgent({sessionId:r.capture.context.sessionId,expectedRevision:s.revision,consentId:r.consent.id,confirm:true,...(targetPurpose(r.consent.prepared.target)==='version-tag'?{purpose:'version-tag' as const}:{})});
       if(!(promise instanceof Promise))throw Error('Missing original Allow');w.promise=promise;
       void promise.then(v=>{
         const accepted=this.receive(o,v);

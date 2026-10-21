@@ -3,7 +3,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: candidate (default), reserve-version, or recover-play-edit (one encrypted known edit; no build/upload/allocation).
+        description: candidate (default), reserve-version, reserve-future-tag, bind-version-tag, or recover-play-edit; version-only jobs never build/upload.
         required: false
         default: candidate
         type: string
@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Or recover-play-edit:<candidateUUID>:<attemptUUID>. Both version actions reject recovery/Desktop inputs.
+        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Or recover-play-edit:<candidateUUID>:<attemptUUID>. All version-only actions reject recovery/Desktop inputs. Future-tag reserve adds :refs/tags/T to the reserve confirmation; bind-version-tag:<platform>:<candidateUUID>:<rowSHA256>:<finalSHA>.
         required: true
         type: string
       recovery_run_id:
@@ -50,7 +50,7 @@ on:
         type: string
     secrets:
       version_allocation_app_id:
-        description: Dedicated repository-scoped GitHub App ID, required only for reserve-version/recover-play-edit.
+        description: Dedicated repository-scoped GitHub App ID, required only for explicit version-only operations.
         required: false
       version_allocation_app_private_key:
         description: Dedicated App private key; used only by the protected reserve job's pinned token step.
@@ -100,7 +100,7 @@ jobs:
         MOBILE_RELEASE_CALLER_REF: ${{ github.ref }}
       run: |
         set -euo pipefail
-        [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version|recover-play-edit)$ ]]
+        [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version|reserve-future-tag|bind-version-tag|recover-play-edit)$ ]]
         [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
         if [[ "$MOBILE_RELEASE_OPERATION" == "reserve-version" ]]; then
           if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then
@@ -108,6 +108,18 @@ jobs:
           else
             [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]
           fi
+          [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
+        elif [[ "$MOBILE_RELEASE_OPERATION" == "reserve-future-tag" ]]; then
+          prefix="reserve-future-tag:$MOBILE_RELEASE_PLATFORM:"
+          if [[ "$MOBILE_RELEASE_PLATFORM" != "ios" ]]; then prefix+="temporary-play-edit:"; fi
+          [[ "$MOBILE_RELEASE_CONFIRMATION" == "$prefix"* ]]
+          tag="${MOBILE_RELEASE_CONFIRMATION#"$prefix"}"
+          [[ "$tag" =~ ^refs/tags/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]]
+          [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
+        elif [[ "$MOBILE_RELEASE_OPERATION" == "bind-version-tag" ]]; then
+          uuid='[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
+          [[ "$MOBILE_RELEASE_CONFIRMATION" =~ ^bind-version-tag:$MOBILE_RELEASE_PLATFORM:$uuid:[0-9a-f]{64}:$MOBILE_RELEASE_CALLER_SHA$ ]]
+          [[ "$MOBILE_RELEASE_CALLER_REF" == refs/heads/* ]]
           [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
         elif [[ "$MOBILE_RELEASE_OPERATION" == "recover-play-edit" ]]; then
           [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|both)$ ]]
@@ -1464,7 +1476,7 @@ jobs:
       evidence_artifact_id: ${{ steps.resolve.outputs.evidence_artifact_id || steps.upload_final.outputs['artifact-id'] }}
   version_reserve:
     needs: validate-platform
-    if: (inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')) || (inputs.operation == 'recover-play-edit' && (inputs.platform == 'android' || inputs.platform == 'both'))
+    if: ((inputs.operation == 'reserve-version' || inputs.operation == 'reserve-future-tag' || inputs.operation == 'bind-version-tag') && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')) || (inputs.operation == 'recover-play-edit' && (inputs.platform == 'android' || inputs.platform == 'both'))
     runs-on: macos-26
     timeout-minutes: 15
     environment: mobile-candidate
@@ -1517,6 +1529,7 @@ jobs:
       with:
         python-version: '3.11'
     - name: Set up pinned Ruby dependencies
+      if: inputs.operation != 'bind-version-tag'
       uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
       with:
         ruby-version: 3.3.12
@@ -1535,7 +1548,7 @@ jobs:
         permission-actions: read
         github-api-url: https://api.github.com
     - name: Reserve a version only; retain candidate and reviewed change data
-      if: inputs.operation == 'reserve-version'
+      if: inputs.operation == 'reserve-version' || inputs.operation == 'reserve-future-tag'
       env:
         MOBILE_RELEASE_VERSION_GITHUB_TOKEN: ${{ steps.version-token.outputs.token }}
         MOBILE_RELEASE_OPERATION: ${{ inputs.operation }}
@@ -1559,6 +1572,24 @@ jobs:
         MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64 || '' }}
         MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && vars.MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION || '' }}
       run: python -P -m mobile_release.version_hosted reserve
+    - name: Bind one absent future tag to the exact version-only commit; no build or Store access
+      if: inputs.operation == 'bind-version-tag'
+      env:
+        MOBILE_RELEASE_VERSION_GITHUB_TOKEN: ${{ steps.version-token.outputs.token }}
+        MOBILE_RELEASE_OPERATION: ${{ inputs.operation }}
+        MOBILE_RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+        MOBILE_RELEASE_SELECTED_PLATFORM: ${{ inputs.platform }}
+        MOBILE_RELEASE_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        MOBILE_RELEASE_RECOVERY_CONFIRMATION: ${{ inputs.recovery_confirmation }}
+        MOBILE_RELEASE_DESKTOP_REQUEST: ${{ inputs.desktop_request }}
+        MOBILE_RELEASE_DESKTOP_SOURCE_SHA: ${{ inputs.desktop_source_sha }}
+        MOBILE_RELEASE_DESKTOP_EXPECTED_REF: ${{ inputs.desktop_expected_ref }}
+        MOBILE_RELEASE_DISPATCH_SHA: ${{ github.sha }}
+        MOBILE_RELEASE_DISPATCH_REF: ${{ github.ref }}
+        MOBILE_RELEASE_APP_ROOT: ${{ github.workspace }}/app
+        MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
+        MOBILE_RELEASE_VERSION_AUTHORITY: ${{ vars.MOBILE_RELEASE_VERSION_AUTHORITY }}
+      run: python -P -m mobile_release.version_hosted bind-version-tag
     - name: Clean one known encrypted Play edit only; never allocate or retry
       if: inputs.operation == 'recover-play-edit'
       env:

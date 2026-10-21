@@ -1,6 +1,6 @@
 //! Closed DATA codec tests; not enrollment, protected-key or dispatch proof.
 use super::*;
-fn prepared() -> Prepared {
+pub(super) fn prepared() -> Prepared {
     let target = Target {
         scope: Scope {
             project_binding: "f".repeat(64),
@@ -11,6 +11,8 @@ fn prepared() -> Prepared {
         tooling_repository: crate::github_release_protocol::TOOLING_REPOSITORY.into(),
         tooling_sha: "f".repeat(40),
         marker: "a".repeat(32),
+        version_tag: None,
+        pending_purpose: None,
     };
     let mut p = Prepared {
         target,
@@ -35,10 +37,10 @@ fn prepared() -> Prepared {
             commit: "c".repeat(40),
         },
         ledger_blob: "d".repeat(40),
-        journal_blob: "e".repeat(40),
-        journal_sha256: "f".repeat(64),
-        journal_revision: 1,
-        candidate: Candidate {
+        journal_blob: Some("e".repeat(40)),
+        journal_sha256: Some("f".repeat(64)),
+        journal_revision: Some(1),
+        candidate: Candidate::PlayCleanup(CleanupCandidate {
             candidate_id: "00000000-0000-4000-8000-000000000003".into(),
             attempt_id: "00000000-0000-4000-8000-000000000004".into(),
             request_sha256: "a".repeat(64),
@@ -57,7 +59,7 @@ fn prepared() -> Prepared {
                 build: 1,
             },
             capsule_sha256: "e".repeat(64),
-        },
+        }),
         confirmation: String::new(),
     };
     p.confirmation = p.confirmation();
@@ -77,7 +79,7 @@ fn request() -> Request {
 #[test]
 fn advanced_dispatch_head_is_separate_from_original_source_and_alias_safe_once_key() {
     let p = prepared();
-    assert_ne!(p.source_sha, p.candidate.source.commit);
+    assert_ne!(p.source_sha, p.candidate.source().commit);
     let mut alias = p.clone();
     alias.target.marker = "b".repeat(32);
     alias.target.scope.account_id = "12".into();
@@ -89,7 +91,8 @@ fn advanced_dispatch_head_is_separate_from_original_source_and_alias_safe_once_k
     assert_eq!(alias.once_key(), p.once_key());
     assert_ne!(alias.digest().unwrap(), p.digest().unwrap());
     let mut wrong = p.clone();
-    wrong.candidate.source.source_ref = "refs/heads/other".into();
+    let Candidate::PlayCleanup(c) = &mut wrong.candidate else { panic!("expected old fixture") };
+    c.source.source_ref = "refs/heads/other".into();
     assert!(!wrong.valid());
     let mut wrong = p.clone();
     wrong.authority.repository_id = "23".into();

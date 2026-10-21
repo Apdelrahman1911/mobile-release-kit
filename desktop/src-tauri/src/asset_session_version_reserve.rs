@@ -435,6 +435,7 @@ impl DocumentBinding {
                 reference: input.reference.clone(),
                 increment: input.increment,
                 new_candidate: input.new_candidate,
+                future_tag: input.future_tag.clone(),
             };
             state.version_reserve.reading = None;
             state.version_reserve.review = Some(Review {
@@ -573,9 +574,10 @@ impl DocumentBinding {
             return Err(p::refused());
         }
         let binding = github_setup_project_binding(&root)?;
-        let template = serde_json::json!({"identityRevision":input.configuration_sha256,"source":review.source,
+        let mut template = serde_json::json!({"identityRevision":input.configuration_sha256,"source":review.source,
             "baseVersion":{"name":review.store.context().saved_version.name,"build":review.store.context().saved_version.build},
             "platforms":match review.store.context().platform {crate::local_store_preflight_protocol::AccessPlatform::Both=>serde_json::json!(["android","ios"]),one=>serde_json::json!([one])},"policy":review.input.policy(review.store.context().platform),"storeContextRevision":crate::version_allocation_state_native::play_inventory::current_context_digest(review.store.context()).map_err(|_|p::refused())?});
+        if let Some(tag) = &review.input.future_tag { template["futureTag"] = serde_json::json!(tag); }
         let selection = match review.previous.clone() {
             Some(previous) => Selection::New {
                 previous_request_sha256: previous,
@@ -1012,6 +1014,7 @@ impl DocumentBinding {
                     .as_u64()
                     .ok_or_else(BridgeError::protocol)?,
                 ci: ci.ok_or_else(BridgeError::protocol)?,
+                future_tag: v["request"].get("futureTag").and_then(serde_json::Value::as_str).map(str::to_owned),
             });
             state.version_reserve.view.phase = p::Phase::Reserved;
             state.version_reserve.view.reason = "none";

@@ -23,12 +23,18 @@ pub(crate) struct Review {
     pub(crate) increment: Increment,
     pub(crate) new_candidate: bool,
     pub(crate) acknowledge_limitations: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tag_present")]
+    pub(crate) future_tag: Option<String>,
+}
+fn tag_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some) // absent is old; present null is invalid.
 }
 impl Review {
     pub(crate) fn valid(&self) -> bool {
         valid_id(&self.project_id)
             && crate::supervisor::version_allocation_source_branch(&self.reference)
             && self.acknowledge_limitations
+            && self.future_tag.as_deref().is_none_or(crate::version_allocation_state_native::future_tag::reference)
     }
     pub(crate) fn policy(&self, platform:crate::local_store_preflight_protocol::AccessPlatform) -> Value {
         use crate::local_store_preflight_protocol::AccessPlatform;
@@ -37,7 +43,7 @@ impl Review {
             AccessPlatform::Android=>(3,2_100_000_000,"require-current-android-inventory"),
             AccessPlatform::Both=>(4,9999,"require-current-shared-inventory"),
         };
-        json!({"schemaVersion":schema,"mode":"automatic","rules":[{"ref":self.reference,"increment":self.increment}],
+        json!({"schemaVersion":schema,"mode":"automatic","rules":[{"ref":self.future_tag.as_deref().unwrap_or(&self.reference),"increment":self.increment}],
             "buildCeiling":ceiling,"storeMaxAgeSeconds":900,"storeScope":scope})
     }
 }
@@ -132,6 +138,8 @@ pub(crate) struct ReviewView {
     pub(crate) reference: String,
     pub(crate) increment: Increment,
     pub(crate) new_candidate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) future_tag: Option<String>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +149,8 @@ pub(crate) struct ReservationView {
     pub(crate) name: String,
     pub(crate) build: u64,
     pub(crate) ci: crate::service_version_reserve_protocol::CiReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) future_tag: Option<String>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

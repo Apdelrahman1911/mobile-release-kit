@@ -350,7 +350,7 @@ fn reason(value: &str) -> bool {
         |"store-observation-stale"|"store-identity-changed"|"store-platform-mismatch"|"store-format-unsupported"
         |"reservation-consumed"|"authority-unavailable"|"authority-untrusted"|"authority-changed"|"authority-missing"
         |"authority-rewound"|"ledger-invalid"|"ledger-full"|"candidate-binding-conflict"|"conditional-conflict"
-        |"pending-unresolved"|"journal-unavailable"|"source-changed"|"invalid-allocation"|"unauthorized"|"forbidden"
+        |"tag-exists"|"pending-unresolved"|"journal-unavailable"|"source-changed"|"invalid-allocation"|"unauthorized"|"forbidden"
         |"rate-limited"|"target-changed"|"not-found-or-inaccessible"|"network-unavailable"|"tls-failed"|"response-invalid"
         |"response-limit"|"expired"|"cancelled")
 }

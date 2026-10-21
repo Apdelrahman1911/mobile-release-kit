@@ -8,11 +8,14 @@ pub(super) const COMMANDS: [&str; 3] = [
     "play-cleanup-status",
     "play-cleanup-cancel",
 ];
+pub(super) const TAG_COMMANDS: [&str; 3] = ["version-tag-submit", "version-tag-status", "version-tag-cancel"];
+fn prefix(q: &cleanup::Query) -> &'static str { match q.purpose { cleanup::Purpose::PlayCleanup => "play-cleanup", cleanup::Purpose::VersionTag => "version-tag" } }
 enum Command {
     Submit {
         project: Id,
         instance: Id,
         consent: Id,
+        purpose: cleanup::Purpose,
     },
     Status(cleanup::Query),
     Cancel(cleanup::Query),
@@ -24,7 +27,7 @@ struct Parsed {
 pub(super) fn recognizes(args: &[OsString]) -> bool {
     args.first()
         .and_then(|v| v.to_str())
-        .is_some_and(|v| COMMANDS.contains(&v))
+        .is_some_and(|v| COMMANDS.contains(&v) || TAG_COMMANDS.contains(&v))
 }
 fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     let mut words: Vec<&str> = args
@@ -39,18 +42,20 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         words.pop();
     }
     let command = match words.as_slice() {
-        ["play-cleanup-submit", project, instance, consent, "--reviewed"] => Command::Submit {
+        [kind @ ("play-cleanup-submit" | "version-tag-submit"), project, instance, consent, "--reviewed"] => Command::Submit {
             project: Id::parse(project)?,
             instance: Id::parse(instance)?,
             consent: Id::parse(consent)?,
+            purpose: if *kind == TAG_COMMANDS[0] { cleanup::Purpose::VersionTag } else { cleanup::Purpose::PlayCleanup },
         },
-        [kind @ ("play-cleanup-status" | "play-cleanup-cancel"), project, instance, request] => {
+        [kind @ ("play-cleanup-status" | "play-cleanup-cancel" | "version-tag-status" | "version-tag-cancel"), project, instance, request] => {
             let q = cleanup::Query {
                 project_id: Id::parse(project)?,
                 service_instance: Id::parse(instance)?,
                 request_id: Id::parse(request)?,
+                purpose: if TAG_COMMANDS.contains(kind) { cleanup::Purpose::VersionTag } else { cleanup::Purpose::PlayCleanup },
             };
-            if *kind == COMMANDS[1] {
+            if *kind == COMMANDS[1] || *kind == TAG_COMMANDS[1] {
                 Command::Status(q)
             } else {
                 Command::Cancel(q)
@@ -61,21 +66,22 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     Ok(Parsed { command, json })
 }
 fn receipt(q: &cleanup::Query) -> String {
-    format!("Request {}\nCheck: mrk play-cleanup-status {} {} {} --json\nStop: mrk play-cleanup-cancel {} {} {} --json\n",
+    let kind = prefix(q);
+    format!("Request {}\nCheck: mrk {kind}-status {} {} {} --json\nStop: mrk {kind}-cancel {} {} {} --json\n",
         q.request_id.as_str(), q.project_id.as_str(), q.service_instance.as_str(), q.request_id.as_str(),
         q.project_id.as_str(), q.service_instance.as_str(), q.request_id.as_str())
 }
 fn unconfirmed(q: &cleanup::Query, error: Error, json: bool) -> Vec<u8> {
     if json {
         let value = serde_json::json!({"version":1,"ok":false,"error":error,"request":q,"doNotReplay":true,
-            "message":"Hosted cleanup dispatch outcome is not confirmed. Keep this request ID; check its status or cancel. Do not submit again; an ACK does not confirm cleanup."});
+            "message":"Hosted dispatch outcome is not confirmed. Keep this request ID; check its status or cancel. Do not submit again; an ACK confirms neither cleanup nor a tag binding."});
         let mut bytes = serde_json::to_vec(&value)
             .unwrap_or_else(|_| b"{\"ok\":false,\"error\":\"state_unknown\"}".to_vec());
         bytes.push(b'\n');
         bytes
     } else {
         format!(
-            "Hosted cleanup dispatch outcome is not confirmed. Do not submit again.\n{}",
+            "Hosted dispatch outcome is not confirmed. Do not submit again.\n{}",
             receipt(q)
         )
         .into_bytes()
@@ -111,16 +117,20 @@ fn output(
         bytes
     } else {
         let mut text = format!(
-            "Hosted cleanup: {:?}; {:?}.\n{}",
+            "Hosted {}: {:?}; {:?}.\n{}",
+            prefix(q),
             status.state,
             status.settlement,
             receipt(q)
         );
         text.push_str(&format!(
-            "Dispatch effect: {:?}. No publication is authorized.\n",
+            "Dispatch effect: {:?}. Only the exact Desktop-reviewed workflow action is authorized.\n",
             status.effect
         ));
-        text.push_str("A GitHub ACK is not cleanup confirmation. Use Desktop's explicit journal observation; never automatically resubmit.\n");
+        text.push_str(match q.purpose {
+            cleanup::Purpose::PlayCleanup => "A GitHub ACK is not cleanup confirmation. Use Desktop's explicit journal observation; never automatically resubmit.\n",
+            cleanup::Purpose::VersionTag => "A GitHub ACK is not tag-creation confirmation. Use Desktop's explicit binding observation; never automatically resubmit.\n",
+        });
         text.into_bytes()
     };
     Ok((code, bytes))
@@ -144,11 +154,13 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                 project,
                 instance,
                 consent,
+                purpose,
             } => {
                 let q = cleanup::Query {
                     project_id: project,
                     service_instance: instance,
                     request_id: Id::random()?,
+                    purpose,
                 };
                 // Public correlation only, emitted BEFORE the first transport
                 // call. Even a lost socket/ACK never needs another Submit ID.

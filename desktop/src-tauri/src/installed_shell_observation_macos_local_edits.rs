@@ -19,10 +19,10 @@ impl Case {
 pub(super) const NAMES: [&str;3] = ["local-metadata-text","local-release-version","local-github-apply"];
 const REPOSITORY: &str = "example/toolkit";
 const PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const RESOURCE: &str = "b0c2b54af743bafd1296cda605fb77d5437c3cfd8a2ba0fe37bae9e84c0717f6";
+const RESOURCE: &str = "a3ed1b9d5b0df42d0f921e09c0fded2c392568e96ec100628c35e319785d5191";
 const WORKFLOWS: [(&str,&str,usize);4] = [
     ("preflight",".github/workflows/mobile-preflight.yml",1479),
-    ("candidate",".github/workflows/mobile-candidate.yml",3796),
+    ("candidate",".github/workflows/mobile-candidate.yml",4079),
     ("external-testing",".github/workflows/mobile-external-testing.yml",3079),
     ("production-submit",".github/workflows/mobile-production-submit.yml",3816)];
 const STALE: &[u8] = b"# MRK local workflow original changed\n";

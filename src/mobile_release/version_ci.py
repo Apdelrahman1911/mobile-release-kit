@@ -178,6 +178,9 @@ def _version_delta(raw: bytes, source: str) -> tuple[str, str]:
 class _Read:
     """One fixed call schedule on the existing Git/gh original owners."""
 
+    _git_limit = MAX_GIT_CALLS
+    _http_limit = MAX_HTTP_CALLS
+
     def __init__(self, root: Path, context: workflow.Context, github: workflow.GitHub,
                  guard: DefaultCancellation):
         self.root, self.context, self.github, self.guard = root, context, github, guard
@@ -200,7 +203,7 @@ class _Read:
     def git(self, args: list[str], maximum: int) -> bytes:
         timeout = self.remaining()
         self.git_calls += 1
-        _need(self.git_calls <= MAX_GIT_CALLS, "read")
+        _need(self.git_calls <= self._git_limit, "read")
         env = {"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
@@ -218,7 +221,7 @@ class _Read:
     def json(self, suffix: str) -> dict:
         timeout = self.remaining()
         self.http_calls += 1
-        _need(self.http_calls <= MAX_HTTP_CALLS, "read")
+        _need(self.http_calls <= self._http_limit, "read")
         # Every call, including commits and the final ref, is fresh/bounded.
         # Do not use GitHub.tree()/_trees/_comparisons with their old defaults.
         body = self.github.json(self.prefix + suffix if suffix else self.prefix[:-1],
@@ -266,6 +269,26 @@ class _Read:
         matches = [item for item in snapshot.ledger.reservations if item.request.candidate_id == trailer.candidate_id]
         _need(len(matches) == 1 and matches[0].sha256 == trailer.row_sha256, "candidate")
         row = matches[0]
+        from . import version_future_tag as future_tag
+        if row.request.future_tag is not None:
+            self._http_limit = MAX_HTTP_CALLS + 2  # Explicit v5 only; old CI stays eight.
+            future_tag.check_bound(snapshot.ledger, row, final, final_tree)
+            future_tag.check_ref(self.json("git/ref/" + row.request.future_tag.removeprefix("refs/")),
+                                 row.request.future_tag, final)
+        self._prove(authority, row, final, reference, selected, final_tree, parents)
+        try:
+            _need(allocation._ref_commit(self.json(reference_path)) == ledger_commit, "authority")
+            allocation._repository_identity(self.json(""), authority)
+        except (ValueError, TypeError, KeyError):
+            raise Refused("authority") from None
+        if row.request.future_tag is not None:
+            future_tag.check_ref(self.json("git/ref/" + row.request.future_tag.removeprefix("refs/")),
+                                 row.request.future_tag, final)
+        self.remaining()
+        return Checked(row.request.candidate_id, row.sha256, final, final_tree, row.version.name, row.version.build)
+
+    def _prove(self, authority, row, final, reference, selected, final_tree, parents):
+        """Same full local/remote B→F proof; no public bypass or partial diff."""
         request = row.request
         _need(request.project_id == authority.project_id and request.version_policy.mode == "automatic"
               and request.source.ref == reference and request.enabled_platforms == selected,
@@ -302,13 +325,7 @@ class _Read:
         except (ConfigurationError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
             raise Refused("source") from None
         self.head(final, final_tree)
-        try:
-            _need(allocation._ref_commit(self.json(reference_path)) == ledger_commit, "authority")
-            allocation._repository_identity(self.json(""), authority)
-        except (ValueError, TypeError, KeyError):
-            raise Refused("authority") from None
-        self.remaining()
-        return Checked(request.candidate_id, row.sha256, final, final_tree, row.version.name, row.version.build)
+
 
 
 def verify_reserved_source(app_root: Path, context: workflow.Context, *,

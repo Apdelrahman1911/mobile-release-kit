@@ -2395,8 +2395,8 @@ export function App() {
             headSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
               ? gitReadState.observation?.observation.branch ?? null : null} />}
           remoteTasks={[
-            { id: 'play-cleanup', title: 'Clean up a previous Google Play draft',
-              description: 'Review the retained draft from a hosted candidate run, then explicitly request cleanup. This does not publish a release.',
+            { id: 'play-cleanup', title: 'Hosted Play cleanup or future version tag',
+              description: 'Explicitly review a retained Play draft cleanup or bind one reserved future tag to its version-only commit. Neither action builds or publishes a Store release.',
               needsAttention: playCleanupBusy() !== null || playCleanupState.error !== null || playCleanupState.uncertain ||
                 !!playCleanupState.status?.pending.length || !!playCleanupState.status?.operation &&
                   ['potentially-applied', 'acknowledged-unconfirmed', 'unresolved', 'observed-unconfirmed'].includes(playCleanupState.status.operation.effect),

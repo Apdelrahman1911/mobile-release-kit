@@ -12,8 +12,9 @@ class PlayEditRecoveryWorkflowTest < Minitest::Test
 
   def test_same_protected_job_fixed_mutually_exclusive_entries_no_build_or_extra_permission
     steps = @job.fetch('steps')
-    reserve, cleanup = steps[-2..]
-    assert_equal "inputs.operation == 'reserve-version'", reserve.fetch('if')
+    reserve = steps.find { |step| step["run"] == "python -P -m mobile_release.version_hosted reserve" }
+    cleanup = steps.find { |step| step["run"] == "python -P -m mobile_release.version_hosted_play_recovery cleanup" }
+    assert_equal "inputs.operation == 'reserve-version' || inputs.operation == 'reserve-future-tag'", reserve.fetch('if')
     assert_equal "inputs.operation == 'recover-play-edit'", cleanup.fetch('if')
     assert_equal 'python -P -m mobile_release.version_hosted reserve', reserve.fetch('run')
     assert_equal 'python -P -m mobile_release.version_hosted_play_recovery cleanup', cleanup.fetch('run')
@@ -29,7 +30,8 @@ class PlayEditRecoveryWorkflowTest < Minitest::Test
   end
 
   def test_new_key_is_opt_in_android_only_and_cleanup_receives_neither_p8_nor_counter_policy
-    reserve, cleanup = @job.fetch('steps')[-2..]
+    reserve = @job.fetch("steps").find { |step| step["run"] == "python -P -m mobile_release.version_hosted reserve" }
+    cleanup = @job.fetch("steps").find { |step| step["run"] == "python -P -m mobile_release.version_hosted_play_recovery cleanup" }
     key = 'MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_BASE64'
     version = 'MOBILE_RELEASE_PLAY_EDIT_RECOVERY_KEY_VERSION'
     assert_equal "${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.#{key} || '' }}", reserve.fetch('env').fetch(key)
@@ -52,7 +54,7 @@ class PlayEditRecoveryWorkflowTest < Minitest::Test
 
   def test_only_public_uuid_confirmation_and_saved_authority_are_forwarded_no_id_url_or_path
     caller_inputs = @caller.fetch('on') { @caller.fetch(true) }.fetch('workflow_dispatch').fetch('inputs')
-    assert_equal %w[candidate reserve-version recover-play-edit], caller_inputs.fetch('operation').fetch('options')
+    assert_equal %w[candidate reserve-version reserve-future-tag bind-version-tag recover-play-edit], caller_inputs.fetch('operation').fetch('options')
     assert_equal %w[operation platform confirmation recovery_run_id recovery_confirmation desktop_request desktop_source_sha desktop_expected_ref], caller_inputs.keys
     validation = @workflow.fetch('jobs').fetch('validate-platform').fetch('steps').first.fetch('run')
     assert_includes validation, 'elif [[ "$MOBILE_RELEASE_OPERATION" == "recover-play-edit" ]]; then'

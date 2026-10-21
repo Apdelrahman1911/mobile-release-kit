@@ -48,6 +48,9 @@ mod upload_key;
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
   mrk capabilities [--json]\n\
+  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -283,6 +286,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "versionEdit": {"scope":"already-desktop-prepared-version-save","commands":version_edit::COMMANDS,"defaultEnabled":false,"oneUse":true,
                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
                 "cliOpenPrepare":false,"readGrantAuthorizesEdits":false,"reservedHandoffReconstructed":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
+            "versionTag": {"scope":"desktop-reviewed-future-tag-binding","commands":play_cleanup::TAG_COMMANDS,
+                "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
+                "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
@@ -359,6 +366,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         text.push_str("\nVersion editing delegates only one existing Desktop-prepared review. No CLI Open/Prepare or automatic allocation.\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
@@ -457,7 +465,10 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
-        p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+        p::ResponseBody::PlayCleanupRequest(value) => match value.origin.purpose {
+            crate::service_play_cleanup_protocol::Purpose::PlayCleanup => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+            crate::service_play_cleanup_protocol::Purpose::VersionTag => "Use version-tag-status with the same original request IDs; dispatch is not tag-creation confirmation.\n".into(),
+        },
         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
             "Use git-remote-status with the same original request IDs; do not repeat a send.\n".into(),
         p::ResponseBody::GitRepositoryScope(_) | p::ResponseBody::GitRepositoryRequest(_) =>

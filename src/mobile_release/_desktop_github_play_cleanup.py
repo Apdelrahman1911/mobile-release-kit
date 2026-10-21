@@ -48,7 +48,9 @@ def parse_initial(raw: bytes) -> Initial:
     p.require((digest is not None) == (kind in ("dispatch", "observe")))
     if digest is not None:
         p.hex_text(digest, 64)
-    return Initial(row["id"], kind, p.Target.parse(action["target"]), action["source"], action["home"], digest,
+    target = p.Target.parse(action["target"])
+    p.require(target.pending_purpose is None or kind == "pending")
+    return Initial(row["id"], kind, target, action["source"], action["home"], digest,
                    hashlib.sha256(raw).hexdigest())
 
 
@@ -85,7 +87,13 @@ def execute(request: Initial, token: str | None, retained: p.Prepared | None, *,
             observed = None
             if request.source is not None:
                 observed = stack.enter_context(observe_play_cleanup_configuration(request.source, budget=budget))
-            source = None if observed is None else p.Source.from_saved(observed.saved_bytes())
+            if observed is None:
+                source = None
+            elif request.target.version_tag is None:
+                source = p.Source.from_saved(observed.saved_bytes())
+            else:
+                from .github_version_tag import saved_source
+                source = saved_source(observed.saved_bytes())
             if request.home is not None:
                 journal = Journal(request.home, end=budget.end)
                 # Register its consuming close before open: partial traversal

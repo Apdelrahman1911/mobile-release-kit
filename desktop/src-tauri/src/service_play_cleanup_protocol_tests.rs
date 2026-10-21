@@ -9,6 +9,7 @@ fn row() -> Status {
             project_id: id('a'),
             service_instance: id('b'),
             request_id: id('c'),
+            purpose: Purpose::PlayCleanup,
         },
         consent_id: id('d'),
         revision: 1,
@@ -90,6 +91,7 @@ fn response_rematches_instance_and_fixed_small_bound() {
     response.service_instance = id('c');
     assert!(wire::encode_response(&response).is_err());
     assert!(Access {
+        purpose: Purpose::PlayCleanup,
         service_instance: id('b'),
         project_id: id('a'),
         consent_id: id('d'),
@@ -98,6 +100,7 @@ fn response_rematches_instance_and_fixed_small_bound() {
     }
     .valid());
     assert!(!Access {
+        purpose: Purpose::PlayCleanup,
         service_instance: id('b'),
         project_id: id('a'),
         consent_id: id('d'),
@@ -105,4 +108,21 @@ fn response_rematches_instance_and_fixed_small_bound() {
         remaining_ms: 0
     }
     .valid());
+}
+
+#[test]
+fn typed_tag_wire_never_widens_old_default_or_accepts_free_provider_arguments() {
+    let old=row().origin; let value=serde_json::to_value(&old).unwrap();
+    assert!(value.get("purpose").is_none());
+    assert_eq!(serde_json::from_value::<Query>(value.clone()).unwrap(), old);
+    let mut tag=value.clone();tag["purpose"]=serde_json::json!("version-tag");
+    let parsed:Query=serde_json::from_value(tag.clone()).unwrap();
+    assert_eq!(parsed.purpose,Purpose::VersionTag);assert_ne!(parsed,old);
+    for bad in [serde_json::Value::Null,serde_json::json!("push"),serde_json::json!({})] {
+        tag["purpose"]=bad;assert!(serde_json::from_value::<Query>(tag.clone()).is_err());
+    }
+    for field in ["tag", "sha", "key", "confirmation"] {
+        let mut bad=value.clone();bad[field]=serde_json::json!("not-accepted");
+        assert!(serde_json::from_value::<Query>(bad).is_err());
+    }
 }

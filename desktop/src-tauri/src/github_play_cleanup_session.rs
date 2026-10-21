@@ -63,6 +63,7 @@ struct Consent {
     stamp: SavedEditStamp,
 }
 pub(crate) struct AgentReview {
+    pub(crate) purpose: p::Purpose,
     pub(crate) identity: Arc<()>,
     pub(crate) id: String,
     pub(crate) end: Instant,
@@ -259,21 +260,22 @@ impl ConnectionState {
         edit: &SavedEditGuard<'_>,
         now: Instant,
     ) -> Result<AgentReview, BridgeError> {
-        let marker = self
+        let retained = self
             .play_cleanup
             .consent
             .as_ref()
             .ok_or_else(|| refused(p::Reason::ConsentExpired))?
             .prepared
             .target
-            .marker
             .clone();
         let target = self.play_cleanup_context(
             &args.session_id,
             args.expected_revision,
             g,
             binding,
-            marker,
+            retained.marker.clone(),
+            retained.version_tag.clone(),
+            None,
             now,
         )?;
         let c = self
@@ -281,7 +283,7 @@ impl ConnectionState {
             .consent
             .as_ref()
             .filter(|c| {
-                args.confirm
+                args.confirm && args.purpose == c.prepared.target.purpose()
                     && c.id == args.consent_id
                     && c.session_id == args.session_id
                     && c.generation == g
@@ -293,6 +295,7 @@ impl ConnectionState {
             })
             .ok_or_else(|| refused(p::Reason::ConsentExpired))?;
         Ok(AgentReview {
+            purpose: c.prepared.target.purpose(),
             identity: c.identity.clone(),
             id: c.id.clone(),
             end: c.end,
@@ -320,6 +323,7 @@ impl ConnectionState {
                 Arc::ptr_eq(&c.identity, &review.identity)
                     && c.agent.is_none()
                     && c.id == scope.consent_id.as_str()
+                    && scope.purpose == review.purpose && scope.purpose == c.prepared.target.purpose()
                     && scope.end <= c.end
             })
             .ok_or_else(|| refused(p::Reason::ConsentExpired))?;
@@ -327,6 +331,7 @@ impl ConnectionState {
             || !access.enabled
             || access.consent_id != scope.consent_id
             || access.project_id != scope.project_id
+            || access.purpose != scope.purpose
         {
             return Err(refused(p::Reason::InvalidInput));
         }
@@ -368,6 +373,7 @@ impl ConnectionState {
             expected_revision: self.play_cleanup.view.revision,
             consent_id: c.id.clone(),
             confirm: true,
+            purpose: c.prepared.target.purpose(),
         })
     }
     pub(crate) fn play_cleanup_agent_close(&mut self, at: Instant) {
@@ -514,6 +520,8 @@ impl ConnectionState {
         generation: u32,
         binding: &str,
         marker: String,
+        version_tag: Option<p::version_tag::Selection>,
+        pending_purpose: Option<p::Purpose>,
         now: Instant,
     ) -> Result<p::Target, BridgeError> {
         self.room()
@@ -582,6 +590,8 @@ impl ConnectionState {
                 .ok_or_else(|| refused(p::Reason::PublisherUnconfigured))?
                 .into(),
             marker,
+            version_tag,
+            pending_purpose,
         };
         if !target.publisher_bound() {
             return Err(refused(p::Reason::InvalidInput));
@@ -733,6 +743,8 @@ impl ConnectionState {
             g,
             binding,
             nonce.clone(),
+            a.version_tag.clone(),
+            None,
             now,
         )?;
         self.play_cleanup_launch(
@@ -775,6 +787,8 @@ impl ConnectionState {
             g,
             binding,
             nonce.clone(),
+            a.version_tag.clone(),
+            (a.purpose == p::Purpose::VersionTag).then_some(p::Purpose::VersionTag),
             now,
         )?;
         self.play_cleanup_launch(
@@ -822,9 +836,11 @@ impl ConnectionState {
             g,
             binding,
             old.marker.clone(),
+            old.version_tag.clone(),
+            None,
             now,
         )?;
-        if !a.confirm
+        if !a.confirm || a.purpose != target.purpose()
             || !self.play_cleanup.consent.as_ref().is_some_and(|c| {
                 c.id == a.consent_id
                     && c.session_id == a.session_id
@@ -902,6 +918,8 @@ impl ConnectionState {
             g,
             binding,
             target.marker.clone(),
+            target.version_tag.clone(),
+            None,
             now,
         )?;
         if !current.same_scope(target) {
@@ -1352,6 +1370,7 @@ mod tests {
         let id = |c: &str| Id::parse(&c.repeat(32)).unwrap();
         let mut state = State::new();
         state.view.agent_access = Some(crate::service_play_cleanup_protocol::Access {
+            purpose: p::Purpose::PlayCleanup,
             service_instance: id("a"),
             project_id: id("b"),
             consent_id: id("c"),
