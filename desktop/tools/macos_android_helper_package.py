@@ -10789,7 +10789,7 @@ def candidate_removal_phase(consumer, context, phase, bootstrap):
     files, originals = {}, {}
     source_phase = None
     helper_files = tuple(dict.fromkeys((*consumer.HELPER_SOURCE_INPUTS, consumer.CONSUMER_PATH,
-        consumer.LEGACY_PATH, consumer.PARSER_PATH, consumer.SELECTION_PATH, consumer.STAGER_PATH,
+        consumer.LEGACY_PATH, consumer.PARSER_PATH, consumer.REMOVAL_SELECTION_PATH, consumer.STAGER_PATH,
         "desktop/tools/macos_android_helper_package.py", "desktop/tools/macos_normal_ui_runner.py")))
     shared = ("desktop/macos-installed-inputs/build-release.json", op.release_input, PROFILE, PRODUCER_PROFILE, INSTALLER_PROFILE, NOTARY_PROFILE,
               "desktop/macos-installed-inputs/remove-postinstall", "desktop/packaging/macos-removal.md")
@@ -10811,7 +10811,7 @@ def candidate_removal_phase(consumer, context, phase, bootstrap):
                 files[(helper, relative)], originals[(helper, relative)] = body, entry
         need(consumer.resume_identity(originals[(True, "desktop/tools/macos_android_helper_package.py")]) == bootstrap[0]
              and files[(True, "desktop/tools/macos_android_helper_package.py")] == bootstrap[2], "candidate-bootstrap-original-post")
-        nomination = consumer.selection_data(files[(True, consumer.SELECTION_PATH)], op.target)
+        nomination = consumer.selection_data(files[(True, consumer.REMOVAL_SELECTION_PATH)], op.target)
         def module(leaf, name, helper=True):
             relative = "desktop/tools/" + leaf
             return r.load_module(name, (consumer.HELPER_ROOT if helper else consumer.CANDIDATE_ROOT) / relative, files[(helper,relative)])

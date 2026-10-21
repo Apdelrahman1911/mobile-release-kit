@@ -1,3 +1,5 @@
+import { copyToolSetupInput, parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
+import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
 // App-retained observation/intent only. Native owns the slot, clocks, STOP and
 // original resources even when this controller, a promise or a view disappears.
 import type { ProjectSession } from './drafts.ts';
@@ -21,7 +23,7 @@ export interface EnvironmentDiagnosticsState {
   mode: BridgeMode; project: EnvironmentDiagnosticsSelection | null; platform: EnvironmentPlatform; operation: EnvironmentOperation;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; visible: boolean; selectionPending: boolean;
   listening: boolean; initialized: boolean; readPending: boolean; status: EnvironmentDiagnosticsStatus | null;
-  observationIssue: 'bridge' | 'protocol' | null; integrityFailed: boolean; generationLost: boolean; nativeBlocked: boolean;
+  observationIssue: 'bridge' | 'protocol' | null; integrityFailed: boolean; generationLost: boolean; nativeBlocked: boolean; delegated: boolean;
   attempt: EnvironmentDiagnosticsAttempt | null; observation: EnvironmentDiagnosticsObservation | null;
   unknownEvidence: EnvironmentDiagnosticsProjection | null; cancelClaimed: { runId: string; ownerGeneration: string } | null; error: ApiError | null;
 }
@@ -48,6 +50,7 @@ export const diagnosticsAvailabilityText: Record<EnvironmentDiagnosticsAvailabil
 };
 export function diagnosticsOwnerReason(state: EnvironmentDiagnosticsState): string | null {
   if (state.nativeBlocked || state.integrityFailed || state.generationLost) return 'Native diagnostics ownership or finality is unverified. Keep the original operation; conflicting work is disabled.';
+  if (state.delegated) return 'The approved draft belongs to a delegated tool check. Check or withdraw its original permission before new work.';
   if (state.status?.active || !attemptSettled(state.attempt)) return 'A build-tool diagnostics run is active or its Start reply is unconfirmed. Read or cancel the original run before conflicting native work.';
   if (state.mode === 'native' && state.observationIssue) return 'Native diagnostics status is not current. Read original status before conflicting native work.';
   return null;
@@ -57,11 +60,12 @@ export class EnvironmentDiagnosticsController {
   private state: EnvironmentDiagnosticsState = freeze<EnvironmentDiagnosticsState>({ mode: 'unavailable', project: null, platform: 'android', operation: 'build',
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, visible: false, selectionPending: false,
     listening: false, initialized: false, readPending: false, status: null, observationIssue: null, integrityFailed: false, generationLost: false,
-    nativeBlocked: false, attempt: null, observation: null, unknownEvidence: null, cancelClaimed: null, error: null });
+    nativeBlocked: false, delegated: false, attempt: null, observation: null, unknownEvidence: null, cancelClaimed: null, error: null });
   private readonly context: Context;
   private api: DesktopApi | null = null;
   private attemptApi: DesktopApi | null = null;
   private draft: JsonObject | null = null;
+  private toolDelegation: object | null = null;
   private unlisten: (() => void) | null = null;
   private reading: Promise<void> | null = null;
   private listeners = new Set<() => void>();
@@ -220,7 +224,7 @@ export class EnvironmentDiagnosticsController {
       provenance: currentAttempt ? currentAttempt.acknowledged ? 'acknowledged-start' : 'native-status' : sameEarlier ? earlier!.provenance : 'native-status',
       stale: !currentAttempt || !binding || !this.matches(binding) || currentAttempt.invalidated || this.state.observationIssue !== null || this.state.integrityFailed || this.state.nativeBlocked } });
   }
-  startReason(): string | null {
+  startReason(peers = true): string | null {
     const state = this.state;
     if (state.mode !== 'native') return 'Native diagnostics are unavailable in browser preview or without the desktop bridge. Example requirements are not tool observations.';
     if (state.operation !== 'build') return 'Artifact-validation diagnostics are not implemented. Its expected requirements remain available separately.';
@@ -229,10 +233,35 @@ export class EnvironmentDiagnosticsController {
     if (state.readPending) return 'The original native status is being read.';
     if (!state.status.capability.available) return diagnosticsAvailabilityText[state.status.capability.reason];
     if (state.status.statusRevision >= ENVIRONMENT_DIAGNOSTICS_COUNTER_MAX) return 'The native status counter cannot advance. No sequence or run will be reused.';
-    const other = this.context.otherOperationReason(); if (other) return other;
+    const other = peers ? this.context.otherOperationReason() : null; if (other) return other;
     if (!state.visible || state.selectionPending) return 'Return to Environment and finish choosing a project before checking tools.';
     if (!state.project?.hasDraft || !this.draft) return 'Select a project and prepare a current configuration draft first.';
     return null;
+  }
+  toolSetupReview():ToolSetupReview|null {
+    const p=this.state.project;if(this.disposed||this.toolDelegation||this.startReason(false)||!p)return null;
+    return parseToolSetupReview({kind:'doctor',platform:this.state.platform,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,prepared:null,sources:null});
+  }
+  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
+    if(!sameToolSetupReview(this.toolSetupReview(),review)||!this.api||!this.draft||!this.state.project||!this.state.status)return null;
+    const api=this.api,p=this.state.project,connection=this.state.connectionGeneration,selection=this.state.selectionGeneration,context=this.state.contextGeneration;
+    const input=copyToolSetupInput({projectId:p.projectId,review,doctorDraft:this.draft,sourceContext:null,nativeConsent:null,licenseAcknowledged:false});
+    if(!input)return null;
+    const token={};this.toolDelegation=token;this.update({delegated:true});
+    return {input,current:()=>!this.disposed&&this.toolDelegation===token&&api===this.api&&this.state.connectionGeneration===connection&&
+      this.state.selectionGeneration===selection&&this.state.contextGeneration===context&&this.state.visible&&!this.state.selectionPending&&!this.state.nativeBlocked,
+      readAfterReturned:async status=>{
+        if(this.toolDelegation!==token||api!==this.api||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'))return false;
+        while(this.reading)await this.reading;
+        const parsed=parseEnvironmentDiagnosticsStatus(await api.environmentDiagnosticsStatus());
+        if(!parsed||this.toolDelegation!==token||api!==this.api)return false;
+        const operation=status?.operation,row=parsed.lastTerminal;
+        if(operation?(!row||row.runId!==operation.operationId||row.ownerGeneration!==operation.ownerGeneration||row.finality!=='settled'||
+          !sameDiagnosticsContext(row.context,{projectId:p.projectId,draftRevision:review.draftRevision,baselineGeneration:review.baselineGeneration,platform:review.platform,operation:'build'})):
+          parsed.active!==null)return false;
+        this.receive(parsed,'read');if(this.state.integrityFailed||this.state.nativeBlocked||this.state.observationIssue)return false;
+        this.toolDelegation=null;this.update({delegated:false});return true;
+      }};
   }
   start(): boolean {
     this.syncProject();

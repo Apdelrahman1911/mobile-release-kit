@@ -74,6 +74,13 @@ class CandidateCarrierData(unittest.TestCase):
                 run['conclusion'] = job['conclusion'] = outcome
                 self.assertEqual(M.candidate_metadata_data(run, job, artifact, row), row)
             self.assertIsNone(job['conclusion'])
+            prepared = dict(job, name='prepared-installed-' + target, conclusion='success')
+            self.assertEqual(M.candidate_metadata_data(run, prepared, artifact, row), row)
+            # The prepared carrier job still needs ALL four original stages.
+            for changed, selection in ((prepared, dict(row, jobId='45')),
+                                       (dict(prepared, steps=prepared['steps'][1:]), row)):
+                with self.assertRaises(ValueError):
+                    M.candidate_metadata_data(run, changed, artifact, selection)
             for index, key, value in ((0, 'head_sha', 'a' * 40), (0, 'run_attempt', 1),
                     (0, 'head_branch', 'main'), (0, 'event', None), (0, 'event', 'workflow_dispatch'),
                     (0, 'event', 'pull_request'), (0, 'workflow_id', 1), (1, 'name', 'normal-installed-other'),

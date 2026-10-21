@@ -45,6 +45,12 @@ pub(crate) use agent_configuration::Link as ConfigurationAgentLink;
 pub(crate) struct ConfigurationAgentLink;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="edit_owner_service_metadata_text.rs"]
+mod agent_metadata_text;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_metadata_text::{Link as MetadataTextAgentLink,Step as MetadataTextAgentStep};
+
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path="edit_owner_service_version_edit.rs"]
@@ -653,7 +659,9 @@ pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_identity: Option<Arc<agent_identity::Link>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    reserved_version: Option<NativeReservedVersionHandoff> }
+    reserved_version: Option<NativeReservedVersionHandoff>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_metadata_text:Option<Arc<MetadataTextAgentLink>> }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -992,6 +1000,8 @@ struct Session {
     agent_configuration: Option<Arc<ConfigurationAgentLink>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_version_edit: std::sync::OnceLock<Arc<agent_version_edit::Link>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_metadata_text: Option<Arc<MetadataTextAgentLink>>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1485,7 +1495,7 @@ impl Inner {
             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); }
+        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); agent_metadata_text::changed(registry); }
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
@@ -1695,7 +1705,7 @@ impl Inner {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
-            agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+            agent_configuration::cancellation_at(&a.session,now).or_else(||agent_metadata_text::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
             self.trigger_locked(publication,r,id,reason,at);
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2144,6 +2154,8 @@ impl EditOwner {
         Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             reserved_version:None,
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_metadata_text:None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity: None })
     }
@@ -2285,6 +2297,11 @@ impl EditOwner {
             if ticket.as_ref().is_some_and(|t|t.reserved_version.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner());}
             ticket.as_mut().and_then(|t|t.reserved_version.take())
         };
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let agent_metadata_text={
+            if ticket.as_ref().is_some_and(|t|t.agent_metadata_text.is_some()&&(domain!=EditDomain::MetadataText||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner())}
+            ticket.as_mut().and_then(|t|t.agent_metadata_text.take())
+        };
         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
@@ -2350,6 +2367,8 @@ impl EditOwner {
             agent_configuration,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_version_edit:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_metadata_text,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2405,6 +2424,8 @@ impl EditOwner {
             agent_identity::before_claim(&self.inner, &r, &session, &project_id)?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_configuration::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_metadata_text::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
             // Claim is permanent for this invocation BEFORE its projection or
             // queue can fail. No postclaim error is a negative admission fact.
             *claimed = true;
@@ -2426,7 +2447,7 @@ impl EditOwner {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity::linked(&r);
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            if agent_configuration::linked(&r).is_err(){
+            if agent_configuration::linked(&r).is_err()||agent_metadata_text::linked(&r).is_err(){
                 // The permanent claim/installed original are never dropped by
                 // a failed link. Retain Unknown and register original cleanup.
                 session.resource_unknown.store(true,Ordering::SeqCst);
@@ -2536,6 +2557,15 @@ impl EditOwner {
     fn prepare_domain_configuration(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
         counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
         agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        self.prepare_domain_metadata(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,agent_config,None)
+    }
+    fn prepare_domain_metadata(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,revision:&str,
+        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
+        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
+        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        if agent_metadata.is_some()&&domain!=EditDomain::MetadataText{return Err(invalid_owner())}
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_metadata_text::preclaim(&self.inner,session_id,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare)?;
         if agent_config.is_some() && domain!=EditDomain::Configuration{return Err(invalid_owner());}
         if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
         let mut publication = self.inner.publication(supplied, false)?;
@@ -2543,7 +2573,9 @@ impl EditOwner {
         if !wire::token(session_id) || !wire::token(revision)
             || domain != EditDomain::Configuration && (counters.0 == u32::MAX || counters.1 == u32::MAX) { return Err(BridgeError::invalid()); }
         let configuration_recovery = matches!(submission.as_ref(), Some(SavedTextSubmission::ConfigurationRecovery));
+        if agent_metadata.is_some(){crate::service_metadata_text_protocol::bounded(&params,crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES-1024).map_err(|_|invalid_owner())?;}
         let bytes = request_with_configuration_intent(domain, configuration_recovery, session_id, 1, "prepare", params)?;
+        if agent_metadata.is_some()&&bytes.len()>crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES{return Err(invalid_owner())}
         let (session, reply) = {
             let mut r = self.inner.lock();
             self.inner.admission(&r, window, domain)?;
@@ -2575,6 +2607,8 @@ impl EditOwner {
                 (EditDomain::ProjectInitialization, Some(SavedTextSubmission::Initialization(intent)))
                     if a.projection.initialization.as_ref().is_some_and(|detail| detail.intent == intent && detail.counters == counters && detail.can_prepare()) => {},
                 (EditDomain::MetadataText, Some(SavedTextSubmission::MetadataText(submission))) => {
+                    #[cfg(any(target_os="linux",target_os="macos"))]
+                    if a.session.agent_metadata_text.is_some(){agent_configuration::memory::metadata_submission(&a.projection,&submission)?;}
                     let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && detail.normal_context().is_some_and(|context| submission.valid_for(context.platform)));
                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
@@ -2614,6 +2648,8 @@ impl EditOwner {
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
             a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
             a.phase_end = Some(phase_end);
@@ -2687,6 +2723,15 @@ impl EditOwner {
     fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
         registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
         agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>)->Result<DomainStatus,BridgeError>{
+        self.apply_domain_metadata(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,agent_config,agent_version,None)
+    }
+    fn apply_domain_metadata(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
+        registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
+        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>,
+        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        if agent_metadata.is_some()&&(domain!=EditDomain::MetadataText||recovery_intent){return Err(invalid_owner())}
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_metadata_text::preclaim(&self.inner,session_id,agent_metadata,crate::service_metadata_text_requests::Kind::Apply)?;
         if agent_version.is_some()&&(domain!=EditDomain::ReleaseVersion||recovery_intent){return Err(invalid_owner());}
         if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
@@ -2748,6 +2793,8 @@ impl EditOwner {
             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -2980,7 +3027,7 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if agent_configuration::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+        if agent_configuration::wait_command(&owner).await.is_err()||agent_metadata_text::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
         sent += 1;
         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
@@ -3076,14 +3123,19 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                             { wire::RESPONSE_LIMIT }
                         },
                         EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
-                        EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
+                        EditDomain::MetadataText => {
+                            #[cfg(any(target_os="linux",target_os="macos"))]
+                            if owner.agent_metadata_text.is_some(){crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES}else{metadata_wire::RESPONSE_LIMIT}
+                            #[cfg(not(any(target_os="linux",target_os="macos")))]
+                            {metadata_wire::RESPONSE_LIMIT}
+                        },
                         EditDomain::ReleaseVersion => version_wire::RESPONSE_LIMIT,
                         EditDomain::MetadataImages => images_wire::RESPONSE_LIMIT,
                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
                     };
                     #[cfg(any(target_os="linux",target_os="macos"))]
-                    if owner.agent_configuration.is_some() && frame.len() >= response_limit {
+                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()) && frame.len() >= response_limit {
                         discard=true;failed=true;frame.clear();
                         inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
                         continue;
@@ -3104,7 +3156,12 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                                     { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
                                 },
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
-                                EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
+                                EditDomain::MetadataText => {
+                                    #[cfg(any(target_os="linux",target_os="macos"))]
+                                    if owner.agent_metadata_text.is_some(){metadata_wire::decode_agent_metadata(&frame,&owner.id)}else{metadata_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
+                                    #[cfg(not(any(target_os="linux",target_os="macos")))]
+                                    {metadata_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
+                                },
                                 EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
                                 EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
                                 EditDomain::ProjectInitialization => initialization_wire::decode(&frame, &owner.id),
@@ -3215,7 +3272,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
-      if !invalid&&a.cleanup_start.is_none()&&agent_configuration::frame(a,&frame,&mut publication).is_err(){invalid=true;} }
+      if !invalid&&a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
     let mut terminal = false;
     let mut uncertain = false;
     if !invalid {
@@ -3556,7 +3613,7 @@ fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
 }
 fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_text.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
     end
 }
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
@@ -4529,6 +4586,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let configuration_chain_current=agent_configuration::retirement_publication(&mut a,&mut publication);
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let metadata_chain_current=agent_metadata_text::retirement_publication(&mut a,&mut publication);
         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
             // IDs only, bounded by the native 64-project picker registry. No
             // retained private history or guessed recovery controller.
@@ -4604,7 +4663,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
           agent_identity::actions::retired(&r, &a.session, a.unknown);
           agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current);
-          agent_version_edit::retired(&r,&a.session,a.unknown); }
+          agent_version_edit::retired(&r,&a.session,a.unknown);
+          agent_metadata_text::retired(&r,&a.session,a.unknown,metadata_chain_current); }
     }
     guard.completed = true;
     })();

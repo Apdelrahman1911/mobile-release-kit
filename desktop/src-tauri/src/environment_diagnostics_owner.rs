@@ -22,6 +22,9 @@ use crate::installed_runtime::AdmissionFailure;
 // metadata nor observation registration proves native/runtime qualification.
 const NATIVE_QUALIFIED: bool = false;
 const RUNTIME_QUALIFIED: bool = false;
+#[path = "environment_diagnostics_agent.rs"]
+mod agent;
+pub(crate) use agent::{Approval as AgentDoctorApproval,Binding as AgentDoctorBinding};
 const WORK: Duration = Duration::from_secs(6);
 const FINALITY: Duration = Duration::from_secs(10);
 
@@ -54,7 +57,7 @@ struct Inner {
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     fixture: Mutex<Option<std::sync::Weak<hosted_tests::Permit>>>,
 }
-struct Registry {
+struct Registry { agent:Option<Arc<agent::Binding>>,
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, active: Option<Active>, last: Option<Projection>,
 }
@@ -62,7 +65,7 @@ struct Active {
     owner: Arc<Session>, projection: Projection, first_stop: Option<Instant>, work_expired: bool,
     accepted: bool, terminal: bool, unknown: bool, final_join_seen: bool,
 }
-struct Session {
+struct Session { agent:Option<Arc<agent::Binding>>,
     id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
     // Immutable admission route, never new-work permission. Losing the live
     // document must not erase this original's runtime settlement obligation.
@@ -170,7 +173,7 @@ fn final_clock_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant)
 
 /// Ticket contains only native identity, an executor and the original T. It is
 /// prepared before the real document lock; no IO/child/request task is started.
-pub(crate) struct Ticket { owner: Arc<Inner>, id: String, generation: String, clocks: Clocks, executor: tokio::runtime::Handle }
+pub(crate) struct Ticket { agent:Option<Arc<agent::Binding>>, owner: Arc<Inner>, id: String, generation: String, clocks: Clocks, executor: tokio::runtime::Handle }
 pub(crate) struct Admitted { status: Status, release: oneshot::Sender<()> }
 impl Admitted {
     /// Called after DocumentBinding unlocks. A lost sender stops this original
@@ -205,7 +208,7 @@ impl EnvironmentDiagnosticsOwner {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation_identity: Arc::new(()),
             original_owner, original_document: Mutex::new(None),
-            runtime, registry: Mutex::new(Registry { revision: 0, exhausted: false,
+            runtime, registry: Mutex::new(Registry { agent:None, revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -240,10 +243,13 @@ impl EnvironmentDiagnosticsOwner {
         else if self.busy() { Err(busy()) } else { Ok(()) }
     }
     pub(crate) fn ticket(&self) -> Result<Ticket, BridgeError> {
-        let clocks = Clocks::new(Instant::now()); // Before entropy, runtime inspection, acquisition or await.
+        self.ticket_at(Instant::now())
+    }
+    fn ticket_at(&self,at:Instant)->Result<Ticket,BridgeError>{
+        let clocks = Clocks::new(at); // Original server submission precedes entropy/queue.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| unavailable())?;
         if !self.inner.qualified() || Profile::current().is_none() { return Err(unavailable()); }
-        Ok(Ticket { owner: self.inner.clone(), id: nonce()?, generation: nonce()?, clocks, executor })
+        Ok(Ticket { agent:None, owner: self.inner.clone(), id: nonce()?, generation: nonce()?, clocks, executor })
     }
     /// Only DocumentBinding calls this under its actual admission mutex after
     /// reciprocal native checks and the in-memory original registry lookup.
@@ -254,6 +260,7 @@ impl EnvironmentDiagnosticsOwner {
         let mut r = self.inner.lock();
         let reason = self.inner.availability(&r, Availability::Available);
         if reason != Availability::Available { return Err(refused(reason)); }
+        if !agent::start_matches(&r,&ticket,&input,registration,&project){return Err(invalid_owner());}
         if r.last.as_ref().is_some_and(|last| last.run_id == ticket.id || last.owner_generation == ticket.generation) { return Err(unavailable()); }
         if Instant::now() >= ticket.clocks.work { return Err(BridgeError::timeout()); }
         let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
@@ -262,7 +269,7 @@ impl EnvironmentDiagnosticsOwner {
         let projection = Projection { run_id: ticket.id.clone(), owner_generation: ticket.generation.clone(), context: context.clone(),
             phase: Phase::Starting, outcome: None, finality: Finality::Pending, reason: Reason::None, result: None };
         let installed_expected = self.inner.installed_selected();
-        let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
+        let owner = Arc::new(Session { agent:ticket.agent, id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             registration, project, draft: Mutex::new(Some(input.draft)), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
@@ -298,6 +305,7 @@ impl EnvironmentDiagnosticsOwner {
         let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false });
+        agent::entered(&owner);
         // Guards are constructed BEFORE spawn: even an unpolled task loss is
         // retained Unknown, not a successful no-op or permission to replace it.
         *watchdog_slot = Some(ticket.executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
@@ -397,6 +405,7 @@ impl EnvironmentDiagnosticsOwner {
                             observation.retired = true; // Actual final-clock-qualified original retirement above.
                         }
                     }
+                    agent::retired(&active);
                     r.last = Some(active.projection); self.inner.bump(&mut r);
                 }
         } else {
@@ -465,6 +474,7 @@ impl Inner {
             Some(next) => r.revision = next,
             None => { r.exhausted = true; r.disabled = true; if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); } },
         }
+        agent::changed(r);
         self.changes.send_replace(r.revision); self.changed.notify_waiters();
     }
     fn availability(&self, r: &Registry, gate: Availability) -> Availability {
@@ -529,6 +539,7 @@ impl Inner {
         let Some(a) = r.active.as_ref().filter(|a| a.owner.id == owner.id) else { return; };
         let work_due = now >= owner.clocks.work && !a.work_expired;
         let finality_due = now >= owner.clocks.finality && !a.unknown;
+        if let Some((reason,at))=agent::advance(owner,now){self.stop_locked(r,owner,reason,at);}
         if work_due {
             if let Some(a) = r.active.as_mut() { a.work_expired = true; }
             self.stop_locked(r, owner, Reason::TimedOut, owner.clocks.work);
@@ -736,7 +747,7 @@ async fn join_slot<T>(slot: &mut Option<JoinHandle<T>>) -> Result<T, tokio::task
 }
 async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, owner: &Session) -> Result<T, tokio::task::JoinError> {
     loop {
-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {} }
     }
 }
@@ -1150,7 +1161,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if book.err_failed { let mut pipe = owner.error.lock().await; let _ = close_original(&mut pipe); }
     let mut frames_open = book.frames.is_some();
     loop {
-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
         let wait_pending = book.child.is_some() && book.waited.is_none() && !book.wait_failed;
         let write_pending = book.writer.is_some() && !book.write_failed;
         let out_pending = book.stdout.is_some() && !book.out_failed;
@@ -1194,7 +1205,7 @@ async fn monitor_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let mut driver = owner.driver.lock().await;
     let mut continuing: Option<Continuation> = None;
     loop {
-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
         let driver_known = owner.driver_joined.load(Ordering::SeqCst) || owner.driver_failed.load(Ordering::SeqCst);
         if driver.is_none() && !driver_known { owner.driver_failed.store(true, Ordering::SeqCst); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); continue; }
         if owner.driver_failed.load(Ordering::SeqCst) && !owner.driver_done.load(Ordering::SeqCst) && continuing.is_none() {
@@ -1442,10 +1453,13 @@ mod tests {
         inert_active_for_route(admitted, false)
     }
     fn inert_active_for_route(admitted: Instant, installed_expected: bool) -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
+        inert_active_for_agent(admitted,installed_expected,None)
+    }
+    pub(super) fn inert_active_for_agent(admitted:Instant,installed_expected:bool,agent:Option<Arc<agent::Binding>>)->(EnvironmentDiagnosticsOwner,Arc<Session>){
         let owner = EnvironmentDiagnosticsOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened")));
         let projection = projection(); let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
         let (frames, receiver) = mpsc::channel(2);
-        let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
+        let session = Arc::new(Session { agent, id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
             profile: Profile::LinuxX64, clocks: Clocks::new(admitted), installed_expected, registration: 1, project: PathBuf::from("/unopened-project"),
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),

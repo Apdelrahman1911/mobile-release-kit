@@ -1,0 +1,1747 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -13,7 +13,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,5 +1,6 @@
+ import { createVersionEditAgentApi } from './serviceVersionEditProtocol.ts';
+ import { createAgentGithubActionPort } from './agentGithubActionAccess.ts';
++import { createMetadataServiceApi } from './serviceMetadataTextProtocol.ts';
+ import { createConfigurationApi } from './serviceConfigurationProtocol.ts';
+ import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+@@ -113,7 +114,7 @@
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+ 
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'mrk:agent-version-edit' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+ 
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -720,6 +721,7 @@
+     },
+     agentVersionEdit: createVersionEditAgentApi(mode, invoke, listen),
+     agentConfiguration: createConfigurationApi(mode, invoke, listen),
++    agentMetadataText: createMetadataServiceApi(mode, invoke, listen),
+     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+     openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+     prepareConfigRecovery: (sessionId, revision) => call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, intent: 'recover' }),
+diff --git a/desktop/src/components/MetadataTextEditor.tsx b/desktop/src/components/MetadataTextEditor.tsx
+--- a/desktop/src/components/MetadataTextEditor.tsx
++++ b/desktop/src/components/MetadataTextEditor.tsx
+@@ -1,3 +1,4 @@
++import { ServiceMetadataTextAccess } from './ServiceMetadataTextAccess.tsx';
+ import { useEffect, useId, useRef, useState } from 'react';
+ import { savedTextRecoveryActionLabel, savedTextRecoveryGuidance, savedTextRecoveryPreservationGuidance } from '../savedTextRecovery.ts';
+ import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryDomain, SavedTextRecoveryView } from '../savedTextRecovery.ts';
+@@ -311,6 +312,7 @@
+       </details>}
+     </section>
+     <MetadataTextSave state={state} controller={controller} detailed onShowProject={onShowProject} onHelp={onHelp} />
++    <ServiceMetadataTextAccess controller={controller.agent} />
+     {retained.length > 0 && <details className="card metadata-retained"><summary>Retained locale text · {retained.length} / 32 bundles · {(metadataCacheBytes(state.entries) / 1024 / 1024).toFixed(2)} / 8 MiB</summary>
+       <p>Refresh, project switches and locale removal never evict these drafts or move their text. To reuse an earlier draft, first select and load its same project, metadata root, platform and locale under the current saved configuration above. Then review its retained changes below; conflicting fields are never merged or forced.</p>
+       <p>Using a retained draft is not a save or transaction recovery. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>
+diff --git a/desktop/src/metadataTextEditController.ts b/desktop/src/metadataTextEditController.ts
+--- a/desktop/src/metadataTextEditController.ts
++++ b/desktop/src/metadataTextEditController.ts
+@@ -1,3 +1,6 @@
++import { MetadataServiceController } from './serviceMetadataTextController.ts';
++import type { MetadataServiceWitness } from './serviceMetadataTextController.ts';
++import type { MetadataServiceRequest } from './serviceMetadataTextProtocol.ts';
+ // App-retained observer/draft orchestration. This class never owns a child,
+ // filesystem handle, journal or write token independently of the native owner.
+ import { sameJson } from './catalog.ts';
+@@ -6,7 +9,7 @@
+ import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
+ import { isU32, U32_MAX } from './configEditProtocol.ts';
+ import { METADATA_TEXT_CACHE_BUNDLES, METADATA_TEXT_CACHE_BYTES, METADATA_TEXT_FIELD_BYTES,
+-  metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
++  metadataProjectDirty, metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
+ import type { MetadataConfiguredContext, MetadataDisplayBinding, MetadataDraftBaseline, MetadataFieldId, MetadataTextBaseline, MetadataTextDraft,
+   MetadataRetainedDraftChange, NormalMetadataTextEditProjection, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
+ import { metadataProjectionProgress, metadataStatusProgress, metadataTextError, metadataTextRequestFits,
+@@ -74,6 +77,7 @@
+   recovery: SavedTextRecoveryAttempt<'metadata_text'> | null;
+ }
+ export interface MetadataTextState {
++  delegationPending?: boolean;
+   mode: BridgeMode;
+   serviceGeneration: number;
+   selectionGeneration: number;
+@@ -117,6 +121,7 @@
+   other_edit_active: 'A configuration or workflow edit owns the shared native service. Finish or close that original session first.',
+ };
+ export function metadataOwnerReason(state: MetadataTextState, projectId: string): string | null {
++  if (state.delegationPending) return 'An original CLI metadata request or permission is still retained; Check or stop it before another file operation.';
+   const owner = state.edit;
+   if (owner.nativeBlocked || owner.integrityFailed || owner.generationLost || owner.observationIssue) return 'Metadata edit ownership is unverified. Observe the original native status, not a competing edit.';
+   if (owner.status?.active || !settled(owner.attempt) || owner.attempt && !owner.attempt.handled ||
+@@ -126,7 +131,7 @@
+ }
+ export function metadataRetainsDraft(state: MetadataTextState, projectId: string): boolean {
+   const edit = state.edit;
+-  return edit.attempt?.binding.projectId === projectId && (!settled(edit.attempt) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
++  return !!state.delegationPending || edit.attempt?.binding.projectId === projectId && (!settled(edit.attempt) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
+     edit.recovery?.binding.projectId === projectId && (!savedTextRecoverySettled(edit.recovery) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
+     edit.status?.active?.projectId === projectId || edit.unknownEvidence?.projectId === projectId;
+ }
+@@ -173,7 +178,50 @@
+   // One private, context-bound completion; never an owner-generation ordering.
+   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
+ 
+-  constructor(context: Context) { this.context = context; }
++  readonly agent: MetadataServiceController;
++  constructor(context: Context) {
++    this.context = context;
++    this.agent = new MetadataServiceController({
++      capture: (r) => this.agentWitness(r, true), current: (r, w) => this.agentWitnessCurrent(r, w),
++      native: () => this.state.edit.status, nativeUsable: () => usable(this.state.edit) && !this.reading && !this.state.edit.readPending,
++      observe: value => this.receive(value, 'reply'), checkNative: () => this.checkStatus(),
++      busy: value => {if (Boolean(this.state.delegationPending) !== value) this.publish({...this.state, delegationPending: value});},
++      boundary: (r, w) => this.agentApplyBoundary(r, w),
++    });
++  }
++  private agentWitness(r: MetadataServiceRequest, opening: boolean): MetadataServiceWitness | null {
++    const session=this.context.selectedProject(), context=this.selectedContext(), edit=this.state.edit;
++    if (this.disposed || !this.recoveryVisible || this.selectionPending || this.state.mode!=='native' || !session || !context ||
++      session.project.id!==r.runtimeProjectId || context.platform!==r.platform || context.locale!==r.locale || !this.state.choices.some(c=>c.key===context.key) ||
++      this.liveContextReason() || this.state.observeReason || !this.state.help || this.passivePending>0 || this.reading || edit.readPending ||
++      !edit.initialized || !edit.listening || edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.observationIssue ||
++      !settled(edit.attempt) || edit.attempt && !edit.attempt.handled || !savedTextRecoverySettled(edit.recovery) || edit.recovery && !edit.recovery.handled ||
++      edit.recoveryProjects.includes(r.runtimeProjectId) || opening && edit.status?.active || metadataProjectDirty(this.state.entries,r.runtimeProjectId) ||
++      this.context.otherEditReason(r.runtimeProjectId) || this.context.otherOperationReason?.()) return null;
++    const draft=this.state.entries[context.key]??null;
++    return {session,context,serviceGeneration:this.state.serviceGeneration,selectionGeneration:this.state.selectionGeneration,
++      draft,draftRevision:draft?.revision??0,baselineGeneration:draft?.baselineGeneration??0,observationGeneration:draft?.observationGeneration??0};
++  }
++  private agentWitnessCurrent(r:MetadataServiceRequest,w:MetadataServiceWitness):boolean {
++    const now=this.agentWitness(r,false);
++    return !!now&&now.session===w.session&&now.context.key===w.context.key&&now.context.metadataRoot===w.context.metadataRoot&&
++      now.serviceGeneration===w.serviceGeneration&&now.selectionGeneration===w.selectionGeneration&&now.draft===w.draft&&
++      now.draftRevision===w.draftRevision&&now.baselineGeneration===w.baselineGeneration&&now.observationGeneration===w.observationGeneration;
++  }
++  private agentApplyBoundary(r: MetadataServiceRequest, w: MetadataServiceWitness): MetadataServiceWitness | null {
++    if (!this.agentWitnessCurrent(r, w)) return null;
++    // Comparison-only: this is the precise existing boundary mutation, not a
++    // capture of a newer draft/selection after subscribers have run. Every
++    // other member must keep its original scalar or object reference (ABA too).
++    const expected = w.draft && { ...w.draft, stale: true, observationPredatesSave: true,
++      validation: null, validationRequest: null, loadRequest: null };
++    this.recoveryBoundary(r.runtimeProjectId);
++    const draft = this.state.entries[w.context.key] ?? null;
++    if (expected ? !draft || Object.keys(expected).length !== Object.keys(draft).length ||
++        Object.entries(expected).some(([key, value]) => Object.getOwnPropertyDescriptor(draft, key)?.value !== value) : draft !== null) return null;
++    const boundary = { ...w, draft };
++    return this.agentWitnessCurrent(r, boundary) ? boundary : null;
++  }
+   getSnapshot = (): MetadataTextState => this.state;
+   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+   private publish(next: MetadataTextState): void {
+@@ -217,10 +265,12 @@
+     if (this.disposed || this.recoveryVisible === value) return;
+     this.recoveryCompletion = null;
+     this.recoveryVisible = value;
++    this.agent.invalidate();
+     this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+     this.retireRecovery(true); this.process();
+   }
+   shutdownIntent(): void {
++    this.agent.invalidate();
+     this.recoveryCompletion = null;
+     this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+     this.retireRecovery(true); this.process();
+@@ -229,6 +279,7 @@
+     if (action.type === 'select' || action.type === 'switch' || action.projectId === this.state.projectId || action.projectId === this.state.edit.recovery?.binding.projectId) {
+       if (['select', 'switch', 'snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal', 'forget-removal',
+         'reset', 'adopt-suggestion', 'config-save-intent', 'config-save-final', 'config-save-recovery'].includes(action.type)) {
++        this.agent.invalidate();
+         this.recoveryCompletion = null;
+         this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+         this.retireRecovery(true); this.process();
+@@ -237,12 +288,14 @@
+   }
+   snapshotIntent(projectId: string): void {
+     if (projectId === this.state.projectId || projectId === this.state.edit.recovery?.binding.projectId) {
++      this.agent.invalidate();
+       this.recoveryCompletion = null;
+       this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
+       this.retireRecovery(true); this.process();
+     }
+   }
+   beginConnection(): void {
++    this.agent.invalidate();
+     this.passiveApi = null;
+     this.publish({ ...this.state, mode: 'unavailable', help: null,
+       serviceGeneration: Math.min(U32_MAX, this.state.serviceGeneration + 1), observeReason: 'The service context is being reloaded.', validateReason: 'The service context is being reloaded.' });
+@@ -262,6 +315,7 @@
+   setSelectionPending(value: boolean): void {
+     if (this.disposed || value === this.selectionPending) return;
+     this.selectionPending = value;
++    this.agent.invalidate();
+     this.publish({ ...this.state, selectionGeneration: Math.min(U32_MAX, this.state.selectionGeneration + 1) });
+     this.retirePassive(); this.process();
+   }
+@@ -271,6 +325,7 @@
+     const fingerprint = JSON.stringify([session?.project.id, session?.revision, session?.baselineGeneration, session?.observationGeneration,
+       session?.snapshotRequest, session?.sourceChanged, session?.saveRecoveryRequired, metadataConfigReason(session), choices]);
+     if (fingerprint !== this.fingerprint) {
++      this.agent.invalidate();
+       this.fingerprint = fingerprint;
+       const sameProject = session?.project.id === this.state.projectId;
+       const old = this.state.selectedKey;
+@@ -284,6 +339,7 @@
+   selectContext(key: string): boolean {
+     if (this.disposed || key === this.state.selectedKey || !this.state.choices.some((choice) => choice.key === key) &&
+         (!Object.hasOwn(this.state.entries, key) || this.state.entries[key]?.context.projectId !== this.state.projectId)) return false;
++    this.agent.invalidate();
+     this.publish({ ...this.state, selectedKey: key, selectionGeneration: Math.min(U32_MAX, this.state.selectionGeneration + 1), cacheError: null });
+     this.retirePassive(); this.process(); return true;
+   }
+@@ -301,6 +357,7 @@
+   }
+   passiveBusyReason(): string | null { return this.passivePending > 0 ? 'An original public-text observation or validation is still pending.' : null; }
+   loadReason(): string | null {
++    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
+     const other = this.context.otherOperationReason?.(); if (other) return other;
+     if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
+     return this.state.mode !== 'native' ? metadataTextError(null).message : this.state.observeReason ?? (!this.state.help ? metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message : null) ??
+@@ -308,6 +365,7 @@
+       (this.selectedEntry()?.loadRequest ? 'The original text observation is still pending.' : null);
+   }
+   validateReason(): string | null {
++    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
+     const other = this.context.otherOperationReason?.(); if (other) return other;
+     if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
+     if (this.state.mode !== 'native') return metadataTextError(null).message;
+@@ -370,12 +428,19 @@
+     } finally { this.passivePending -= 1; if (!this.disposed) { this.publish({ ...this.state }); this.process(); } }
+   }
+   editField(key: string, id: MetadataFieldId, text: string): boolean {
+-    const entry = this.state.entries[key];
++    const state = this.state, entry = state.entries[key];
+     if (this.disposed || !entry?.fields || entry.revision >= U32_MAX - 1 || !entry.fields.some((field) => field.id === id)) return false;
+     if (typeof text !== 'string' || /[\ud800-\udfff]/u.test(text) || new TextEncoder().encode(text).byteLength > METADATA_TEXT_FIELD_BYTES) {
+       this.put({ ...entry, editError: metadataTextError({ code: 'MetadataTextDraftLimit' }) }); return false;
+     }
+     if (entry.fields.find((field) => field.id === id)?.text === text) return false;
++    const project = this.context.selectedProject(), api = this.api, passive = this.passiveApi;
++    this.agent.invalidate();
++    // Revocation publishes synchronously. Never put the old entry over a
++    // subscriber's newer edit, edit/restore, selection or connection.
++    if (this.disposed || this.state.entries[key] !== entry || this.context.selectedProject() !== project ||
++        this.api !== api || this.passiveApi !== passive || this.state.serviceGeneration !== state.serviceGeneration ||
++        this.state.selectionGeneration !== state.selectionGeneration || this.state.selectedKey !== state.selectedKey || this.state.projectId !== state.projectId) return false;
+     const accepted = this.put({ ...entry, revision: entry.revision + 1, fields: entry.fields.map((field) => field.id === id ? { id, text } : field), editError: null,
+       loadRequest: null, validationRequest: null, validationError: null });
+     this.process(); return accepted;
+@@ -501,7 +566,7 @@
+   async connect(api: DesktopApi): Promise<void> {
+     if (this.disposed || this.api) return;
+     this.api = api; this.edit({ ...this.state.edit, mode: api.mode });
+-    if (api.mode === 'native') await this.checkStatus();
++    if (api.mode === 'native') {await this.checkStatus(); await this.agent.connect(api);}
+   }
+   async checkStatus(): Promise<void> {
+     if (this.disposed || !this.api || this.api.mode !== 'native') return;
+@@ -520,7 +585,7 @@
+       }
+     });
+     this.reading = work; this.edit({ ...this.state.edit, readPending: true });
+-    try { await work; } finally { if (this.reading === work) this.reading = null; }
++    try { await work; } finally { if (this.reading === work) this.reading = null; this.agent.nativeChanged(); }
+   }
+   private observationFailed(protocol: boolean): void {
+     this.edit({ ...this.state.edit, readPending: false, integrityFailed: this.state.edit.integrityFailed || protocol,
+@@ -705,6 +770,7 @@
+       this.state.selectionGeneration === binding.selectionGeneration && this.recoveryNavigationGeneration === binding.navigationGeneration;
+   }
+   inspectRecoveryReason(): string | null {
++    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
+     const edit = this.state.edit, project = this.context.selectedProject();
+     if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native metadata-text service; browser preview cannot inspect files.';
+     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
+@@ -870,6 +936,7 @@
+         }
+       } while (this.processAgain);
+     } finally { this.processing = false; }
++    this.agent.nativeChanged();
+   }
+   private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: MetadataReviewBinding, call: () => Promise<MetadataTextEditStatus>): Promise<void> {
+     try { this.receive(await call(), 'reply'); }
+@@ -886,6 +953,7 @@
+   }
+   dispose(): void {
+     if (this.disposed) return;
++    this.agent.dispose();
+     this.recoveryCompletion = null;
+     this.disposed = true;
+     const attempt = this.state.edit.attempt;
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -425,6 +425,7 @@
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+   readonly agentVersionEdit?: import('./serviceVersionEditProtocol.ts').VersionEditAgentApi | null;
++  readonly agentMetadataText?: import('./serviceMetadataTextProtocol.ts').MetadataServiceApi | null;
+   readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
+   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -290,6 +290,7 @@
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
+     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
++    "agent_metadata_text_status", "allow_agent_metadata_text_apply", "revoke_agent_metadata_text",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_store_access", "allow_agent_store", "revoke_agent_store",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -9,6 +9,7 @@
+     "allow-allow-agent-version-edit-apply",
+     "allow-revoke-agent-version-edit",
+     "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
++    "allow-agent-metadata-text-status", "allow-allow-agent-metadata-text-apply", "allow-revoke-agent-metadata-text",
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+     "allow-agent-git-commit-access",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -91,6 +91,8 @@
+ mod git_index;
+ #[path="service_configuration_application.rs"]
+ mod agent_configuration;
++#[path="service_metadata_text_application.rs"]
++mod agent_metadata_text;
+ #[path="service_version_reserve_application.rs"]
+ mod agent_version_reserve;
+ #[path="service_version_edit_application.rs"]
+@@ -503,6 +505,11 @@
+                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
+                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
+                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
++                p::RequestBody::MetadataTextRead(v) => return self.metadata_text_read(client,v.clone()),
++                p::RequestBody::MetadataTextPrepare(v) => return self.metadata_text_prepare(client,v.clone()),
++                p::RequestBody::MetadataTextApply(v) => return self.metadata_text_apply(client,v.clone()),
++                p::RequestBody::MetadataTextStatus(q) => return self.metadata_text_query(client,q,false),
++                p::RequestBody::MetadataTextCancel(q) => return self.metadata_text_query(client,q,true),
+                 p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
+                 p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
+                 p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
+@@ -519,6 +526,7 @@
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
++                p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1168,6 +1168,11 @@
+ mod agent_configuration;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use agent_configuration::ConfigurationAgentGate;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_service_metadata_text.rs"]
++mod agent_metadata_text;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_metadata_text::MetadataTextAgentGate;
+ 
+ struct Inner {
+     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+@@ -2223,7 +2228,9 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_version_edit_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+-            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
++            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_metadata_text_requests::DOCUMENT_BACKING)?; // SAME Config32; only one active full metadata bundle.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -4611,6 +4618,8 @@
+         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+     ) -> Result<T, BridgeError> {
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.inner.bridge.edits.metadata_text_agent_manual()?;
+         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+     }
+     #[cfg(test)]
+@@ -4666,6 +4675,8 @@
+         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+     ) -> Result<T, BridgeError> {
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.inner.bridge.edits.metadata_text_agent_manual()?;
+         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+     }
+     pub(crate) fn release_version_edit_admit_published<T>(
+diff --git a/desktop/src-tauri/src/edit_owner.rs b/desktop/src-tauri/src/edit_owner.rs
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -45,6 +45,12 @@
+ pub(crate) struct ConfigurationAgentLink;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ pub(crate) use agent_configuration::Step as ConfigurationAgentStep;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="edit_owner_service_metadata_text.rs"]
++mod agent_metadata_text;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_metadata_text::{Link as MetadataTextAgentLink,Step as MetadataTextAgentStep};
++
+ 
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path="edit_owner_service_version_edit.rs"]
+@@ -653,7 +659,9 @@
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_identity: Option<Arc<agent_identity::Link>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    reserved_version: Option<NativeReservedVersionHandoff> }
++    reserved_version: Option<NativeReservedVersionHandoff>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_metadata_text:Option<Arc<MetadataTextAgentLink>> }
+ pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
+ 
+ // Only the ignored headless workflow fixture can construct this private value,
+@@ -992,6 +1000,8 @@
+     agent_configuration: Option<Arc<ConfigurationAgentLink>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_version_edit: std::sync::OnceLock<Arc<agent_version_edit::Link>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_metadata_text: Option<Arc<MetadataTextAgentLink>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_failure: Mutex<Option<(Reason, Instant)>>,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -1485,7 +1495,7 @@
+             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); }
++        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); agent_metadata_text::changed(registry); }
+         self.changes.send_replace(registry.revision);
+         self.changed.notify_waiters();
+     }
+@@ -1695,7 +1705,7 @@
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+-            agent_configuration::cancellation_at(&a.session,now).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
++            agent_configuration::cancellation_at(&a.session,now).or_else(||agent_metadata_text::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+             self.trigger_locked(publication,r,id,reason,at);
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2144,6 +2154,8 @@
+         Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             reserved_version:None,
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_metadata_text:None,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity: None })
+     }
+@@ -2284,6 +2296,11 @@
+         let reserved_version={
+             if ticket.as_ref().is_some_and(|t|t.reserved_version.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner());}
+             ticket.as_mut().and_then(|t|t.reserved_version.take())
++        };
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let agent_metadata_text={
++            if ticket.as_ref().is_some_and(|t|t.agent_metadata_text.is_some()&&(domain!=EditDomain::MetadataText||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner())}
++            ticket.as_mut().and_then(|t|t.agent_metadata_text.take())
+         };
+         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
+             (EditDomain::Configuration, None) => {
+@@ -2350,6 +2367,8 @@
+             agent_configuration,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_version_edit:std::sync::OnceLock::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_metadata_text,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2405,6 +2424,8 @@
+             agent_identity::before_claim(&self.inner, &r, &session, &project_id)?;
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_configuration::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_metadata_text::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
+             // Claim is permanent for this invocation BEFORE its projection or
+             // queue can fail. No postclaim error is a negative admission fact.
+             *claimed = true;
+@@ -2426,7 +2447,7 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity::linked(&r);
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+-            if agent_configuration::linked(&r).is_err(){
++            if agent_configuration::linked(&r).is_err()||agent_metadata_text::linked(&r).is_err(){
+                 // The permanent claim/installed original are never dropped by
+                 // a failed link. Retain Unknown and register original cleanup.
+                 session.resource_unknown.store(true,Ordering::SeqCst);
+@@ -2536,6 +2557,15 @@
+     fn prepare_domain_configuration(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+         counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
+         agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        self.prepare_domain_metadata(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,agent_config,None)
++    }
++    fn prepare_domain_metadata(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,revision:&str,
++        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
++        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
++        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_metadata.is_some()&&domain!=EditDomain::MetadataText{return Err(invalid_owner())}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_metadata_text::preclaim(&self.inner,session_id,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare)?;
+         if agent_config.is_some() && domain!=EditDomain::Configuration{return Err(invalid_owner());}
+         if agent_action.is_some() && domain != EditDomain::ProjectIdentity { return Err(invalid_owner()); }
+         let mut publication = self.inner.publication(supplied, false)?;
+@@ -2543,7 +2573,9 @@
+         if !wire::token(session_id) || !wire::token(revision)
+             || domain != EditDomain::Configuration && (counters.0 == u32::MAX || counters.1 == u32::MAX) { return Err(BridgeError::invalid()); }
+         let configuration_recovery = matches!(submission.as_ref(), Some(SavedTextSubmission::ConfigurationRecovery));
++        if agent_metadata.is_some(){crate::service_metadata_text_protocol::bounded(&params,crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES-1024).map_err(|_|invalid_owner())?;}
+         let bytes = request_with_configuration_intent(domain, configuration_recovery, session_id, 1, "prepare", params)?;
++        if agent_metadata.is_some()&&bytes.len()>crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES{return Err(invalid_owner())}
+         let (session, reply) = {
+             let mut r = self.inner.lock();
+             self.inner.admission(&r, window, domain)?;
+@@ -2575,6 +2607,8 @@
+                 (EditDomain::ProjectInitialization, Some(SavedTextSubmission::Initialization(intent)))
+                     if a.projection.initialization.as_ref().is_some_and(|detail| detail.intent == intent && detail.counters == counters && detail.can_prepare()) => {},
+                 (EditDomain::MetadataText, Some(SavedTextSubmission::MetadataText(submission))) => {
++                    #[cfg(any(target_os="linux",target_os="macos"))]
++                    if a.session.agent_metadata_text.is_some(){agent_configuration::memory::metadata_submission(&a.projection,&submission)?;}
+                     let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && detail.normal_context().is_some_and(|context| submission.valid_for(context.platform)));
+                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
+@@ -2614,6 +2648,8 @@
+             }
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
+             a.prepare_counters = Some(counters);
+             a.claimed_seq = 1;
+             a.phase_end = Some(phase_end);
+@@ -2687,6 +2723,15 @@
+     fn apply_domain_configuration(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
+         registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
+         agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>)->Result<DomainStatus,BridgeError>{
++        self.apply_domain_metadata(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,agent_config,agent_version,None)
++    }
++    fn apply_domain_metadata(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
++        registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
++        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>,
++        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_metadata.is_some()&&(domain!=EditDomain::MetadataText||recovery_intent){return Err(invalid_owner())}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_metadata_text::preclaim(&self.inner,session_id,agent_metadata,crate::service_metadata_text_requests::Kind::Apply)?;
+         if agent_version.is_some()&&(domain!=EditDomain::ReleaseVersion||recovery_intent){return Err(invalid_owner());}
+         if agent_config.is_some()&&(domain!=EditDomain::Configuration||recovery_intent){return Err(invalid_owner());}
+         if agent_action.is_some() && (domain != EditDomain::ProjectIdentity || recovery_intent) { return Err(invalid_owner()); }
+@@ -2748,6 +2793,8 @@
+             if let Some(handoff)=&a.session.reserved_version {handoff.publication(&mut publication,ReservedVersionStep::Apply)?;}
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !agent_configuration::consume(a,agent_config,crate::service_configuration_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+             a.claimed_seq = 2;
+@@ -2980,7 +3027,7 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        if agent_configuration::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
++        if agent_configuration::wait_command(&owner).await.is_err()||agent_metadata_text::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
+         sent += 1;
+         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
+@@ -3076,14 +3123,19 @@
+                             { wire::RESPONSE_LIMIT }
+                         },
+                         EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
+-                        EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
++                        EditDomain::MetadataText => {
++                            #[cfg(any(target_os="linux",target_os="macos"))]
++                            if owner.agent_metadata_text.is_some(){crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES}else{metadata_wire::RESPONSE_LIMIT}
++                            #[cfg(not(any(target_os="linux",target_os="macos")))]
++                            {metadata_wire::RESPONSE_LIMIT}
++                        },
+                         EditDomain::ReleaseVersion => version_wire::RESPONSE_LIMIT,
+                         EditDomain::MetadataImages => images_wire::RESPONSE_LIMIT,
+                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
+                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
+                     };
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+-                    if owner.agent_configuration.is_some() && frame.len() >= response_limit {
++                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()) && frame.len() >= response_limit {
+                         discard=true;failed=true;frame.clear();
+                         inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
+                         continue;
+@@ -3104,7 +3156,12 @@
+                                     { wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery) }
+                                 },
+                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
+-                                EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
++                                EditDomain::MetadataText => {
++                                    #[cfg(any(target_os="linux",target_os="macos"))]
++                                    if owner.agent_metadata_text.is_some(){metadata_wire::decode_agent_metadata(&frame,&owner.id)}else{metadata_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
++                                    #[cfg(not(any(target_os="linux",target_os="macos")))]
++                                    {metadata_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
++                                },
+                                 EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
+                                 EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
+                                 EditDomain::ProjectInitialization => initialization_wire::decode(&frame, &owner.id),
+@@ -3215,7 +3272,7 @@
+     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
+-      if !invalid&&a.cleanup_start.is_none()&&agent_configuration::frame(a,&frame,&mut publication).is_err(){invalid=true;} }
++      if !invalid&&a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
+     let mut terminal = false;
+     let mut uncertain = false;
+     if !invalid {
+@@ -3556,7 +3613,7 @@
+ }
+ fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_text.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+     end
+ }
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+@@ -4529,6 +4586,8 @@
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         let configuration_chain_current=agent_configuration::retirement_publication(&mut a,&mut publication);
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let metadata_chain_current=agent_metadata_text::retirement_publication(&mut a,&mut publication);
+         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
+             // IDs only, bounded by the native 64-project picker registry. No
+             // retained private history or guessed recovery controller.
+@@ -4604,7 +4663,8 @@
+         { identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+           agent_identity::actions::retired(&r, &a.session, a.unknown);
+           agent_configuration::retired(&r,&a.session,a.unknown,configuration_chain_current);
+-          agent_version_edit::retired(&r,&a.session,a.unknown); }
++          agent_version_edit::retired(&r,&a.session,a.unknown);
++          agent_metadata_text::retired(&r,&a.session,a.unknown,metadata_chain_current); }
+     }
+     guard.completed = true;
+     })();
+diff --git a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+--- a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
++++ b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+@@ -406,6 +406,69 @@
+             // A simultaneous ordinary Edit is refused, never credited as idle.
+         }
+         n.add(FUTURE)?;
++        Ok(n.bytes)
++    }
++    pub(crate) fn metadata_text_agent_edit_backing(&self) -> Result<usize, BridgeError> {
++        let r = self
++            .inner
++            .registry
++            .try_lock()
++            .map_err(|_| invalid_owner())?;
++        if self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted {
++            return Err(edit_unknown());
++        }
++        let mut n = Usage {
++            bytes: size_of::<Registry>(),
++            nodes: 0,
++        };
++        r.generation.heap(&mut n)?;
++        r.loss_generation.heap(&mut n)?;
++        r.window.heap(&mut n)?;
++        // Registry bookkeeping remains present even with no active operation.
++        for keys in [
++            &r.blocked_projects,
++            &r.image_recovery_projects,
++            &r.workflow_recovery_projects,
++        ] {
++            n.add(keys.len().checked_mul(1024).ok_or_else(invalid_owner)?)?;
++            for key in keys {
++                key.heap(&mut n)?;
++            }
++        }
++        n.add(
++            r.domain_blocks
++                .0
++                .len()
++                .checked_mul(4096)
++                .ok_or_else(invalid_owner)?,
++        )?;
++        for key in r.domain_blocks.0.keys() {
++            key.heap(&mut n)?;
++        }
++        if let Some(p) = &r.last {
++            let bytes = projection(p)?;
++            // Config Status can hold two extra independent last clones. Other
++            // domains are filtered out, but their ORIGINAL full backing stays.
++            n.add(
++                bytes
++                    .checked_mul(if p.domain == EditDomain::MetadataText {
++                        3
++                    } else {
++                        1
++                    })
++                    .ok_or_else(invalid_owner)?,
++            )?;
++        }
++        if let Some(a) = &r.active {
++            if a.session.agent_metadata_text.is_none()
++                || projection(&a.projection)? > METADATA_REPRESENTATION
++            {
++                return Err(invalid_owner());
++            }
++            // The linked active is already in METADATA_FUTURE's bounded six copies.
++            // A simultaneous ordinary Edit is refused, never credited as idle.
++        }
++        n.add(METADATA_FUTURE)?;
+         Ok(n.bytes)
+     }
+ }
+@@ -592,3 +655,30 @@
+         );
+     }
+ }
++
++// Fixed new MetadataText agent quote; original Config quote above is unchanged.
++pub(in crate::edit_owner) const METADATA_REPRESENTATION:usize=crate::service_metadata_text_protocol::NATIVE_FRAME_NODES*512+2*crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES;
++pub(in crate::edit_owner) const METADATA_FUTURE:usize=6*METADATA_REPRESENTATION
++    +2*crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES+2*c::STATUS_LIMIT
++    +2*crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES
++    +2*8192+size_of::<Session>()+size_of::<crate::edit_owner::agent_metadata_text::Link>()
++    +4*(size_of::<tokio::sync::oneshot::Sender<Result<(),BridgeError>>>()+size_of::<tokio::sync::oneshot::Receiver<Result<(),BridgeError>>>()+256)
++    +size_of::<crate::service_metadata_text_requests::Call>();
++pub(in crate::edit_owner) fn metadata_prospective(p:&EditProjection,frame:&ChildFrame)->Result<(),BridgeError>{
++    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};p.heap(&mut n)?;
++    match frame{
++        ChildFrame::MetadataTextOpened(o)=>{o.revision.heap(&mut n)?;o.metadata_root.heap(&mut n)?;o.baseline.heap(&mut n)?;},
++        ChildFrame::MetadataTextPrepared(v)=>{v.revision.heap(&mut n)?;v.plan_token.heap(&mut n)?;v.view.heap(&mut n)?;},
++        ChildFrame::MetadataTextTerminal(_,_)=>(),_=>return Err(invalid_owner())}
++    if n.bytes>METADATA_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
++}
++
++pub(in crate::edit_owner) fn metadata_submission(p:&EditProjection,submission:&t::Submission)->Result<(),BridgeError>{
++    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};
++    p.heap(&mut n)?;submission.heap(&mut n)?;
++    if n.bytes>METADATA_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
++}
++
++#[cfg(test)]
++#[path = "edit_owner_service_metadata_text_memory_tests.rs"]
++mod metadata_tests;
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -9,6 +9,8 @@
+ mod identity;
+ #[path="installed_cli_configuration.rs"]
+ mod configuration;
++#[path="installed_cli_metadata_text.rs"]
++mod metadata_text;
+ #[path = "installed_cli_identity_actions.rs"]
+ mod identity_actions;
+ #[path = "installed_cli_local_checks.rs"]
+@@ -63,6 +65,11 @@
+   mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
+   mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk metadata-text-read PROJECT_ID OBSERVATION_REVISION android|ios LOCALE [--json]\n\
++  mrk metadata-text-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID --stdin [--json]\n\
++  mrk metadata-text-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
++  mrk metadata-text-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk metadata-text-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk configuration-read PROJECT_ID OBSERVATION_REVISION [--json]\n\
+   mrk configuration-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION --stdin [--json]\n\
+   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+@@ -281,6 +288,7 @@
+                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                 "commands": IDENTITY_ACTION_COMMANDS,
+             },
++            "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
+             "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
+                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
+                 "excludes":["identity","version","enabled-platforms","commands","credentials","signing","recovery"],"nativeAvailabilityChecked":false},
+@@ -339,7 +347,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup","apple-provisioning"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","metadata-text","store","play-cleanup","apple-provisioning"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -367,7 +375,7 @@
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -473,6 +481,7 @@
+         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+         p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
++        p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
+@@ -512,6 +521,7 @@
+     let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
+     if configuration::recognizes(&args){return configuration::run(args);}
++    if metadata_text::recognizes(&args){return metadata_text::run(args);}
+     if identity::recognizes(&args) { return identity::run(args); }
+     if upload_key::recognizes(&args) { return upload_key::run(args); }
+     if version_edit::recognizes(&args) { return version_edit::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -5,7 +5,7 @@
+ //! JSON/CLI argument/environment value. Peer UID is checked on BOTH ends.
+ use crate::{application_service::{ApplicationService, ClientSession}, application_state_store as store, service_protocol as p};
+ use p::{Error, Id};
+-use std::{path::Path, sync::Arc, time::Duration};
++use std::{path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
+ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{UnixListener, UnixStream}, sync::watch, task::{JoinHandle, JoinSet}, time::{timeout_at, Instant}};
+ use zeroize::Zeroizing;
+ 
+@@ -47,7 +47,42 @@
+     }
+ }
+ 
+-struct Endpoint { socket: store::FileKey, descriptor: store::FileKey, capability: ConnectionCapability }
++struct Endpoint { socket: store::FileKey, descriptor: store::FileKey, capability: ConnectionCapability, metadata_exchange: AtomicBool }
++// Only concurrent allocation exclusion on the SAME endpoint, not a service
++// grant/native owner. No waiting queue or renewed deadline is introduced.
++struct MetadataExchange<'a> { active: &'a AtomicBool }
++impl<'a> MetadataExchange<'a> {
++    fn require(active: &'a AtomicBool, held: &mut Option<Self>) -> Result<(), Error> {
++        if let Some(original) = held {
++            return if std::ptr::eq(original.active, active) { Ok(()) } else { Err(Error::StateUnknown) };
++        }
++        active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).map_err(|_| Error::Busy)?;
++        *held = Some(Self { active });
++        Ok(())
++    }
++}
++impl Drop for MetadataExchange<'_> {
++    fn drop(&mut self) { self.active.store(false, Ordering::Release); }
++}
++// Quote the entire original endpoint (including padding), plus each existing
++// worker's retained option and BOTH nested futures' option borrows. No extra
++// worker: serve_exchange and read_request_frame borrow the same outer cell.
++pub(crate) const METADATA_CONTROL_BACKING: usize = std::mem::size_of::<Endpoint>()
++    + CLIENTS * (std::mem::size_of::<Option<MetadataExchange<'static>>>()
++        + 2 * std::mem::size_of::<&mut Option<MetadataExchange<'static>>>());
++fn metadata_request(body: &p::RequestBody) -> bool {
++    matches!(body, p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_)
++        | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_))
++}
++fn admit_request_size<'a>(size: usize, active: &'a AtomicBool, held: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
++    if size == 0 || size > crate::service_metadata_text_protocol::REQUEST_BYTES { return Err(Error::InvalidRequest); }
++    if size > p::REQUEST_BYTES { MetadataExchange::require(active, held)?; }
++    Ok(())
++}
++fn admit_request_body<'a>(body: &p::RequestBody, active: &'a AtomicBool, held: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
++    if metadata_request(body) { MetadataExchange::require(active, held)?; }
++    Ok(())
++}
+ impl Endpoint {
+     fn check(&self, service: &ApplicationService) -> Result<(), Error> {
+         let guard = service.state_directory().ipc_directory().map_err(|e| e.code)?;
+@@ -144,7 +179,7 @@
+         let descriptor = store::create_private(fd, DESCRIPTOR, &capability.bytes()).map_err(|e| e.code)?;
+         store::sync(fd).map_err(|e| e.code)?;
+         directory.check().map_err(|e| e.code)?;
+-        Ok(Endpoint { socket, descriptor, capability })
++        Ok(Endpoint { socket, descriptor, capability, metadata_exchange: AtomicBool::new(false) })
+     })();
+     match prepared {
+         Ok(endpoint) => {
+@@ -221,16 +256,21 @@
+ async fn serve_one(mut stream: UnixStream, service: Arc<ApplicationService>, endpoint: Arc<Endpoint>, mut stop: watch::Receiver<bool>, deadline: Instant) -> Result<(), Error> {
+     // Errors/refusals/disconnects are not leaked to logs and are not operation
+     // outcomes. The owner still closes this exact stream before its task joins.
++    // OUTSIDE the cancelled future: a timeout/STOP cannot release this lease
++    // before the same original stream has taken its explicit close path.
++    let mut metadata = None;
+     let _exchange = tokio::select! {
+         _ = stop.changed() => Err(Error::Unavailable),
+-        result = timeout_at(deadline, serve_exchange(&mut stream, &service, &endpoint)) => result.unwrap_or(Err(Error::Unavailable)),
++        result = timeout_at(deadline, serve_exchange(&mut stream, &service, &endpoint, &mut metadata)) => result.unwrap_or(Err(Error::Unavailable)),
+     };
+-    close_stream(stream)
++    let closed = close_stream(stream);
++    drop(metadata);
++    closed
+ }
+ fn same_user(stream: &UnixStream) -> Result<(), Error> {
+     if stream.peer_cred().map_err(|_| Error::AccessDenied)?.uid() != store::uid() { Err(Error::AccessDenied) } else { Ok(()) }
+ }
+-async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, endpoint: &Endpoint) -> Result<(), Error> {
++async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationService, endpoint: &'a Endpoint, metadata: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
+     same_user(stream)?;
+     endpoint.check(service)?;
+     let mut handshake = Zeroizing::new([0u8; HANDSHAKE]);
+@@ -245,17 +285,22 @@
+     };
+     stream.write_all(b"A").await.map_err(|_| Error::Unavailable)?;
+     stream.write_all(service.instance().as_str().as_bytes()).await.map_err(|_| Error::Unavailable)?;
+-    let bytes = read_frame(stream, p::REQUEST_BYTES).await?;
++    let bytes = read_request_frame(stream, endpoint, metadata).await?;
+     // One frame/connection; extra bytes are rejected rather than ignored as a
+     // possible second action. The client half-closes after its exact request.
+     let mut extra = [0u8; 1];
+     if stream.read(&mut extra).await.map_err(|_| Error::Unavailable)? != 0 { return Err(Error::InvalidRequest); }
+     let request = p::decode_request(&bytes)?;
++    drop(bytes); // Parser-only input never overlaps response encoding. Original owners remain retained.
++    // All short Metadata methods, especially Status/Cancel returning public
++    // Load data, share the same exclusion before any dispatch/result clone.
++    admit_request_body(&request.request, &endpoint.metadata_exchange, metadata)?;
+     endpoint.check(service)?;
+     let response = service.dispatch(&client, request);
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
+         p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+@@ -272,6 +317,17 @@
+         _ => service.client_current(&client)?,
+     }
+     write_frame(stream, &bytes).await
++}
++async fn read_request_frame<'a>(stream: &mut UnixStream, endpoint: &'a Endpoint, metadata: &mut Option<MetadataExchange<'a>>) -> Result<Vec<u8>, Error> {
++    let mut header = [0u8; 4];
++    stream.read_exact(&mut header).await.map_err(|_| Error::Unavailable)?;
++    let size = u32::from_be_bytes(header) as usize;
++    // Before ANY extended Vec allocation/read. Old <=4KiB requests retain the
++    // original eight-worker path; oversize old actions still fail the decoder.
++    admit_request_size(size, &endpoint.metadata_exchange, metadata)?;
++    let mut bytes = vec![0u8; size];
++    stream.read_exact(&mut bytes).await.map_err(|_| Error::Unavailable)?;
++    Ok(bytes)
+ }
+ async fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>, Error> {
+     let mut header = [0u8; 4];
+@@ -360,6 +416,152 @@
+     fn list() -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
+     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
+     #[test]
++    fn metadata_exchange_admission_is_fixed_fail_fast_and_reuses_only_its_original_lease() {
++        use crate::service_metadata_text_protocol as wire;
++        let id = |n: char| Id::parse(&n.to_string().repeat(32)).unwrap();
++        let query = wire::Query { service_instance: id('1'), project_id: id('2'), request_id: id('3') };
++        let bodies = [
++            p::RequestBody::MetadataTextRead(wire::Read { origin: query.clone(), expected_observation_revision: 1, platform: wire::Platform::Android, locale: "en-US".into() }),
++            p::RequestBody::MetadataTextPrepare(wire::Prepare { origin: query.clone(), proposal: wire::Fields { platform: wire::Platform::Android, fields: wire::Platform::Android.ids().iter().map(|id| wire::Field { id: (*id).into(), text: String::new() }).collect() } }),
++            p::RequestBody::MetadataTextApply(wire::Apply { origin: query.clone(), original: wire::Original { session_id: id('4'), owner_generation: id('5'), revision: id('6') }, plan_token: id('7'), reviewed: true }),
++            p::RequestBody::MetadataTextStatus(query.clone()),
++            p::RequestBody::MetadataTextCancel(query),
++        ];
++        let active = AtomicBool::new(false);
++        let mut held = None;
++        for size in [0, wire::REQUEST_BYTES + 1] {
++            assert_eq!(admit_request_size(size, &active, &mut held), Err(Error::InvalidRequest));
++            assert!(held.is_none() && !active.load(Ordering::Acquire));
++        }
++        admit_request_size(p::REQUEST_BYTES + 1, &active, &mut held).unwrap();
++        assert!(active.load(Ordering::Acquire));
++        let mut other = None;
++        assert_eq!(admit_request_size(wire::REQUEST_BYTES, &active, &mut other), Err(Error::Busy));
++        assert!(other.is_none()); // The production size cut precedes Vec allocation.
++        for body in [p::RequestBody::Info(p::Empty {}), p::RequestBody::Projects(p::Empty {})] {
++            let request = p::Request { version: p::VERSION, request_id: id('8'), request: body };
++            let mut bytes = p::encode_request(&request).unwrap();
++            bytes.resize(p::REQUEST_BYTES, b' ');
++            let ordinary = p::decode_request(&bytes).unwrap();
++            admit_request_size(bytes.len(), &active, &mut other).unwrap();
++            admit_request_body(&ordinary.request, &active, &mut other).unwrap();
++            assert!(other.is_none()); // All eight ordinary workers remain available.
++        }
++        for body in &bodies {
++            let request = p::Request { version: p::VERSION, request_id: id('8'), request: body.clone() };
++            let bytes = p::encode_request(&request).unwrap();
++            assert!(bytes.len() <= p::REQUEST_BYTES);
++            let decoded = p::decode_request(&bytes).unwrap();
++            assert!(metadata_request(&decoded.request));
++            assert_eq!(admit_request_body(&decoded.request, &active, &mut other), Err(Error::Busy));
++            assert!(other.is_none());
++            admit_request_body(&decoded.request, &active, &mut held).unwrap();
++        }
++        // Already admitted large input retains its SAME original lease; a
++        // different Endpoint can never adopt that cell as its own admission.
++        admit_request_size(wire::REQUEST_BYTES, &active, &mut held).unwrap();
++        let foreign = AtomicBool::new(false);
++        assert_eq!(MetadataExchange::require(&foreign, &mut held), Err(Error::StateUnknown));
++        assert!(!foreign.load(Ordering::Acquire));
++        drop(held);
++        assert!(!active.load(Ordering::Acquire));
++        for body in &bodies {
++            let mut fresh = None;
++            admit_request_size(p::REQUEST_BYTES, &active, &mut fresh).unwrap();
++            assert!(fresh.is_none());
++            admit_request_body(body, &active, &mut fresh).unwrap();
++            assert!(fresh.is_some() && active.load(Ordering::Acquire));
++            drop(fresh);
++            assert!(!active.load(Ordering::Acquire));
++        }
++        assert_eq!(CLIENTS, 8);
++        assert_eq!(SERVER_DEADLINE, Duration::from_secs(5));
++        assert_eq!(METADATA_CONTROL_BACKING, std::mem::size_of::<Endpoint>() + CLIENTS *
++            (std::mem::size_of::<Option<MetadataExchange<'static>>>() + 2 * std::mem::size_of::<&mut Option<MetadataExchange<'static>>>()));
++    }
++    #[test]
++    fn metadata_stalled_large_frame_keeps_lease_until_original_stop_close_and_return() {
++        // Genuine private Store/Service/socket fixture, not native Load/Edit
++        // evidence. All three original serve_one futures and clients return;
++        // no standalone task, forged grant or background cleanup is used.
++        runtime().block_on(async {
++            use crate::service_metadata_text_protocol as wire;
++            let f = Fixture::short();
++            let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
++            let (id, root) = register_fixture(&service, &f.app, "project", "metadata-project");
++            service.publish_passive_snapshot("metadata-project", &passive(&root, &"a".repeat(64))).unwrap();
++            service.allow_agent_read(vec![id.clone()], Duration::from_secs(300)).unwrap();
++            store.begin_endpoint().unwrap();
++            let (listener, endpoint) = bind(&service).unwrap();
++            let endpoint = Arc::new(endpoint);
++            let (signal, stop) = watch::channel(false);
++            let mut client = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
++            let (stream, _) = listener.accept().await.unwrap();
++            let mut large = Box::pin(serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE));
++            let header_only = async {
++                client.write_all(&endpoint.capability.bytes()).await.unwrap();
++                let mut accepted = [0u8; 1]; client.read_exact(&mut accepted).await.unwrap();
++                assert_eq!(accepted, *b"A");
++                let mut instance = [0u8; 32]; client.read_exact(&mut instance).await.unwrap();
++                assert_eq!(instance, service.instance().as_str().as_bytes());
++                client.write_all(&((p::REQUEST_BYTES + 1) as u32).to_be_bytes()).await.unwrap();
++                while !endpoint.metadata_exchange.load(Ordering::Acquire) { tokio::task::yield_now().await; }
++            };
++            tokio::select! {
++                _ = large.as_mut() => panic!("incomplete body cannot return an exchange"),
++                result = timeout(Duration::from_secs(2), header_only) => result.unwrap(),
++            }
++            // Ordinary IPC still uses this original listener/Endpoint and
++            // closes independently while the admitted large body is stalled.
++            let listing = list();
++            let (listed, returned) = timeout(Duration::from_secs(2), async {
++                tokio::join!(request(&f.app, &listing), async {
++                    let (stream, _) = listener.accept().await.unwrap();
++                    serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE).await
++                })
++            }).await.unwrap();
++            returned.unwrap();
++            let revision = match listed.unwrap().response {
++                p::ResponseBody::Projects(rows) => { assert_eq!(rows.len(), 1); rows[0].observation.as_ref().unwrap().revision },
++                _ => panic!("wrong ordinary response"),
++            };
++            let query = wire::Query { service_instance: service.instance().clone(), project_id: id, request_id: Id::random().unwrap() };
++            let read = p::Request { version: p::VERSION, request_id: Id::random().unwrap(), request: p::RequestBody::MetadataTextRead(wire::Read {
++                origin: query.clone(), expected_observation_revision: revision, platform: wire::Platform::Android, locale: "en-US".into(),
++            }) };
++            let (blocked, returned) = timeout(Duration::from_secs(2), async {
++                tokio::join!(request(&f.app, &read), async {
++                    let (stream, _) = listener.accept().await.unwrap();
++                    serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE).await
++                })
++            }).await.unwrap();
++            returned.unwrap();
++            assert!(blocked.is_err());
++            assert!(service.configuration_requests().metadata_entry(&query).is_err());
++            assert!(endpoint.metadata_exchange.load(Ordering::Acquire));
++            // STOP is not a close/return. The outer original retains its guard
++            // even when the borrowed exchange future is about to be cancelled.
++            signal.send(true).unwrap();
++            assert!(endpoint.metadata_exchange.load(Ordering::Acquire));
++            timeout(Duration::from_secs(2), large.as_mut()).await.unwrap().unwrap();
++            drop(large);
++            assert!(!endpoint.metadata_exchange.load(Ordering::Acquire));
++            let mut extra = [0u8; 1];
++            assert_eq!(client.read(&mut extra).await.unwrap(), 0);
++            close_stream(client).unwrap();
++            let mut after_close = None;
++            MetadataExchange::require(&endpoint.metadata_exchange, &mut after_close).unwrap();
++            drop(after_close);
++            nix::unistd::close(listener.into_std().unwrap()).unwrap();
++            let endpoint = match Arc::try_unwrap(endpoint) { Ok(endpoint) => endpoint, Err(_) => panic!("original endpoint still retained") };
++            endpoint.remove(&service).unwrap();
++            store.endpoint_settled(true).unwrap();
++            service.stop().unwrap();
++            store.close().unwrap();
++        });
++    }
++    #[test]
+     fn real_socket_two_clients_share_completed_observations_and_history() {
+         runtime().block_on(async {
+             let f = Fixture::short(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -12,6 +12,9 @@
+ mod service_version_edit_protocol;
+ mod service_version_edit_requests;
+ mod service_configuration_protocol;
++mod bounded_json_seed;
++mod service_metadata_text_protocol;
++mod service_metadata_text_requests;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -128,6 +128,9 @@
+ mod service_version_edit_protocol;
+ mod service_version_edit_requests;
+ mod service_configuration_protocol;
++mod bounded_json_seed;
++mod service_metadata_text_protocol;
++mod service_metadata_text_requests;
+ mod service_configuration_requests;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
+diff --git a/desktop/src-tauri/src/metadata_text_commands.rs b/desktop/src-tauri/src/metadata_text_commands.rs
+--- a/desktop/src-tauri/src/metadata_text_commands.rs
++++ b/desktop/src-tauri/src/metadata_text_commands.rs
+@@ -102,3 +102,19 @@
+     }
+ 
+ }
++
++#[derive(Deserialize)]
++#[serde(rename_all="kebab-case")]
++pub(crate) enum AgentIntent { AgentMetadataText }
++#[derive(Deserialize)]
++#[serde(rename_all="camelCase",deny_unknown_fields)]
++pub(crate) struct AgentRequest { pub intent:AgentIntent, pub origin:crate::service_metadata_text_protocol::Query }
++pub(crate) fn agent(body:&Value)->Result<AgentRequest,BridgeError>{decode(body,4096)}
++pub(crate) fn agent_query(body:&Value)->Result<crate::service_metadata_text_protocol::Query,BridgeError>{decode(body,4096)}
++pub(crate) fn agent_status(body:&Value)->Result<Option<crate::service_metadata_text_protocol::Query>,BridgeError>{
++    if body.as_object().is_some_and(|o|o.is_empty()){Ok(None)}else{agent_query(body).map(Some)}
++}
++pub(crate) fn agent_allow(body:&Value)->Result<crate::service_metadata_text_protocol::Allow,BridgeError>{
++    let a:crate::service_metadata_text_protocol::Allow=decode(body,4096)?;
++    if a.consent_version!=crate::service_metadata_text_protocol::CONSENT{return Err(BridgeError::invalid())}Ok(a)
++}
+diff --git a/desktop/src-tauri/src/metadata_text_edit_protocol.rs b/desktop/src-tauri/src/metadata_text_edit_protocol.rs
+--- a/desktop/src-tauri/src/metadata_text_edit_protocol.rs
++++ b/desktop/src-tauri/src/metadata_text_edit_protocol.rs
+@@ -360,10 +360,14 @@
+     decode_with_intent(bytes, session, false)
+ }
+ pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovering: bool) -> Result<ChildFrame, BridgeError> {
++    decode_entry(bytes,session,recovering,false)
++}
++pub(crate) fn decode_agent_metadata(bytes:&[u8],session:&str)->Result<ChildFrame,BridgeError>{decode_entry(bytes,session,false,true)}
++fn decode_entry(bytes:&[u8],session:&str,recovering:bool,agent:bool)->Result<ChildFrame,BridgeError>{
+     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+     let body = &bytes[..bytes.len() - 1];
+     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
+-    let value = strict_json(body)?;
++    let value = if agent{crate::protocol::strict_metadata_agent_frame_json(body)?}else{strict_json(body)?};
+     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session { return Err(BridgeError::protocol()); }
+     let seq = value["seq"].as_u64().filter(|seq| *seq <= 2).ok_or_else(BridgeError::protocol)? as u32;
+     let raw = &value["result"];
+diff --git a/desktop/src-tauri/src/protocol.rs b/desktop/src-tauri/src/protocol.rs
+--- a/desktop/src-tauri/src/protocol.rs
++++ b/desktop/src-tauri/src/protocol.rs
+@@ -1,7 +1,7 @@
+ //! Closed one-request/one-response protocol. No generic process or method IPC.
+-use std::{collections::BTreeSet, fmt, io};
+-use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
+-use serde_json::{Map, Number, Value};
++use std::io;
++use serde::{de::DeserializeSeed, Deserialize, Serialize};
++use serde_json::{Map, Value};
+ use crate::error::BridgeError;
+ 
+ pub const PROTOCOL: u32 = 1;
+@@ -90,50 +90,7 @@
+     Ok(writer.bytes)
+ }
+ 
+-struct Seed<'a> { nodes: &'a mut usize, depth: usize, node_limit: usize, depth_limit: usize }
+-impl<'de> DeserializeSeed<'de> for Seed<'_> {
+-    type Value = Value;
+-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+-        *self.nodes += 1;
+-        if *self.nodes > self.node_limit || self.depth > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
+-        deserializer.deserialize_any(self)
+-    }
+-}
+-impl<'de> Visitor<'de> for Seed<'_> {
+-    type Value = Value;
+-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("bounded strict JSON") }
+-    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> { Ok(Value::Bool(v)) }
+-    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> { Ok(Value::Number(v.into())) }
+-    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> { Ok(Value::Number(v.into())) }
+-    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
+-        Number::from_f64(v).map(Value::Number).ok_or_else(|| de::Error::custom("nonfinite number"))
+-    }
+-    fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> { Ok(Value::String(v.to_owned())) }
+-    fn visit_string<E: de::Error>(self, v: String) -> Result<Value, E> { Ok(Value::String(v)) }
+-    fn visit_unit<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
+-    fn visit_none<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
+-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+-        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
+-        let mut items = Vec::new();
+-        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+-            node_limit: self.node_limit, depth_limit: self.depth_limit })? { items.push(value); }
+-        Ok(Value::Array(items))
+-    }
+-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+-        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
+-        let mut items = Map::new();
+-        let mut names = BTreeSet::new();
+-        while let Some(key) = map.next_key::<String>()? {
+-            *self.nodes += 1;
+-            if *self.nodes > self.node_limit || self.depth + 1 > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
+-            if !names.insert(key.clone()) { return Err(de::Error::custom("duplicate JSON key")); }
+-            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+-                node_limit: self.node_limit, depth_limit: self.depth_limit })?;
+-            items.insert(key, value);
+-        }
+-        Ok(Value::Object(items))
+-    }
+-}
++use crate::bounded_json_seed::Seed;
+ 
+ fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
+     std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
+@@ -410,3 +367,9 @@
+         assert!(decode_response(&vec![b' '; RESPONSE_LIMIT + 1], "query-1").is_err());
+     }
+ }
++
++// Only the linked metadata agent, never ordinary metadata/other methods.
++pub(crate) fn strict_metadata_agent_frame_json(bytes: &[u8]) -> Result<Value, BridgeError> {
++    if bytes.len() > crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES { return Err(BridgeError::protocol()); }
++    strict_json_with_limits(bytes, crate::service_metadata_text_protocol::NATIVE_FRAME_NODES, 24)
++}
+diff --git a/desktop/src-tauri/src/service_configuration_requests.rs b/desktop/src-tauri/src/service_configuration_requests.rs
+--- a/desktop/src-tauri/src/service_configuration_requests.rs
++++ b/desktop/src-tauri/src/service_configuration_requests.rs
+@@ -493,8 +493,17 @@
+         }
+     }
+ }
++// One Book/mutex/32-row budget for both fixed editor families.
++enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>) }
++impl SharedRow {
++    fn origin(&self)->&p::Query {match self{Self::Configuration(e)=>&e.input.origin,Self::MetadataText(e)=>&e.input().origin}}
++    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()}}}
++    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at)}}
++    fn configuration(&self)->Option<&Arc<Entry>>{match self{Self::Configuration(e)=>Some(e),_=>None}}
++    fn metadata(&self)->Option<&Arc<crate::service_metadata_text_requests::Entry>>{match self{Self::MetadataText(e)=>Some(e),_=>None}}
++}
+ struct Book {
+-    rows: Vec<Arc<Entry>>,
++    rows: Vec<SharedRow>,
+     closed: bool,
+ }
+ pub(crate) struct Inbox {
+@@ -538,8 +547,9 @@
+         if let Some(old) = book
+             .rows
+             .iter()
+-            .find(|r| r.input.origin.request_id == input.origin.request_id)
+-        {
++            .find(|r| r.origin().request_id == input.origin.request_id)
++        {
++            let old=old.configuration().ok_or(Error::Conflict)?;
+             if old.input != input {
+                 return Err(Error::Conflict);
+             }
+@@ -555,7 +565,6 @@
+             return Err(Error::Conflict);
+         }
+         for row in &book.rows {
+-            let _ = row.status()?;
+             if row.occupied()? {
+                 return Err(Error::Busy);
+             }
+@@ -604,7 +613,7 @@
+             failed: self.failed.clone(),
+             changes: self.changes.clone(),
+         });
+-        book.rows.push(entry.clone());
++        book.rows.push(SharedRow::Configuration(entry.clone()));
+         {
+             let mut row = entry.lock()?;
+             bump(&mut row, &self.changes, &self.failed)?
+@@ -617,14 +626,14 @@
+         }
+         self.lock()?
+             .rows
+-            .iter()
++            .iter().filter_map(SharedRow::configuration)
+             .find(|r| &r.input.origin == q)
+             .cloned()
+             .ok_or(Error::Conflict)
+     }
+     pub(crate) fn desktop(&self) -> Result<p::DesktopStatus, Error> {
+         let book = self.lock()?;
+-        let request = book.rows.last().map(|r| r.status()).transpose()?;
++        let request = book.rows.iter().rev().find_map(SharedRow::configuration).map(|r| r.status()).transpose()?;
+         let result = p::DesktopStatus {
+             service_instance: self.instance.clone(),
+             revision: *self.changes.borrow(),
+@@ -646,7 +655,7 @@
+         Ok(result)
+     }
+     pub(crate) fn entries(&self) -> Result<Vec<Arc<Entry>>, Error> {
+-        Ok(self.lock()?.rows.clone())
++        Ok(self.lock()?.rows.iter().filter_map(SharedRow::configuration).cloned().collect())
+     }
+     pub(crate) fn close(&self, at: Instant) {
+         if let Ok(mut book) = self.book.lock() {
+@@ -658,6 +667,31 @@
+             self.failed.store(true, Ordering::Release)
+         }
+     }
++    pub(crate) fn metadata_read(&self,input:crate::service_metadata_text_protocol::Read,source:Source,read:Arc<ReadPermission>)->Result<crate::service_metadata_text_protocol::Status,Error>{
++        input.validate()?;let mut book=self.lock()?;
++        if input.origin.service_instance!=self.instance{return Err(Error::Conflict)}
++        if let Some(row)=book.rows.iter().find(|r|r.origin().request_id==input.origin.request_id){
++            let old=row.metadata().ok_or(Error::Conflict)?;if old.input()!=&input{return Err(Error::Conflict)}return old.status();
++        }
++        if book.closed||self.failed.load(Ordering::Acquire){return Err(Error::Unavailable)}
++        if input.expected_observation_revision!=source.observation_revision||read.stop(Instant::now())?.is_some(){return Err(Error::Conflict)}
++        for row in &book.rows{if row.occupied()?{return Err(Error::Busy)}}
++        if book.rows.len()>=p::REQUEST_LIMIT{return Err(Error::Busy)}
++        let entry=Arc::new(crate::service_metadata_text_requests::Entry::new(input,source,read,self.failed.clone(),self.changes.clone())?);
++        book.rows.push(SharedRow::MetadataText(entry.clone()));
++        self.changes.send_modify(|n|if let Some(next)=n.checked_add(1){*n=next}else{self.failed.store(true,Ordering::Release)});
++        entry.status()
++    }
++    pub(crate) fn metadata_entry(&self,q:&p::Query)->Result<Arc<crate::service_metadata_text_requests::Entry>,Error>{
++        if q.service_instance!=self.instance{return Err(Error::Conflict)}
++        self.lock()?.rows.iter().filter_map(SharedRow::metadata).find(|e|&e.input().origin==q).cloned().ok_or(Error::Conflict)
++    }
++    pub(crate) fn metadata_desktop(&self,q:Option<&p::Query>)->Result<crate::service_metadata_text_protocol::DesktopStatus,Error>{
++        let request=if let Some(q)=q{Some(self.metadata_entry(q)?.status()?)}else{self.lock()?.rows.iter().rev().find_map(SharedRow::metadata).map(|e|e.status()).transpose()?};
++        let s=crate::service_metadata_text_protocol::DesktopStatus{service_instance:self.instance.clone(),revision:*self.changes.borrow(),request};s.validate()?;Ok(s)
++    }
++    pub(crate) fn metadata_entries(&self)->Result<Vec<Arc<crate::service_metadata_text_requests::Entry>>,Error>{Ok(self.lock()?.rows.iter().filter_map(SharedRow::metadata).cloned().collect())}
++
+     pub(crate) fn fence(&self) {
+         self.failed.store(true, Ordering::Release);
+     }
+@@ -670,10 +704,10 @@
+             .lock()?
+             .rows
+             .iter()
+-            .filter(|r| &r.input.origin.project_id == project)
++            .filter(|r| &r.origin().project_id == project)
+             .map(|r| AdditionalRequest {
+-                family: AdditionalFamily::Configuration,
+-                request_id: r.input.origin.request_id.clone(),
++                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText},
++                request_id: r.origin().request_id.clone(),
+             })
+             .collect())
+     }
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -96,7 +96,7 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+-    ObserveProject, EditConfiguration, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubFailedJobsRetry, GitStage, GitUnstage,
++    ObserveProject, EditConfiguration, EditMetadataText, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubFailedJobsRetry, GitStage, GitUnstage,
+     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+ }
+ 
+@@ -209,6 +209,11 @@
+     #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
+     #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
+     #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
++    #[serde(rename="metadata-text.read")] MetadataTextRead(crate::service_metadata_text_protocol::Read),
++    #[serde(rename="metadata-text.prepare")] MetadataTextPrepare(crate::service_metadata_text_protocol::Prepare),
++    #[serde(rename="metadata-text.apply")] MetadataTextApply(crate::service_metadata_text_protocol::Apply),
++    #[serde(rename="metadata-text.status")] MetadataTextStatus(crate::service_metadata_text_protocol::Query),
++    #[serde(rename="metadata-text.cancel")] MetadataTextCancel(crate::service_metadata_text_protocol::Query),
+     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
+@@ -297,6 +302,7 @@
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
+     GitHubActionRequest(crate::service_github_action_protocol::Status),
++    MetadataTextRequest(crate::service_metadata_text_protocol::Status),
+     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
+     UploadKeyAccess(crate::service_upload_key_protocol::Access),
+     UploadKeyRequest(crate::service_upload_key_protocol::Status),
+@@ -353,7 +359,10 @@
+     Ok(())
+ }
+ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
+-    if bytes.is_empty() || bytes.len() > REQUEST_BYTES { return Err(Error::InvalidRequest); }
++    if bytes.is_empty() { return Err(Error::InvalidRequest); }
++    // The only larger request is the exact fixed metadata Prepare envelope.
++    // It never reaches the ordinary enum decoder or widens any old action.
++    if bytes.len()>REQUEST_BYTES{return crate::service_metadata_text_protocol::decode_prepare_request(bytes);}
+     nesting(bytes)?;
+     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
+@@ -361,6 +370,13 @@
+         && bytes.len()>crate::service_version_edit_protocol::REQUEST_BYTES {return Err(Error::InvalidRequest)}
+     if let RequestBody::VersionEditSubmit(v)=&request.request{v.validate()?;}
+     if matches!(&request.request,RequestBody::GitHubActionSubmit(_)|RequestBody::GitHubActionStatus(_)|RequestBody::GitHubActionCancel(_)) && bytes.len()>crate::service_github_action_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
++    match &request.request {
++        RequestBody::MetadataTextPrepare(_)=>return crate::service_metadata_text_protocol::decode_prepare_request(bytes),
++        RequestBody::MetadataTextRead(v)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;v.validate()?;},
++        RequestBody::MetadataTextApply(v)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;if !v.reviewed{return Err(Error::InvalidRequest)}},
++        RequestBody::MetadataTextStatus(_)|RequestBody::MetadataTextCancel(_)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;},
++        _=>(),
++    }
+     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
+@@ -382,13 +398,19 @@
+     Ok(request)
+ }
+ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
++    if let RequestBody::MetadataTextPrepare(input)=&request.request{
++        input.validate()?;let bytes=crate::service_metadata_text_protocol::encoded(request,crate::service_metadata_text_protocol::REQUEST_BYTES)?;
++        decode_request(&bytes)?;return Ok(bytes);
++    }
+     let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+     decode_request(&bytes)?;
+     Ok(bytes)
+ }
+ pub fn encode_response(response: &Response) -> Result<Vec<u8>, Error> {
+     validate_response(response)?;
+-    let bytes = serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?;
++    let bytes = if matches!(&response.response,ResponseBody::MetadataTextRequest(_)){
++        crate::service_metadata_text_protocol::encoded(response,RESPONSE_BYTES).map_err(|_|Error::StateUnknown)?
++    }else{serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?};
+     if bytes.len() > RESPONSE_BYTES { return Err(Error::StateUnknown); }
+     Ok(bytes)
+ }
+@@ -441,6 +463,10 @@
+         ResponseBody::GitHubActionRequest(row)=>{
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
++        },
++        ResponseBody::MetadataTextRequest(row)=>{
++            row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
++            crate::service_metadata_text_protocol::bounded(response,if row.observation.is_some(){RESPONSE_BYTES}else{crate::service_metadata_text_protocol::STATUS_BYTES})?;
+         },
+         ResponseBody::PlayCleanupRequest(row)=>{
+             row.validate()?;
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -176,6 +176,7 @@
+     VersionReservation,
+     AndroidUploadKey,
+     Configuration,
++    MetadataText,
+     Store,
+     PlayCleanup,
+     AppleProvisioning,
+@@ -190,7 +191,7 @@
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
+             Self::AndroidUploadKey => 3,
+-            Self::Configuration => 4,
++            Self::Configuration | Self::MetadataText => 4,
+             Self::Store => 5,
+             Self::PlayCleanup | Self::VersionTag => 6,
+             Self::AppleProvisioning=>7,
+@@ -208,6 +209,7 @@
+             Self::VersionReservation => "version-reserve-status",
+             Self::AndroidUploadKey => "upload-key-status",
+             Self::Configuration => "configuration-status",
++            Self::MetadataText => "metadata-text-status",
+             Self::Store => "store-status",
+             Self::PlayCleanup => "play-cleanup-status",
+             Self::AppleProvisioning=>"apple-provisioning-status",
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1395,8 +1395,14 @@
+ #[tauri::command]
+ async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+-    edit_window(&webview)?;
++    let window=edit_window(&webview)?;
+     let body = request_body(&request)?;
++    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_read(window,args.origin).await;}
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
++    }
+     let args = metadata_text_commands::open(body)?;
+     not_closing(&state)?;
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+@@ -1424,6 +1430,12 @@
+ async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Open);}
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
++    }
+     let args = match metadata_text_commands::open_request(request_body(&request)?)? {
+         metadata_text_commands::OpenRequest::Recover(args) => return state.bridge.open_metadata_text_recovery(&state.document, window, args),
+         metadata_text_commands::OpenRequest::Edit(args) => args,
+@@ -1439,6 +1451,12 @@
+ async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Prepare);}
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
++    }
+     let args = match metadata_text_commands::prepare_request(request_body(&request)?)? {
+         metadata_text_commands::PrepareRequest::Recover(args) => return state.bridge.prepare_metadata_text_recovery(&state.document, window, args),
+         metadata_text_commands::PrepareRequest::Edit(args) => args,
+@@ -1454,6 +1472,12 @@
+ async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Apply);}
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
++    }
+     let body = request_body(&request)?;
+     if body.get("intent").is_some() {
+         return state.bridge.apply_metadata_text_recovery(&state.document, window, crate::saved_text_recovery_protocol::apply(body)?);
+@@ -1705,6 +1729,34 @@
+     {let args=edit_commands::agent_configuration_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_configuration(window,args)?).map_err(|_|BridgeError::protocol())}
+     #[cfg(not(any(target_os="linux",target_os="macos")))]
+     {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
++}
++
++#[tauri::command]
++async fn agent_metadata_text_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let origin=metadata_text_commands::agent_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_metadata_text_status(origin.as_ref())?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_metadata_text_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=metadata_text_commands::agent_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_metadata_text_apply(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_metadata_text(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let args=metadata_text_commands::agent_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_metadata_text(window,args)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
+ }
+ 
+ #[tauri::command]
+@@ -3530,7 +3582,7 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
+ #[cfg(any(target_os="linux",target_os="macos"))]
+-impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();}}
++impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_metadata_text_relay_lost();}}
+ 
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
+@@ -3637,6 +3689,8 @@
+         let mut version_edit_key=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut configuration_revision=None;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut metadata_text_revision=None;
+         let mut ios_archive_guard = ios_archive_guard;
+         if enter.await.is_err() { return; }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -3704,6 +3758,14 @@
+                 if configuration_revision.as_ref()!=Some(&key){
+                     let _=app.emit_to(MAIN_WINDOW,"mrk:agent-configuration",&status);
+                     configuration_revision=Some(key);
++                }
++            }
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(Some(status))=document.agent_metadata_text_relay(){
++                let key=(status.service_instance.clone(),status.revision);
++                if metadata_text_revision.as_ref()!=Some(&key){
++                    let _=app.emit_to(MAIN_WINDOW,"mrk:agent-metadata-text",&status);
++                    metadata_text_revision=Some(key);
+                 }
+             }
+             // Fixed DATA tap in this SAME retained relay; no new task, Git
+@@ -5659,6 +5721,7 @@
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
+             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
++            agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
+             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
+             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
+             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -8,6 +8,8 @@
+ //! One final observer owns the original driver/watchdog joins before retirement.
+ //! After the one cleanup allowance, uncertainty is reported and ownership is
+ //! retained; late positive settlement cannot restore successful admission.
++#[path="supervisor_service_metadata_text.rs"]
++mod agent_metadata_text;
+ use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
+ #[cfg(any(all(feature = "development-runtime", debug_assertions),
+     all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+@@ -442,6 +444,7 @@
+ // Closed original-return arms, not a callback registry. Early Unknown takes
+ // only a sender; the typed arm retains the same Document/lane completion.
+ enum PassiveReply {
++    MetadataText { sender: Option<oneshot::Sender<Result<Value,BridgeError>>>, completion: agent_metadata_text::Completion },
+     Value { sender: Option<oneshot::Sender<Result<Value, BridgeError>>> },
+     ReleaseVersionObserve {
+         sender: Option<oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>>,
+@@ -461,6 +464,7 @@
+ impl PassiveReply {
+     fn sender_for_unknown(&mut self) -> Option<FailedPassiveReply> {
+         match self {
++            Self::MetadataText {sender,completion}=>{completion.unknown();sender.take().map(FailedPassiveReply::Value)},
+             Self::Value { sender } => sender.take().map(FailedPassiveReply::Value),
+             Self::ReleaseVersionObserve { sender, completion } => {
+                 completion.unknown();
+@@ -469,10 +473,11 @@
+         }
+     }
+     fn arm(&self) -> Result<(), BridgeError> {
+-        match self { Self::Value { .. } => Ok(()), Self::ReleaseVersionObserve { completion, .. } => completion.arm() }
++        match self { Self::MetadataText {completion,..}=>completion.arm(), Self::Value { .. } => Ok(()), Self::ReleaseVersionObserve { completion, .. } => completion.arm() }
+     }
+     fn retire(self, value: Result<Value, BridgeError>, was_unknown: bool) {
+         match self {
++            Self::MetadataText{sender,completion}=>{let result=completion.complete(value,was_unknown);if let Some(sender)=sender{let _=sender.send(result);}},
+             Self::Value { sender } => { if let Some(sender) = sender { let _ = sender.send(value); } },
+             Self::ReleaseVersionObserve { sender, mut completion } => {
+                 // Parse ONCE, at this actual original retirement, before delivery.
+@@ -488,6 +493,7 @@
+     }
+ }
+ enum CompletionTarget {
++    MetadataText {sender:oneshot::Sender<Result<Value,BridgeError>>,completion:agent_metadata_text::Completion},
+     Passive(oneshot::Sender<Result<Value, BridgeError>>),
+     ReleaseVersionObserve {
+         sender: oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>,
+@@ -980,7 +986,7 @@
+         state.unknown = true;
+         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
+         let reply = match state.reply.as_mut() {
+-            Some(reply @ PassiveReply::ReleaseVersionObserve { .. }) => reply.sender_for_unknown(),
++            Some(reply @ (PassiveReply::ReleaseVersionObserve { .. } | PassiveReply::MetadataText { .. })) => reply.sender_for_unknown(),
+             _ => state.reply.take().and_then(|mut reply| reply.sender_for_unknown()),
+         };
+         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -1054,6 +1060,7 @@
+     }
+     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
+         github_action_delegation::observe(self, inner);
++        agent_metadata_text::observe(self,now);
+         play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
+         let mut state = lock(&self.state);
+         if state.terminal { return None; }
+@@ -1071,7 +1078,7 @@
+             if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
+             self.stop.send_replace(true); self.changed.notify_waiters(); }
+         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
+-        if expired { None } else { Some(github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint))) }
++        if expired { None } else { Some(agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint)))) }
+     }
+     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+         if matches!(self.profile,Profile::GitHubPublication)&&self.publication_gate.as_ref().is_none_or(|g|!g.counter_settled()) {self.unknown(inner);return false;}
+@@ -1528,6 +1535,8 @@
+         let play_cleanup_receipt = match &completion { CompletionTarget::GitHubPlayCleanup(value) => Some(value.clone()), _ => None };
+         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
++            (Profile::Passive(Method::MetadataTextObserve), CompletionTarget::MetadataText{sender,completion})=>
++                (Some(PassiveReply::MetadataText{sender:Some(sender),completion}),None,None,None,None,None,None),
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+                 (Some(PassiveReply::Value { sender: Some(sender) }), None, None, None, None, None, None),
+             (Profile::Passive(Method::ReleaseVersionObserve), CompletionTarget::ReleaseVersionObserve { sender, completion }) =>
+@@ -4011,9 +4020,9 @@
+             }
+         } else {
+         #[cfg(all(test, feature = "development-runtime"))]
+-        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, profile.stdout_limit(), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
++        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, agent_metadata_text::limit(&owner), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
+         #[cfg(not(all(test, feature = "development-runtime")))]
+-        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, profile.stdout_limit(), faults.clone()))); }
++        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, agent_metadata_text::limit(&owner), faults.clone()))); }
+         }
+     }
+     if let Some(stderr) = stderr {
+@@ -4457,7 +4466,7 @@
+         Some(output) if matches!(profile,Profile::VersionEnrollment)=>owner.version_enrollment.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|original|crate::version_enrollment_protocol::decode_reply(&owner.id,&output.bytes,&original.request))
+             .map(ReadOutcome::VersionEnrollment),
+-        Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref(),owner.publication_request.as_ref()),
++        Some(output) => agent_metadata_text::decode(owner,&output.bytes).unwrap_or_else(||profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref(),owner.publication_request.as_ref())),
+         None => Err(BridgeError::protocol()),
+     };
+     // Only after the SAME original IO/native retirement above. A structurally
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -39,6 +39,12 @@
+ #[path="../src/service_version_edit_protocol.rs"] mod service_version_edit_protocol;
+ #[path="../src/service_version_edit_requests.rs"] mod service_version_edit_requests;
+ #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
++#[path="../src/bounded_json_seed.rs"]
++mod bounded_json_seed;
++#[path="../src/service_metadata_text_protocol.rs"]
++mod service_metadata_text_protocol;
++#[path="../src/service_metadata_text_requests.rs"]
++mod service_metadata_text_requests;
+ #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
+ #[path="../src/service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;

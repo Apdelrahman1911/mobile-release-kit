@@ -592,3 +592,32 @@ test('prerequisite: the same prerequisite-shaped error from an entered Start is 
   h.reply(cancel, status(4, terminal(op, 'cancelled'))); await stop;
   assert.equal(h.state.prerequisite, null); // Only the original real terminal status can settle this entered work.
 });
+
+
+test('Advanced CLI preparation retains the actual Prepared; terminal events do not join a delegated Start',async t=>{
+  const h=harness(t);await h.ready;
+  const preparing=h.controller.prepareForCli(),call=h.calls[0],op=operation(call.request);
+  assert.equal(call.kind,'prepare');h.reply(call,status(2,op));await preparing;
+  assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);assert.equal(h.state.inspection,null);
+  const review=h.controller.toolSetupReview();assert.equal(review.kind,'inspect-requirements');
+  const pin=h.controller.delegateToolSetup(review);assert.ok(pin);assert.equal(pin.current(),true);
+  assert.equal(h.controller.toolSetupReview(),null);assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);
+  h.emit(status(3,running(op)));assert.equal(h.state.issue,null);
+  h.emit(status(4,terminal(op)));assert.equal(h.state.inspection,null);assert.ok(h.controller.ownerReason());
+  const service={review,settlement:'settled',operation:{operationId:OP,ownerGeneration:OWNER,registrationGeneration:null}};
+  assert.equal(await pin.readAfterReturned(service),true);
+  assert.equal(h.state.inspection?.kind,'tool-requirements-observation');assert.equal(h.controller.ownerReason(),null);
+  assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);
+});
+
+test('CLI acquisition consumes only the same returned download review and never issues the GUI Start',async t=>{
+  const h=harness(t),op=await reviewed(h),review=h.controller.toolSetupReview();
+  assert.equal(review.kind,'acquire-missing');const pin=h.controller.delegateToolSetup(review);assert.ok(pin);
+  h.controller.setAcknowledged(ACQUIRE,ACQUIRE_OWNER,true);await h.controller.download(ACQUIRE,ACQUIRE_OWNER);
+  assert.equal(h.calls.filter(c=>c.kind==='start').length,1); // only the earlier ordinary inspection
+  h.emit(status(5,running(op)));h.emit(status(6,terminal(op)));
+  assert.equal(h.state.presentation==='current-staged',false);
+  assert.equal(await pin.readAfterReturned({review,settlement:'settled',operation:{operationId:OP,ownerGeneration:OWNER,registrationGeneration:null}}),false);
+  assert.equal(await pin.readAfterReturned({review,settlement:'settled',operation:{operationId:ACQUIRE,ownerGeneration:ACQUIRE_OWNER,registrationGeneration:null}}),true);
+  assert.equal(h.state.presentation,'current-staged');assert.equal(h.calls.filter(c=>c.kind==='start').length,1);
+});

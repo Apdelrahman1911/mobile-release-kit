@@ -63,8 +63,10 @@ impl ApplicationService {
         additional_requests.extend(self.configuration_requests.catalogue(project)?);
         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
+        additional_requests.extend(self.github_action_requests.catalogue_requests(&self.instance,project)?);
         additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|(purpose, request_id)| data::AdditionalRequest {family:match purpose {crate::service_play_cleanup_protocol::Purpose::PlayCleanup => data::AdditionalFamily::PlayCleanup, crate::service_play_cleanup_protocol::Purpose::VersionTag => data::AdditionalFamily::VersionTag},request_id}));
+        additional_requests.extend(self.tool_setup_requests.catalogue_requests(&self.instance,project)?);
         let view = data::Catalogue {
             schema_version: 2,
             scope: data::Scope::CurrentHostRetainedRequests,

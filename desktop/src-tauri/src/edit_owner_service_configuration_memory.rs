@@ -408,6 +408,69 @@ impl EditOwner {
         n.add(FUTURE)?;
         Ok(n.bytes)
     }
+    pub(crate) fn metadata_text_agent_edit_backing(&self) -> Result<usize, BridgeError> {
+        let r = self
+            .inner
+            .registry
+            .try_lock()
+            .map_err(|_| invalid_owner())?;
+        if self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted {
+            return Err(edit_unknown());
+        }
+        let mut n = Usage {
+            bytes: size_of::<Registry>(),
+            nodes: 0,
+        };
+        r.generation.heap(&mut n)?;
+        r.loss_generation.heap(&mut n)?;
+        r.window.heap(&mut n)?;
+        // Registry bookkeeping remains present even with no active operation.
+        for keys in [
+            &r.blocked_projects,
+            &r.image_recovery_projects,
+            &r.workflow_recovery_projects,
+        ] {
+            n.add(keys.len().checked_mul(1024).ok_or_else(invalid_owner)?)?;
+            for key in keys {
+                key.heap(&mut n)?;
+            }
+        }
+        n.add(
+            r.domain_blocks
+                .0
+                .len()
+                .checked_mul(4096)
+                .ok_or_else(invalid_owner)?,
+        )?;
+        for key in r.domain_blocks.0.keys() {
+            key.heap(&mut n)?;
+        }
+        if let Some(p) = &r.last {
+            let bytes = projection(p)?;
+            // Config Status can hold two extra independent last clones. Other
+            // domains are filtered out, but their ORIGINAL full backing stays.
+            n.add(
+                bytes
+                    .checked_mul(if p.domain == EditDomain::MetadataText {
+                        3
+                    } else {
+                        1
+                    })
+                    .ok_or_else(invalid_owner)?,
+            )?;
+        }
+        if let Some(a) = &r.active {
+            if a.session.agent_metadata_text.is_none()
+                || projection(&a.projection)? > METADATA_REPRESENTATION
+            {
+                return Err(invalid_owner());
+            }
+            // The linked active is already in METADATA_FUTURE's bounded six copies.
+            // A simultaneous ordinary Edit is refused, never credited as idle.
+        }
+        n.add(METADATA_FUTURE)?;
+        Ok(n.bytes)
+    }
 }
 
 // Prepared version delegation has consumed Opened+Prepared out of THREE
@@ -592,3 +655,30 @@ mod tests {
         );
     }
 }
+
+// Fixed new MetadataText agent quote; original Config quote above is unchanged.
+pub(in crate::edit_owner) const METADATA_REPRESENTATION:usize=crate::service_metadata_text_protocol::NATIVE_FRAME_NODES*512+2*crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES;
+pub(in crate::edit_owner) const METADATA_FUTURE:usize=6*METADATA_REPRESENTATION
+    +2*crate::service_metadata_text_protocol::NATIVE_COMMAND_BYTES+2*c::STATUS_LIMIT
+    +2*crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES
+    +2*8192+size_of::<Session>()+size_of::<crate::edit_owner::agent_metadata_text::Link>()
+    +4*(size_of::<tokio::sync::oneshot::Sender<Result<(),BridgeError>>>()+size_of::<tokio::sync::oneshot::Receiver<Result<(),BridgeError>>>()+256)
+    +size_of::<crate::service_metadata_text_requests::Call>();
+pub(in crate::edit_owner) fn metadata_prospective(p:&EditProjection,frame:&ChildFrame)->Result<(),BridgeError>{
+    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};p.heap(&mut n)?;
+    match frame{
+        ChildFrame::MetadataTextOpened(o)=>{o.revision.heap(&mut n)?;o.metadata_root.heap(&mut n)?;o.baseline.heap(&mut n)?;},
+        ChildFrame::MetadataTextPrepared(v)=>{v.revision.heap(&mut n)?;v.plan_token.heap(&mut n)?;v.view.heap(&mut n)?;},
+        ChildFrame::MetadataTextTerminal(_,_)=>(),_=>return Err(invalid_owner())}
+    if n.bytes>METADATA_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
+}
+
+pub(in crate::edit_owner) fn metadata_submission(p:&EditProjection,submission:&t::Submission)->Result<(),BridgeError>{
+    let mut n=Usage{bytes:size_of::<EditProjection>(),nodes:0};
+    p.heap(&mut n)?;submission.heap(&mut n)?;
+    if n.bytes>METADATA_REPRESENTATION{Err(invalid_owner())}else{Ok(())}
+}
+
+#[cfg(test)]
+#[path = "edit_owner_service_metadata_text_memory_tests.rs"]
+mod metadata_tests;

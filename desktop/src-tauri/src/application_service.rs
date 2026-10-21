@@ -79,6 +79,8 @@ pub(crate) struct ReadAccessStatus { pub(crate) enabled: bool, pub(crate) remain
 mod local_checks;
 #[path = "application_service_agent_android_build.rs"]
 mod agent_android_build;
+#[path = "application_service_tool_setup.rs"]
+mod agent_tool_setup;
 #[path="service_store_application.rs"]
 mod agent_store;
 #[path="service_apple_provisioning_application.rs"]
@@ -91,10 +93,14 @@ mod request_catalogue;
 mod git_index;
 #[path="service_configuration_application.rs"]
 mod agent_configuration;
+#[path="service_metadata_text_application.rs"]
+mod agent_metadata_text;
 #[path="service_version_reserve_application.rs"]
 mod agent_version_reserve;
 #[path="service_version_edit_application.rs"]
 mod agent_version_edit;
+#[path="service_github_action_application.rs"]
+mod agent_github_action;
 #[path="service_play_cleanup_application.rs"]
 mod agent_play_cleanup;
 #[path="application_service_upload_key_requests.rs"]
@@ -107,7 +113,9 @@ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instan
     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
     store_requests: Arc<crate::service_store_requests::Inbox>,
     apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
+    tool_setup_requests: Arc<crate::service_tool_setup_requests::Inbox>,
     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+    github_action_requests: Arc<crate::service_github_action_requests::Inbox>,
     upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
     configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
@@ -144,16 +152,18 @@ impl ApplicationService {
         let instance = Id::random()?;
         let version_edit_requests = Arc::new(crate::service_version_edit_requests::Inbox::new(instance.clone()));
         let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
+        let tool_setup_requests=Arc::new(crate::service_tool_setup_requests::Inbox::new(instance.clone()));
         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
         let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+        let github_action_requests=Arc::new(crate::service_github_action_requests::Inbox::new(instance.clone()));
         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
         let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, version_edit_requests, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, tool_setup_requests, version_edit_requests, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, github_action_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -206,7 +216,7 @@ impl ApplicationService {
     /// Permanent original-service read fence. Native observation callbacks must
     /// not wait for the state mutex, which real store IO can hold. No Allow or
     /// later successful write clears this flag; original cleanup still runs.
-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.version_edit_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.github_action_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.version_edit_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence(); self.tool_setup_requests.fence();self.apple_provisioning_requests.fence(); }
     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
         // Nonblocking: an old facet must not survive an unobserved state
         // poison while another caller still has not attempted lock().
@@ -397,6 +407,7 @@ impl ApplicationService {
     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
         let at = Instant::now();
         self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+        self.tool_setup_requests.revoke_all(crate::service_tool_setup_protocol::Reason::PermissionRevoked,at);
         let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
         let _=self.apple_provisioning_requests.revoke(crate::service_apple_provisioning_protocol::Reason::PermissionRevoked,at);
         let mut state = self.lock()?;
@@ -445,6 +456,9 @@ impl ApplicationService {
                 p::RequestBody::UploadKeySubmit(v) => return self.upload_key_submit(client,v.clone()),
                 p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
                 p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
+                p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
+                p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
+                p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
                 p::RequestBody::AppleProvisioningSubmit(v)=>return self.service_apple_provisioning_submit(client,v.clone()),
                 p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
@@ -455,6 +469,9 @@ impl ApplicationService {
                 p::RequestBody::VersionEditStatus(q)=>return self.service_version_edit_query(client,q,false),
                 p::RequestBody::VersionEditCancel(q)=>return self.service_version_edit_query(client,q,true),
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                p::RequestBody::GitHubActionSubmit(v)=>return self.service_github_action_submit(client,v.clone()),
+                p::RequestBody::GitHubActionStatus(q)=>return self.service_github_action_query(client,q,false),
+                p::RequestBody::GitHubActionCancel(q)=>return self.service_github_action_query(client,q,true),
                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
                 p::RequestBody::PlayCleanupCancel(q)=>return self.service_play_cleanup_query(client,q,true),
@@ -496,6 +513,11 @@ impl ApplicationService {
                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
+                p::RequestBody::MetadataTextRead(v) => return self.metadata_text_read(client,v.clone()),
+                p::RequestBody::MetadataTextPrepare(v) => return self.metadata_text_prepare(client,v.clone()),
+                p::RequestBody::MetadataTextApply(v) => return self.metadata_text_apply(client,v.clone()),
+                p::RequestBody::MetadataTextStatus(q) => return self.metadata_text_query(client,q,false),
+                p::RequestBody::MetadataTextCancel(q) => return self.metadata_text_query(client,q,true),
                 p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
                 p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
                 p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
@@ -512,11 +534,14 @@ impl ApplicationService {
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
                 p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                p::RequestBody::GitHubActionSubmit(_) | p::RequestBody::GitHubActionStatus(_) | p::RequestBody::GitHubActionCancel(_) |
                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
@@ -565,7 +590,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.version_edit_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.version_edit_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at); self.tool_setup_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at);self.github_action_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

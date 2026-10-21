@@ -1,7 +1,7 @@
 //! Closed one-request/one-response protocol. No generic process or method IPC.
-use std::{collections::BTreeSet, fmt, io};
-use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use std::io;
+use serde::{de::DeserializeSeed, Deserialize, Serialize};
+use serde_json::{Map, Value};
 use crate::error::BridgeError;
 
 pub const PROTOCOL: u32 = 1;
@@ -90,50 +90,7 @@ pub fn encode_request(id: &str, method: Method, params: &Value) -> Result<Vec<u8
     Ok(writer.bytes)
 }
 
-struct Seed<'a> { nodes: &'a mut usize, depth: usize, node_limit: usize, depth_limit: usize }
-impl<'de> DeserializeSeed<'de> for Seed<'_> {
-    type Value = Value;
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
-        *self.nodes += 1;
-        if *self.nodes > self.node_limit || self.depth > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
-        deserializer.deserialize_any(self)
-    }
-}
-impl<'de> Visitor<'de> for Seed<'_> {
-    type Value = Value;
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("bounded strict JSON") }
-    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> { Ok(Value::Bool(v)) }
-    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> { Ok(Value::Number(v.into())) }
-    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> { Ok(Value::Number(v.into())) }
-    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
-        Number::from_f64(v).map(Value::Number).ok_or_else(|| de::Error::custom("nonfinite number"))
-    }
-    fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> { Ok(Value::String(v.to_owned())) }
-    fn visit_string<E: de::Error>(self, v: String) -> Result<Value, E> { Ok(Value::String(v)) }
-    fn visit_unit<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
-    fn visit_none<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
-        let mut items = Vec::new();
-        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
-            node_limit: self.node_limit, depth_limit: self.depth_limit })? { items.push(value); }
-        Ok(Value::Array(items))
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
-        let mut items = Map::new();
-        let mut names = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            *self.nodes += 1;
-            if *self.nodes > self.node_limit || self.depth + 1 > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
-            if !names.insert(key.clone()) { return Err(de::Error::custom("duplicate JSON key")); }
-            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
-                node_limit: self.node_limit, depth_limit: self.depth_limit })?;
-            items.insert(key, value);
-        }
-        Ok(Value::Object(items))
-    }
-}
+use crate::bounded_json_seed::Seed;
 
 fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
     std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
@@ -409,4 +366,10 @@ mod tests {
         assert!(encode_request("query-1", Method::ValidateConfig, &value).is_err());
         assert!(decode_response(&vec![b' '; RESPONSE_LIMIT + 1], "query-1").is_err());
     }
+}
+
+// Only the linked metadata agent, never ordinary metadata/other methods.
+pub(crate) fn strict_metadata_agent_frame_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > crate::service_metadata_text_protocol::NATIVE_FRAME_BYTES { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, crate::service_metadata_text_protocol::NATIVE_FRAME_NODES, 24)
 }

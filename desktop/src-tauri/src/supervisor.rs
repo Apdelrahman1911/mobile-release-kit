@@ -8,6 +8,8 @@
 //! One final observer owns the original driver/watchdog joins before retirement.
 //! After the one cleanup allowance, uncertainty is reported and ownership is
 //! retained; late positive settlement cannot restore successful admission.
+#[path="supervisor_service_metadata_text.rs"]
+mod agent_metadata_text;
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
     all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
@@ -442,6 +444,7 @@ impl AdmissionRequest<'_> {
 // Closed original-return arms, not a callback registry. Early Unknown takes
 // only a sender; the typed arm retains the same Document/lane completion.
 enum PassiveReply {
+    MetadataText { sender: Option<oneshot::Sender<Result<Value,BridgeError>>>, completion: agent_metadata_text::Completion },
     Value { sender: Option<oneshot::Sender<Result<Value, BridgeError>>> },
     ReleaseVersionObserve {
         sender: Option<oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>>,
@@ -461,6 +464,7 @@ impl FailedPassiveReply {
 impl PassiveReply {
     fn sender_for_unknown(&mut self) -> Option<FailedPassiveReply> {
         match self {
+            Self::MetadataText {sender,completion}=>{completion.unknown();sender.take().map(FailedPassiveReply::Value)},
             Self::Value { sender } => sender.take().map(FailedPassiveReply::Value),
             Self::ReleaseVersionObserve { sender, completion } => {
                 completion.unknown();
@@ -469,10 +473,11 @@ impl PassiveReply {
         }
     }
     fn arm(&self) -> Result<(), BridgeError> {
-        match self { Self::Value { .. } => Ok(()), Self::ReleaseVersionObserve { completion, .. } => completion.arm() }
+        match self { Self::MetadataText {completion,..}=>completion.arm(), Self::Value { .. } => Ok(()), Self::ReleaseVersionObserve { completion, .. } => completion.arm() }
     }
     fn retire(self, value: Result<Value, BridgeError>, was_unknown: bool) {
         match self {
+            Self::MetadataText{sender,completion}=>{let result=completion.complete(value,was_unknown);if let Some(sender)=sender{let _=sender.send(result);}},
             Self::Value { sender } => { if let Some(sender) = sender { let _ = sender.send(value); } },
             Self::ReleaseVersionObserve { sender, mut completion } => {
                 // Parse ONCE, at this actual original retirement, before delivery.
@@ -488,6 +493,7 @@ impl PassiveReply {
     }
 }
 enum CompletionTarget {
+    MetadataText {sender:oneshot::Sender<Result<Value,BridgeError>>,completion:agent_metadata_text::Completion},
     Passive(oneshot::Sender<Result<Value, BridgeError>>),
     ReleaseVersionObserve {
         sender: oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>,
@@ -980,7 +986,7 @@ impl Owner {
         state.unknown = true;
         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
         let reply = match state.reply.as_mut() {
-            Some(reply @ PassiveReply::ReleaseVersionObserve { .. }) => reply.sender_for_unknown(),
+            Some(reply @ (PassiveReply::ReleaseVersionObserve { .. } | PassiveReply::MetadataText { .. })) => reply.sender_for_unknown(),
             _ => state.reply.take().and_then(|mut reply| reply.sender_for_unknown()),
         };
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1025,6 +1031,7 @@ impl Owner {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubPlayCleanupReceipt::Pending) { *receipt = GitHubPlayCleanupReceipt::RetainedUnknown; }
         }
+        github_action_delegation::unknown(self);
         play_cleanup::native_unknown(self); // Original state/receipt locks are released above.
         if let Some(receipt) = &self.github_activity_receipt {
             let mut receipt = lock(receipt);
@@ -1052,6 +1059,8 @@ impl Owner {
         self.changed.notify_waiters();
     }
     fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
+        github_action_delegation::observe(self, inner);
+        agent_metadata_text::observe(self,now);
         play_cleanup::observe_agent(self, inner, now); // Same original watchdog/management, no Doc lock.
         let mut state = lock(&self.state);
         if state.terminal { return None; }
@@ -1069,7 +1078,7 @@ impl Owner {
             if let Some(gate)=&self.github_device_read_gate {gate.failure(BridgeError::timeout(),self.endpoint());}
             self.stop.send_replace(true); self.changed.notify_waiters(); }
         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
-        if expired { None } else { Some(play_cleanup::check_deadline(self,now,endpoint)) }
+        if expired { None } else { Some(agent_metadata_text::deadline(self,now,github_action_delegation::endpoint(self,now,play_cleanup::check_deadline(self,now,endpoint)))) }
     }
     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
         if matches!(self.profile,Profile::GitHubPublication)&&self.publication_gate.as_ref().is_none_or(|g|!g.counter_settled()) {self.unknown(inner);return false;}
@@ -1526,6 +1535,8 @@ impl Supervisor {
         let play_cleanup_receipt = match &completion { CompletionTarget::GitHubPlayCleanup(value) => Some(value.clone()), _ => None };
         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+            (Profile::Passive(Method::MetadataTextObserve), CompletionTarget::MetadataText{sender,completion})=>
+                (Some(PassiveReply::MetadataText{sender:Some(sender),completion}),None,None,None,None,None,None),
             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
                 (Some(PassiveReply::Value { sender: Some(sender) }), None, None, None, None, None, None),
             (Profile::Passive(Method::ReleaseVersionObserve), CompletionTarget::ReleaseVersionObserve { sender, completion }) =>
@@ -1727,6 +1738,7 @@ impl Supervisor {
             #[cfg(any(target_os="linux",target_os="macos"))]
             if let Some(local) = &owner.git_local { local.gate.agent_arm(&owner.id)?; }
             if let Some(gate)=&owner.play_cleanup_gate { gate.agent_arm(&owner.id)?; }
+            github_action_delegation::arm(&owner)?;
             owners.insert(key, owner.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -4008,9 +4020,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             }
         } else {
         #[cfg(all(test, feature = "development-runtime"))]
-        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, profile.stdout_limit(), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
+        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, agent_metadata_text::limit(&owner), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
         #[cfg(not(all(test, feature = "development-runtime")))]
-        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, profile.stdout_limit(), faults.clone()))); }
+        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, agent_metadata_text::limit(&owner), faults.clone()))); }
         }
     }
     if let Some(stderr) = stderr {
@@ -4454,7 +4466,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         Some(output) if matches!(profile,Profile::VersionEnrollment)=>owner.version_enrollment.as_ref().ok_or_else(BridgeError::protocol)
             .and_then(|original|crate::version_enrollment_protocol::decode_reply(&owner.id,&output.bytes,&original.request))
             .map(ReadOutcome::VersionEnrollment),
-        Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref(),owner.publication_request.as_ref()),
+        Some(output) => agent_metadata_text::decode(&owner,&output.bytes).unwrap_or_else(||profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.setup_request.as_ref(),owner.publication_request.as_ref())),
         None => Err(BridgeError::protocol()),
     };
     // Only after the SAME original IO/native retirement above. A structurally
@@ -7421,3 +7433,6 @@ mod tests {
         installed_native_fixture::report(&resources.native_snapshots);
     }
 }
+
+#[path="supervisor_github_action_delegation.rs"]
+mod github_action_delegation;

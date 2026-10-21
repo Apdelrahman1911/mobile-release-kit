@@ -1,3 +1,5 @@
+import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
+import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
 // App-held UI coordination, not a native owner. Only the original native
 // status after its own joins can report completion. A Promise/event cannot.
 import { isDirty } from './drafts.ts';
@@ -31,7 +33,7 @@ interface Attempt {
   witness: Witness; epoch: number; context: ToolAcquisitionContext; after: number; previous: ToolAcquisitionIdentity | null;
   beforeStatus: ToolAcquisitionStatus; refusedBeforeAdmission: ToolAcquisitionPrerequisite | null; notAdmitted: boolean;
   identity: ToolAcquisitionIdentity | null; prepareSent: boolean; prepareJoined: boolean; prepareAccepted: boolean;
-  startClaimed: boolean; startSent: boolean; startJoined: boolean; retired: boolean; unconfirmed: boolean;
+  startClaimed: boolean; startSent: boolean; startJoined: boolean; delegated: boolean; delegatedReturned: boolean; retired: boolean; unconfirmed: boolean;
   terminalRead: boolean; cancelRequested: boolean; cancelSent: boolean;
   requirements: ToolRequirementsObservation | null;
 }
@@ -206,7 +208,7 @@ export class ToolAcquisitionController {
       return 'Finish or cancel the original tool preparation before starting another task.';
     return null;
   }
-  private newWorkReason(ownIntent = false): string | null {
+  private newWorkReason(ownIntent = false, peers = true): string | null {
     if (this.disposed || this.connectionRetired || !this.api) return 'Guided downloads need the original native app connection. Use existing tools or manual setup instead.';
     if (this.issue) return attention;
     if (!this.initialized || !this.off || !this.status) return 'Check the native tool status first.';
@@ -216,7 +218,7 @@ export class ToolAcquisitionController {
     if (!this.visible) return 'Open Check this computer to review tool preparation.';
     if (this.selectionPending) return 'Finish choosing the project first.';
     if (!this.capture()) return 'Save or revert your settings, then check the saved project files. An unsaved draft or earlier file check cannot prepare tools.';
-    return this.other();
+    return peers ? this.other() : null;
   }
   checkReason(): string | null {
     const reason = this.newWorkReason(); if (reason) return reason;
@@ -312,7 +314,7 @@ export class ToolAcquisitionController {
         this.fail('protocol'); return null;
       }
       if (candidate) {
-        if (!a.startSent && (op.phase === 'starting' || op.phase === 'running' || op.outcome === 'complete')) { this.fail('protocol'); return null; }
+        if (!a.startSent && !a.delegated && (op.phase === 'starting' || op.phase === 'running' || op.outcome === 'complete')) { this.fail('protocol'); return null; }
         if (!a.identity) a.identity = identity(op);
       }
     } else if (before && (p || op) && !sameToolAcquisitionIdentity(p, op)) { this.fail('protocol'); return null; }
@@ -337,7 +339,7 @@ export class ToolAcquisitionController {
     while (this.reading) { const previous = await this.reading; if (!fresh) return previous; }
     if (!this.api) return null;
     const api = this.api, a = this.attempt, barrier = this.mutation;
-    const afterInvoke = !!a && a.prepareJoined && (!a.startSent || a.startJoined) && !this.preparing && !this.starting && !this.cancelling;
+    const afterInvoke = !!a && a.prepareJoined && (a.delegated ? a.delegatedReturned : !a.startSent || a.startJoined) && !this.preparing && !this.starting && !this.cancelling;
     const work = Promise.resolve().then(async () => {
       try {
         const s = this.receive(await api.status(), 'read');
@@ -353,7 +355,7 @@ export class ToolAcquisitionController {
         } else if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
           a.terminalRead = true; a.unconfirmed = false;
           if (this.issue === 'unconfirmed') this.issue = null;
-          if (!this.issue && a.startSent && !a.retired && this.current(a) && a.context.action === 'inspect' &&
+          if (!this.issue && (a.startSent || a.delegatedReturned) && !a.retired && this.current(a) && a.context.action === 'inspect' &&
               op.outcome === 'complete' && op.result?.kind === 'tool-requirements-observation')
             this.inspection = { witness: a.witness, epoch: a.epoch, identity: identity(op), result: op.result };
         } else if (this.issue === 'unconfirmed' && !a && !active(op)) this.issue = null;
@@ -365,12 +367,12 @@ export class ToolAcquisitionController {
   }
   private usable(a: Attempt): boolean {
     const op = this.status?.operation;
-    return !this.issue && !a.retired && this.current(a) && this.visible && a.prepareAccepted && !a.startSent &&
+    return !this.issue && !a.retired && this.current(a) && this.visible && a.prepareAccepted && !a.startSent && !a.delegated &&
       sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable && this.newWorkReason(true) === null;
   }
   async inspect(): Promise<void> { if (!this.checkReason()) await this.prepare('inspect'); }
   async reviewDownload(): Promise<void> { if (!this.reviewReason()) await this.prepare('acquire'); }
-  private async prepare(action: 'inspect' | 'acquire'): Promise<void> {
+  private async prepare(action: 'inspect' | 'acquire', forCli = false): Promise<void> {
     const witness = this.capture(), api = this.api, inspected = this.inspection;
     if (!witness || !api || !this.status || action === 'acquire' && !inspected) return;
     const context: ToolAcquisitionContext = freeze({ ...witness.context, action, review: action === 'acquire' ?
@@ -378,7 +380,7 @@ export class ToolAcquisitionController {
     const a: Attempt = { witness, epoch: this.epoch, context, after: this.status.statusRevision,
       beforeStatus: this.status, refusedBeforeAdmission: null, notAdmitted: false,
       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
-      startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
+      startClaimed: false, startSent: false, startJoined: false, delegated: false, delegatedReturned: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
       requirements: action === 'acquire' ? inspected!.result : null };
     this.sourceFolders.retire();
     this.attempt = a; this.cancelIdentity = null; this.consentOpen = false; this.acknowledged = false;
@@ -408,11 +410,39 @@ export class ToolAcquisitionController {
         return; // Explicit catalogue/saved read then a NEW user check; never Start or retry this call.
       }
       if (!read || !this.usable(a)) { a.retired = true; a.cancelRequested = true; return; }
-      if (action === 'inspect') {
+      if (action === 'inspect' && !forCli) {
         // Only this explicit Check click may chain its own INSPECT intent.
         a.startClaimed = true; await this.sendStart(a, api);
-      } else { this.consentOpen = true; this.acknowledged = false; }
+      } else if (action === 'acquire') { this.consentOpen = true; this.acknowledged = false; }
     } finally { this.action = null; this.publish(); this.cancelRetired(); this.detachIfFinished(); }
+  }
+  // Explicit Advanced action: real Prepare + post-return read, without the
+  // ordinary Check button's automatic Start. No alternate native admission.
+  async prepareForCli(): Promise<void> { if (!this.checkReason()) await this.prepare('inspect', true); }
+  toolSetupReview(): ToolSetupReview | null {
+    const a=this.attempt,op=this.status?.operation;
+    if (!a||!op||a.delegated||a.startClaimed||!a.prepareJoined||!a.prepareAccepted||a.retired||!this.current(a)||this.issue||
+        this.preparing||this.starting||this.cancelling||this.reading||this.action||this.newWorkReason(true,false)||
+        !sameToolAcquisitionIdentity(a.identity,op)||op.phase!=='awaiting-consent'||!op.intentUsable)return null;
+    return parseToolSetupReview({kind:a.context.action==='inspect'?'inspect-requirements':'acquire-missing',platform:'android',
+      draftRevision:a.context.draftRevision,baselineGeneration:a.context.baselineGeneration,
+      prepared:{...identity(op),statusRevision:this.status!.statusRevision},sources:null});
+  }
+  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
+    if(!sameToolSetupReview(this.toolSetupReview(),review))return null;
+    const a=this.attempt!,api=this.api!;
+    a.delegated=true;a.startClaimed=true;this.consentOpen=false;this.acknowledged=false;this.publish();
+    return {input:{projectId:a.context.projectId,review,doctorDraft:null,sourceContext:null,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false},
+      current:()=>{const status=this.status;return !!status&&this.attempt===a&&this.api===api&&!a.retired&&this.current(a)&&!this.issue&&status.statusRevision===review.prepared?.statusRevision&&
+        sameToolAcquisitionIdentity(a.identity,status.operation)&&status.operation?.phase==='awaiting-consent'&&status.operation.intentUsable;},
+      readAfterReturned:async status=>{
+        if(this.attempt!==a||this.api!==api||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'||
+          status.operation!==null&&!sameToolAcquisitionIdentity(a.identity,{operationId:status.operation.operationId,ownerGeneration:status.operation.ownerGeneration??''})))return false;
+        // Genuine service/caller return, NOT the GUI Start Promise. The fresh
+        // read below alone may set terminalRead and restore the original result.
+        a.delegatedReturned=true;const read=await this.checkStatus(true);
+        return !!read&&this.attempt===a&&a.terminalRead&&!this.issue&&sameToolAcquisitionIdentity(a.identity,read.operation)&&read.operation?.phase==='terminal';
+      }};
   }
   setAcknowledged(operationId: string, ownerGeneration: string, value: boolean): void {
     const a = this.attempt;

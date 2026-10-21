@@ -74,7 +74,7 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
     let retained = retained_document_backing_bytes().unwrap();
     assert!(retained >= APPLE_PROVISIONING_INPUT_LIMIT + 2 * apple_wire::STATUS_LIMIT);
     let common = document_backing_bytes(apple_wire::Mode::Review).unwrap();
-    for mode in [
+    let modes = [
         apple_wire::Mode::Review, apple_wire::Mode::Register, apple_wire::Mode::Reconcile,
         apple_wire::Mode::ProfileReview, apple_wire::Mode::ProfileReuse,
         apple_wire::Mode::ProfileCreate, apple_wire::Mode::ProfileReconcile,
@@ -82,9 +82,20 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
         apple_wire::Mode::CertificateReview, apple_wire::Mode::CertificateCreate,
         apple_wire::Mode::CertificateReconcile,
         apple_wire::Mode::P12Review, apple_wire::Mode::P12Reuse, apple_wire::Mode::P12Save,
-    ] {
+    ];
+    // Print every branch before any fit assertion: one failing mode must not
+    // hide the distinct selected-P12 or private-save quote in a native run.
+    let quotes: Vec<_> = modes.into_iter().map(|mode| {
+        let active = document_backing_bytes(mode).unwrap();
+        let input = 2 * private_input_backing_bytes(mode);
+        eprintln!("Apple owner DATA quote: mode={mode:?}; retained={retained}; active={active}; private_input_overlap={input}; total={}; cap={}",
+            retained.checked_add(active).unwrap(), 64 * 1024 * 1024);
+        (mode, active)
+    }).collect();
+    for (mode, active) in quotes {
         // Mirror the actual initialize branches, not a max of mutually
-        // exclusive sessions. All sixteen modes retain the same common quote.
+        // exclusive sessions. All common retained/state/ACK backing remains;
+        // only Certificate/P12 active wire and private-input sizes differ.
         let parent = match mode {
             apple_wire::Mode::Review | apple_wire::Mode::Register | apple_wire::Mode::Reconcile => 0,
             apple_wire::Mode::ProfileReview | apple_wire::Mode::ProfileReuse
@@ -96,12 +107,24 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
             | apple_wire::Mode::P12Review | apple_wire::Mode::P12Reuse | apple_wire::Mode::P12Save =>
                 super::super::apple_key::backing_bytes(mode).unwrap(),
         };
-        let active = document_backing_bytes(mode).unwrap();
-        assert_eq!(active.checked_sub(common), Some(parent), "{mode:?}");
+        let original = common.checked_add(parent).unwrap();
+        let expected = if mode.certificate() || mode.p12() {
+            let unused_wire = 4 * (apple_wire::PROFILE_IDENTITY_LIMIT
+                + apple_wire::PROFILE_JSON_LIMIT + apple_wire::KEY_JSON_LIMIT);
+            original.checked_sub(unused_wire).unwrap()
+                .checked_sub(2 * (4 * 1024 * 1024 + 4096 + 16 * 1024 + 46)).unwrap()
+                .checked_add(2 * private_input_backing_bytes(mode)).unwrap()
+        } else { original };
+        assert_eq!(active, expected, "{mode:?}");
         assert!(active >= 8 * crate::apple_provisioning_journal::STATE_LIMIT, "{mode:?}");
         assert!(active.checked_add(retained).unwrap() < 64 * 1024 * 1024, "{mode:?}");
         assert!(active.checked_add(usize::MAX).is_none(), "{mode:?}");
     }
+    assert_eq!(2 * private_input_backing_bytes(apple_wire::Mode::CertificateCreate), 57_436);
+    assert_eq!(2 * private_input_backing_bytes(apple_wire::Mode::P12Save), 57_564);
+    assert_eq!(2 * private_input_backing_bytes(apple_wire::Mode::P12Review), 8_454_236);
+    assert_eq!(private_input_backing_bytes(apple_wire::Mode::P12Reuse),
+        private_input_backing_bytes(apple_wire::Mode::P12Review));
     // This is a fixed representation census only, not a native/RSS bound.
 }
 

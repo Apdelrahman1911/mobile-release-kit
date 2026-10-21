@@ -531,3 +531,23 @@ test('matched iOS version remains an observation without SDK or release-readines
   assert.equal(h.calls.length, 1); // Receiving the result does not send another Start.
   h.controller.dispose();
 });
+
+
+test('CLI doctor delegates one immutable draft copy without a fake GUI Start or event-derived join',async()=>{
+  const h=harness();await h.ready;const review=h.controller.toolSetupReview(),pin=h.controller.delegateToolSetup(review);
+  assert.ok(pin);assert.equal(pin.input.doctorDraft.current,true);assert.equal(h.calls.length,0);
+  assert.equal(h.state.delegated,true);assert.equal(h.state.attempt,null);assert.equal(h.controller.start(),false);
+  h.project.draft.current=false;assert.equal(pin.input.doctorDraft.current,true);
+  h.emit(status(1,null,finished()));assert.equal(h.state.delegated,true);assert.equal(h.state.attempt,null);
+  const returned={review,settlement:'settled',operation:{operationId:RUN,ownerGeneration:GENERATION,registrationGeneration:null}};
+  assert.equal(await pin.readAfterReturned({...returned,operation:{...returned.operation,operationId:OTHER}}),false);
+  assert.equal(h.state.delegated,true);assert.equal(await pin.readAfterReturned(returned),true);
+  assert.equal(h.state.delegated,false);assert.equal(h.state.attempt,null);assert.equal(h.calls.length,0);h.controller.dispose();
+});
+
+test('never-submitted doctor permission releases only after the original native status read is known idle',async()=>{
+  const h=harness();await h.ready;const pin=h.controller.delegateToolSetup(h.controller.toolSetupReview());assert.ok(pin);
+  h.registry(status(1,owner()));assert.equal(await pin.readAfterReturned(null),false);assert.equal(h.state.delegated,true);
+  h.registry(status(2,null,finished({outcome:'cancelled',reason:'cancelled',result:null})));
+  assert.equal(await pin.readAfterReturned(null),true);assert.equal(h.calls.length,0);h.controller.dispose();
+});

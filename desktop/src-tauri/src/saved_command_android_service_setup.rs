@@ -1630,7 +1630,7 @@ impl SavedCommandOwner {
             let cohort=snapshot.cohort.lock().map_err(|_|wire::service_unconfirmed())?.take().ok_or_else(wire::service_invalid)?;
             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::service_invalid());}
             let (stop,_)=watch::channel(false);let(audit,_)=watch::channel(hard);
-            let control=Arc::new(Control{
+            let control=Arc::new(Control{agent:None,
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(),lane:ControlLane::Service,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,

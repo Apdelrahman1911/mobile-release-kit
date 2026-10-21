@@ -1395,8 +1395,14 @@ async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<
 #[tauri::command]
 async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    edit_window(&webview)?;
+    let window=edit_window(&webview)?;
     let body = request_body(&request)?;
+    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_read(window,args.origin).await;}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
+    }
     let args = metadata_text_commands::open(body)?;
     not_closing(&state)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
@@ -1424,6 +1430,12 @@ async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'
 async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Open);}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
+    }
     let args = match metadata_text_commands::open_request(request_body(&request)?)? {
         metadata_text_commands::OpenRequest::Recover(args) => return state.bridge.open_metadata_text_recovery(&state.document, window, args),
         metadata_text_commands::OpenRequest::Edit(args) => args,
@@ -1439,6 +1451,12 @@ async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<
 async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Prepare);}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
+    }
     let args = match metadata_text_commands::prepare_request(request_body(&request)?)? {
         metadata_text_commands::PrepareRequest::Recover(args) => return state.bridge.prepare_metadata_text_recovery(&state.document, window, args),
         metadata_text_commands::PrepareRequest::Edit(args) => args,
@@ -1454,6 +1472,12 @@ async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Reque
 async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    if request_body(&request)?.get("intent").and_then(Value::as_str)==Some("agent-metadata-text"){
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {let args=metadata_text_commands::agent(request_body(&request)?)?;return state.document.agent_metadata_text_command(window,args.origin,crate::service_metadata_text_requests::Kind::Apply);}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        return Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."));
+    }
     let body = request_body(&request)?;
     if body.get("intent").is_some() {
         return state.bridge.apply_metadata_text_recovery(&state.document, window, crate::saved_text_recovery_protocol::apply(body)?);
@@ -1708,6 +1732,34 @@ async fn revoke_agent_configuration(webview:Webview,request:tauri::ipc::Request<
 }
 
 #[tauri::command]
+async fn agent_metadata_text_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let origin=metadata_text_commands::agent_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_metadata_text_status(origin.as_ref())?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_metadata_text_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let args=metadata_text_commands::agent_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_metadata_text_apply(window,args)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_metadata_text(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let args=metadata_text_commands::agent_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_metadata_text(window,args)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Metadata text delegation is unavailable on this platform."))}
+}
+
+#[tauri::command]
 async fn agent_version_reserve_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
@@ -1893,6 +1945,90 @@ async fn revoke_agent_git_remote(webview: Webview, request: tauri::ipc::Request<
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
+}
+// The largest action is the original bounded copied Doctor draft. RAW only;
+// Tauri JSON has already lost duplicate-field evidence and is not accepted.
+fn tool_setup_request_bytes<'a>(request:&'a tauri::ipc::Request<'_>)->Result<&'a [u8],BridgeError>{
+    match request.body(){tauri::ipc::InvokeBody::Raw(bytes) if bytes.len()<=crate::environment_diagnostics_protocol::REQUEST_LIMIT=>Ok(bytes),_=>Err(BridgeError::invalid())}
+}
+#[tauri::command]
+async fn agent_tool_setup_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]{
+        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_tool_setup_access(window)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_tool_setup(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]{
+        serde_json::to_value(state.document.allow_agent_tool_setup(window,tool_setup_request_bytes(&request)?)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_tool_setup(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]{
+        let args:crate::asset_session::agent_tool_setup::Revoke=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_tool_setup(window,args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+}
+#[tauri::command]
+async fn agent_tool_setup_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]{
+        let args:crate::service_tool_setup_protocol::Query=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_tool_setup_request_status(window,args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+}
+#[tauri::command]
+async fn agent_github_action_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))] {
+        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_github_action_access(window)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))] {
+        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_github_action(window,args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_github_action(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))] {
+        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_github_action(window)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn agent_github_action_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))] {
+        let args:crate::service_github_action_protocol::Query=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_github_action_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
 }
 #[tauri::command]
 async fn agent_store_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
@@ -3436,7 +3572,7 @@ impl Drop for ToolAcquisitionRelayGuard {
 #[cfg(any(target_os="linux",target_os="macos"))]
 struct AgentStoreRelayGuard {document:DocumentBinding,closed:bool}
 #[cfg(any(target_os="linux",target_os="macos"))]
-impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();}}}
+impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();self.document.agent_tool_setup_relay_lost();}}}
 #[cfg(any(target_os="linux",target_os="macos"))]
 struct AgentAppleRelayGuard {document:DocumentBinding,closed:bool}
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -3470,6 +3606,10 @@ struct VersionReserveRelayGuard { document:DocumentBinding, slot:Arc<crate::asse
 impl Drop for VersionReserveRelayGuard {fn drop(&mut self){if !self.closed {self.slot.lost(&self.document);}}}
 
 #[cfg(any(target_os="linux",target_os="macos"))]
+struct GitHubActionRelayGuard {document:DocumentBinding,closed:bool}
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for GitHubActionRelayGuard {fn drop(&mut self){if !self.closed {self.document.github_action_agent_relay_closed();}}}
+#[cfg(any(target_os="linux",target_os="macos"))]
 struct PlayCleanupRelayGuard {document:DocumentBinding,closed:bool}
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl Drop for PlayCleanupRelayGuard {fn drop(&mut self){if !self.closed {self.document.play_cleanup_agent_relay_closed();}}}
@@ -3486,7 +3626,7 @@ impl Drop for VersionEditAgentRelayGuard{fn drop(&mut self){self.0.agent_version
 #[cfg(any(target_os="linux",target_os="macos"))]
 struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
 #[cfg(any(target_os="linux",target_os="macos"))]
-impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();}}
+impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_metadata_text_relay_lost();}}
 
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
@@ -3495,6 +3635,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let reserve_guard=VersionReserveRelayGuard {document:document.clone(),slot:reserve.clone(),closed:false};
     #[cfg(any(target_os="linux",target_os="macos"))]
     let play_cleanup_guard=PlayCleanupRelayGuard{document:document.clone(),closed:false};
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let github_action_guard=GitHubActionRelayGuard{document:document.clone(),closed:false};
     #[cfg(any(target_os="linux",target_os="macos"))]
     let upload_key_guard=UploadKeyRelayGuard {document:document.clone(),slot:upload_key.clone(),closed:false};
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3549,6 +3691,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut play_cleanup_guard=play_cleanup_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut github_action_guard=github_action_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut upload_key_guard=upload_key_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut git_index_guard = git_index_guard;
@@ -3589,6 +3733,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut version_edit_key=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut configuration_revision=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut metadata_text_revision=None;
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3631,7 +3777,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         loop {
             if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; document.github_action_agent_relay_closed();github_action_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
                 }
@@ -3658,6 +3804,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     configuration_revision=Some(key);
                 }
             }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(Some(status))=document.agent_metadata_text_relay(){
+                let key=(status.service_instance.clone(),status.revision);
+                if metadata_text_revision.as_ref()!=Some(&key){
+                    let _=app.emit_to(MAIN_WINDOW,"mrk:agent-metadata-text",&status);
+                    metadata_text_revision=Some(key);
+                }
+            }
             // Fixed DATA tap in this SAME retained relay; no new task, Git
             // command, status IPC, Store write or native read is introduced.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3666,6 +3820,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             document.service_identity_actions_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.play_cleanup_agent_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            document.github_action_agent_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             upload_key.tick(&document, &app).await;
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -3683,6 +3839,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             document.service_store_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.service_apple_provisioning_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            document.service_tool_setup_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
             // status() releases its native locks before any renderer callback.
@@ -4030,7 +4188,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 biased;
                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; document.github_action_agent_relay_closed();github_action_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
                 }
@@ -4121,6 +4279,7 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
                     document.drain_agent_store_for_exit();
+                    document.drain_agent_tool_setup_for_exit();
                     #[cfg(any(target_os="linux",target_os="macos"))]
                     document.drain_agent_apple_for_exit();
                     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -5609,6 +5768,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+            agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve,
             agent_upload_key_access, allow_agent_upload_key, revoke_agent_upload_key,
             agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
@@ -5617,7 +5777,9 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_store_access, allow_agent_store, revoke_agent_store,
+            agent_github_action_access, allow_agent_github_action, revoke_agent_github_action, agent_github_action_request_status,
             agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
+            agent_tool_setup_access, allow_agent_tool_setup, revoke_agent_tool_setup, agent_tool_setup_request_status,
             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,
             installation_preparation_status, prepare_installation_quit,

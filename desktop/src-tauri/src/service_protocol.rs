@@ -96,8 +96,8 @@ impl CredentialReference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
-    ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
-    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+    ObserveProject, EditConfiguration, EditMetadataText, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubFailedJobsRetry, GitStage, GitUnstage,
+    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
 
 /// Future operation-specific adapters may compare this DATA with a genuine
@@ -206,6 +206,14 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
+    #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
+    #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
+    #[serde(rename="metadata-text.read")] MetadataTextRead(crate::service_metadata_text_protocol::Read),
+    #[serde(rename="metadata-text.prepare")] MetadataTextPrepare(crate::service_metadata_text_protocol::Prepare),
+    #[serde(rename="metadata-text.apply")] MetadataTextApply(crate::service_metadata_text_protocol::Apply),
+    #[serde(rename="metadata-text.status")] MetadataTextStatus(crate::service_metadata_text_protocol::Query),
+    #[serde(rename="metadata-text.cancel")] MetadataTextCancel(crate::service_metadata_text_protocol::Query),
     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
@@ -218,6 +226,9 @@ pub enum RequestBody {
     #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
     #[serde(rename="configuration.status")] ConfigurationStatus(crate::service_configuration_protocol::Query),
     #[serde(rename="configuration.cancel")] ConfigurationCancel(crate::service_configuration_protocol::Query),
+    #[serde(rename="tool-setup.submit")] ToolSetupSubmit(crate::service_tool_setup_protocol::Submit),
+    #[serde(rename="tool-setup.status")] ToolSetupStatus(crate::service_tool_setup_protocol::Query),
+    #[serde(rename="tool-setup.cancel")] ToolSetupCancel(crate::service_tool_setup_protocol::Query),
     #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
     #[serde(rename="apple-provisioning.submit")] AppleProvisioningSubmit(crate::service_apple_provisioning_protocol::Submit),
     #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
@@ -293,6 +304,8 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    GitHubActionRequest(crate::service_github_action_protocol::Status),
+    MetadataTextRequest(crate::service_metadata_text_protocol::Status),
     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
     UploadKeyAccess(crate::service_upload_key_protocol::Access),
     UploadKeyRequest(crate::service_upload_key_protocol::Status),
@@ -301,6 +314,7 @@ pub enum ResponseBody {
     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
     StoreRequest(crate::service_store_protocol::Status),
     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
+    ToolSetupRequest(crate::service_tool_setup_protocol::Status),
     GitIndexScope(crate::service_git_protocol::Scope),
     GitIndexRequest(crate::service_git_protocol::Status),
     GitCommitScope(crate::service_git_commit_protocol::Scope),
@@ -349,13 +363,24 @@ fn nesting(bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
-    if bytes.is_empty() || bytes.len() > REQUEST_BYTES { return Err(Error::InvalidRequest); }
+    if bytes.is_empty() { return Err(Error::InvalidRequest); }
+    // The only larger request is the exact fixed metadata Prepare envelope.
+    // It never reaches the ordinary enum decoder or widens any old action.
+    if bytes.len()>REQUEST_BYTES{return crate::service_metadata_text_protocol::decode_prepare_request(bytes);}
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if matches!(&request.request,RequestBody::VersionEditSubmit(_)|RequestBody::VersionEditStatus(_)|RequestBody::VersionEditCancel(_))
         && bytes.len()>crate::service_version_edit_protocol::REQUEST_BYTES {return Err(Error::InvalidRequest)}
     if let RequestBody::VersionEditSubmit(v)=&request.request{v.validate()?;}
+    if matches!(&request.request,RequestBody::GitHubActionSubmit(_)|RequestBody::GitHubActionStatus(_)|RequestBody::GitHubActionCancel(_)) && bytes.len()>crate::service_github_action_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+    match &request.request {
+        RequestBody::MetadataTextPrepare(_)=>return crate::service_metadata_text_protocol::decode_prepare_request(bytes),
+        RequestBody::MetadataTextRead(v)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;v.validate()?;},
+        RequestBody::MetadataTextApply(v)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;if !v.reviewed{return Err(Error::InvalidRequest)}},
+        RequestBody::MetadataTextStatus(_)|RequestBody::MetadataTextCancel(_)=>{crate::service_metadata_text_protocol::strict_small_request(bytes)?;},
+        _=>(),
+    }
     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
@@ -366,6 +391,8 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+    if matches!(&request.request,RequestBody::ToolSetupSubmit(_)|RequestBody::ToolSetupStatus(_)|RequestBody::ToolSetupCancel(_))
+        &&bytes.len()>crate::service_tool_setup_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
@@ -377,13 +404,19 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     Ok(request)
 }
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
+    if let RequestBody::MetadataTextPrepare(input)=&request.request{
+        input.validate()?;let bytes=crate::service_metadata_text_protocol::encoded(request,crate::service_metadata_text_protocol::REQUEST_BYTES)?;
+        decode_request(&bytes)?;return Ok(bytes);
+    }
     let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
     decode_request(&bytes)?;
     Ok(bytes)
 }
 pub fn encode_response(response: &Response) -> Result<Vec<u8>, Error> {
     validate_response(response)?;
-    let bytes = serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?;
+    let bytes = if matches!(&response.response,ResponseBody::MetadataTextRequest(_)){
+        crate::service_metadata_text_protocol::encoded(response,RESPONSE_BYTES).map_err(|_|Error::StateUnknown)?
+    }else{serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?};
     if bytes.len() > RESPONSE_BYTES { return Err(Error::StateUnknown); }
     Ok(bytes)
 }
@@ -433,6 +466,14 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
             crate::service_version_edit_protocol::bounded(response,crate::service_version_edit_protocol::STATUS_BYTES)?;
         },
+        ResponseBody::GitHubActionRequest(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_github_action_protocol::STATUS_LIMIT {return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::MetadataTextRequest(row)=>{
+            row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+            crate::service_metadata_text_protocol::bounded(response,if row.observation.is_some(){RESPONSE_BYTES}else{crate::service_metadata_text_protocol::STATUS_BYTES})?;
+        },
         ResponseBody::PlayCleanupRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance || serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_play_cleanup_protocol::STATUS_LIMIT {
@@ -452,6 +493,10 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         ResponseBody::ConfigurationRequest(row)=>{
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_configuration_protocol::STATUS_BYTES{return Err(Error::InvalidRequest);}
+        },
+        ResponseBody::ToolSetupRequest(row)=>{
+            row.validate()?;
+            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
         },
         ResponseBody::StoreRequest(row)=>{
             row.validate()?;

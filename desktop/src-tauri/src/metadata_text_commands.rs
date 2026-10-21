@@ -102,3 +102,19 @@ mod tests {
     }
 
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum AgentIntent { AgentMetadataText }
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct AgentRequest { pub intent:AgentIntent, pub origin:crate::service_metadata_text_protocol::Query }
+pub(crate) fn agent(body:&Value)->Result<AgentRequest,BridgeError>{decode(body,4096)}
+pub(crate) fn agent_query(body:&Value)->Result<crate::service_metadata_text_protocol::Query,BridgeError>{decode(body,4096)}
+pub(crate) fn agent_status(body:&Value)->Result<Option<crate::service_metadata_text_protocol::Query>,BridgeError>{
+    if body.as_object().is_some_and(|o|o.is_empty()){Ok(None)}else{agent_query(body).map(Some)}
+}
+pub(crate) fn agent_allow(body:&Value)->Result<crate::service_metadata_text_protocol::Allow,BridgeError>{
+    let a:crate::service_metadata_text_protocol::Allow=decode(body,4096)?;
+    if a.consent_version!=crate::service_metadata_text_protocol::CONSENT{return Err(BridgeError::invalid())}Ok(a)
+}

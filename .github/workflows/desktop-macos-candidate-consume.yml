@@ -267,7 +267,8 @@ jobs:
         include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","python":"arm64","rust":"1.98.1"}]' || inputs.architecture == 'x86_64' && '[{"target":"x86_64-apple-darwin","runner":"macos-26-intel","python":"x64","rust":"1.98.0"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","python":"arm64","rust":"1.98.1"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","python":"x64","rust":"1.98.0"}]') }}
     env:
       MRK_CANDIDATE_MODE: remove-delivery
-      MRK_CANDIDATE_SOURCE: fcb1aa46fb95e601479078fdc98ba05acb701c05
+      # Removal-only donor routing; Restore/UI keeps its independent nomination.
+      MRK_CANDIDATE_SOURCE: ${{ fromJSON('{"aarch64-apple-darwin":"bf9d397bde641aae4b4cd205f3c962e899557650","x86_64-apple-darwin":"fcb1aa46fb95e601479078fdc98ba05acb701c05"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
       MACOSX_DEPLOYMENT_TARGET: '26.0'

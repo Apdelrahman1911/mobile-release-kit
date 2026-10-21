@@ -58,51 +58,83 @@ fn actual_document_plus_apple_future_fits_original_session_limit() {
     let mut state=document.lock();
     let base=lookup_memory::retained_document_bytes(&document.inner,&state).unwrap();
     assert!(state.records.is_empty());
-    for (id,kind,file_kind) in [
-        ("inert-apple-p8",Kind::AscP8,credential_format::FileKind::AscP8),
-        ("inert-apple-p12",Kind::AppleP12,credential_format::FileKind::AppleP12),
+    for (id,kind,file_kind,capacity) in [
+        ("inert-apple-p8",Kind::AscP8,credential_format::FileKind::AscP8,16*1024),
+        ("inert-apple-p12",Kind::AppleP12,credential_format::FileKind::AppleP12,4*1024*1024),
     ] {
         // Real, distinct retained payloads and format observations; empty
         // census DATA is not a usable credential, BoundLoan or native receipt.
+        // Capacity is genuinely retained at the existing source limits even
+        // though no key/P12 bytes are generated or decoded by this DATA test.
         let observation=credential_format::inspect(file_kind,&[],&mut||false)
             .ok().expect("inert empty observation");
         state.records.push(Record{key:RecordKey{id:Token(id.into()),revision:1},
             payload:Arc::new(Payload{kind,fields:None,material:Some(Arc::new(Material{
-                origin:MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(Vec::new())),
+                origin:MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity))),
                 observation}))}),mutation_pending:false});
     }
     assert!(!Arc::ptr_eq(&state.records[0].payload,&state.records[1].payload));
     let retained=lookup_memory::retained_document_bytes(&document.inner,&state).unwrap();
-    assert!(retained>=base+2*RECORD_METADATA_BYTES);
+    assert!(retained>=base+2*RECORD_METADATA_BYTES+16*1024+4*1024*1024);
     let future=future_for(Mode::ProfileReview).unwrap();
     let minimum=retained.checked_add(future).unwrap();
-    eprintln!("Apple DATA census: empty={base}; with P8/P12={retained}; profile future={future}; minimum={minimum}; cap={SESSION_BYTES}");
+    let modes=[Mode::Review,Mode::Register,Mode::Reconcile,
+        Mode::ProfileReview,Mode::ProfileReuse,Mode::ProfileCreate,Mode::ProfileReconcile,
+        Mode::KeyReview,Mode::KeyPrepare,Mode::KeyRecover,
+        Mode::CertificateReview,Mode::CertificateCreate,Mode::CertificateReconcile,
+        Mode::P12Review,Mode::P12Reuse,Mode::P12Save];
+    let quotes:Vec<_>=modes.into_iter().map(|mode|{
+        let active=future_for(mode).unwrap();
+        let total=retained.checked_add(active).unwrap();
+        eprintln!("Apple DATA census: mode={mode:?}; empty={base}; payload_delta={}; input_capacities={}; retained={retained}; future={active}; total={total}; cap={SESSION_BYTES}; headroom={}",
+            retained-base,16*1024+4*1024*1024,SESSION_BYTES as i128-total as i128);
+        (mode,active,total)
+    }).collect();
     for mode in [Mode::ProfileReview,Mode::ProfileReuse,Mode::ProfileCreate,Mode::ProfileReconcile] {
         assert_eq!(future_for(mode),Some(future));
-        assert!(retained.checked_add(future_for(mode).unwrap()).unwrap()<SESSION_BYTES,"{mode:?}");
     }
     // Reconstruct the old exclusive-parent double charge using actual helper
     // quotes. This exact two-payload Document could not admit that old quote.
     let common=future_for(Mode::Review).unwrap();
     let extra_key=[Mode::KeyPrepare,Mode::CertificateCreate,Mode::P12Save].into_iter()
-        .map(|mode|future_for(mode).unwrap().checked_sub(common).unwrap()).max().unwrap();
+        .map(|mode|{
+            let active=future_for(mode).unwrap();
+            // Restore the old common private/wire quote before recovering
+            // its exclusive parent charge. These are not usable inputs.
+            let restored=if mode==Mode::KeyPrepare{active}else{
+                let wire=4*(crate::apple_provisioning_protocol::PROFILE_IDENTITY_LIMIT
+                    +crate::apple_provisioning_protocol::PROFILE_JSON_LIMIT
+                    +crate::apple_provisioning_protocol::KEY_JSON_LIMIT);
+                let old_input=4*1024*1024+4096+16*1024+46;
+                let input=16*1024+46+3*4096+if mode==Mode::P12Save{64}else{0};
+                active.checked_add(wire).unwrap().checked_add(2*old_input).unwrap()
+                    .checked_sub(2*input).unwrap()
+            };
+            restored.checked_sub(common).unwrap()
+        }).max().unwrap();
     let old_minimum=minimum.checked_add(extra_key).unwrap();
     eprintln!("Apple DATA old exclusive-parent double charge: minimum={old_minimum}; cap={SESSION_BYTES}");
     assert!(old_minimum>SESSION_BYTES);
     assert!(retained.checked_add(usize::MAX).is_none());
     // Necessary, not sufficient: actual material/Ready/loan charges still run
     // at the production gate. Retained capacity is never free credit.
-    let grow_by=SESSION_BYTES.checked_sub(minimum).unwrap()+1;
+    let grow_by=SESSION_BYTES.checked_sub(minimum).map_or(1,|remaining|remaining+1);
     let payload=Arc::get_mut(&mut state.records[1].payload).unwrap();
     let material=Arc::get_mut(payload.material.as_mut().unwrap()).unwrap();
     let MaterialOrigin::Selected(source)=&mut material.origin else { panic!("inert selected source") };
-    source.bytes.reserve_exact(grow_by);
+    source.bytes.reserve_exact(source.bytes.capacity().checked_add(grow_by).unwrap());
     let larger=lookup_memory::retained_document_bytes(&document.inner,&state).unwrap();
     assert!(larger>=retained+grow_by);
     assert!(larger.checked_add(future).unwrap()>SESSION_BYTES);
     state.retiring=true;
     assert!(matches!(lookup_memory::retained_document_bytes(&document.inner,&state),
         Err(keyring::Problem::CleanupUnknown)));
+    // Do not treat a refused mode as a pass or stop diagnostics at the first
+    // failure. These original admission assertions still require actual fit.
+    for (mode,active,total) in quotes {
+        assert!(total<SESSION_BYTES,
+            "{mode:?}: empty={base}; retained={retained}; future={active}; total={total}; cap={SESSION_BYTES}");
+    }
 }
 
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]

@@ -1,3 +1,5 @@
+import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
+import type { ToolSetupKind, ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
 import { canObserveAgentAndroidBuild } from './agentAndroidBuildOrigin.ts';
 import { copyAndroidBuildApproval } from './agentAndroidBuild.ts';
 import type { AndroidBuildApproval } from './agentAndroidBuild.ts';
@@ -102,7 +104,7 @@ interface CatalogAttempt {
 interface RegistrationAttempt {
   observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; kind: AndroidToolRegistrationKind;
   identity: AndroidToolRegistrationIdentity | null; retired: boolean; settled: boolean; sent: boolean;
-  replySettled: boolean; notAdmitted: boolean; requestedAt: number; reviewDeadline: number;
+  replySettled: boolean; delegated: boolean; delegatedReturned: boolean; notAdmitted: boolean; requestedAt: number; reviewDeadline: number;
 }
 interface ServiceAttempt {
   observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; action: AndroidToolServiceAction;
@@ -373,8 +375,8 @@ export class AndroidBuildController {
       || observer.catalogCancelPending
       || observer.catalogUnconfirmed || observer.catalogLost
       || this.sourcesAttempt?.observer === observer && !this.sourcesAttempt.settled || androidToolSourcesActive(observer.sources)
-      || this.registrationAttempt?.observer === observer && this.registrationAttempt.sent
-        && (!this.registrationAttempt.replySettled || !this.registrationAttempt.settled)
+      || this.registrationAttempt?.observer === observer && (this.registrationAttempt.sent||this.registrationAttempt.delegated)
+        && (!(this.registrationAttempt.replySettled||this.registrationAttempt.delegatedReturned) || !this.registrationAttempt.settled)
       || this.registrationHeld(observer.registration) || observer.registrationLost || observer.registrationStops.some((claim) => claim.pending)
       || this.observer === observer && this.state.registrationUnconfirmed
       || this.serviceAttempt?.observer === observer && this.serviceAttempt.sent
@@ -764,7 +766,7 @@ export class AndroidBuildController {
   }
   private registrationCandidate(attempt: RegistrationAttempt, status: AndroidToolRegistrationStatus): boolean {
     const op = status.operation;
-    return attempt.sent && !!op && status.registrationGeneration === attempt.before + 1 && status.statusRevision > attempt.after
+    return (attempt.sent||attempt.delegated) && !!op && status.registrationGeneration === attempt.before + 1 && status.statusRevision > attempt.after
       && op.kind === attempt.kind && op.sourceGeneration === attempt.binding.sourceGeneration
       && sameAndroidBuildData(op.context, attempt.binding.context)
       && (!attempt.identity || sameAndroidToolRegistrationIdentity(attempt.identity, op));
@@ -773,7 +775,7 @@ export class AndroidBuildController {
   // described, but must not tell the user to change the current tool folders.
   canExplainCurrentSourceInspection(): boolean {
     const attempt = this.registrationAttempt, status = this.state.toolRegistration;
-    return !!attempt && !!status && attempt.kind === 'inspection' && attempt.sent && attempt.replySettled && attempt.settled
+    return !!attempt && !!status && attempt.kind === 'inspection' && (attempt.sent||attempt.delegated) && (attempt.replySettled||attempt.delegatedReturned) && attempt.settled
       && this.state.mode === 'native' && !this.state.nativeBlocked && !this.state.integrityFailed && !this.state.generationLost
       && this.state.registrationListening && !this.state.registrationIssue && !this.state.registrationUnconfirmed
       && this.state.registrationPending === null && !this.state.registrationCancelPending && !this.state.registrationCancelClaimed
@@ -805,7 +807,7 @@ export class AndroidBuildController {
   private reconcileRegistrationConsent(observer: Observer): void {
     const status = observer.registration, attempt = this.registrationAttempt;
     if (!status?.review || !status.operation || status.phase !== 'review' || !attempt || attempt.observer !== observer
-        || attempt.kind !== 'inspection' || !attempt.replySettled || !this.registrationCandidate(attempt, status)
+        || attempt.kind !== 'inspection' || !(attempt.replySettled||attempt.delegatedReturned) || !this.registrationCandidate(attempt, status)
         || !this.registrationMatches(attempt) || !(this.state.visible || this.toolSetupVisible) || this.state.registrationIssue) {
       if (observer === this.observer && this.state.registrationConsent) this.update({ registrationConsent: null });
       return;
@@ -857,7 +859,7 @@ export class AndroidBuildController {
     if (acknowledged) attempt.settled = !androidToolRegistrationActive(status);
     observer.registration = status;
     if (observer === this.observer) this.update({ toolRegistration: status,
-      registrationPending: acknowledged && attempt.replySettled ? null : this.state.registrationPending,
+      registrationPending: acknowledged && (attempt.replySettled||attempt.delegatedReturned) ? null : this.state.registrationPending,
       registrationUnconfirmed: acknowledged ? false : this.state.registrationUnconfirmed,
       nativeBlocked: this.state.nativeBlocked || status.phase === 'unknown'
         || ['cleanup-unknown', 'document-lost', 'shutdown'].includes(status.availability),
@@ -893,7 +895,7 @@ export class AndroidBuildController {
       }
     }
   }
-  private registrationCommonReason(ignoreOwnPending = false): string | null {
+  private registrationCommonReason(ignoreOwnPending = false, peers = true): string | null {
     const observer = this.observer, status = this.state.toolRegistration, project = this.state.project, sources = this.state.toolSources;
     if (this.disposed || this.state.mode !== 'native' || !observer?.active || !hasAndroidToolRegistration(observer.api))
       return 'Protected registration is unavailable in this adapter. There is no browser, shell or unprivileged-copy fallback.';
@@ -921,7 +923,7 @@ export class AndroidBuildController {
     if (!sources || sources.projectId !== project.projectId || sources.selections.length !== 3 || sources.sourceGeneration === 0)
       return 'Choose all three original JDK, SDK and Gradle folders for this project first.';
     if (this.currentRegistrationContext() === null) return 'Refresh the saved configuration and version for the chosen inspection context.';
-    return this.context.otherOperationReason();
+    return peers ? this.context.otherOperationReason() : null;
   }
   inspectToolSourcesReason = (): string | null => this.registrationCommonReason() ??
     (this.state.toolRegistration?.review ? 'Register this exact review or discard it before inspecting new sources.' : null);
@@ -962,6 +964,54 @@ export class AndroidBuildController {
     if (!Number.isFinite(now) || now < attempt.requestedAt || now >= consent.deadline) { this.armRegistrationExpiry(); return; }
     this.update({ registrationConsent: { ...consent, acknowledged } });
   }
+  toolSetupReview(kind:ToolSetupKind):ToolSetupReview|null {
+    if(kind!=='inspect-picked-sources'&&kind!=='register-reviewed-sources'||this.registrationCommonReason(false,false))return null;
+    const status=this.state.toolRegistration,sources=this.state.toolSources,context=this.currentRegistrationContext();
+    if(!status||!sources||!context||status.registrationGeneration>=ANDROID_BUILD_COUNTER_MAX-1)return null;
+    let reviewId:string|null=null;
+    if(kind==='inspect-picked-sources'){if(status.review)return null;}
+    else {const consent=this.state.registrationConsent,a=this.registrationAttempt,now=this.now();
+      if(!consent||!a||!this.registrationMatches(a)||!status.review||!status.operation||!sameAndroidToolRegistrationIdentity(consent,status.operation)||
+        consent.reviewId!==status.review.reviewId||!Number.isFinite(now)||now<a.requestedAt||now>=consent.deadline)return null;
+      reviewId=consent.reviewId; // Advanced approval independently includes the vendor licenses.
+    }
+    return parseToolSetupReview({kind,platform:'android',draftRevision:context.draftRevision,baselineGeneration:context.baselineGeneration,prepared:null,
+      sources:{registrationGeneration:status.registrationGeneration,sourceGeneration:sources.sourceGeneration,reviewId}});
+  }
+  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
+    if(!sameToolSetupReview(this.toolSetupReview(review.kind),review))return null;
+    const observer=this.observer!,previous=observer.registration!,context=this.currentRegistrationContext()!,sources=review.sources!,old=this.registrationAttempt,oldConsent=this.state.registrationConsent;
+    const now=this.now(),binding=this.registrationBinding(context,sources.sourceGeneration,this.state.requestGeneration);
+    if(!binding||!Number.isFinite(now)||now<0)return null;
+    const a:RegistrationAttempt={observer,before:previous.registrationGeneration,after:previous.statusRevision,binding,
+      kind:review.kind==='inspect-picked-sources'?'inspection':'registration',identity:null,retired:false,settled:false,sent:false,replySettled:false,
+      delegated:true,delegatedReturned:false,notAdmitted:false,requestedAt:now,reviewDeadline:now+ANDROID_BUILD_CONSENT_MS};
+    this.clearTimer();this.registrationAttempt=a;observer.registrationStops=[];
+    this.update({registrationConsent:null,registrationPending:a.kind==='inspection'?'inspect':'register',registrationUnconfirmed:false,registrationError:null,registrationCancelClaimed:null});
+    return {input:{projectId:context.projectId,review,doctorDraft:null,sourceContext:context as unknown as Record<string,unknown>,
+      nativeConsent:a.kind==='registration'?ANDROID_TOOL_REGISTRATION_CONSENT:null,licenseAcknowledged:a.kind==='registration'},
+      current:()=>this.registrationMatches(a)&&observer.registration?.statusRevision===previous.statusRevision&&sameAndroidBuildData(observer.registration,previous)&&!this.state.nativeBlocked&&!this.state.integrityFailed,
+      readAfterReturned:async status=>{
+        if(this.registrationAttempt!==a||this.observer!==observer||!observer.active||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'))return false;
+        while(observer.registrationReading)await observer.registrationReading;
+        const parsed=parseAndroidToolRegistrationStatus(await observer.api.androidToolRegistrationStatus!());
+        if(!parsed||this.registrationAttempt!==a||this.observer!==observer||!observer.active)return false;
+        const op=status?.operation;
+        if(op){if(!parsed.operation||parsed.operation.operationId!==op.operationId||parsed.operation.registrationGeneration!==op.registrationGeneration||
+            !this.registrationCandidate(a,parsed)||androidToolRegistrationActive(parsed)||parsed.phase==='unknown')return false;
+          a.delegatedReturned=true;this.receiveRegistration(observer,parsed);
+        }else{
+          // Known no-admission can restore ONLY the very same retained earlier
+          // inspection object, bytes and original UI expiry; no new Review DTO.
+          if(parsed.registrationGeneration!==previous.registrationGeneration||!sameAndroidBuildData(parsed,previous))return false;
+          a.delegatedReturned=true;a.notAdmitted=true;a.settled=true;
+          if(old&&oldConsent&&sameAndroidBuildData(parsed.review,previous.review)&&old.reviewDeadline>this.now()){
+            this.registrationAttempt=old;this.update({registrationPending:null,registrationUnconfirmed:false,registrationConsent:oldConsent});this.reconcileRegistrationConsent(observer);
+          }else{a.retired=true;this.update({registrationPending:null,registrationUnconfirmed:false});}
+        }
+        return !this.state.nativeBlocked&&!this.state.integrityFailed&&!observer.registrationLost&&(!op||a.settled);
+      }};
+  }
   async inspectToolSources(): Promise<void> {
     this.syncProject();
     if (this.inspectToolSourcesReason() || !this.observer || !this.state.toolRegistration || !this.state.toolSources) return;
@@ -988,7 +1038,7 @@ export class AndroidBuildController {
     const binding = this.registrationBinding(context, sourceGeneration, counters.requestGeneration!);
     if (!binding) return;
     const attempt: RegistrationAttempt = { observer, before: previous.registrationGeneration, after: previous.statusRevision,
-      binding, kind, identity: null, retired: false, settled: false, sent: false, replySettled: false, notAdmitted: false,
+      binding, kind, identity: null, retired: false, settled: false, sent: false, replySettled: false, delegated: false, delegatedReturned: false, notAdmitted: false,
       requestedAt: now, reviewDeadline: now + ANDROID_BUILD_CONSENT_MS };
     // No call to retire(): Register consumes this exact review, not a parallel
     // cancellation of it. Native independently rejects any conflicting owner.

@@ -28,7 +28,7 @@ mod apple_profile;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "asset_session_apple_key.rs"]
 mod apple_key;
-pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput, UploadKeySavedInput};
+pub(crate) use saved_observation::{SavedObservationCompletion, ToolDelegationSavedWitness,ValidatedSavedInput, UploadKeySavedInput};
 #[path = "asset_session_version_allocation.rs"]
 mod version_allocation;
 pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
@@ -68,6 +68,9 @@ pub(crate) mod agent_ios_archive;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_agent_store.rs"]
 pub(crate) mod agent_store;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_tool_setup.rs"]
+pub(crate) mod agent_tool_setup;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path="service_git_document.rs"]
 pub(crate) mod agent_git_index;
@@ -176,6 +179,9 @@ pub(crate) use actions_retry::GitHubActionsRetryGoGate;
 #[path="asset_session_github_play_cleanup.rs"]
 mod play_cleanup;
 pub(crate) use play_cleanup::GitHubPlayCleanupGoGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_github_action_native.rs"]
+pub(crate) mod agent_github_action;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path="service_play_cleanup_native.rs"]
 mod agent_play_cleanup;
@@ -882,6 +888,8 @@ struct DocumentState {
     agent_store_grant:Option<Arc<agent_store::Grant>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_apple:apple_provisioning::agent::State,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_tool_setup:agent_tool_setup::State,
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
@@ -1165,6 +1173,11 @@ pub(crate) mod agent_version_edit;
 mod agent_configuration;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_configuration::ConfigurationAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_metadata_text.rs"]
+mod agent_metadata_text;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_metadata_text::MetadataTextAgentGate;
 
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
@@ -1191,6 +1204,12 @@ struct Inner {
     agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_apple_service:std::sync::OnceLock<std::sync::Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_github_action_allow_pending:std::sync::atomic::AtomicBool,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
@@ -2206,6 +2225,7 @@ mod lookup_memory {
             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
+            self.add(crate::service_github_action_protocol::DOCUMENT_BACKING)?; // ONE complete three-kind inbox + scopes/8 replies, never per-kind credit.
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2213,7 +2233,13 @@ mod lookup_memory {
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_version_edit_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
-            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
+            self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_metadata_text_requests::DOCUMENT_BACKING)?; // SAME Config32; only one active full metadata bundle.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_tool_setup_requests::DOCUMENT_BACKING)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(agent_tool_setup::retained_bytes(state).ok_or(Problem::Capacity)?)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2338,23 +2364,33 @@ mod lookup_memory {
     // Actual retained Document/artifact/GitHub buffers for a new public-tool
     // operation. No fabricated current owner, standalone state or signing credit.
     pub(super) fn retained_document_bytes(document: &Arc<Inner>, state: &DocumentState) -> Result<usize, Problem> {
-        document_bytes_with_tool_pickers(document, state, None)
+        document_bytes_with_tool_pickers(document, state, None, None)
     }
     // The SAME census/Seen visits every exact current and earlier picker held
     // by tool preparation. A snapshot path or the current Document.slot alone
     // cannot account for those original source/GUI/retirement allocations.
     pub(super) fn tool_acquisition_document_bytes(document: &Arc<Inner>, state: &DocumentState,
         tools: &crate::saved_command_owner::ToolAcquisitionCensus) -> Result<usize, Problem> {
-        document_bytes_with_tool_pickers(document, state, Some(tools))
+        document_bytes_with_tool_pickers(document, state, Some(tools), None)
+    }
+    // Same concrete census for delegated source registration. These are the
+    // three actual Checked picker originals, not paths or replacement owners.
+    pub(super) fn tool_setup_registration_document_bytes(document: &Arc<Inner>, state: &DocumentState,
+        pickers: &[Arc<OriginalWork>; 3]) -> Result<usize, Problem> {
+        document_bytes_with_tool_pickers(document, state, None, Some(pickers))
     }
     fn document_bytes_with_tool_pickers(document: &Arc<Inner>, state: &DocumentState,
-        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>) -> Result<usize, Problem> {
+        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>,
+        registration: Option<&[Arc<OriginalWork>; 3]>) -> Result<usize, Problem> {
         let mut census = Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
             sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() };
         census.artifact_document(document)?;
         census.document(state)?;
         if let Some(tools) = tools {
             for original in tools.picker_originals() { census.owner(original)?; }
+        }
+        if let Some(pickers) = registration {
+            for original in pickers { census.owner(original)?; }
         }
         if !state.github.setup_has_material() && !state.github.history_has_retained_data() {
             census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
@@ -3007,6 +3043,12 @@ impl DocumentBinding {
             #[cfg(any(target_os="linux",target_os="macos"))]
             agent_apple_service:std::sync::OnceLock::new(),
             #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_service:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_github_action_allow_pending:std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(target_os="linux",target_os="macos"))]
             agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
@@ -3024,6 +3066,7 @@ impl DocumentBinding {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
@@ -3708,6 +3751,10 @@ impl DocumentBinding {
         #[cfg(any(target_os="linux",target_os="macos"))]
         self.agent_apple_relay_lost();
         #[cfg(any(target_os="linux",target_os="macos"))]
+        self.github_action_agent_relay_closed();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_tool_setup_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
         self.git_index_relay_lost();
         // Loss retires consent/STOP under the same gate. It is not settlement,
         // owner deletion, a replacement run or permission to reopen the slot.
@@ -3991,6 +4038,9 @@ impl DocumentBinding {
     }
     pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
         let ticket = self.inner.bridge.diagnostics.ticket()?; // Original T, entropy/executor before lock/effects.
+        self.admit_environment_diagnostics(ticket,args,None)
+    }
+    pub(super) fn admit_environment_diagnostics(&self,ticket:crate::environment_diagnostics_owner::Ticket,args:crate::environment_diagnostics_protocol::Start,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<crate::environment_diagnostics_protocol::Status,BridgeError>{
         let state = self.lock();
         use crate::environment_diagnostics_protocol::Availability;
         match self.environment_gate(&state) {
@@ -3998,10 +4048,16 @@ impl DocumentBinding {
             Availability::CleanupUnknown => return Err(BridgeError::cleanup_unknown()), Availability::Shutdown => return Err(BridgeError::shutdown()),
             _ => return Err(BridgeError::new("environment_diagnostics_owner", "This request does not identify the original build-tool diagnostics run.")),
         }
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let delegation_edit=entry.map(|entry|self.tool_setup_admission_guard(&state,entry)).transpose()?;
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        if entry.is_some(){return Err(BridgeError::invalid());}
         let (generation, root) = self.inner.bridge.environment_registration(&args.project_id)?;
         let admitted = self.inner.bridge.diagnostics.admit(ticket, args, generation, root)?;
         // Real document loss, selection, assets, edits, GitHub and quit cannot
         // interleave lookup/claim/enqueue. All original handles exist before GO.
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        drop(delegation_edit);
         drop(state); Ok(admitted.release())
     }
     pub(crate) fn cancel_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Cancel) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -4593,6 +4649,8 @@ impl DocumentBinding {
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.inner.bridge.edits.metadata_text_agent_manual()?;
         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
     #[cfg(test)]
@@ -4648,6 +4706,8 @@ impl DocumentBinding {
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.inner.bridge.edits.metadata_text_agent_manual()?;
         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
     pub(crate) fn release_version_edit_admit_published<T>(
@@ -5497,6 +5557,8 @@ impl DocumentBinding {
                 if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
                 state.saved_input = None;
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                self.stop_tool_setup_locked(&mut state,crate::service_tool_setup_protocol::Reason::Shutdown,now);
                 state.evidence.revoke(false);
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
@@ -6974,7 +7036,7 @@ impl DocumentBinding {
                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
                 && !version_allocation::pending(&state) && !version_enrollment::pending(&state)
                 && {
-                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) }
+                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) && !agent_tool_setup::pending(&state) }
                     #[cfg(not(any(target_os="linux",target_os="macos")))] { true }
                 }
                 && state.maintenance.can_exit()
@@ -8586,6 +8648,7 @@ pub(crate) fn assert_project_path_document_contracts() {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
@@ -8727,6 +8790,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
@@ -8831,6 +8895,7 @@ mod tests {
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
                 agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,

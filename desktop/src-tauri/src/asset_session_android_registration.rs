@@ -65,14 +65,25 @@ impl DocumentBinding {
 
     fn admit_checked_android_registration(&self,checked:crate::saved_command_owner::AndroidRegistrationChecked)
         ->Result<wire::Status,BridgeError> {
+        self.admit_checked_android_registration_agent(checked, None)
+    }
+    pub(super) fn admit_checked_android_registration_agent(&self,checked:crate::saved_command_owner::AndroidRegistrationChecked,
+        entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>) ->Result<wire::Status,BridgeError> {
         let admitted={
             let state=self.lock();
             let gate=self.android_build_gate(&state);
             if gate!=crate::android_build_protocol::Availability::Available{return Err(wire::unavailable());}
             let (registration,root)=self.inner.bridge.native_project(&checked.context().project_id).map_err(|_|wire::unavailable())?;
-            let census=installation_memory::android_registration_census(self,&state,checked.picker_originals())
-                .map_err(|_|wire::unavailable())?;
+            let census=if entry.is_some(){
+                installation_memory::android_registration_agent_census(self,&state,checked.picker_originals())
+            }else{
+                installation_memory::android_registration_census(self,&state,checked.picker_originals())
+            }.map_err(|_|wire::unavailable())?;
             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Some(entry)=entry{self.tool_setup_admission_current(&state,entry,&edit)?;}
+            #[cfg(not(any(target_os="linux",target_os="macos")))]
+            if entry.is_some(){return Err(wire::unavailable());}
             let current=self.validated_saved_input_with_edit(&state,checked.context(),&edit)?;
             self.inner.bridge.android_build.admit_registration(&self.inner.session_identity,&checked,current,
                 registration,&root,&census,gate)?

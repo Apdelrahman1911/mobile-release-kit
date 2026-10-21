@@ -1,3 +1,5 @@
+import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
+import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
 // One presentation coordinator for the original native connection operation.
 // No HTTP, token, timer, automatic creation, Git mutation or new execution owner.
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
@@ -8,11 +10,12 @@ import type { RepositoryCreateConsent, RepositoryCreateKind, RepositoryCreatePor
 
 interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; accountLogin: string }
 interface Original { port: RepositoryCreatePort; live: boolean; unlisten: (() => void) | null; status: RepositoryCreateStatus | null; fresh: boolean }
-interface Work { owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean }
+interface Work { agentCheck?:{delegate:Delegated;status:RepositoryCreateStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean }
 interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: RepositoryCreateKind; ownerKind: RepositoryOwnerKind;
   visibility: RepositoryVisibility; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: RepositoryCreateConsent | null }
 interface Review { owner: Original; context: Context; epoch: object; consent: RepositoryCreateConsent }
+interface Delegated {prepareId:string;review:Review;selection:GithubActionSelection;allowReturned:boolean;noAllow:boolean;unused:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
 export interface RepositoryCreateView {
   native: boolean; status: RepositoryCreateStatus | null; ownerKind: RepositoryOwnerKind; visibility: RepositoryVisibility;
   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
@@ -52,6 +55,7 @@ export class GitHubRepositoryCreateController {
   private work = new Set<Work>();
   private attempt: Attempt | null = null;
   private review: Review | null = null;
+  private delegated:Delegated|null=null;
   private current: Context | null = null;
   private epoch: object = {};
   private unknown = false;
@@ -66,7 +70,7 @@ export class GitHubRepositoryCreateController {
     this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null,
       observing: [...this.work].some((w) => w.kind === 'status' || w.kind === 'subscribe'), cancelling: [...this.work].some((w) => w.kind === 'cancel'),
       discarding: [...this.work].some((w) => w.kind === 'discard') });
-    this.listeners.forEach((f) => f());
+    for(const f of [...this.listeners]){try{f();}catch{/* Rendering cannot disown an original invocation. */}}
   }
   private fail(reason: RepositoryCreateReason): void { this.unknown = true; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
   private invalidate(): void {
@@ -88,7 +92,7 @@ export class GitHubRepositoryCreateController {
   }
   setConfirmed(value: boolean): void { if (!this.disposed) this.update({ confirmed: value === true && this.currentConsent() !== null }); }
   private owns(o: Original): boolean {
-    return this.unknown || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
+    return this.delegated?.review.owner === o || this.unknown || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
       !!o.status?.operation && o.status.operation.phase !== 'settled';
   }
   private maintain(): void {
@@ -120,7 +124,8 @@ export class GitHubRepositoryCreateController {
     this.desired = port; this.syncContext(); this.invalidate(); this.update({ native: port !== null }); this.maintain();
   }
   private latch(owner: Original, kind: Work['kind']): Work { const w: Work = { owner, kind, ended: false }; this.work.add(w); this.update(); return w; }
-  private finish(w: Work): void { w.ended = true; this.work.delete(w); this.settle(); this.update(); this.maintain(); }
+  private finish(w: Work): void { w.ended = true; this.work.delete(w); this.settle(); this.settleDelegated(w); this.update(); this.maintain();
+    if(w.kind==='discard'&&this.delegated?.noAllow&&!this.unknown)this.checkStatus(); }
   private origin(a: Attempt, s: RepositoryCreateStatus): boolean {
     const o = s.operation;
     return a.sent && s.revision > a.revision && s.sessionId === a.context.sessionId && !!o && o.id !== a.previousId &&
@@ -173,10 +178,12 @@ export class GitHubRepositoryCreateController {
     const o = this.original;
     if (!o?.live || this.disposed && !this.owns(o) || [...this.work].some((w) => w.owner === o && ['status', 'subscribe'].includes(w.kind))) return;
     const w = this.latch(o, 'status');
+    const delegated=this.delegated;
+    if(delegated&&(delegated.allowReturned||delegated.noAllow)&&(delegated.unused||delegated.terminal?.settlement==='settled'))w.agentCheck={delegate:delegated,status:null};
     const failed = () => { o.fresh = false; if (this.attempt || o.status?.operation && o.status.operation.phase !== 'settled') this.update({ uncertain: true, error: 'response-invalid' });
       else this.update({ error: 'response-invalid' }); };
     try { const promise = o.port.status(); if (!(promise instanceof Promise)) throw new Error('No original status promise');
-      void promise.then((v) => { this.receive(o, v); }, failed).finally(() => this.finish(w));
+      void promise.then((v) => { const accepted=this.receive(o, v);if(w.agentCheck)w.agentCheck.status=accepted; }, failed).finally(() => this.finish(w));
     } catch { failed(); this.finish(w); }
   }
   currentConsent(): RepositoryCreateConsent | null {
@@ -186,6 +193,7 @@ export class GitHubRepositoryCreateController {
       r.consent.prepared.target.visibility === this.state.visibility ? r.consent : null;
   }
   ownerReason(): string | null {
+    if(this.delegated)return 'The original GitHub review is delegated to a local CLI. Check or revoke that permission; original Check/Stop/Close remain available.';
     if (this.unknown) return REPOSITORY_CREATE_HELP['cleanup-unknown'];
     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
       return 'The original GitHub repository task is still active. Check status or Stop it before starting another task.';
@@ -193,6 +201,7 @@ export class GitHubRepositoryCreateController {
     return null;
   }
   private startReason(): string | null {
+    if(this.delegated)return 'This exact review was delegated. Ordinary Create/Retry cannot consume it, including after a lost Allow reply.';
     const o = this.original, c = context(this.connection()), s = o?.status;
     if (this.disposed || !o?.live || o.port !== this.desired || !o.unlisten) return REPOSITORY_CREATE_HELP['runtime-unavailable'];
     if (this.unknown) return REPOSITORY_CREATE_HELP['cleanup-unknown'];
@@ -299,6 +308,56 @@ export class GitHubRepositoryCreateController {
       if (!(promise instanceof Promise)) throw new Error('No original Close promise');
       void promise.then((v) => { this.receive(o, v); if (o.status?.consent?.id === consent.id) this.fail('response-invalid'); }, () => this.fail('response-invalid')).finally(() => this.finish(w));
     } catch { this.fail('response-invalid'); this.finish(w); }
+  }
+  // Eligibility comes only from the SAME private review, minted after the
+  // original Prepare promise returned; a public status/selection cannot mint it.
+  agentSelection():GithubActionSelection|null {
+    const r=this.review,s=this.original?.status;
+    return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
+      Object.freeze({kind:'repository-create',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
+  }
+  agentSelected(selection:GithubActionSelection):boolean {
+    const d=this.delegated;
+    if(d)return sameGithubActionSelection(d.selection,selection)&&this.delegatedCurrent(d);
+    return sameGithubActionSelection(this.agentSelection(),selection);
+  }
+  private delegatedCurrent(d:Delegated):boolean {
+    return this.delegated===d&&!d.unknown&&!this.unknown&&!this.disposed&&!this.attempt&&!this.work.size&&
+      this.review===d.review&&this.currentConsent()===d.review.consent&&d.review.owner===this.original&&d.review.owner.live&&
+      this.original.status?.revision===d.selection.expectedRevision;
+  }
+  delegatePrepared(selection:GithubActionSelection):GithubActionDelegate|null {
+    if(!sameGithubActionSelection(this.agentSelection(),selection)||!this.review)return null;
+    const d:Delegated={prepareId:this.original!.status!.operation!.id,review:this.review,selection:Object.freeze({...selection}),allowReturned:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
+    this.delegated=d;this.update({confirmed:false}); // latch BEFORE listeners; never rearm this Review.
+    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
+    return Object.freeze({
+      current:()=>this.delegatedCurrent(d),released:()=>d.released,
+      allowReturned:()=>{if(this.delegated===d&&!d.unknown){d.allowReturned=true;this.update();}},
+      observe:(raw:GithubActionStatus)=>{
+        const value=parseGithubActionStatus(raw);
+        if(this.delegated!==d||d.unknown)return;
+        if(!value||!sameGithubActionSelection(value.review,d.selection)||value.settlement==='unknown'){uncertain();return;}
+        if(value.settlement==='settled'){d.terminal=value;this.checkStatus();}
+      },
+      unusedReturned:()=>{if(this.delegated===d&&!d.unknown){d.unused=true;this.checkStatus();}},
+      notSubmitted:()=>{if(this.delegated!==d||d.unknown)return;d.noAllow=true;d.unused=true;
+        if(this.canDiscard())this.discardReview();else this.checkStatus();},
+      uncertain,
+    });
+  }
+  private settleDelegated(w:Work):void {
+    const d=this.delegated,s=w.agentCheck?.status;
+    if(!d||w.agentCheck?.delegate!==d||!w.ended||!s||d.unknown||this.unknown||!(d.allowReturned||d.noAllow)||
+      this.original!==d.review.owner||!d.review.owner.live||this.work.size||!same(s,d.review.owner.status)||s.sessionId!==d.selection.sessionId||
+      s.consent!==null||s.operation?.phase!=='settled'||s.operation.projectId!==d.review.context.projectId)return;
+    const final=d.terminal,op=s.operation;
+    const originalTarget=d.review.consent.prepared.target;
+    if(!same(op.target,originalTarget))return;
+    if(final?.settlement==='settled'&&!final.neverAdmitted){if(op.kind!=='create'||op.id!==final.operationId)return;}
+    else if(d.unused||final?.neverAdmitted){if(op.kind!=='prepare'||op.id!==d.prepareId||s.revision<d.selection.expectedRevision)return;}
+    else return;
+    d.released=true;this.delegated=null;this.review=null;this.epoch={};
   }
   dispose(): void { this.disposed = true; this.desired = null; this.invalidate(); this.maintain(); }
 }

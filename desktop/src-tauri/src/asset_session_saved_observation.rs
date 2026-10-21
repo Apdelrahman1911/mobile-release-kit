@@ -155,7 +155,12 @@ impl SavedInputBinding {
 pub(crate) struct ValidatedSavedInput {
     document: Weak<Inner>, lane: Arc<SavedObservationLane>, comparison: SavedComparisonData, epoch: u64,
 }
+pub(crate) struct ToolDelegationSavedWitness { document:Weak<Inner>, lane:Weak<SavedObservationLane>, epoch:u64 }
+impl ToolDelegationSavedWitness {
+    pub(crate) fn matches(&self,input:&ValidatedSavedInput)->bool { Weak::ptr_eq(&self.document,&input.document)&&self.lane.as_ptr()==Arc::as_ptr(&input.lane)&&self.epoch==input.epoch }
+}
 impl ValidatedSavedInput {
+    pub(crate) fn tool_delegation_witness(&self)->ToolDelegationSavedWitness { ToolDelegationSavedWitness{document:self.document.clone(),lane:Arc::downgrade(&self.lane),epoch:self.epoch} }
     pub(crate) fn matches(&self, document: &Arc<()>, registration: u32, root: &asset_source::RegisteredRoot,
         input: &crate::android_build_protocol::Prepare) -> bool {
         self.document.upgrade().is_some_and(|original| Arc::ptr_eq(&original.session_identity, document)

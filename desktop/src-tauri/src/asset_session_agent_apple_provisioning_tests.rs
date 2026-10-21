@@ -67,17 +67,29 @@ fn apple_cli_uses_actual_default_document_plus_two_profile_payload_quotes() {
     let retained = lookup_memory::retained_document_bytes(&document.inner, &state).unwrap();
     assert!(base >= p::DOCUMENT_BACKING);
     assert!(retained >= base + 2 * RECORD_METADATA_BYTES);
-    for mode in [
-        crate::apple_provisioning_protocol::Mode::ProfileReview,
-        crate::apple_provisioning_protocol::Mode::KeyPrepare,
-        crate::apple_provisioning_protocol::Mode::CertificateCreate,
-        crate::apple_provisioning_protocol::Mode::P12Save,
-    ] {
+    use crate::apple_provisioning_protocol::Mode;
+    let modes = [
+        Mode::Review, Mode::Register, Mode::Reconcile,
+        Mode::ProfileReview, Mode::ProfileReuse, Mode::ProfileCreate, Mode::ProfileReconcile,
+        Mode::KeyReview, Mode::KeyPrepare, Mode::KeyRecover,
+        Mode::CertificateReview, Mode::CertificateCreate, Mode::CertificateReconcile,
+        Mode::P12Review, Mode::P12Reuse, Mode::P12Save,
+    ];
+    // All rows are printed before asserting fit, including the selected-P12
+    // modes previously hidden by the first CertificateCreate failure.
+    // KeyRecover's quote is DATA only; Context::valid still refuses that mode.
+    let quotes: Vec<_> = modes.into_iter().map(|mode| {
         let future =
             crate::saved_command_owner::apple_provisioning_document_backing_bytes(mode).unwrap();
+        let total = retained.checked_add(future).unwrap();
+        eprintln!("Apple CLI DATA census: mode={mode:?}; empty={base}; payload_delta={}; retained={retained}; future={future}; total={total}; cap={SESSION_BYTES}; headroom={}",
+            retained - base, SESSION_BYTES as i128 - total as i128);
+        (mode, future, total)
+    }).collect();
+    for (mode, future, total) in quotes {
         assert!(
-            retained.checked_add(future).unwrap() < SESSION_BYTES,
-            "{mode:?}"
+            total < SESSION_BYTES,
+            "{mode:?}: empty={base}; retained={retained}; future={future}; total={total}; cap={SESSION_BYTES}"
         );
     }
     assert!(retained.checked_add(usize::MAX).is_none());

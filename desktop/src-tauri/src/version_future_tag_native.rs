@@ -132,7 +132,7 @@ mod tests {
             Transition::Pending(pending.clone()),
         )
         .unwrap();
-        let retained = port.snapshot().unwrap();
+        let retained_revision = port.snapshot().unwrap().revision;
         assert_eq!(port.selected_request().unwrap(), &selected);
         assert_eq!(selected["source"], original_source);
         assert_eq!(selected["policy"]["schemaVersion"], 2);
@@ -141,12 +141,12 @@ mod tests {
         wrong["schemaVersion"] = json!(2);
         wrong["protocol"] = json!(super::super::ios_inventory::PROTOCOL);
         assert!(port
-            .apply(retained.revision, &selected, Transition::Pending(wrong))
+            .apply(retained_revision, &selected, Transition::Pending(wrong))
             .is_err());
-        assert_eq!(port.snapshot().unwrap().revision, retained.revision);
+        assert_eq!(port.snapshot().unwrap().revision, retained_revision);
         let advanced = super::super::tests::advanced(&pending);
         port.apply(
-            retained.revision,
+            retained_revision,
             &selected,
             Transition::Checkpoint(advanced.clone()),
         )

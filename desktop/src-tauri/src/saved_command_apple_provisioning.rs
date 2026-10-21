@@ -281,6 +281,25 @@ pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
         .checked_add(16*1024)?
         .checked_add(6*1024*1024)
 }
+fn private_input_backing_bytes(mode: apple_wire::Mode) -> usize {
+    // Bounds of the SAME native writer's borrowed parts, not a smaller
+    // accepted-input limit. CertificateMaterial has P8/key-ID/issuer and
+    // three stored fields, EACH bounded to4096 by the original key loan.
+    // P12Save adds only its64-byte password; it cannot carry a selected P12.
+    // Review/Reuse can carry that original4MiB P12 and4096-byte password too.
+    let input = 16 * 1024 + 46 + 3 * 4096;
+    if mode.certificate() {
+        input
+    } else {
+        match mode {
+            apple_wire::Mode::P12Save => input + 64,
+            apple_wire::Mode::P12Review | apple_wire::Mode::P12Reuse =>
+                input + 4 * 1024 * 1024 + 4096,
+            // Preserve the existing Bundle/profile/local-key quote exactly.
+            _ => 4 * 1024 * 1024 + 4096 + 16 * 1024 + 46,
+        }
+    }
+}
 /// Finite representations, NOT RSS or a replacement for the installed
 /// runtime's separate control/FD admission. All jobs are serial, so reserve
 /// one complete namespace decode/encode/readback scratch set, plus every
@@ -294,6 +313,10 @@ pub(crate) fn document_backing_bytes(mode: apple_wire::Mode) -> Option<usize> {
     } else {
         super::apple_key::backing_bytes(mode)?
     };
+    // Certificate/P12 decode only their closed event family on the original
+    // reader. Their retained earlier reviews stay in the common quote below;
+    // they do not also allocate active profile/key JSON or identity frames.
+    let other_wire_copies = if mode.certificate() || mode.p12() { 0 } else { 4 };
     let mut total = store::document_backing_bytes()?;
     for (count, size) in [
         (8usize, STATE_LIMIT),
@@ -305,13 +328,13 @@ pub(crate) fn document_backing_bytes(mode: apple_wire::Mode) -> Option<usize> {
         (2, apple_wire::STATUS_LIMIT),
         (4, apple_wire::IPC_LIMIT),
         (5, apple_wire::ACK_LIMIT),
-        (4, apple_wire::PROFILE_IDENTITY_LIMIT),
-        (4, apple_wire::PROFILE_JSON_LIMIT),
-        (4, apple_wire::KEY_JSON_LIMIT),
+        (other_wire_copies, apple_wire::PROFILE_IDENTITY_LIMIT),
+        (other_wire_copies, apple_wire::PROFILE_JSON_LIMIT),
+        (other_wire_copies, apple_wire::KEY_JSON_LIMIT),
         (4, apple_wire::CERTIFICATE_JSON_LIMIT), // original decode/phase/pipe projection capacities
         (2, apple_wire::CERTIFICATE_IDENTITIES_LIMIT),
         (1, 2*1024*1024), // fixed NEW/profile AEAD scratch; old file limits unchanged
-        (2, 4*1024*1024+4096+16*1024+46), // actual private receive/worker input overlap
+        (2, private_input_backing_bytes(mode)), // same two simultaneous input representations
     ] {
         total = total.checked_add(count.checked_mul(size)?)?;
     }

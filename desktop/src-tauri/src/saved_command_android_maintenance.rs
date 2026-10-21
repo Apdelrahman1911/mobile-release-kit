@@ -487,7 +487,7 @@ mod selected{
             let hard=snapshot.request.at.checked_add(HARD).ok_or_else(unavailable)?;
             if Instant::now()>=work{return Err(unavailable());}
             let(stop,_)=watch::channel(false);let(audit,_)=watch::channel(hard);
-            let control=Arc::new(Control{
+            let control=Arc::new(Control{agent:None,
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(),lane:ControlLane::Maintenance,owner:Arc::downgrade(&self.inner),id:snapshot.request.id.clone(),
                 generation,admitted:snapshot.request.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),

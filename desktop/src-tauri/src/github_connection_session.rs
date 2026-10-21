@@ -2145,3 +2145,6 @@ mod installation_memory_capacity_tests {
         assert_eq!(state.status.operation.as_ref().unwrap().phase, Phase::Running);
     }
 }
+
+#[path="github_action_delegation.rs"]
+pub(crate) mod action_delegation;

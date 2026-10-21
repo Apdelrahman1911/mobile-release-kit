@@ -1,0 +1,2055 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -12,7 +12,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-tool-setup.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1,5 +1,7 @@
+ import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
+ import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
++import { AgentToolSetupController } from './agentToolSetupController.ts';
++import { AgentToolSetup } from './components/AgentToolSetup.tsx';
+ import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
+ import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
+ import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
+@@ -260,6 +262,7 @@
+   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
+   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
+   const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
++  const agentToolSetupRef=useRef<AgentToolSetupController|null>(null);
+   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
+   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
+   const agentAppleControllerRef = useRef<AgentAppleProvisioningController | null>(null);
+@@ -394,7 +397,7 @@
+   const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
+   const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? agentAppleControllerRef.current?.ownerReason() ?? null, []);
+   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
+-  const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
++  const toolPreparationBusy = useCallback(() => agentToolSetupRef.current?.ownerReason() ?? toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
+   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
+   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
+   const iosBusy = useCallback(() => iosArchiveControllerRef.current ? iosArchiveOwnerReason(iosArchiveControllerRef.current.getSnapshot()) : null, []);
+@@ -402,7 +405,7 @@
+   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
+   // Existing reciprocal admission callbacks also retain the original path
+   // picker, even after its display eligibility was retired by a local edit.
+-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
++  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false, excludeToolRegistration = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? (excludeToolRegistration ? null : androidBusy()) ?? iosBusy() ?? recoveryBusy() ??
+     (excludeHistory ? null : historyBusy()) ??
+     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
+     (excludeActivity ? null : activityBusy()) ??
+@@ -792,12 +795,12 @@
+   // Evidence selection has deliberately no source-project or draft callback.
+   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
+   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
+-  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false, gitScope?: GitConnectedAdmission): string | null => {
++  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false, gitScope?: GitConnectedAdmission, excludeToolDoctor = false): string | null => {
+     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
+     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
+     const projectId = workspaceRef.current.selectedId ?? '';
+     const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initializationOwnerReason(initialization.getSnapshot(),projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
+-      metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ??
++      metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? (excludeToolDoctor ? null : diagnosticsOwnerReason(diagnostics.getSnapshot())) ??
+       (excludeVersion ? null : versionOwnerReason(versionEdit.getSnapshot(), projectId)) ??
+       (excludeImages ? null : metadataImagesOwnerReason(metadataImages.getSnapshot(), projectId));
+     if (owned) return owned;
+@@ -982,7 +985,7 @@
+       const current = workspaceRef.current;
+       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+     },
+-    otherOperationReason: () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
++    otherOperationReason: () => agentToolSetupRef.current?.toolPreparePeerReason() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
+       externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null,
+     knownTools: () => {
+       const state = androidBuildControllerRef.current?.getSnapshot();
+@@ -1088,6 +1091,29 @@
+   useEffect(()=>{agentStoreAccess.syncContext();});
+   useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
+   const agentStoreReason=agentStoreAccess.ownerReason();
++  // One shared five-kind facade. These exceptions exclude only the selected
++  // controller's own prepared object; its private delegate method rematches it.
++  const [agentToolSetup]=useState(()=>new AgentToolSetupController({
++    prepareRequirements:()=>toolAcquisition.prepareForCli(),prepareReason:()=>toolAcquisition.checkReason(),
++    delegate:r=>r.kind==='doctor'?diagnostics.delegateToolSetup(r):r.prepared?toolAcquisition.delegateToolSetup(r):androidBuild.delegateToolSetup(r),
++    current:kind=>{
++      const service=cliService.current,w=workspaceRef.current,p=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
++      const doctor=diagnostics.toolSetupReview(),tools=toolAcquisition.toolSetupReview();
++      const inspect=androidBuild.toolSetupReview('inspect-picked-sources'),register=androidBuild.toolSetupReview('register-reviewed-sources');
++      const sources=kind==='inspect-picked-sources'||kind==='register-reviewed-sources',prepared=kind==='inspect-requirements'||kind==='acquire-missing';
++      const peers=versionEnrollmentBusy()??gitBusy()??githubGhBusy()??identityBusy()??
++        savedOwnersWithoutToolsBusy(false,false,false,false,false,false,false,false,false,false,false,false,false,sources)??
++        (prepared?null:toolAcquisition.ownerReason())??savedOwnersPrerequisiteReason(false,false,undefined,false,false,false,undefined,kind==='doctor')??
++        externalBusy()??cliReadAccessControllerRef.current?.pendingReason()??null;
++      return {port:service.api?.mode==='native'?service.api.agentToolSetup??null:null,nativeSession:service.api?.mode==='native'?service:null,
++        projectId:p?.project.id??null,epoch:p??service,preview:service.api?.mode==='preview',
++        reviews:[...(doctor?[doctor]:[]),...(tools?[tools]:[]),...(inspect?[inspect]:[]),...(register?[register]:[])],blockedReason:peers};
++    }}));
++  agentToolSetupRef.current=agentToolSetup;
++  useSyncExternalStore(agentToolSetup.subscribe,agentToolSetup.getSnapshot,agentToolSetup.getSnapshot);
++  useEffect(()=>{agentToolSetup.syncContext();});
++  useEffect(()=>()=>agentToolSetup.dispose(),[agentToolSetup]);
++
+ 
+   const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
+     project: () => {
+@@ -2349,7 +2375,7 @@
+             </section>}
+           </ProgressiveDisclosure></>}
+         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
+-          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
++          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<AgentToolSetup controller={agentToolSetup}/>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
+         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
+           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
+           nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -1,3 +1,5 @@
++import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
++import type { ToolSetupKind, ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
+ import { canObserveAgentAndroidBuild } from './agentAndroidBuildOrigin.ts';
+ import { copyAndroidBuildApproval } from './agentAndroidBuild.ts';
+ import type { AndroidBuildApproval } from './agentAndroidBuild.ts';
+@@ -102,7 +104,7 @@
+ interface RegistrationAttempt {
+   observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; kind: AndroidToolRegistrationKind;
+   identity: AndroidToolRegistrationIdentity | null; retired: boolean; settled: boolean; sent: boolean;
+-  replySettled: boolean; notAdmitted: boolean; requestedAt: number; reviewDeadline: number;
++  replySettled: boolean; delegated: boolean; delegatedReturned: boolean; notAdmitted: boolean; requestedAt: number; reviewDeadline: number;
+ }
+ interface ServiceAttempt {
+   observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; action: AndroidToolServiceAction;
+@@ -373,8 +375,8 @@
+       || observer.catalogCancelPending
+       || observer.catalogUnconfirmed || observer.catalogLost
+       || this.sourcesAttempt?.observer === observer && !this.sourcesAttempt.settled || androidToolSourcesActive(observer.sources)
+-      || this.registrationAttempt?.observer === observer && this.registrationAttempt.sent
+-        && (!this.registrationAttempt.replySettled || !this.registrationAttempt.settled)
++      || this.registrationAttempt?.observer === observer && (this.registrationAttempt.sent||this.registrationAttempt.delegated)
++        && (!(this.registrationAttempt.replySettled||this.registrationAttempt.delegatedReturned) || !this.registrationAttempt.settled)
+       || this.registrationHeld(observer.registration) || observer.registrationLost || observer.registrationStops.some((claim) => claim.pending)
+       || this.observer === observer && this.state.registrationUnconfirmed
+       || this.serviceAttempt?.observer === observer && this.serviceAttempt.sent
+@@ -764,7 +766,7 @@
+   }
+   private registrationCandidate(attempt: RegistrationAttempt, status: AndroidToolRegistrationStatus): boolean {
+     const op = status.operation;
+-    return attempt.sent && !!op && status.registrationGeneration === attempt.before + 1 && status.statusRevision > attempt.after
++    return (attempt.sent||attempt.delegated) && !!op && status.registrationGeneration === attempt.before + 1 && status.statusRevision > attempt.after
+       && op.kind === attempt.kind && op.sourceGeneration === attempt.binding.sourceGeneration
+       && sameAndroidBuildData(op.context, attempt.binding.context)
+       && (!attempt.identity || sameAndroidToolRegistrationIdentity(attempt.identity, op));
+@@ -773,7 +775,7 @@
+   // described, but must not tell the user to change the current tool folders.
+   canExplainCurrentSourceInspection(): boolean {
+     const attempt = this.registrationAttempt, status = this.state.toolRegistration;
+-    return !!attempt && !!status && attempt.kind === 'inspection' && attempt.sent && attempt.replySettled && attempt.settled
++    return !!attempt && !!status && attempt.kind === 'inspection' && (attempt.sent||attempt.delegated) && (attempt.replySettled||attempt.delegatedReturned) && attempt.settled
+       && this.state.mode === 'native' && !this.state.nativeBlocked && !this.state.integrityFailed && !this.state.generationLost
+       && this.state.registrationListening && !this.state.registrationIssue && !this.state.registrationUnconfirmed
+       && this.state.registrationPending === null && !this.state.registrationCancelPending && !this.state.registrationCancelClaimed
+@@ -805,7 +807,7 @@
+   private reconcileRegistrationConsent(observer: Observer): void {
+     const status = observer.registration, attempt = this.registrationAttempt;
+     if (!status?.review || !status.operation || status.phase !== 'review' || !attempt || attempt.observer !== observer
+-        || attempt.kind !== 'inspection' || !attempt.replySettled || !this.registrationCandidate(attempt, status)
++        || attempt.kind !== 'inspection' || !(attempt.replySettled||attempt.delegatedReturned) || !this.registrationCandidate(attempt, status)
+         || !this.registrationMatches(attempt) || !(this.state.visible || this.toolSetupVisible) || this.state.registrationIssue) {
+       if (observer === this.observer && this.state.registrationConsent) this.update({ registrationConsent: null });
+       return;
+@@ -857,7 +859,7 @@
+     if (acknowledged) attempt.settled = !androidToolRegistrationActive(status);
+     observer.registration = status;
+     if (observer === this.observer) this.update({ toolRegistration: status,
+-      registrationPending: acknowledged && attempt.replySettled ? null : this.state.registrationPending,
++      registrationPending: acknowledged && (attempt.replySettled||attempt.delegatedReturned) ? null : this.state.registrationPending,
+       registrationUnconfirmed: acknowledged ? false : this.state.registrationUnconfirmed,
+       nativeBlocked: this.state.nativeBlocked || status.phase === 'unknown'
+         || ['cleanup-unknown', 'document-lost', 'shutdown'].includes(status.availability),
+@@ -893,7 +895,7 @@
+       }
+     }
+   }
+-  private registrationCommonReason(ignoreOwnPending = false): string | null {
++  private registrationCommonReason(ignoreOwnPending = false, peers = true): string | null {
+     const observer = this.observer, status = this.state.toolRegistration, project = this.state.project, sources = this.state.toolSources;
+     if (this.disposed || this.state.mode !== 'native' || !observer?.active || !hasAndroidToolRegistration(observer.api))
+       return 'Protected registration is unavailable in this adapter. There is no browser, shell or unprivileged-copy fallback.';
+@@ -921,7 +923,7 @@
+     if (!sources || sources.projectId !== project.projectId || sources.selections.length !== 3 || sources.sourceGeneration === 0)
+       return 'Choose all three original JDK, SDK and Gradle folders for this project first.';
+     if (this.currentRegistrationContext() === null) return 'Refresh the saved configuration and version for the chosen inspection context.';
+-    return this.context.otherOperationReason();
++    return peers ? this.context.otherOperationReason() : null;
+   }
+   inspectToolSourcesReason = (): string | null => this.registrationCommonReason() ??
+     (this.state.toolRegistration?.review ? 'Register this exact review or discard it before inspecting new sources.' : null);
+@@ -962,6 +964,54 @@
+     if (!Number.isFinite(now) || now < attempt.requestedAt || now >= consent.deadline) { this.armRegistrationExpiry(); return; }
+     this.update({ registrationConsent: { ...consent, acknowledged } });
+   }
++  toolSetupReview(kind:ToolSetupKind):ToolSetupReview|null {
++    if(kind!=='inspect-picked-sources'&&kind!=='register-reviewed-sources'||this.registrationCommonReason(false,false))return null;
++    const status=this.state.toolRegistration,sources=this.state.toolSources,context=this.currentRegistrationContext();
++    if(!status||!sources||!context||status.registrationGeneration>=ANDROID_BUILD_COUNTER_MAX-1)return null;
++    let reviewId:string|null=null;
++    if(kind==='inspect-picked-sources'){if(status.review)return null;}
++    else {const consent=this.state.registrationConsent,a=this.registrationAttempt,now=this.now();
++      if(!consent||!a||!this.registrationMatches(a)||!status.review||!status.operation||!sameAndroidToolRegistrationIdentity(consent,status.operation)||
++        consent.reviewId!==status.review.reviewId||!Number.isFinite(now)||now<a.requestedAt||now>=consent.deadline)return null;
++      reviewId=consent.reviewId; // Advanced approval independently includes the vendor licenses.
++    }
++    return parseToolSetupReview({kind,platform:'android',draftRevision:context.draftRevision,baselineGeneration:context.baselineGeneration,prepared:null,
++      sources:{registrationGeneration:status.registrationGeneration,sourceGeneration:sources.sourceGeneration,reviewId}});
++  }
++  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
++    if(!sameToolSetupReview(this.toolSetupReview(review.kind),review))return null;
++    const observer=this.observer!,previous=observer.registration!,context=this.currentRegistrationContext()!,sources=review.sources!,old=this.registrationAttempt,oldConsent=this.state.registrationConsent;
++    const now=this.now(),binding=this.registrationBinding(context,sources.sourceGeneration,this.state.requestGeneration);
++    if(!binding||!Number.isFinite(now)||now<0)return null;
++    const a:RegistrationAttempt={observer,before:previous.registrationGeneration,after:previous.statusRevision,binding,
++      kind:review.kind==='inspect-picked-sources'?'inspection':'registration',identity:null,retired:false,settled:false,sent:false,replySettled:false,
++      delegated:true,delegatedReturned:false,notAdmitted:false,requestedAt:now,reviewDeadline:now+ANDROID_BUILD_CONSENT_MS};
++    this.clearTimer();this.registrationAttempt=a;observer.registrationStops=[];
++    this.update({registrationConsent:null,registrationPending:a.kind==='inspection'?'inspect':'register',registrationUnconfirmed:false,registrationError:null,registrationCancelClaimed:null});
++    return {input:{projectId:context.projectId,review,doctorDraft:null,sourceContext:context as unknown as Record<string,unknown>,
++      nativeConsent:a.kind==='registration'?ANDROID_TOOL_REGISTRATION_CONSENT:null,licenseAcknowledged:a.kind==='registration'},
++      current:()=>this.registrationMatches(a)&&observer.registration?.statusRevision===previous.statusRevision&&sameAndroidBuildData(observer.registration,previous)&&!this.state.nativeBlocked&&!this.state.integrityFailed,
++      readAfterReturned:async status=>{
++        if(this.registrationAttempt!==a||this.observer!==observer||!observer.active||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'))return false;
++        while(observer.registrationReading)await observer.registrationReading;
++        const parsed=parseAndroidToolRegistrationStatus(await observer.api.androidToolRegistrationStatus!());
++        if(!parsed||this.registrationAttempt!==a||this.observer!==observer||!observer.active)return false;
++        const op=status?.operation;
++        if(op){if(!parsed.operation||parsed.operation.operationId!==op.operationId||parsed.operation.registrationGeneration!==op.registrationGeneration||
++            !this.registrationCandidate(a,parsed)||androidToolRegistrationActive(parsed)||parsed.phase==='unknown')return false;
++          a.delegatedReturned=true;this.receiveRegistration(observer,parsed);
++        }else{
++          // Known no-admission can restore ONLY the very same retained earlier
++          // inspection object, bytes and original UI expiry; no new Review DTO.
++          if(parsed.registrationGeneration!==previous.registrationGeneration||!sameAndroidBuildData(parsed,previous))return false;
++          a.delegatedReturned=true;a.notAdmitted=true;a.settled=true;
++          if(old&&oldConsent&&sameAndroidBuildData(parsed.review,previous.review)&&old.reviewDeadline>this.now()){
++            this.registrationAttempt=old;this.update({registrationPending:null,registrationUnconfirmed:false,registrationConsent:oldConsent});this.reconcileRegistrationConsent(observer);
++          }else{a.retired=true;this.update({registrationPending:null,registrationUnconfirmed:false});}
++        }
++        return !this.state.nativeBlocked&&!this.state.integrityFailed&&!observer.registrationLost&&(!op||a.settled);
++      }};
++  }
+   async inspectToolSources(): Promise<void> {
+     this.syncProject();
+     if (this.inspectToolSourcesReason() || !this.observer || !this.state.toolRegistration || !this.state.toolSources) return;
+@@ -988,7 +1038,7 @@
+     const binding = this.registrationBinding(context, sourceGeneration, counters.requestGeneration!);
+     if (!binding) return;
+     const attempt: RegistrationAttempt = { observer, before: previous.registrationGeneration, after: previous.statusRevision,
+-      binding, kind, identity: null, retired: false, settled: false, sent: false, replySettled: false, notAdmitted: false,
++      binding, kind, identity: null, retired: false, settled: false, sent: false, replySettled: false, delegated: false, delegatedReturned: false, notAdmitted: false,
+       requestedAt: now, reviewDeadline: now + ANDROID_BUILD_CONSENT_MS };
+     // No call to retire(): Register consumes this exact review, not a parallel
+     // cancellation of it. Native independently rejects any conflicting owner.
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -1,4 +1,5 @@
+ import { createVersionEditAgentApi } from './serviceVersionEditProtocol.ts';
++import { createAgentToolSetupPort } from './agentToolSetup.ts';
+ import { createConfigurationApi } from './serviceConfigurationProtocol.ts';
+ import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
+ import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
+@@ -433,6 +434,7 @@
+     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    agentToolSetup: mode === 'native' ? createAgentToolSetupPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+diff --git a/desktop/src/environmentDiagnosticsController.ts b/desktop/src/environmentDiagnosticsController.ts
+--- a/desktop/src/environmentDiagnosticsController.ts
++++ b/desktop/src/environmentDiagnosticsController.ts
+@@ -1,3 +1,5 @@
++import { copyToolSetupInput, parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
++import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
+ // App-retained observation/intent only. Native owns the slot, clocks, STOP and
+ // original resources even when this controller, a promise or a view disappears.
+ import type { ProjectSession } from './drafts.ts';
+@@ -21,7 +23,7 @@
+   mode: BridgeMode; project: EnvironmentDiagnosticsSelection | null; platform: EnvironmentPlatform; operation: EnvironmentOperation;
+   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; visible: boolean; selectionPending: boolean;
+   listening: boolean; initialized: boolean; readPending: boolean; status: EnvironmentDiagnosticsStatus | null;
+-  observationIssue: 'bridge' | 'protocol' | null; integrityFailed: boolean; generationLost: boolean; nativeBlocked: boolean;
++  observationIssue: 'bridge' | 'protocol' | null; integrityFailed: boolean; generationLost: boolean; nativeBlocked: boolean; delegated: boolean;
+   attempt: EnvironmentDiagnosticsAttempt | null; observation: EnvironmentDiagnosticsObservation | null;
+   unknownEvidence: EnvironmentDiagnosticsProjection | null; cancelClaimed: { runId: string; ownerGeneration: string } | null; error: ApiError | null;
+ }
+@@ -48,6 +50,7 @@
+ };
+ export function diagnosticsOwnerReason(state: EnvironmentDiagnosticsState): string | null {
+   if (state.nativeBlocked || state.integrityFailed || state.generationLost) return 'Native diagnostics ownership or finality is unverified. Keep the original operation; conflicting work is disabled.';
++  if (state.delegated) return 'The approved draft belongs to a delegated tool check. Check or withdraw its original permission before new work.';
+   if (state.status?.active || !attemptSettled(state.attempt)) return 'A build-tool diagnostics run is active or its Start reply is unconfirmed. Read or cancel the original run before conflicting native work.';
+   if (state.mode === 'native' && state.observationIssue) return 'Native diagnostics status is not current. Read original status before conflicting native work.';
+   return null;
+@@ -57,11 +60,12 @@
+   private state: EnvironmentDiagnosticsState = freeze<EnvironmentDiagnosticsState>({ mode: 'unavailable', project: null, platform: 'android', operation: 'build',
+     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, visible: false, selectionPending: false,
+     listening: false, initialized: false, readPending: false, status: null, observationIssue: null, integrityFailed: false, generationLost: false,
+-    nativeBlocked: false, attempt: null, observation: null, unknownEvidence: null, cancelClaimed: null, error: null });
++    nativeBlocked: false, delegated: false, attempt: null, observation: null, unknownEvidence: null, cancelClaimed: null, error: null });
+   private readonly context: Context;
+   private api: DesktopApi | null = null;
+   private attemptApi: DesktopApi | null = null;
+   private draft: JsonObject | null = null;
++  private toolDelegation: object | null = null;
+   private unlisten: (() => void) | null = null;
+   private reading: Promise<void> | null = null;
+   private listeners = new Set<() => void>();
+@@ -220,7 +224,7 @@
+       provenance: currentAttempt ? currentAttempt.acknowledged ? 'acknowledged-start' : 'native-status' : sameEarlier ? earlier!.provenance : 'native-status',
+       stale: !currentAttempt || !binding || !this.matches(binding) || currentAttempt.invalidated || this.state.observationIssue !== null || this.state.integrityFailed || this.state.nativeBlocked } });
+   }
+-  startReason(): string | null {
++  startReason(peers = true): string | null {
+     const state = this.state;
+     if (state.mode !== 'native') return 'Native diagnostics are unavailable in browser preview or without the desktop bridge. Example requirements are not tool observations.';
+     if (state.operation !== 'build') return 'Artifact-validation diagnostics are not implemented. Its expected requirements remain available separately.';
+@@ -229,10 +233,35 @@
+     if (state.readPending) return 'The original native status is being read.';
+     if (!state.status.capability.available) return diagnosticsAvailabilityText[state.status.capability.reason];
+     if (state.status.statusRevision >= ENVIRONMENT_DIAGNOSTICS_COUNTER_MAX) return 'The native status counter cannot advance. No sequence or run will be reused.';
+-    const other = this.context.otherOperationReason(); if (other) return other;
++    const other = peers ? this.context.otherOperationReason() : null; if (other) return other;
+     if (!state.visible || state.selectionPending) return 'Return to Environment and finish choosing a project before checking tools.';
+     if (!state.project?.hasDraft || !this.draft) return 'Select a project and prepare a current configuration draft first.';
+     return null;
++  }
++  toolSetupReview():ToolSetupReview|null {
++    const p=this.state.project;if(this.disposed||this.toolDelegation||this.startReason(false)||!p)return null;
++    return parseToolSetupReview({kind:'doctor',platform:this.state.platform,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,prepared:null,sources:null});
++  }
++  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
++    if(!sameToolSetupReview(this.toolSetupReview(),review)||!this.api||!this.draft||!this.state.project||!this.state.status)return null;
++    const api=this.api,p=this.state.project,connection=this.state.connectionGeneration,selection=this.state.selectionGeneration,context=this.state.contextGeneration;
++    const input=copyToolSetupInput({projectId:p.projectId,review,doctorDraft:this.draft,sourceContext:null,nativeConsent:null,licenseAcknowledged:false});
++    if(!input)return null;
++    const token={};this.toolDelegation=token;this.update({delegated:true});
++    return {input,current:()=>!this.disposed&&this.toolDelegation===token&&api===this.api&&this.state.connectionGeneration===connection&&
++      this.state.selectionGeneration===selection&&this.state.contextGeneration===context&&this.state.visible&&!this.state.selectionPending&&!this.state.nativeBlocked,
++      readAfterReturned:async status=>{
++        if(this.toolDelegation!==token||api!==this.api||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'))return false;
++        while(this.reading)await this.reading;
++        const parsed=parseEnvironmentDiagnosticsStatus(await api.environmentDiagnosticsStatus());
++        if(!parsed||this.toolDelegation!==token||api!==this.api)return false;
++        const operation=status?.operation,row=parsed.lastTerminal;
++        if(operation?(!row||row.runId!==operation.operationId||row.ownerGeneration!==operation.ownerGeneration||row.finality!=='settled'||
++          !sameDiagnosticsContext(row.context,{projectId:p.projectId,draftRevision:review.draftRevision,baselineGeneration:review.baselineGeneration,platform:review.platform,operation:'build'})):
++          parsed.active!==null)return false;
++        this.receive(parsed,'read');if(this.state.integrityFailed||this.state.nativeBlocked||this.state.observationIssue)return false;
++        this.toolDelegation=null;this.update({delegated:false});return true;
++      }};
+   }
+   start(): boolean {
+     this.syncProject();
+diff --git a/desktop/src/pages/Environment.tsx b/desktop/src/pages/Environment.tsx
+--- a/desktop/src/pages/Environment.tsx
++++ b/desktop/src/pages/Environment.tsx
+@@ -1,3 +1,4 @@
++import type { ReactNode } from 'react';
+ import { InstallationDetails } from '../components/InstallationDetails.tsx';
+ import type { AppInfo, DesktopApi, HelpContent } from '../types.ts';
+ import type { ProjectSession } from '../drafts.ts';
+@@ -36,10 +37,10 @@
+ };
+ const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
+ 
+-export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, onRetry, onSettings, onHelp, loading }: {
++export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, toolDelegation, onRetry, onSettings, onHelp, loading }: {
+   info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
+   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
+-  toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps;
++  toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps; toolDelegation?: ReactNode;
+   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
+ }) {
+   const runtime = info?.runtime;
+@@ -72,6 +73,7 @@
+       <PrepareBuildEnvironment {...toolPreparation} />
+       <AndroidToolSetup {...toolSetup} />
+     </>}
++    {toolDelegation}
+     <ProgressiveDisclosure title="Required tools & versions"
+       description="See what this project asks for. This list does not check what is installed on your computer."
+       needsAttention={state.pending !== null || state.error !== null || (result !== null && state.stale)}>
+diff --git a/desktop/src/toolAcquisitionController.ts b/desktop/src/toolAcquisitionController.ts
+--- a/desktop/src/toolAcquisitionController.ts
++++ b/desktop/src/toolAcquisitionController.ts
+@@ -1,3 +1,5 @@
++import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
++import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
+ // App-held UI coordination, not a native owner. Only the original native
+ // status after its own joins can report completion. A Promise/event cannot.
+ import { isDirty } from './drafts.ts';
+@@ -31,7 +33,7 @@
+   witness: Witness; epoch: number; context: ToolAcquisitionContext; after: number; previous: ToolAcquisitionIdentity | null;
+   beforeStatus: ToolAcquisitionStatus; refusedBeforeAdmission: ToolAcquisitionPrerequisite | null; notAdmitted: boolean;
+   identity: ToolAcquisitionIdentity | null; prepareSent: boolean; prepareJoined: boolean; prepareAccepted: boolean;
+-  startClaimed: boolean; startSent: boolean; startJoined: boolean; retired: boolean; unconfirmed: boolean;
++  startClaimed: boolean; startSent: boolean; startJoined: boolean; delegated: boolean; delegatedReturned: boolean; retired: boolean; unconfirmed: boolean;
+   terminalRead: boolean; cancelRequested: boolean; cancelSent: boolean;
+   requirements: ToolRequirementsObservation | null;
+ }
+@@ -206,7 +208,7 @@
+       return 'Finish or cancel the original tool preparation before starting another task.';
+     return null;
+   }
+-  private newWorkReason(ownIntent = false): string | null {
++  private newWorkReason(ownIntent = false, peers = true): string | null {
+     if (this.disposed || this.connectionRetired || !this.api) return 'Guided downloads need the original native app connection. Use existing tools or manual setup instead.';
+     if (this.issue) return attention;
+     if (!this.initialized || !this.off || !this.status) return 'Check the native tool status first.';
+@@ -216,7 +218,7 @@
+     if (!this.visible) return 'Open Check this computer to review tool preparation.';
+     if (this.selectionPending) return 'Finish choosing the project first.';
+     if (!this.capture()) return 'Save or revert your settings, then check the saved project files. An unsaved draft or earlier file check cannot prepare tools.';
+-    return this.other();
++    return peers ? this.other() : null;
+   }
+   checkReason(): string | null {
+     const reason = this.newWorkReason(); if (reason) return reason;
+@@ -312,7 +314,7 @@
+         this.fail('protocol'); return null;
+       }
+       if (candidate) {
+-        if (!a.startSent && (op.phase === 'starting' || op.phase === 'running' || op.outcome === 'complete')) { this.fail('protocol'); return null; }
++        if (!a.startSent && !a.delegated && (op.phase === 'starting' || op.phase === 'running' || op.outcome === 'complete')) { this.fail('protocol'); return null; }
+         if (!a.identity) a.identity = identity(op);
+       }
+     } else if (before && (p || op) && !sameToolAcquisitionIdentity(p, op)) { this.fail('protocol'); return null; }
+@@ -337,7 +339,7 @@
+     while (this.reading) { const previous = await this.reading; if (!fresh) return previous; }
+     if (!this.api) return null;
+     const api = this.api, a = this.attempt, barrier = this.mutation;
+-    const afterInvoke = !!a && a.prepareJoined && (!a.startSent || a.startJoined) && !this.preparing && !this.starting && !this.cancelling;
++    const afterInvoke = !!a && a.prepareJoined && (a.delegated ? a.delegatedReturned : !a.startSent || a.startJoined) && !this.preparing && !this.starting && !this.cancelling;
+     const work = Promise.resolve().then(async () => {
+       try {
+         const s = this.receive(await api.status(), 'read');
+@@ -353,7 +355,7 @@
+         } else if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
+           a.terminalRead = true; a.unconfirmed = false;
+           if (this.issue === 'unconfirmed') this.issue = null;
+-          if (!this.issue && a.startSent && !a.retired && this.current(a) && a.context.action === 'inspect' &&
++          if (!this.issue && (a.startSent || a.delegatedReturned) && !a.retired && this.current(a) && a.context.action === 'inspect' &&
+               op.outcome === 'complete' && op.result?.kind === 'tool-requirements-observation')
+             this.inspection = { witness: a.witness, epoch: a.epoch, identity: identity(op), result: op.result };
+         } else if (this.issue === 'unconfirmed' && !a && !active(op)) this.issue = null;
+@@ -365,12 +367,12 @@
+   }
+   private usable(a: Attempt): boolean {
+     const op = this.status?.operation;
+-    return !this.issue && !a.retired && this.current(a) && this.visible && a.prepareAccepted && !a.startSent &&
++    return !this.issue && !a.retired && this.current(a) && this.visible && a.prepareAccepted && !a.startSent && !a.delegated &&
+       sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable && this.newWorkReason(true) === null;
+   }
+   async inspect(): Promise<void> { if (!this.checkReason()) await this.prepare('inspect'); }
+   async reviewDownload(): Promise<void> { if (!this.reviewReason()) await this.prepare('acquire'); }
+-  private async prepare(action: 'inspect' | 'acquire'): Promise<void> {
++  private async prepare(action: 'inspect' | 'acquire', forCli = false): Promise<void> {
+     const witness = this.capture(), api = this.api, inspected = this.inspection;
+     if (!witness || !api || !this.status || action === 'acquire' && !inspected) return;
+     const context: ToolAcquisitionContext = freeze({ ...witness.context, action, review: action === 'acquire' ?
+@@ -378,7 +380,7 @@
+     const a: Attempt = { witness, epoch: this.epoch, context, after: this.status.statusRevision,
+       beforeStatus: this.status, refusedBeforeAdmission: null, notAdmitted: false,
+       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
+-      startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
++      startClaimed: false, startSent: false, startJoined: false, delegated: false, delegatedReturned: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
+       requirements: action === 'acquire' ? inspected!.result : null };
+     this.sourceFolders.retire();
+     this.attempt = a; this.cancelIdentity = null; this.consentOpen = false; this.acknowledged = false;
+@@ -408,11 +410,39 @@
+         return; // Explicit catalogue/saved read then a NEW user check; never Start or retry this call.
+       }
+       if (!read || !this.usable(a)) { a.retired = true; a.cancelRequested = true; return; }
+-      if (action === 'inspect') {
++      if (action === 'inspect' && !forCli) {
+         // Only this explicit Check click may chain its own INSPECT intent.
+         a.startClaimed = true; await this.sendStart(a, api);
+-      } else { this.consentOpen = true; this.acknowledged = false; }
++      } else if (action === 'acquire') { this.consentOpen = true; this.acknowledged = false; }
+     } finally { this.action = null; this.publish(); this.cancelRetired(); this.detachIfFinished(); }
++  }
++  // Explicit Advanced action: real Prepare + post-return read, without the
++  // ordinary Check button's automatic Start. No alternate native admission.
++  async prepareForCli(): Promise<void> { if (!this.checkReason()) await this.prepare('inspect', true); }
++  toolSetupReview(): ToolSetupReview | null {
++    const a=this.attempt,op=this.status?.operation;
++    if (!a||!op||a.delegated||a.startClaimed||!a.prepareJoined||!a.prepareAccepted||a.retired||!this.current(a)||this.issue||
++        this.preparing||this.starting||this.cancelling||this.reading||this.action||this.newWorkReason(true,false)||
++        !sameToolAcquisitionIdentity(a.identity,op)||op.phase!=='awaiting-consent'||!op.intentUsable)return null;
++    return parseToolSetupReview({kind:a.context.action==='inspect'?'inspect-requirements':'acquire-missing',platform:'android',
++      draftRevision:a.context.draftRevision,baselineGeneration:a.context.baselineGeneration,
++      prepared:{...identity(op),statusRevision:this.status!.statusRevision},sources:null});
++  }
++  delegateToolSetup(review:ToolSetupReview):ToolSetupDelegation|null {
++    if(!sameToolSetupReview(this.toolSetupReview(),review))return null;
++    const a=this.attempt!,api=this.api!;
++    a.delegated=true;a.startClaimed=true;this.consentOpen=false;this.acknowledged=false;this.publish();
++    return {input:{projectId:a.context.projectId,review,doctorDraft:null,sourceContext:null,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false},
++      current:()=>{const status=this.status;return !!status&&this.attempt===a&&this.api===api&&!a.retired&&this.current(a)&&!this.issue&&status.statusRevision===review.prepared?.statusRevision&&
++        sameToolAcquisitionIdentity(a.identity,status.operation)&&status.operation?.phase==='awaiting-consent'&&status.operation.intentUsable;},
++      readAfterReturned:async status=>{
++        if(this.attempt!==a||this.api!==api||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'||
++          status.operation!==null&&!sameToolAcquisitionIdentity(a.identity,{operationId:status.operation.operationId,ownerGeneration:status.operation.ownerGeneration??''})))return false;
++        // Genuine service/caller return, NOT the GUI Start Promise. The fresh
++        // read below alone may set terminalRead and restore the original result.
++        a.delegatedReturned=true;const read=await this.checkStatus(true);
++        return !!read&&this.attempt===a&&a.terminalRead&&!this.issue&&sameToolAcquisitionIdentity(a.identity,read.operation)&&read.operation?.phase==='terminal';
++      }};
+   }
+   setAcknowledged(operationId: string, ownerGeneration: string, value: boolean): void {
+     const a = this.attempt;
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -441,6 +441,7 @@
+   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+   readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
++  readonly agentToolSetup?: import('./agentToolSetup.ts').AgentToolSetupPort | null;
+   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -294,6 +294,7 @@
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_store_access", "allow_agent_store", "revoke_agent_store",
+     "agent_apple_provisioning_access","allow_agent_apple_provisioning","revoke_agent_apple_provisioning","agent_apple_provisioning_request_status",
++    "agent_tool_setup_access", "allow_agent_tool_setup", "revoke_agent_tool_setup", "agent_tool_setup_request_status",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -20,6 +20,7 @@
+     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
+     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
+     "allow-agent-apple-provisioning-access","allow-allow-agent-apple-provisioning","allow-revoke-agent-apple-provisioning","allow-agent-apple-provisioning-request-status",
++    "allow-agent-tool-setup-access", "allow-allow-agent-tool-setup", "allow-revoke-agent-tool-setup", "allow-agent-tool-setup-request-status",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+     "allow-revoke-agent-git-index",
+diff --git a/desktop/src-tauri/src/android_build_owner.rs b/desktop/src-tauri/src/android_build_owner.rs
+--- a/desktop/src-tauri/src/android_build_owner.rs
++++ b/desktop/src-tauri/src/android_build_owner.rs
+@@ -15,6 +15,7 @@
+     pub(crate) fn release(self) -> Status { if let Some(release) = self.release { let _ = release.send(()); } self.status }
+ }
+ impl AndroidBuildOwner {
++    pub(crate) fn tool_setup_original(&self)->&SavedCommandOwner{&self.saved}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+     pub(crate) fn candidate_claim_matches(&self,claim:&crate::saved_command_owner::LocalHistoryClaim)->bool{claim.matches_owner(&self.saved)}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+diff --git a/desktop/src-tauri/src/android_build_wiring_tests.rs b/desktop/src-tauri/src/android_build_wiring_tests.rs
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -14,6 +14,7 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
+         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -79,6 +79,8 @@
+ mod local_checks;
+ #[path = "application_service_agent_android_build.rs"]
+ mod agent_android_build;
++#[path = "application_service_tool_setup.rs"]
++mod agent_tool_setup;
+ #[path="service_store_application.rs"]
+ mod agent_store;
+ #[path="service_apple_provisioning_application.rs"]
+@@ -107,6 +109,7 @@
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     store_requests: Arc<crate::service_store_requests::Inbox>,
+     apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
++    tool_setup_requests: Arc<crate::service_tool_setup_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+     upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
+     configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
+@@ -144,6 +147,7 @@
+         let instance = Id::random()?;
+         let version_edit_requests = Arc::new(crate::service_version_edit_requests::Inbox::new(instance.clone()));
+         let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
++        let tool_setup_requests=Arc::new(crate::service_tool_setup_requests::Inbox::new(instance.clone()));
+         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
+         let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+@@ -153,7 +157,7 @@
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, version_edit_requests, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, tool_setup_requests, version_edit_requests, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -206,7 +210,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.version_edit_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.version_edit_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence(); self.tool_setup_requests.fence();self.apple_provisioning_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -397,6 +401,7 @@
+     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
+         let at = Instant::now();
+         self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
++        self.tool_setup_requests.revoke_all(crate::service_tool_setup_protocol::Reason::PermissionRevoked,at);
+         let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
+         let _=self.apple_provisioning_requests.revoke(crate::service_apple_provisioning_protocol::Reason::PermissionRevoked,at);
+         let mut state = self.lock()?;
+@@ -445,6 +450,9 @@
+                 p::RequestBody::UploadKeySubmit(v) => return self.upload_key_submit(client,v.clone()),
+                 p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
+                 p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
++                p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
++                p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
++                p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
+                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
+                 p::RequestBody::AppleProvisioningSubmit(v)=>return self.service_apple_provisioning_submit(client,v.clone()),
+                 p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
+@@ -513,6 +521,7 @@
+             Ok(match request.request {
+                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
++                p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+                 p::RequestBody::VersionEditSubmit(_) | p::RequestBody::VersionEditStatus(_) | p::RequestBody::VersionEditCancel(_) |
+@@ -565,7 +574,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.version_edit_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.version_edit_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at); self.tool_setup_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -65,6 +65,7 @@
+         additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.version_edit_requests.catalogue(project)?.into_iter().map(|request_id|data::AdditionalRequest{family:data::AdditionalFamily::VersionEdit,request_id}));
+         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|(purpose, request_id)| data::AdditionalRequest {family:match purpose {crate::service_play_cleanup_protocol::Purpose::PlayCleanup => data::AdditionalFamily::PlayCleanup, crate::service_play_cleanup_protocol::Purpose::VersionTag => data::AdditionalFamily::VersionTag},request_id}));
++        additional_requests.extend(self.tool_setup_requests.catalogue_requests(&self.instance,project)?);
+         let view = data::Catalogue {
+             schema_version: 2,
+             scope: data::Scope::CurrentHostRetainedRequests,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -28,7 +28,7 @@
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ #[path = "asset_session_apple_key.rs"]
+ mod apple_key;
+-pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput, UploadKeySavedInput};
++pub(crate) use saved_observation::{SavedObservationCompletion, ToolDelegationSavedWitness,ValidatedSavedInput, UploadKeySavedInput};
+ #[path = "asset_session_version_allocation.rs"]
+ mod version_allocation;
+ pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
+@@ -68,6 +68,9 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="asset_session_agent_store.rs"]
+ pub(crate) mod agent_store;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_agent_tool_setup.rs"]
++pub(crate) mod agent_tool_setup;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="service_git_document.rs"]
+ pub(crate) mod agent_git_index;
+@@ -882,6 +885,8 @@
+     agent_store_grant:Option<Arc<agent_store::Grant>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_apple:apple_provisioning::agent::State,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_tool_setup:agent_tool_setup::State,
+     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
+     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+     compatibility_picker_pending: bool,
+@@ -2215,6 +2220,10 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_tool_setup_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(agent_tool_setup::retained_bytes(state).ok_or(Problem::Capacity)?)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/8 replies, not per-mode pools.
+@@ -2338,23 +2347,33 @@
+     // Actual retained Document/artifact/GitHub buffers for a new public-tool
+     // operation. No fabricated current owner, standalone state or signing credit.
+     pub(super) fn retained_document_bytes(document: &Arc<Inner>, state: &DocumentState) -> Result<usize, Problem> {
+-        document_bytes_with_tool_pickers(document, state, None)
++        document_bytes_with_tool_pickers(document, state, None, None)
+     }
+     // The SAME census/Seen visits every exact current and earlier picker held
+     // by tool preparation. A snapshot path or the current Document.slot alone
+     // cannot account for those original source/GUI/retirement allocations.
+     pub(super) fn tool_acquisition_document_bytes(document: &Arc<Inner>, state: &DocumentState,
+         tools: &crate::saved_command_owner::ToolAcquisitionCensus) -> Result<usize, Problem> {
+-        document_bytes_with_tool_pickers(document, state, Some(tools))
++        document_bytes_with_tool_pickers(document, state, Some(tools), None)
++    }
++    // Same concrete census for delegated source registration. These are the
++    // three actual Checked picker originals, not paths or replacement owners.
++    pub(super) fn tool_setup_registration_document_bytes(document: &Arc<Inner>, state: &DocumentState,
++        pickers: &[Arc<OriginalWork>; 3]) -> Result<usize, Problem> {
++        document_bytes_with_tool_pickers(document, state, None, Some(pickers))
+     }
+     fn document_bytes_with_tool_pickers(document: &Arc<Inner>, state: &DocumentState,
+-        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>) -> Result<usize, Problem> {
++        tools: Option<&crate::saved_command_owner::ToolAcquisitionCensus>,
++        registration: Option<&[Arc<OriginalWork>; 3]>) -> Result<usize, Problem> {
+         let mut census = Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
+             sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() };
+         census.artifact_document(document)?;
+         census.document(state)?;
+         if let Some(tools) = tools {
+             for original in tools.picker_originals() { census.owner(original)?; }
++        }
++        if let Some(pickers) = registration {
++            for original in pickers { census.owner(original)?; }
+         }
+         if !state.github.setup_has_material() && !state.github.history_has_retained_data() {
+             census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+@@ -3024,6 +3043,7 @@
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+                 agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+@@ -3707,6 +3727,8 @@
+         self.agent_store_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.agent_apple_relay_lost();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.agent_tool_setup_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.git_index_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+@@ -3991,6 +4013,9 @@
+     }
+     pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+         let ticket = self.inner.bridge.diagnostics.ticket()?; // Original T, entropy/executor before lock/effects.
++        self.admit_environment_diagnostics(ticket,args,None)
++    }
++    pub(super) fn admit_environment_diagnostics(&self,ticket:crate::environment_diagnostics_owner::Ticket,args:crate::environment_diagnostics_protocol::Start,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<crate::environment_diagnostics_protocol::Status,BridgeError>{
+         let state = self.lock();
+         use crate::environment_diagnostics_protocol::Availability;
+         match self.environment_gate(&state) {
+@@ -3998,10 +4023,16 @@
+             Availability::CleanupUnknown => return Err(BridgeError::cleanup_unknown()), Availability::Shutdown => return Err(BridgeError::shutdown()),
+             _ => return Err(BridgeError::new("environment_diagnostics_owner", "This request does not identify the original build-tool diagnostics run.")),
+         }
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let delegation_edit=entry.map(|entry|self.tool_setup_admission_guard(&state,entry)).transpose()?;
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        if entry.is_some(){return Err(BridgeError::invalid());}
+         let (generation, root) = self.inner.bridge.environment_registration(&args.project_id)?;
+         let admitted = self.inner.bridge.diagnostics.admit(ticket, args, generation, root)?;
+         // Real document loss, selection, assets, edits, GitHub and quit cannot
+         // interleave lookup/claim/enqueue. All original handles exist before GO.
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        drop(delegation_edit);
+         drop(state); Ok(admitted.release())
+     }
+     pub(crate) fn cancel_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Cancel) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+@@ -5497,6 +5528,8 @@
+                 if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+                 state.saved_input = None;
+                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                self.stop_tool_setup_locked(&mut state,crate::service_tool_setup_protocol::Reason::Shutdown,now);
+                 state.evidence.revoke(false);
+                 state.github.retire(GitHubReason::Cancelled);
+                 self.inner.bridge.diagnostics.request_shutdown();
+@@ -6974,7 +7007,7 @@
+                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
+                 && !version_allocation::pending(&state) && !version_enrollment::pending(&state)
+                 && {
+-                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) }
++                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) && !agent_upload_key::pending(&state) && !agent_tool_setup::pending(&state) }
+                     #[cfg(not(any(target_os="linux",target_os="macos")))] { true }
+                 }
+                 && state.maintenance.can_exit()
+@@ -8586,6 +8619,7 @@
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+                 agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+@@ -8727,6 +8761,7 @@
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+                 agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+@@ -8831,6 +8866,7 @@
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+                 agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+diff --git a/desktop/src-tauri/src/asset_session_android_registration.rs b/desktop/src-tauri/src/asset_session_android_registration.rs
+--- a/desktop/src-tauri/src/asset_session_android_registration.rs
++++ b/desktop/src-tauri/src/asset_session_android_registration.rs
+@@ -65,14 +65,25 @@
+ 
+     fn admit_checked_android_registration(&self,checked:crate::saved_command_owner::AndroidRegistrationChecked)
+         ->Result<wire::Status,BridgeError> {
++        self.admit_checked_android_registration_agent(checked, None)
++    }
++    pub(super) fn admit_checked_android_registration_agent(&self,checked:crate::saved_command_owner::AndroidRegistrationChecked,
++        entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>) ->Result<wire::Status,BridgeError> {
+         let admitted={
+             let state=self.lock();
+             let gate=self.android_build_gate(&state);
+             if gate!=crate::android_build_protocol::Availability::Available{return Err(wire::unavailable());}
+             let (registration,root)=self.inner.bridge.native_project(&checked.context().project_id).map_err(|_|wire::unavailable())?;
+-            let census=installation_memory::android_registration_census(self,&state,checked.picker_originals())
+-                .map_err(|_|wire::unavailable())?;
++            let census=if entry.is_some(){
++                installation_memory::android_registration_agent_census(self,&state,checked.picker_originals())
++            }else{
++                installation_memory::android_registration_census(self,&state,checked.picker_originals())
++            }.map_err(|_|wire::unavailable())?;
+             let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Some(entry)=entry{self.tool_setup_admission_current(&state,entry,&edit)?;}
++            #[cfg(not(any(target_os="linux",target_os="macos")))]
++            if entry.is_some(){return Err(wire::unavailable());}
+             let current=self.validated_saved_input_with_edit(&state,checked.context(),&edit)?;
+             self.inner.bridge.android_build.admit_registration(&self.inner.session_identity,&checked,current,
+                 registration,&root,&census,gate)?
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -120,6 +120,25 @@
+         Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
+     }
+     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
++    { let _ = (document, state, pickers); Err(Reason::Capacity) }
++}
++
++// The delegated path also retains the shared Service rows and its exact
++// native approval/link. Use the SAME lookup/Seen plus the original additional
++// document fields, not an uncharged service overlay or a second native budget.
++// Ordinary GUI registration keeps its original census below unchanged.
++pub(super) fn android_registration_agent_census<'a>(document: &'a DocumentBinding, state: &'a DocumentState,
++    pickers: &'a [Arc<OriginalWork>; 3]) -> Result<AndroidRegistrationCensus<'a>, Reason> {
++    if !android_fixture_histories_empty(document) { return Err(Reason::Capacity); }
++    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
++    {
++        let bytes = lookup_memory::tool_setup_registration_document_bytes(&document.inner, state, pickers)
++            .map_err(|_| Reason::Capacity)?;
++        let bytes = bytes.checked_add(known::additional_document_bytes(state)?).ok_or(Reason::Capacity)?;
++        if bytes > SESSION_BYTES { return Err(Reason::Capacity); }
++        Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
++    }
++    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+     { let _ = (document, state, pickers); Err(Reason::Capacity) }
+ }
+ 
+@@ -567,6 +586,7 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
+         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+@@ -686,6 +706,7 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
+         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+diff --git a/desktop/src-tauri/src/asset_session_saved_observation.rs b/desktop/src-tauri/src/asset_session_saved_observation.rs
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -155,7 +155,12 @@
+ pub(crate) struct ValidatedSavedInput {
+     document: Weak<Inner>, lane: Arc<SavedObservationLane>, comparison: SavedComparisonData, epoch: u64,
+ }
++pub(crate) struct ToolDelegationSavedWitness { document:Weak<Inner>, lane:Weak<SavedObservationLane>, epoch:u64 }
++impl ToolDelegationSavedWitness {
++    pub(crate) fn matches(&self,input:&ValidatedSavedInput)->bool { Weak::ptr_eq(&self.document,&input.document)&&self.lane.as_ptr()==Arc::as_ptr(&input.lane)&&self.epoch==input.epoch }
++}
+ impl ValidatedSavedInput {
++    pub(crate) fn tool_delegation_witness(&self)->ToolDelegationSavedWitness { ToolDelegationSavedWitness{document:self.document.clone(),lane:Arc::downgrade(&self.lane),epoch:self.epoch} }
+     pub(crate) fn matches(&self, document: &Arc<()>, registration: u32, root: &asset_source::RegisteredRoot,
+         input: &crate::android_build_protocol::Prepare) -> bool {
+         self.document.upgrade().is_some_and(|original| Arc::ptr_eq(&original.session_identity, document)
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -401,7 +401,10 @@
+         &self,
+         input: wire::Start,
+     ) -> Result<wire::Status, BridgeError> {
+-        let admitted_at = Instant::now(); // BEFORE Doc/Registry/queue admission.
++        self.start_tool_acquisition_agent(input,Instant::now(),None)
++    }
++    pub(crate) fn start_tool_acquisition_agent(&self,input:wire::Start,admitted_at:Instant,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<wire::Status,BridgeError>{
++        // SAME original T before queue/Doc, never sampled again for delegation.
+         let mut state = self.lock();
+         let owner = &self.inner.bridge.tool_acquisition;
+         let original = owner
+@@ -460,6 +463,10 @@
+                 return Err(error);
+             }
+         };
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if let Some(entry)=entry{self.tool_setup_admission_current(&state,entry,&edit)?;}
++        #[cfg(not(any(target_os="linux",target_os="macos")))]
++        if entry.is_some(){return Err(wire::invalid());}
+         let current =
+             self.tool_acquisition_saved_lane(&state, &original.context, &edit, registration, &root);
+         if !current
+@@ -472,13 +479,13 @@
+             owner.context_changed();
+             return Err(wire::invalid());
+         }
+-        let admitted = owner.start_tool_acquisition(
++        let admitted = owner.start_tool_acquisition_agent(
+             input,
+             admitted_at,
+             Some((registration, root)),
+             gate,
+             &census,
+-            &budget,
++            &budget,entry,
+         )?;
+         // Prepared-context validation, one-use consent and original roster
+         // claim are atomic under BOTH guards. Worker GO is only after release.
+diff --git a/desktop/src-tauri/src/environment_diagnostics_owner.rs b/desktop/src-tauri/src/environment_diagnostics_owner.rs
+--- a/desktop/src-tauri/src/environment_diagnostics_owner.rs
++++ b/desktop/src-tauri/src/environment_diagnostics_owner.rs
+@@ -22,6 +22,9 @@
+ // metadata nor observation registration proves native/runtime qualification.
+ const NATIVE_QUALIFIED: bool = false;
+ const RUNTIME_QUALIFIED: bool = false;
++#[path = "environment_diagnostics_agent.rs"]
++mod agent;
++pub(crate) use agent::{Approval as AgentDoctorApproval,Binding as AgentDoctorBinding};
+ const WORK: Duration = Duration::from_secs(6);
+ const FINALITY: Duration = Duration::from_secs(10);
+ 
+@@ -54,7 +57,7 @@
+         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+     fixture: Mutex<Option<std::sync::Weak<hosted_tests::Permit>>>,
+ }
+-struct Registry {
++struct Registry { agent:Option<Arc<agent::Binding>>,
+     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
+     capability: Availability, active: Option<Active>, last: Option<Projection>,
+ }
+@@ -62,7 +65,7 @@
+     owner: Arc<Session>, projection: Projection, first_stop: Option<Instant>, work_expired: bool,
+     accepted: bool, terminal: bool, unknown: bool, final_join_seen: bool,
+ }
+-struct Session {
++struct Session { agent:Option<Arc<agent::Binding>>,
+     id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
+     // Immutable admission route, never new-work permission. Losing the live
+     // document must not erase this original's runtime settlement obligation.
+@@ -170,7 +173,7 @@
+ 
+ /// Ticket contains only native identity, an executor and the original T. It is
+ /// prepared before the real document lock; no IO/child/request task is started.
+-pub(crate) struct Ticket { owner: Arc<Inner>, id: String, generation: String, clocks: Clocks, executor: tokio::runtime::Handle }
++pub(crate) struct Ticket { agent:Option<Arc<agent::Binding>>, owner: Arc<Inner>, id: String, generation: String, clocks: Clocks, executor: tokio::runtime::Handle }
+ pub(crate) struct Admitted { status: Status, release: oneshot::Sender<()> }
+ impl Admitted {
+     /// Called after DocumentBinding unlocks. A lost sender stops this original
+@@ -205,7 +208,7 @@
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             observation_identity: Arc::new(()),
+             original_owner, original_document: Mutex::new(None),
+-            runtime, registry: Mutex::new(Registry { revision: 0, exhausted: false,
++            runtime, registry: Mutex::new(Registry { agent:None, revision: 0, exhausted: false,
+             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
+             active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+@@ -240,10 +243,13 @@
+         else if self.busy() { Err(busy()) } else { Ok(()) }
+     }
+     pub(crate) fn ticket(&self) -> Result<Ticket, BridgeError> {
+-        let clocks = Clocks::new(Instant::now()); // Before entropy, runtime inspection, acquisition or await.
++        self.ticket_at(Instant::now())
++    }
++    fn ticket_at(&self,at:Instant)->Result<Ticket,BridgeError>{
++        let clocks = Clocks::new(at); // Original server submission precedes entropy/queue.
+         let executor = tokio::runtime::Handle::try_current().map_err(|_| unavailable())?;
+         if !self.inner.qualified() || Profile::current().is_none() { return Err(unavailable()); }
+-        Ok(Ticket { owner: self.inner.clone(), id: nonce()?, generation: nonce()?, clocks, executor })
++        Ok(Ticket { agent:None, owner: self.inner.clone(), id: nonce()?, generation: nonce()?, clocks, executor })
+     }
+     /// Only DocumentBinding calls this under its actual admission mutex after
+     /// reciprocal native checks and the in-memory original registry lookup.
+@@ -254,6 +260,7 @@
+         let mut r = self.inner.lock();
+         let reason = self.inner.availability(&r, Availability::Available);
+         if reason != Availability::Available { return Err(refused(reason)); }
++        if !agent::start_matches(&r,&ticket,&input,registration,&project){return Err(invalid_owner());}
+         if r.last.as_ref().is_some_and(|last| last.run_id == ticket.id || last.owner_generation == ticket.generation) { return Err(unavailable()); }
+         if Instant::now() >= ticket.clocks.work { return Err(BridgeError::timeout()); }
+         let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+@@ -262,7 +269,7 @@
+         let projection = Projection { run_id: ticket.id.clone(), owner_generation: ticket.generation.clone(), context: context.clone(),
+             phase: Phase::Starting, outcome: None, finality: Finality::Pending, reason: Reason::None, result: None };
+         let installed_expected = self.inner.installed_selected();
+-        let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
++        let owner = Arc::new(Session { agent:ticket.agent, id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             registration, project, draft: Mutex::new(Some(input.draft)), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
+@@ -298,6 +305,7 @@
+         let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+         r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
+             accepted: false, terminal: false, unknown: false, final_join_seen: false });
++        agent::entered(&owner);
+         // Guards are constructed BEFORE spawn: even an unpolled task loss is
+         // retained Unknown, not a successful no-op or permission to replace it.
+         *watchdog_slot = Some(ticket.executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
+@@ -397,6 +405,7 @@
+                             observation.retired = true; // Actual final-clock-qualified original retirement above.
+                         }
+                     }
++                    agent::retired(&active);
+                     r.last = Some(active.projection); self.inner.bump(&mut r);
+                 }
+         } else {
+@@ -465,6 +474,7 @@
+             Some(next) => r.revision = next,
+             None => { r.exhausted = true; r.disabled = true; if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); } },
+         }
++        agent::changed(r);
+         self.changes.send_replace(r.revision); self.changed.notify_waiters();
+     }
+     fn availability(&self, r: &Registry, gate: Availability) -> Availability {
+@@ -529,6 +539,7 @@
+         let Some(a) = r.active.as_ref().filter(|a| a.owner.id == owner.id) else { return; };
+         let work_due = now >= owner.clocks.work && !a.work_expired;
+         let finality_due = now >= owner.clocks.finality && !a.unknown;
++        if let Some((reason,at))=agent::advance(owner,now){self.stop_locked(r,owner,reason,at);}
+         if work_due {
+             if let Some(a) = r.active.as_mut() { a.work_expired = true; }
+             self.stop_locked(r, owner, Reason::TimedOut, owner.clocks.work);
+@@ -736,7 +747,7 @@
+ }
+ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, owner: &Session) -> Result<T, tokio::task::JoinError> {
+     loop {
+-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
++        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
+         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {} }
+     }
+ }
+@@ -1150,7 +1161,7 @@
+     if book.err_failed { let mut pipe = owner.error.lock().await; let _ = close_original(&mut pipe); }
+     let mut frames_open = book.frames.is_some();
+     loop {
+-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
++        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
+         let wait_pending = book.child.is_some() && book.waited.is_none() && !book.wait_failed;
+         let write_pending = book.writer.is_some() && !book.write_failed;
+         let out_pending = book.stdout.is_some() && !book.out_failed;
+@@ -1194,7 +1205,7 @@
+     let mut driver = owner.driver.lock().await;
+     let mut continuing: Option<Continuation> = None;
+     loop {
+-        let wake = owner.wake.notified(); let end = inner.endpoint(owner);
++        let wake = owner.wake.notified(); let end = agent::wait_end(owner,inner.endpoint(owner));
+         let driver_known = owner.driver_joined.load(Ordering::SeqCst) || owner.driver_failed.load(Ordering::SeqCst);
+         if driver.is_none() && !driver_known { owner.driver_failed.store(true, Ordering::SeqCst); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); continue; }
+         if owner.driver_failed.load(Ordering::SeqCst) && !owner.driver_done.load(Ordering::SeqCst) && continuing.is_none() {
+@@ -1442,10 +1453,13 @@
+         inert_active_for_route(admitted, false)
+     }
+     fn inert_active_for_route(admitted: Instant, installed_expected: bool) -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
++        inert_active_for_agent(admitted,installed_expected,None)
++    }
++    pub(super) fn inert_active_for_agent(admitted:Instant,installed_expected:bool,agent:Option<Arc<agent::Binding>>)->(EnvironmentDiagnosticsOwner,Arc<Session>){
+         let owner = EnvironmentDiagnosticsOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened")));
+         let projection = projection(); let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+         let (frames, receiver) = mpsc::channel(2);
+-        let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
++        let session = Arc::new(Session { agent, id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
+             profile: Profile::LinuxX64, clocks: Clocks::new(admitted), installed_expected, registration: 1, project: PathBuf::from("/unopened-project"),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+diff --git a/desktop/src-tauri/src/environment_diagnostics_protocol.rs b/desktop/src-tauri/src/environment_diagnostics_protocol.rs
+--- a/desktop/src-tauri/src/environment_diagnostics_protocol.rs
++++ b/desktop/src-tauri/src/environment_diagnostics_protocol.rs
+@@ -310,6 +310,12 @@
+     }
+ }
+ impl Terminal {
++    pub(crate) fn tool_setup_summary(&self)->Vec<crate::service_tool_setup_protocol::Finding>{
++        use crate::service_tool_setup_protocol::{Check as C,CheckStatus as S,Finding};
++        self.checks.iter().map(|c|Finding{check:match c.id{CheckId::DeveloperSelection=>C::DeveloperSelection,CheckId::Git=>C::Git,CheckId::Java=>C::Java,CheckId::Javac=>C::Javac,CheckId::Xcode=>C::Xcode},
++            status:match(c.state,c.reason){(CheckState::Completed,CheckReason::Observed)=>S::Ok,(CheckState::Completed|CheckState::Attempted,_)=>S::Failed,
++                (CheckState::NotRun,CheckReason::Stopped|CheckReason::PlatformDisabled|CheckReason::HostMismatch)=>S::Skipped,_=>S::Unavailable}}).collect()
++    }
+     pub(crate) fn completed_rows(&self) -> usize { self.checks.iter().filter(|c| c.state == CheckState::Completed).count() }
+     /// Read-only version observation. The caller must FIRST require the
+     /// existing original owner's settled Projection; a Terminal is not finality.
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -35,6 +35,8 @@
+ mod store;
+ #[path="installed_cli_apple_provisioning.rs"]
+ mod apple_provisioning;
++#[path="installed_cli_tool_setup.rs"]
++mod tool_setup;
+ #[path="installed_cli_play_cleanup.rs"]
+ mod play_cleanup;
+ 
+@@ -66,6 +68,9 @@
+   mrk apple-provisioning-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk apple-provisioning-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk apple-provisioning-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk tool-setup-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
++  mrk tool-setup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk tool-setup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -127,6 +132,7 @@
+ Reads return observations; they do not rerun actions or validate a release.\n\
+ requests lists retained local-check/build, Git, identity and version request IDs in this Desktop instance, not complete history or replay permission.\n\
+ android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
++Tool setup starts one separately approved existing Desktop step; Desktop still prepares sources, grants, service registration and catalogue selection. No unattended chain.\n\
+ repository returns historical Desktop Git counts; local refs only, no inspection, fetch or current-checkout claim.\n\
+ observe --json may include optional setup state codes, not a passed check or release approval.\n\
+ Identity requests additionally need the separate 15-minute Desktop request permission.\n\
+@@ -306,6 +312,10 @@
+                 "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
+                 "maxPreparedMs":300000,"nativeWorkMs":1200000,"nativeHardMs":1210000,"providerEffectsPossible":true,
+                 "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":false,"p12Reconcile":false},
++            "toolSetup": {"scope":"one-desktop-prepared-tool-step","commands":tool_setup::COMMANDS,
++                "kinds":["doctor","inspect-requirements","acquire-missing","inspect-picked-sources","register-reviewed-sources"],
++                "readGrantRequired":true,"oneUseApprovalRequired":true,"requiresRunningDesktop":true,
++                "cliPrepare":false,"privateArguments":false,"automaticNextStep":false,"publicationIsSelection":false},
+             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
+                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+@@ -329,7 +339,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup","apple-provisioning"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup","apple-provisioning","version-edit","version-tag","tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -462,6 +472,7 @@
+         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+         p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
++        p::ResponseBody::ToolSetupRequest(_)=>"Use tool-setup-status with the same original request IDs; never replay.\n".into(),
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionEditRequest(_) => "Use version-edit-status with the same original request IDs; never resend Apply.\n".into(),
+@@ -506,6 +517,7 @@
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if store::recognizes(&args){return store::run(args);}
+     if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
++    if tool_setup::recognizes(&args){return tool_setup::run(args);}
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -17,6 +17,8 @@
+ mod service_version_reserve_protocol;
+ #[path="service_store_protocol.rs"]
+ mod service_store_protocol;
++mod service_tool_setup_protocol;
++mod service_tool_setup_requests;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
+ #[path="service_apple_provisioning_protocol.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -133,6 +133,8 @@
+ mod service_version_reserve_protocol;
+ #[path="service_store_protocol.rs"]
+ mod service_store_protocol;
++mod service_tool_setup_protocol;
++mod service_tool_setup_requests;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
+ #[path="service_apple_provisioning_protocol.rs"]
+diff --git a/desktop/src-tauri/src/saved_command_android_maintenance.rs b/desktop/src-tauri/src/saved_command_android_maintenance.rs
+--- a/desktop/src-tauri/src/saved_command_android_maintenance.rs
++++ b/desktop/src-tauri/src/saved_command_android_maintenance.rs
+@@ -487,7 +487,7 @@
+             let hard=snapshot.request.at.checked_add(HARD).ok_or_else(unavailable)?;
+             if Instant::now()>=work{return Err(unavailable());}
+             let(stop,_)=watch::channel(false);let(audit,_)=watch::channel(hard);
+-            let control=Arc::new(Control{
++            let control=Arc::new(Control{agent:None,
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(),lane:ControlLane::Maintenance,owner:Arc::downgrade(&self.inner),id:snapshot.request.id.clone(),
+                 generation,admitted:snapshot.request.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),
+diff --git a/desktop/src-tauri/src/saved_command_android_registration.rs b/desktop/src-tauri/src/saved_command_android_registration.rs
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -6,6 +6,9 @@
+ use crate::android_registration_app_protocol as wire;
+ use std::sync::{Weak, TryLockError};
+ use android_sources::SourceSnapshot;
++#[path = "saved_command_agent_tool_registration.rs"]
++mod agent;
++pub(crate) use agent::{Approval as AgentToolRegistrationApproval,Binding as AgentToolRegistrationBinding};
+ #[path = "saved_command_android_service_setup.rs"]
+ pub(super) mod service_setup;
+ #[path = "saved_command_android_maintenance.rs"]
+@@ -315,7 +318,7 @@
+ }
+ #[derive(Clone,Copy,PartialEq,Eq)]
+ enum ControlLane { Sources, Service, Maintenance }
+-pub(super) struct Control {
++pub(super) struct Control { agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>,
+     lane:ControlLane,
+     owner:Weak<Inner>,id:String,generation:u32,admitted:Instant,work:Instant,hard:Instant,
+     slot:Weak<ControlSlot>,cohort:Arc<()>,epoch:u64,
+@@ -361,6 +364,7 @@
+             service_setup::RemovalCut::Unknown=>{self.poisoned();false}}
+     }
+     fn mark_unknown(&self,at:Instant){
++        agent::unknown(self);
+         // A genuine local/native failure is never suppressed by an unrelated
+         // earlier Parent-clock latch. Exact Parent veto sites use poisoned()
+         // directly; they must not route an invented Instant through this API.
+@@ -431,6 +435,7 @@
+     fn advance_classified(&self,now:Instant)->bool{self.advance_phase(now,false)}
+     fn advance_cleanup(&self,now:Instant)->bool{self.advance_phase(now,true)}
+     fn advance_phase(&self,now:Instant,cleanup:bool)->bool{
++        agent::advance(self,now);
+         // The original own-domain deadline remains genuine first-F even when
+         // a later Parent observation stops work or makes its clock unknown.
+         if now>=self.work && self.failure().is_none(){self.stop_at(wire::Reason::TimedOut,self.work);}
+@@ -654,6 +659,11 @@
+                     if unavailable{return Err((wire::Reason::CleanupUnknown,self.control.admitted));}
+                     return Ok(());
+                 }
++                // The original book wait cannot renew a delegated READ. This
++                // check takes only the private facet/control cells, not Doc or
++                // Host/Service/book again; native source checks stay unchanged.
++                agent::advance(&self.control,Instant::now());
++                if let Some(first)=self.control.failure(){return Err(first);}
+                 // Lock contention is part of the original W, not free time.
+                 let entered_at = Instant::now();
+                 if entered_at >= self.control.work_endpoint()
+@@ -665,7 +675,7 @@
+             let end=if self.control.lane==ControlLane::Maintenance {
+                 self.control.work_endpoint().min(self.control.endpoint())
+             }else{self.control.work_endpoint()};
+-            let remaining = end.saturating_duration_since(Instant::now());
++            let remaining = agent::wait_end(&self.control,end).saturating_duration_since(Instant::now());
+             if remaining.is_zero() { drop(book); continue; }
+             #[cfg(test)] {
+                 self.slot.wait_entries.fetch_add(1, Ordering::SeqCst);
+@@ -781,7 +791,7 @@
+     }
+ }
+ /// First short-lock snapshot only. It has no native/worker/finality authority.
+-pub(crate) struct Snapshot {
++pub(crate) struct Snapshot { agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>,
+     owner:Weak<Inner>,document:Weak<()>,at:Instant,source:Arc<SourceSnapshot>,request:Request,
+     reviewed:Option<Arc<Review>>,saved:crate::asset_session::ValidatedSavedInput,cohort:Mutex<Option<AdmissionCohort>>,
+ }
+@@ -858,7 +868,7 @@
+ }
+ struct Last {data:wire::Operation,phase:wire::Phase,reason:wire::Reason,report:Option<wire::Report>}
+ #[derive(Default)]
+-pub(super) struct Registration {
++pub(super) struct Registration { agent:Option<Arc<agent::Binding>>,
+     generation:u32,active:Option<Arc<Operation>>,review:Option<Arc<Review>>,last:Option<Last>,
+     capability:Option<(Availability,wire::Prerequisite)>,
+     service:service_setup::State,maintenance:maintenance::State,
+@@ -1187,10 +1197,16 @@
+ #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+ async fn coordinate_inspection(original:Arc<Operation>,enter:oneshot::Receiver<()>,source_release:oneshot::Sender<()>)->bool{
+     let mut stopped=original.control.stop.subscribe();let mut changed=original.control.audit.subscribe();
+-    let go=tokio::select!{
+-        value=enter=>value.is_ok(),
+-        _=stopped.changed()=>false,
+-        _=tokio::time::sleep_until(tokio::time::Instant::from_std(original.control.work))=>false,
++    let mut enter=enter;
++    let go=loop {
++        let now=Instant::now();original.control.advance(now);
++        if original.control.failure().is_some()||original.control.unknown.load(Ordering::SeqCst)||now>=original.control.work{break false;}
++        let end=agent::wait_end(&original.control,original.control.work);
++        tokio::select!{
++            value=&mut enter=>break value.is_ok(),
++            _=stopped.changed()=>break false,
++            _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>{},
++        }
+     };
+     let current=original.owner.upgrade().is_some_and(|owner|{
+         let registry=owner.lock();
+@@ -1219,7 +1235,7 @@
+                 let observed=Instant::now();poll_source(&original,&mut slot,context,observed)
+             })=>Some(known),
+             value=changed.changed()=>{if value.is_err(){original.control.mark_unknown(Instant::now());}None},
+-            _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>None,
++            _=tokio::time::sleep_until(tokio::time::Instant::from_std(agent::wait_end(&original.control,end)))=>None,
+         };
+         if let Some(known)=known{
+             drop(slot);
+@@ -1349,7 +1365,7 @@
+                 self.last=Some(Last{data:original.data.clone(),phase,reason,report:Some(report)});
+                 self.review=None;original.accepted.store(true,Ordering::SeqCst);
+                 book.original=None;book.cohort=None;self.active=None;
+-                drop(book);inner.android_registration_control.wake.notify_all();return true;
++                drop(book);agent::retired(self,original);inner.android_registration_control.wake.notify_all();return true;
+             }
+             let setup=prerequisite(&self.service);
+             let sources=source.review.as_ref().map_or_else(Vec::new,AndroidRegistrationSourceReview::sources);
+@@ -1388,7 +1404,7 @@
+             }
+             original.accepted.store(true,Ordering::SeqCst);
+             book.original=None;book.cohort=None;self.active=None;
+-            drop(book);inner.android_registration_control.wake.notify_all();true
++            drop(book);agent::retired(self,original);inner.android_registration_control.wake.notify_all();true
+         }
+         #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
+         {drop(book);original.control.mark_unknown(at);true}
+@@ -1490,6 +1506,10 @@
+     }
+     fn registration_snapshot(&self,document:&Arc<()>,at:Instant,request:Request,
+         registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:android_wire::Availability)->Result<Snapshot,BridgeError>{
++        self.registration_snapshot_agent(document,at,request,registration,project,saved,gate,None)
++    }
++    fn registration_snapshot_agent(&self,document:&Arc<()>,at:Instant,request:Request,
++        registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:android_wire::Availability,agent_binding:Option<&agent::Binding>)->Result<Snapshot,BridgeError>{
+         let registry=self.inner.lock();
+         if self.registration_gate(&registry,Availability::from_android(gate))!=Availability::Available
+             || !self.inner.android_original_document_matches(Some(document)){return Err(wire::unavailable());}
+@@ -1503,8 +1523,9 @@
+             Request::Inspect(_)=>None,
+             Request::Register(input)=>Some(registry.android_registration.same_review(input,&source,at).ok_or_else(wire::invalid)?),
+         };
++        let agent=agent::admission_binding(&self.inner,&registry,agent_binding,&saved,&request)?;
+         let cohort=self.inner.android_registration_control.claim(saved.epoch(),reviewed.as_ref())?;
+-        Ok(Snapshot{owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),at,source:Arc::new(source),request,reviewed,saved,cohort:Mutex::new(Some(cohort))})
++        Ok(Snapshot{agent,owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),at,source:Arc::new(source),request,reviewed,saved,cohort:Mutex::new(Some(cohort))})
+     }
+     /// Second phase, under the SAME current Document guard and registered root.
+     /// Root has revalidated current saved inputs and supplies that exact context.
+@@ -1522,7 +1543,8 @@
+             || !registry.android_sources.same_snapshot(&snapshot.source)
+             || snapshot.source.registration!=registration || &snapshot.source.project!=project
+             || !current.matches(document,registration,project,snapshot.request.context()) || !snapshot.saved.same_binding(&current)
+-            || snapshot.request.generation()!=registry.android_registration.generation{return Err(wire::invalid());}
++            || snapshot.request.generation()!=registry.android_registration.generation
++            || !agent::current_checked(&self.inner,&registry,snapshot,&current){return Err(wire::invalid());}
+         if let Request::Register(input)=&snapshot.request{
+             let checked_at=Instant::now();
+             let current_review=registry.android_registration.same_review(input,&snapshot.source,checked_at).ok_or_else(wire::invalid)?;
+@@ -1558,7 +1580,7 @@
+             let cohort=snapshot.cohort.lock().map_err(|_|wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
+             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::invalid());}
+             let (stop,_)=watch::channel(false);let (audit,audit_read)=watch::channel(hard);
+-            let control=Arc::new(Control{
++            let control=Arc::new(Control{ agent:snapshot.agent.clone(),
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(),lane:ControlLane::Sources,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
+                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
+@@ -1589,6 +1611,7 @@
+             registry.android_registration.review=None;
+             registry.android_registration.generation=generation;
+             registry.android_registration.active=Some(original.clone());
++            agent::entered(&original);
+             let mut source_slot=match original.source_handle.try_lock(){
+                 Ok(slot)=>slot,Err(_)=>{original.control.mark_unknown(observed);registry.disabled=true;self.inner.bump(&mut registry);return Err(wire::unconfirmed());},
+             };
+@@ -1733,7 +1756,7 @@
+         let admitted=Instant::now();let work=admitted.checked_add(WORK).unwrap();let hard=admitted.checked_add(HARD).unwrap();
+         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
+         // No claim/install, AdmissionCohort, owner, GO, retirement or receipt.
+-        Arc::new(Control{
++        Arc::new(Control{ agent:None,
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id,generation,admitted,work,hard,
+             slot:Arc::downgrade(slot),cohort:Arc::new(()),epoch:0,first:Mutex::new(None),
+@@ -2018,11 +2041,14 @@
+         control_in_lane(admitted,ControlLane::Sources)
+     }
+     pub(super) fn control_in_lane(admitted:Instant,lane:ControlLane)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
++        control_for_agent(admitted,lane,None)
++    }
++    pub(super) fn control_for_agent(admitted:Instant,lane:ControlLane,agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate){
+         let slot=Arc::new(ControlSlot::default());
+         let cohort=slot.claim(0,None).unwrap();
+         let work=admitted+WORK;let hard=admitted+HARD;
+         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
+-        let control=Arc::new(Control{
++        let control=Arc::new(Control{ agent,
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
+             admitted,work,hard,slot:Arc::downgrade(&slot),cohort:cohort.identity.clone(),epoch:cohort.epoch,
+diff --git a/desktop/src-tauri/src/saved_command_android_registration_client.rs b/desktop/src-tauri/src/saved_command_android_registration_client.rs
+--- a/desktop/src-tauri/src/saved_command_android_registration_client.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration_client.rs
+@@ -975,7 +975,7 @@
+     let cohort = snapshot.cohort.lock().map_err(|_| wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
+     if !owner.inner.android_registration_control.current_claim(&cohort) { return Err(wire::invalid()); }
+     let (stop, _) = watch::channel(false); let (audit, audit_read) = watch::channel(hard);
+-    let control = Arc::new(Control {
++    let control = Arc::new(Control { agent:snapshot.agent.clone(),
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(), lane:ControlLane::Sources, owner: Arc::downgrade(&owner.inner), id: checked.id.clone(), generation,
+         admitted: snapshot.at, work, hard, slot: Arc::downgrade(&owner.inner.android_registration_control),
+@@ -1031,6 +1031,7 @@
+     registry.android_registration.review = None;
+     registry.android_registration.generation = generation;
+     registry.android_registration.active = Some(original.clone());
++    agent::entered(&original);
+     // Publication changes error semantics. From here, retain/settle originals
+     // even on lost reply/GO; never fall back to pre-admission unavailable.
+     let publish_handles = || -> Result<(), ()> {
+diff --git a/desktop/src-tauri/src/saved_command_android_service_setup.rs b/desktop/src-tauri/src/saved_command_android_service_setup.rs
+--- a/desktop/src-tauri/src/saved_command_android_service_setup.rs
++++ b/desktop/src-tauri/src/saved_command_android_service_setup.rs
+@@ -1630,7 +1630,7 @@
+             let cohort=snapshot.cohort.lock().map_err(|_|wire::service_unconfirmed())?.take().ok_or_else(wire::service_invalid)?;
+             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::service_invalid());}
+             let (stop,_)=watch::channel(false);let(audit,_)=watch::channel(hard);
+-            let control=Arc::new(Control{
++            let control=Arc::new(Control{agent:None,
+                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                 removal:std::sync::OnceLock::new(),lane:ControlLane::Service,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
+                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -99,6 +99,7 @@
+ pub(crate) type AndroidRegistrationCancelPublisher = android_registration::CancelPublisher;
+ pub(crate) use android_registration::{ControlSlot as AndroidRegistrationControl, Publisher as AndroidRegistrationPublisher, PublisherKind as AndroidRegistrationPublisherKind};
+ pub(crate) use android_registration::WorkGate as AndroidRegistrationWorkGate;
++pub(crate) use android_registration::{AgentToolRegistrationApproval,AgentToolRegistrationBinding};
+ #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+ pub(crate) use android_registration::SourceWorkFailure as AndroidRegistrationSourceWorkFailure;
+ pub(crate) type AndroidServiceSnapshot = android_registration::service_setup::Snapshot;
+@@ -1279,6 +1280,7 @@
+ mod agent_store;
+ pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
+ pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
++pub(crate) use tool_acquisition::{AgentToolAcquisitionApproval,AgentToolAcquisitionBinding};
+ 
+ struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+@@ -1602,7 +1604,7 @@
+     }
+     async fn android_control_tick(&self) {
+         // Store shares this original control-select slot; no new watchdog or clock.
+-        if let Some(delay)=agent_store::control_poll(self).or_else(||apple_provisioning::agent::control_poll(self)){tokio::time::sleep(delay).await;return;}
++        if let Some(delay)=agent_store::control_poll(self).or_else(||tool_acquisition::agent::poll(self)).or_else(||apple_provisioning::agent::control_poll(self)){tokio::time::sleep(delay).await;return;}
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
+         pending::<()>().await
+@@ -2442,12 +2444,27 @@
+         agent_store:Option<&Arc<crate::service_store_requests::Entry>>)->Result<Admitted,BridgeError>{
+         self.start_bound_requests_apple(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,agent_store,None)
+     }
++    fn start_bound_requests_tools(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
++        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
++        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
++        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
++        agent_store:Option<&Arc<crate::service_store_requests::Entry>>,agent_tools:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<Admitted,BridgeError>{
++        self.start_bound_requests_delegated(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,agent_store,None,agent_tools)
++    }
+     fn start_bound_requests_apple(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
+         material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
+         agent_store:Option<&Arc<crate::service_store_requests::Entry>>,
+         agent_apple:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>)->Result<Admitted,BridgeError>{
++        self.start_bound_requests_delegated(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,agent_store,agent_apple,None)
++    }
++    fn start_bound_requests_delegated(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
++        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
++        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
++        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
++        agent_store:Option<&Arc<crate::service_store_requests::Entry>>,
++        agent_apple:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>,agent_tools:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<Admitted,BridgeError>{
+         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
+         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
+         let mut r = self.inner.lock();
+@@ -2456,18 +2473,20 @@
+         }
+         // All Start routes share this guard BEFORE take. Ordinary GUI Start
+         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
+-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store) && apple_provisioning::agent::start_matches(p,agent_apple)) {
++        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store) && tool_acquisition::agent::start_matches(p,agent_tools) && apple_provisioning::agent::start_matches(p,agent_apple)) {
+             return Err(self.inner.domain.invalid_owner());
+         }
+         agent_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
+         agent_store::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
+         apple_provisioning::agent::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
++        tool_acquisition::agent::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?,agent_tools)?;
+         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
+             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             apple_provisioning::agent::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
++            tool_acquisition::agent::retired_prepared(&prepared,Reason::StaleIntent);
+             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
+             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
+         }
+@@ -2499,7 +2518,7 @@
+         // Starting any new work consumes the former inspected observation.
+         // It cannot license a second recovery after even a known refusal.
+         r.recovery = None;
+-        let mut refused = if let Some((reason,_))=apple_provisioning::agent::prepared_binding(&prepared).and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
++        let mut refused = if let Some((reason,_))=tool_acquisition::agent::stop_prepared(&prepared,Instant::now()){Some(reason)} else if let Some((reason,_))=apple_provisioning::agent::prepared_binding(&prepared).and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
+         else if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
+             else if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
+             else if !upload_key::start_matches(&self.inner,&prepared,clocks) { Some(Reason::StaleIntent) }
+@@ -2519,6 +2538,7 @@
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            tool_acquisition::agent::retired_prepared(&prepared,reason);
+             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
+             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
+         }
+@@ -2541,6 +2561,7 @@
+         if let Some(link) = &prepared.agent_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
+         if let Some(link)=&prepared.agent_store{link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
+         if let Some(link)=apple_provisioning::agent::prepared_binding(&prepared){link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
++        tool_acquisition::agent::attach_stop(&prepared,&stop)?;
+         if let Some(link) = &prepared.agent_local_check {
+             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
+         }
+@@ -2671,6 +2692,7 @@
+         apple_key::initialize(&owner)?;
+         r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false, context_invalidated: false,
+             accepted: false, terminal: false, unknown: false, final_join_seen: false });
++        tool_acquisition::agent::entered(&owner);
+         *watchdog_slot = Some(executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
+         book.writer = Some(executor.spawn(write_request(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
+         book.stdout = Some(executor.spawn(read_output(self.inner.clone(), owner.clone(), owner.output.clone(), false, Guard::new(&self.inner, &owner))));
+@@ -2904,6 +2926,7 @@
+                 agent_build::retired(&active,r.revision.saturating_add(1));
+                 agent_store::retired(&active,r.revision.saturating_add(1));
+                 apple_provisioning::agent::retired(&active,r.revision.saturating_add(1),&r.apple);
++                tool_acquisition::agent::retired(&active,r.disabled);
+                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
+             }
+         } else {
+@@ -3180,6 +3203,7 @@
+                     agent_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     agent_store::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     apple_provisioning::agent::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
++            tool_acquisition::agent::retired_prepared(&prepared,Reason::CleanupUnknown);
+                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
+                 }
+                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
+@@ -3189,6 +3213,7 @@
+         agent_build::changed(r);
+         agent_store::changed(r);
+         apple_provisioning::agent::changed(r);
++        tool_acquisition::agent::changed(r);
+         self.changes.send_replace(r.revision); self.changed.notify_waiters();
+     }
+     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
+@@ -3198,10 +3223,12 @@
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            tool_acquisition::agent::retired_prepared(&prepared,reason);
+             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
+         }
+     }
+     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
++        if let Some((reason,_))=r.prepared.as_ref().and_then(|p|tool_acquisition::agent::stop_prepared(p,now)){self.retire_prepared(r,reason);}
+         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref()).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+         if let Some((reason,_))=r.prepared.as_ref().and_then(apple_provisioning::agent::prepared_binding).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+         if r.prepared.as_ref().and_then(|p|p.agent_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
+@@ -3352,6 +3379,7 @@
+     }
+     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+         if !original_session(r,owner){return;}
++        if let Some((reason,at))=tool_acquisition::agent::stop_at(owner,now){self.stop_locked(r,owner,reason,at);}
+         if let Some((reason,at))=owner.agent_store.as_ref().and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+         if let Some((reason,at))=apple_provisioning::agent::binding(owner).and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+         if let Some(at)=owner.agent_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
+@@ -3398,7 +3426,7 @@
+         if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
+             Some(owner.finality_end(a.first_stop))
+         } else {Some(owner.clocks.work.min(owner.finality_end(None))
+-            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(apple_provisioning::agent::binding(owner).map_or(owner.clocks.work,|link|link.read_end())))}
++            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(tool_acquisition::agent::read_end(owner).unwrap_or(owner.clocks.work)).min(apple_provisioning::agent::binding(owner).map_or(owner.clocks.work,|link|link.read_end())))}
+     }
+     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
+     fn accept_at(&self, owner: &Session, frame: Frame, now: Instant) {
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition.rs b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -202,7 +202,11 @@
+         wire::footprint(&self.terminal.result.as_ref().ok_or_else(wire::invalid)?["footprint"])
+     }
+ }
++#[path = "saved_command_agent_tool_acquisition.rs"]
++pub(in crate::saved_command_owner) mod agent;
++pub(crate) use agent::{Approval as AgentToolAcquisitionApproval, Binding as AgentToolAcquisitionBinding};
+ pub(super) struct Intent {
++    agent: std::sync::OnceLock<Arc<agent::Binding>>,
+     known: Arc<Known>,
+     document: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
+     inspection: Option<Arc<Inspection>>,
+@@ -486,6 +490,7 @@
+                 ),
+             };
+             Arc::new(Intent {
++                agent:std::sync::OnceLock::new(),
+                 known: census.known.clone(),
+                 document,
+                 inspection,
+@@ -553,11 +558,14 @@
+         census: &Census,
+         budget: &crate::asset_session::ToolAcquisitionMemoryAdmission<'_>,
+     ) -> Result<Admitted, BridgeError> {
++        self.start_tool_acquisition_agent(input,at,registered,gate,census,budget,None)
++    }
++    pub(crate) fn start_tool_acquisition_agent(&self,input:wire::Start,at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:wire::Availability,census:&Census,budget:&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>) -> Result<Admitted,BridgeError> {
+         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
+         if !input.consents() {
+             return Err(wire::invalid());
+         }
+-        let admitted = self.start_bound_admitted(
++        let admitted = self.start_bound_requests_tools(
+             Start {
+                 operation_id: input.operation_id,
+                 owner_generation: input.owner_generation,
+@@ -567,7 +575,7 @@
+             Availability::from_tools(gate),
+             None,
+             None,
+-            Some((census, budget)),
++            Some((census, budget)),None,None,None,entry,
+         )?;
+         Ok(Admitted {
+             status: admitted.status.tools()?,
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -97,7 +97,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Action {
+     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
+-    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
++    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
+ }
+ 
+ /// Future operation-specific adapters may compare this DATA with a genuine
+@@ -218,6 +218,9 @@
+     #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
+     #[serde(rename="configuration.status")] ConfigurationStatus(crate::service_configuration_protocol::Query),
+     #[serde(rename="configuration.cancel")] ConfigurationCancel(crate::service_configuration_protocol::Query),
++    #[serde(rename="tool-setup.submit")] ToolSetupSubmit(crate::service_tool_setup_protocol::Submit),
++    #[serde(rename="tool-setup.status")] ToolSetupStatus(crate::service_tool_setup_protocol::Query),
++    #[serde(rename="tool-setup.cancel")] ToolSetupCancel(crate::service_tool_setup_protocol::Query),
+     #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
+     #[serde(rename="apple-provisioning.submit")] AppleProvisioningSubmit(crate::service_apple_provisioning_protocol::Submit),
+     #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
+@@ -301,6 +304,7 @@
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     StoreRequest(crate::service_store_protocol::Status),
+     AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
++    ToolSetupRequest(crate::service_tool_setup_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+     GitCommitScope(crate::service_git_commit_protocol::Scope),
+@@ -366,6 +370,8 @@
+         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
++    if matches!(&request.request,RequestBody::ToolSetupSubmit(_)|RequestBody::ToolSetupStatus(_)|RequestBody::ToolSetupCancel(_))
++        &&bytes.len()>crate::service_tool_setup_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
+     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
+@@ -452,6 +458,10 @@
+         ResponseBody::ConfigurationRequest(row)=>{
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_configuration_protocol::STATUS_BYTES{return Err(Error::InvalidRequest);}
++        },
++        ResponseBody::ToolSetupRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+         },
+         ResponseBody::StoreRequest(row)=>{
+             row.validate()?;
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -16,7 +16,8 @@
+     + crate::service_store_protocol::REQUEST_LIMIT
+     + crate::service_play_cleanup_protocol::REQUEST_LIMIT
+     + crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+-    + crate::service_version_edit_protocol::REQUEST_LIMIT;
++    + crate::service_version_edit_protocol::REQUEST_LIMIT
++    + crate::service_tool_setup_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -180,6 +181,7 @@
+     AppleProvisioning,
+     VersionEdit,
+     VersionTag,
++    ToolSetup,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -193,6 +195,7 @@
+             Self::PlayCleanup | Self::VersionTag => 6,
+             Self::AppleProvisioning=>7,
+             Self::VersionEdit=>8,
++            Self::ToolSetup=>10,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -210,6 +213,7 @@
+             Self::AppleProvisioning=>"apple-provisioning-status",
+             Self::VersionEdit=>"version-edit-status",
+             Self::VersionTag => "version-tag-status",
++            Self::ToolSetup => "tool-setup-status",
+         }
+     }
+ }
+@@ -271,7 +275,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 9];
++        let mut counts = [0usize; 11];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -290,6 +294,7 @@
+             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
+             || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+             || counts[8] > crate::service_version_edit_protocol::REQUEST_LIMIT
++            || counts[10] > crate::service_tool_setup_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+@@ -500,12 +505,14 @@
+         }
+         fullest.schema_version = 2;
+         fullest.additional_requests = Some(
+-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit]
++            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::ToolSetup]
+                 .into_iter()
+                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
+                 .collect(),
+         );
+         fullest.validate().unwrap();
++        assert_eq!(LIMIT,384); // Current base plus ToolSetup10; GitHub9 composition is416.
++        assert_eq!(AdditionalFamily::ToolSetup.namespace(),10);
+         let response = crate::service_protocol::Response {
+             version: crate::service_protocol::VERSION,
+             request_id: id(10),
+@@ -560,12 +567,13 @@
+             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::VersionEdit, request_id: id(3) },
++            AdditionalRequest { family: AdditionalFamily::ToolSetup, request_id: id(3) },
+         ]);
+         current.validate().unwrap();
+         let text = human(&current);
+         assert!(!text.contains("No requests retained"));
+         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
+-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3)] {
++            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3), ("tool-setup-status",3)] {
+             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
+         }
+         let encoded = serde_json::to_value(&current).unwrap();
+@@ -580,7 +588,7 @@
+         assert!(!accepted(changed));
+         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
+         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
+-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit] {
++        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::ToolSetup] {
+             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
+             assert!(current.validate().is_err());
+             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);
+@@ -648,7 +656,7 @@
+     fn future_tag_discovery_shares_cleanup_namespace_and_routes_exact_status() {
+         let mut v=view(vec![]);v.schema_version=2;
+         v.additional_requests=Some(vec![AdditionalRequest {family:AdditionalFamily::VersionTag,request_id:id(3)}]);
+-        v.validate().unwrap();assert_eq!(LIMIT,352); // Apple and VersionEdit namespaces remain separately counted.
++        v.validate().unwrap(); // VersionTag remains the ONE Cleanup6 pool; full-capacity test above is authoritative.
+         assert!(human(&v).contains("mrk version-tag-status"));assert!(!human(&v).contains("mrk version-tag-submit"));
+         v.additional_requests.as_mut().unwrap().push(AdditionalRequest {family:AdditionalFamily::PlayCleanup,request_id:id(3)});
+         assert!(v.validate().is_err()); // same ID cannot appear through a family alias.
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1893,6 +1893,50 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
++}
++// The largest action is the original bounded copied Doctor draft. RAW only;
++// Tauri JSON has already lost duplicate-field evidence and is not accepted.
++fn tool_setup_request_bytes<'a>(request:&'a tauri::ipc::Request<'_>)->Result<&'a [u8],BridgeError>{
++    match request.body(){tauri::ipc::InvokeBody::Raw(bytes) if bytes.len()<=crate::environment_diagnostics_protocol::REQUEST_LIMIT=>Ok(bytes),_=>Err(BridgeError::invalid())}
++}
++#[tauri::command]
++async fn agent_tool_setup_access(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]{
++        let _args:crate::asset_session::agent_identity::Empty=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_tool_setup_access(window)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_tool_setup(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]{
++        serde_json::to_value(state.document.allow_agent_tool_setup(window,tool_setup_request_bytes(&request)?)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_tool_setup(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]{
++        let args:crate::asset_session::agent_tool_setup::Revoke=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_tool_setup(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
++}
++#[tauri::command]
++async fn agent_tool_setup_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state,Forbidden,observed,BridgeError::new("sg1_fixture_refused","This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]{
++        let args:crate::service_tool_setup_protocol::Query=crate::asset_session::agent_tool_setup::decode(tool_setup_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_tool_setup_request_status(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Tool delegation is not supported on this platform."))}
+ }
+ #[tauri::command]
+ async fn agent_store_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -3436,7 +3480,7 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ struct AgentStoreRelayGuard {document:DocumentBinding,closed:bool}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+-impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();}}}
++impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();self.document.agent_tool_setup_relay_lost();}}}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ struct AgentAppleRelayGuard {document:DocumentBinding,closed:bool}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -3684,6 +3728,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             document.service_apple_provisioning_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            document.service_tool_setup_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
+             // status() releases its native locks before any renderer callback.
+             // Events are best effort: the UI subscribes then fetches status and
+@@ -4121,6 +4167,7 @@
+                     document.drain_local_checks_for_exit();
+                     document.drain_android_builds_for_exit();
+                     document.drain_agent_store_for_exit();
++                    document.drain_agent_tool_setup_for_exit();
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+                     document.drain_agent_apple_for_exit();
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -5618,6 +5665,7 @@
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             agent_store_access, allow_agent_store, revoke_agent_store,
+             agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
++            agent_tool_setup_access, allow_agent_tool_setup, revoke_agent_tool_setup, agent_tool_setup_request_status,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+             installation_preparation_status, prepare_installation_quit,
+diff --git a/desktop/tests/android-build-controller.test.mjs b/desktop/tests/android-build-controller.test.mjs
+--- a/desktop/tests/android-build-controller.test.mjs
++++ b/desktop/tests/android-build-controller.test.mjs
+@@ -1341,3 +1341,40 @@
+   assert.deepEqual(home().activities, []); assert.equal(updates.at(-1), 0, 'actual finally publishes the pending-bit transition to Home');
+   assert.equal(h.calls.length, 2, 'view updates neither repeat the build nor start another check');
+ });
++
++
++test('CLI chosen-source inspection uses the same controller originals and needs service return plus fresh native read',async t=>{
++  const h=toolSetupHarness(t);await h.ready;h.controller.setVisible(false);h.controller.setToolSetupVisible(true);
++  const scope=h.controller.toolSetupReview('inspect-picked-sources');assert.ok(scope);
++  const pin=h.controller.delegateToolSetup(scope);assert.ok(pin);assert.equal(pin.current(),true);
++  await h.controller.inspectToolSources();assert.equal(h.registrationCalls.length,0);
++  const native=sourceReview({input:{context:pin.input.sourceContext}});h.emitRegistration(native);
++  assert.equal(h.state.registrationConsent,null);assert.equal(h.state.registrationPending,'inspect');
++  const returned={review:scope,settlement:'settled',operation:{operationId:OP,ownerGeneration:null,registrationGeneration:1}};
++  assert.equal(await pin.readAfterReturned(returned),true);
++  assert.equal(h.state.registrationPending,null);assert.equal(h.state.registrationConsent.reviewId,OTHER);
++  assert.equal(h.state.registrationConsent.acknowledged,false);assert.equal(h.registrationCalls.length,0);
++  const register=h.controller.toolSetupReview('register-reviewed-sources');assert.ok(register);
++  const copyPin=h.controller.delegateToolSetup(register);assert.ok(copyPin);assert.equal(copyPin.input.nativeConsent,ANDROID_TOOL_REGISTRATION_CONSENT);
++  assert.equal(copyPin.input.licenseAcknowledged,true);await h.controller.registerToolSources(OP,1,OTHER);assert.equal(h.registrationCalls.length,0);
++  const refused={...native,statusRevision:2,registrationGeneration:2,phase:'refused',reason:'registration-refused',review:null,
++    operation:{...native.operation,operationId:OWNER,registrationGeneration:2,kind:'registration'}};
++  h.emitRegistration(refused);assert.equal(h.state.registrationPending,'register');
++  assert.equal(await copyPin.readAfterReturned({review:register,settlement:'settled',operation:{operationId:OWNER,ownerGeneration:null,registrationGeneration:2}}),true);
++  assert.equal(h.state.registrationPending,null);assert.equal(h.state.registrationConsent,null);assert.equal(h.state.integrityFailed,false);
++  assert.deepEqual([h.calls.length,h.registrationCalls.length,h.catalogCalls.length],[0,0,0]);
++});
++
++test('unused CLI copy restores only the same retained earlier native review, not a later status lookalike',async t=>{
++  const h=toolSetupHarness(t),native=await reviewInToolSetup(h),old=h.state.registrationConsent;
++  const scope=h.controller.toolSetupReview('register-reviewed-sources'),pin=h.controller.delegateToolSetup(scope);assert.ok(pin);
++  assert.equal(h.state.registrationConsent,null);assert.equal(await pin.readAfterReturned(null),true);
++  assert.equal(h.state.registrationConsent.binding,old.binding);assert.equal(h.state.registrationConsent.deadline,old.deadline);
++  assert.equal(h.state.registrationConsent.acknowledged,old.acknowledged);assert.equal(h.registrationCalls.length,1);
++  const pin2=h.controller.delegateToolSetup(h.controller.toolSetupReview('register-reviewed-sources'));assert.ok(pin2);
++  h.emitRegistration({...native,statusRevision:2});assert.equal(await pin2.readAfterReturned(null),false);
++  assert.equal(h.state.registrationConsent,null);assert.equal(h.registrationCalls.length,1);
++  // Ordinary cancellation still targets the actual original, not a new CLI invoke.
++  h.controller.cancelToolRegistration();const cancel=h.registrationCalls.at(-1);
++  if(cancel?.kind==='cancel'){h.replyRegistration(cancel,discardedSourceReview({...native,statusRevision:2}));await flush();}
++});
+diff --git a/desktop/tests/environment-diagnostics.test.mjs b/desktop/tests/environment-diagnostics.test.mjs
+--- a/desktop/tests/environment-diagnostics.test.mjs
++++ b/desktop/tests/environment-diagnostics.test.mjs
+@@ -531,3 +531,23 @@
+   assert.equal(h.calls.length, 1); // Receiving the result does not send another Start.
+   h.controller.dispose();
+ });
++
++
++test('CLI doctor delegates one immutable draft copy without a fake GUI Start or event-derived join',async()=>{
++  const h=harness();await h.ready;const review=h.controller.toolSetupReview(),pin=h.controller.delegateToolSetup(review);
++  assert.ok(pin);assert.equal(pin.input.doctorDraft.current,true);assert.equal(h.calls.length,0);
++  assert.equal(h.state.delegated,true);assert.equal(h.state.attempt,null);assert.equal(h.controller.start(),false);
++  h.project.draft.current=false;assert.equal(pin.input.doctorDraft.current,true);
++  h.emit(status(1,null,finished()));assert.equal(h.state.delegated,true);assert.equal(h.state.attempt,null);
++  const returned={review,settlement:'settled',operation:{operationId:RUN,ownerGeneration:GENERATION,registrationGeneration:null}};
++  assert.equal(await pin.readAfterReturned({...returned,operation:{...returned.operation,operationId:OTHER}}),false);
++  assert.equal(h.state.delegated,true);assert.equal(await pin.readAfterReturned(returned),true);
++  assert.equal(h.state.delegated,false);assert.equal(h.state.attempt,null);assert.equal(h.calls.length,0);h.controller.dispose();
++});
++
++test('never-submitted doctor permission releases only after the original native status read is known idle',async()=>{
++  const h=harness();await h.ready;const pin=h.controller.delegateToolSetup(h.controller.toolSetupReview());assert.ok(pin);
++  h.registry(status(1,owner()));assert.equal(await pin.readAfterReturned(null),false);assert.equal(h.state.delegated,true);
++  h.registry(status(2,null,finished({outcome:'cancelled',reason:'cancelled',result:null})));
++  assert.equal(await pin.readAfterReturned(null),true);assert.equal(h.calls.length,0);h.controller.dispose();
++});
+diff --git a/desktop/tests/tool-acquisition-controller.test.mjs b/desktop/tests/tool-acquisition-controller.test.mjs
+--- a/desktop/tests/tool-acquisition-controller.test.mjs
++++ b/desktop/tests/tool-acquisition-controller.test.mjs
+@@ -592,3 +592,32 @@
+   h.reply(cancel, status(4, terminal(op, 'cancelled'))); await stop;
+   assert.equal(h.state.prerequisite, null); // Only the original real terminal status can settle this entered work.
+ });
++
++
++test('Advanced CLI preparation retains the actual Prepared; terminal events do not join a delegated Start',async t=>{
++  const h=harness(t);await h.ready;
++  const preparing=h.controller.prepareForCli(),call=h.calls[0],op=operation(call.request);
++  assert.equal(call.kind,'prepare');h.reply(call,status(2,op));await preparing;
++  assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);assert.equal(h.state.inspection,null);
++  const review=h.controller.toolSetupReview();assert.equal(review.kind,'inspect-requirements');
++  const pin=h.controller.delegateToolSetup(review);assert.ok(pin);assert.equal(pin.current(),true);
++  assert.equal(h.controller.toolSetupReview(),null);assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);
++  h.emit(status(3,running(op)));assert.equal(h.state.issue,null);
++  h.emit(status(4,terminal(op)));assert.equal(h.state.inspection,null);assert.ok(h.controller.ownerReason());
++  const service={review,settlement:'settled',operation:{operationId:OP,ownerGeneration:OWNER,registrationGeneration:null}};
++  assert.equal(await pin.readAfterReturned(service),true);
++  assert.equal(h.state.inspection?.kind,'tool-requirements-observation');assert.equal(h.controller.ownerReason(),null);
++  assert.deepEqual(h.calls.map(c=>c.kind),['prepare']);
++});
++
++test('CLI acquisition consumes only the same returned download review and never issues the GUI Start',async t=>{
++  const h=harness(t),op=await reviewed(h),review=h.controller.toolSetupReview();
++  assert.equal(review.kind,'acquire-missing');const pin=h.controller.delegateToolSetup(review);assert.ok(pin);
++  h.controller.setAcknowledged(ACQUIRE,ACQUIRE_OWNER,true);await h.controller.download(ACQUIRE,ACQUIRE_OWNER);
++  assert.equal(h.calls.filter(c=>c.kind==='start').length,1); // only the earlier ordinary inspection
++  h.emit(status(5,running(op)));h.emit(status(6,terminal(op)));
++  assert.equal(h.state.presentation==='current-staged',false);
++  assert.equal(await pin.readAfterReturned({review,settlement:'settled',operation:{operationId:OP,ownerGeneration:OWNER,registrationGeneration:null}}),false);
++  assert.equal(await pin.readAfterReturned({review,settlement:'settled',operation:{operationId:ACQUIRE,ownerGeneration:ACQUIRE_OWNER,registrationGeneration:null}}),true);
++  assert.equal(h.state.presentation,'current-staged');assert.equal(h.calls.filter(c=>c.kind==='start').length,1);
++});
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -257,6 +257,7 @@
+     match &response.response {
+         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
++        p::ResponseBody::ToolSetupRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -32,6 +32,8 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "../src/git_local_state.rs"] mod git_local_state;
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
++#[path = "../src/service_tool_setup_protocol.rs"] mod service_tool_setup_protocol;
++#[path = "../src/service_tool_setup_requests.rs"] mod service_tool_setup_requests;
+ #[path = "../src/service_upload_key_protocol.rs"] mod service_upload_key_protocol;
+ #[path = "../src/service_upload_key_requests.rs"] mod service_upload_key_requests;
+ #[path = "../src/service_play_cleanup_protocol.rs"] mod service_play_cleanup_protocol;

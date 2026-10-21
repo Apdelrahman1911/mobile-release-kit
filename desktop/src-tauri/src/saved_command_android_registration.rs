@@ -6,6 +6,9 @@ use super::*;
 use crate::android_registration_app_protocol as wire;
 use std::sync::{Weak, TryLockError};
 use android_sources::SourceSnapshot;
+#[path = "saved_command_agent_tool_registration.rs"]
+mod agent;
+pub(crate) use agent::{Approval as AgentToolRegistrationApproval,Binding as AgentToolRegistrationBinding};
 #[path = "saved_command_android_service_setup.rs"]
 pub(super) mod service_setup;
 #[path = "saved_command_android_maintenance.rs"]
@@ -315,7 +318,7 @@ impl Drop for Publisher {
 }
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum ControlLane { Sources, Service, Maintenance }
-pub(super) struct Control {
+pub(super) struct Control { agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>,
     lane:ControlLane,
     owner:Weak<Inner>,id:String,generation:u32,admitted:Instant,work:Instant,hard:Instant,
     slot:Weak<ControlSlot>,cohort:Arc<()>,epoch:u64,
@@ -361,6 +364,7 @@ impl Control {
             service_setup::RemovalCut::Unknown=>{self.poisoned();false}}
     }
     fn mark_unknown(&self,at:Instant){
+        agent::unknown(self);
         // A genuine local/native failure is never suppressed by an unrelated
         // earlier Parent-clock latch. Exact Parent veto sites use poisoned()
         // directly; they must not route an invented Instant through this API.
@@ -431,6 +435,7 @@ impl Control {
     fn advance_classified(&self,now:Instant)->bool{self.advance_phase(now,false)}
     fn advance_cleanup(&self,now:Instant)->bool{self.advance_phase(now,true)}
     fn advance_phase(&self,now:Instant,cleanup:bool)->bool{
+        agent::advance(self,now);
         // The original own-domain deadline remains genuine first-F even when
         // a later Parent observation stops work or makes its clock unknown.
         if now>=self.work && self.failure().is_none(){self.stop_at(wire::Reason::TimedOut,self.work);}
@@ -654,6 +659,11 @@ impl WorkGate {
                     if unavailable{return Err((wire::Reason::CleanupUnknown,self.control.admitted));}
                     return Ok(());
                 }
+                // The original book wait cannot renew a delegated READ. This
+                // check takes only the private facet/control cells, not Doc or
+                // Host/Service/book again; native source checks stay unchanged.
+                agent::advance(&self.control,Instant::now());
+                if let Some(first)=self.control.failure(){return Err(first);}
                 // Lock contention is part of the original W, not free time.
                 let entered_at = Instant::now();
                 if entered_at >= self.control.work_endpoint()
@@ -665,7 +675,7 @@ impl WorkGate {
             let end=if self.control.lane==ControlLane::Maintenance {
                 self.control.work_endpoint().min(self.control.endpoint())
             }else{self.control.work_endpoint()};
-            let remaining = end.saturating_duration_since(Instant::now());
+            let remaining = agent::wait_end(&self.control,end).saturating_duration_since(Instant::now());
             if remaining.is_zero() { drop(book); continue; }
             #[cfg(test)] {
                 self.slot.wait_entries.fetch_add(1, Ordering::SeqCst);
@@ -781,7 +791,7 @@ impl Request {
     }
 }
 /// First short-lock snapshot only. It has no native/worker/finality authority.
-pub(crate) struct Snapshot {
+pub(crate) struct Snapshot { agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>,
     owner:Weak<Inner>,document:Weak<()>,at:Instant,source:Arc<SourceSnapshot>,request:Request,
     reviewed:Option<Arc<Review>>,saved:crate::asset_session::ValidatedSavedInput,cohort:Mutex<Option<AdmissionCohort>>,
 }
@@ -858,7 +868,7 @@ struct Review {
 }
 struct Last {data:wire::Operation,phase:wire::Phase,reason:wire::Reason,report:Option<wire::Report>}
 #[derive(Default)]
-pub(super) struct Registration {
+pub(super) struct Registration { agent:Option<Arc<agent::Binding>>,
     generation:u32,active:Option<Arc<Operation>>,review:Option<Arc<Review>>,last:Option<Last>,
     capability:Option<(Availability,wire::Prerequisite)>,
     service:service_setup::State,maintenance:maintenance::State,
@@ -1187,10 +1197,16 @@ fn poll_source_cells(control:&Control,joined:&AtomicBool,
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 async fn coordinate_inspection(original:Arc<Operation>,enter:oneshot::Receiver<()>,source_release:oneshot::Sender<()>)->bool{
     let mut stopped=original.control.stop.subscribe();let mut changed=original.control.audit.subscribe();
-    let go=tokio::select!{
-        value=enter=>value.is_ok(),
-        _=stopped.changed()=>false,
-        _=tokio::time::sleep_until(tokio::time::Instant::from_std(original.control.work))=>false,
+    let mut enter=enter;
+    let go=loop {
+        let now=Instant::now();original.control.advance(now);
+        if original.control.failure().is_some()||original.control.unknown.load(Ordering::SeqCst)||now>=original.control.work{break false;}
+        let end=agent::wait_end(&original.control,original.control.work);
+        tokio::select!{
+            value=&mut enter=>break value.is_ok(),
+            _=stopped.changed()=>break false,
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>{},
+        }
     };
     let current=original.owner.upgrade().is_some_and(|owner|{
         let registry=owner.lock();
@@ -1219,7 +1235,7 @@ async fn coordinate_inspection(original:Arc<Operation>,enter:oneshot::Receiver<(
                 let observed=Instant::now();poll_source(&original,&mut slot,context,observed)
             })=>Some(known),
             value=changed.changed()=>{if value.is_err(){original.control.mark_unknown(Instant::now());}None},
-            _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>None,
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(agent::wait_end(&original.control,end)))=>None,
         };
         if let Some(known)=known{
             drop(slot);
@@ -1349,7 +1365,7 @@ impl Registration {
                 self.last=Some(Last{data:original.data.clone(),phase,reason,report:Some(report)});
                 self.review=None;original.accepted.store(true,Ordering::SeqCst);
                 book.original=None;book.cohort=None;self.active=None;
-                drop(book);inner.android_registration_control.wake.notify_all();return true;
+                drop(book);agent::retired(self,original);inner.android_registration_control.wake.notify_all();return true;
             }
             let setup=prerequisite(&self.service);
             let sources=source.review.as_ref().map_or_else(Vec::new,AndroidRegistrationSourceReview::sources);
@@ -1388,7 +1404,7 @@ impl Registration {
             }
             original.accepted.store(true,Ordering::SeqCst);
             book.original=None;book.cohort=None;self.active=None;
-            drop(book);inner.android_registration_control.wake.notify_all();true
+            drop(book);agent::retired(self,original);inner.android_registration_control.wake.notify_all();true
         }
         #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {drop(book);original.control.mark_unknown(at);true}
@@ -1490,6 +1506,10 @@ impl SavedCommandOwner {
     }
     fn registration_snapshot(&self,document:&Arc<()>,at:Instant,request:Request,
         registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:android_wire::Availability)->Result<Snapshot,BridgeError>{
+        self.registration_snapshot_agent(document,at,request,registration,project,saved,gate,None)
+    }
+    fn registration_snapshot_agent(&self,document:&Arc<()>,at:Instant,request:Request,
+        registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:android_wire::Availability,agent_binding:Option<&agent::Binding>)->Result<Snapshot,BridgeError>{
         let registry=self.inner.lock();
         if self.registration_gate(&registry,Availability::from_android(gate))!=Availability::Available
             || !self.inner.android_original_document_matches(Some(document)){return Err(wire::unavailable());}
@@ -1503,8 +1523,9 @@ impl SavedCommandOwner {
             Request::Inspect(_)=>None,
             Request::Register(input)=>Some(registry.android_registration.same_review(input,&source,at).ok_or_else(wire::invalid)?),
         };
+        let agent=agent::admission_binding(&self.inner,&registry,agent_binding,&saved,&request)?;
         let cohort=self.inner.android_registration_control.claim(saved.epoch(),reviewed.as_ref())?;
-        Ok(Snapshot{owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),at,source:Arc::new(source),request,reviewed,saved,cohort:Mutex::new(Some(cohort))})
+        Ok(Snapshot{agent,owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),at,source:Arc::new(source),request,reviewed,saved,cohort:Mutex::new(Some(cohort))})
     }
     /// Second phase, under the SAME current Document guard and registered root.
     /// Root has revalidated current saved inputs and supplies that exact context.
@@ -1522,7 +1543,8 @@ impl SavedCommandOwner {
             || !registry.android_sources.same_snapshot(&snapshot.source)
             || snapshot.source.registration!=registration || &snapshot.source.project!=project
             || !current.matches(document,registration,project,snapshot.request.context()) || !snapshot.saved.same_binding(&current)
-            || snapshot.request.generation()!=registry.android_registration.generation{return Err(wire::invalid());}
+            || snapshot.request.generation()!=registry.android_registration.generation
+            || !agent::current_checked(&self.inner,&registry,snapshot,&current){return Err(wire::invalid());}
         if let Request::Register(input)=&snapshot.request{
             let checked_at=Instant::now();
             let current_review=registry.android_registration.same_review(input,&snapshot.source,checked_at).ok_or_else(wire::invalid)?;
@@ -1558,7 +1580,7 @@ impl SavedCommandOwner {
             let cohort=snapshot.cohort.lock().map_err(|_|wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::invalid());}
             let (stop,_)=watch::channel(false);let (audit,audit_read)=watch::channel(hard);
-            let control=Arc::new(Control{
+            let control=Arc::new(Control{ agent:snapshot.agent.clone(),
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(),lane:ControlLane::Sources,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
@@ -1589,6 +1611,7 @@ impl SavedCommandOwner {
             registry.android_registration.review=None;
             registry.android_registration.generation=generation;
             registry.android_registration.active=Some(original.clone());
+            agent::entered(&original);
             let mut source_slot=match original.source_handle.try_lock(){
                 Ok(slot)=>slot,Err(_)=>{original.control.mark_unknown(observed);registry.disabled=true;self.inner.bump(&mut registry);return Err(wire::unconfirmed());},
             };
@@ -1733,7 +1756,7 @@ mod catalogue_budget_tests {
         let admitted=Instant::now();let work=admitted.checked_add(WORK).unwrap();let hard=admitted.checked_add(HARD).unwrap();
         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
         // No claim/install, AdmissionCohort, owner, GO, retirement or receipt.
-        Arc::new(Control{
+        Arc::new(Control{ agent:None,
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id,generation,admitted,work,hard,
             slot:Arc::downgrade(slot),cohort:Arc::new(()),epoch:0,first:Mutex::new(None),
@@ -2018,11 +2041,14 @@ mod lifecycle_book_tests {
         control_in_lane(admitted,ControlLane::Sources)
     }
     pub(super) fn control_in_lane(admitted:Instant,lane:ControlLane)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
+        control_for_agent(admitted,lane,None)
+    }
+    pub(super) fn control_for_agent(admitted:Instant,lane:ControlLane,agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate){
         let slot=Arc::new(ControlSlot::default());
         let cohort=slot.claim(0,None).unwrap();
         let work=admitted+WORK;let hard=admitted+HARD;
         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
-        let control=Arc::new(Control{
+        let control=Arc::new(Control{ agent,
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
             admitted,work,hard,slot:Arc::downgrade(&slot),cohort:cohort.identity.clone(),epoch:cohort.epoch,

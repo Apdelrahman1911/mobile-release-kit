@@ -215,7 +215,7 @@ impl DocumentBinding {
         let _state = self.lock();
         self.inner.bridge.tool_acquisition.document_lost();
     }
-    fn tool_acquisition_gate(&self, state: &DocumentState) -> wire::Availability {
+    pub(in crate::asset_session) fn tool_acquisition_gate(&self, state: &DocumentState) -> wire::Availability {
         use wire::Availability as A;
         let bridge = &self.inner.bridge;
         if state.unknown
@@ -401,7 +401,10 @@ impl DocumentBinding {
         &self,
         input: wire::Start,
     ) -> Result<wire::Status, BridgeError> {
-        let admitted_at = Instant::now(); // BEFORE Doc/Registry/queue admission.
+        self.start_tool_acquisition_agent(input,Instant::now(),None)
+    }
+    pub(crate) fn start_tool_acquisition_agent(&self,input:wire::Start,admitted_at:Instant,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>)->Result<wire::Status,BridgeError>{
+        // SAME original T before queue/Doc, never sampled again for delegation.
         let mut state = self.lock();
         let owner = &self.inner.bridge.tool_acquisition;
         let original = owner
@@ -460,6 +463,10 @@ impl DocumentBinding {
                 return Err(error);
             }
         };
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if let Some(entry)=entry{self.tool_setup_admission_current(&state,entry,&edit)?;}
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        if entry.is_some(){return Err(wire::invalid());}
         let current =
             self.tool_acquisition_saved_lane(&state, &original.context, &edit, registration, &root);
         if !current
@@ -472,13 +479,13 @@ impl DocumentBinding {
             owner.context_changed();
             return Err(wire::invalid());
         }
-        let admitted = owner.start_tool_acquisition(
+        let admitted = owner.start_tool_acquisition_agent(
             input,
             admitted_at,
             Some((registration, root)),
             gate,
             &census,
-            &budget,
+            &budget,entry,
         )?;
         // Prepared-context validation, one-use consent and original roster
         // claim are atomic under BOTH guards. Worker GO is only after release.

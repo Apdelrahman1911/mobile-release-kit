@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { InstallationDetails } from '../components/InstallationDetails.tsx';
 import type { AppInfo, DesktopApi, HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
@@ -36,10 +37,10 @@ const initialHelp: Record<'platform' | 'operation', HelpContent> = {
 };
 const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
 
-export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, onRetry, onSettings, onHelp, loading }: {
+export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, toolDelegation, onRetry, onSettings, onHelp, loading }: {
   info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
-  toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps;
+  toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps; toolDelegation?: ReactNode;
   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
 }) {
   const runtime = info?.runtime;
@@ -72,6 +73,7 @@ export function Environment({ info, api, preview, session, state, controller, di
       <PrepareBuildEnvironment {...toolPreparation} />
       <AndroidToolSetup {...toolSetup} />
     </>}
+    {toolDelegation}
     <ProgressiveDisclosure title="Required tools & versions"
       description="See what this project asks for. This list does not check what is installed on your computer."
       needsAttention={state.pending !== null || state.error !== null || (result !== null && state.stale)}>

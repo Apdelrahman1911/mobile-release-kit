@@ -1,3 +1,4 @@
+import { ServiceMetadataTextAccess } from './ServiceMetadataTextAccess.tsx';
 import { useEffect, useId, useRef, useState } from 'react';
 import { savedTextRecoveryActionLabel, savedTextRecoveryGuidance, savedTextRecoveryPreservationGuidance } from '../savedTextRecovery.ts';
 import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryDomain, SavedTextRecoveryView } from '../savedTextRecovery.ts';
@@ -311,6 +312,7 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
       </details>}
     </section>
     <MetadataTextSave state={state} controller={controller} detailed onShowProject={onShowProject} onHelp={onHelp} />
+    <ServiceMetadataTextAccess controller={controller.agent} />
     {retained.length > 0 && <details className="card metadata-retained"><summary>Retained locale text · {retained.length} / 32 bundles · {(metadataCacheBytes(state.entries) / 1024 / 1024).toFixed(2)} / 8 MiB</summary>
       <p>Refresh, project switches and locale removal never evict these drafts or move their text. To reuse an earlier draft, first select and load its same project, metadata root, platform and locale under the current saved configuration above. Then review its retained changes below; conflicting fields are never merged or forced.</p>
       <p>Using a retained draft is not a save or transaction recovery. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>

@@ -3,9 +3,13 @@ use super::*;
 use crate::{github_actions_retry_protocol as p, github_connection_session::actions_retry as s};
 
 pub(crate) struct GitHubActionsRetryGoGate {
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     inner: Weak<Inner>,
 }
 impl GitHubActionsRetryGoGate {
+    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
+    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
+
     pub(crate) fn claim(
         &self,
         id: &str,
@@ -65,6 +69,7 @@ impl GitHubActionsRetryGoGate {
             })?;
         // No lock gap before one-use original GO. The caller supplies no token,
         // source path/identity, raw config, JSON body or alternate edit witness.
+        if let Some(e)=&self.agent { e.current(true).map_err(application_service::public_error)?; }
         state.github.actions_retry_go(
             id,
             digest,
@@ -73,7 +78,7 @@ impl GitHubActionsRetryGoGate {
             &root,
             &edit,
             Instant::now(),
-            claim,
+            || { let granted=claim(); if granted { if let Some(e)=&self.agent { if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; } } } granted },
         )
     }
 }
@@ -135,6 +140,9 @@ impl DocumentBinding {
     ) -> Result<p::Status, BridgeError> {
         let command =
             p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.actions_retry_execute(command,None)
+    }
+    pub(super) fn actions_retry_execute(&self, command:p::Command, agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<p::Status,BridgeError>{
         if matches!(command, p::Command::Status) {
             return Ok(self.actions_retry_status());
         }
@@ -198,6 +206,7 @@ impl DocumentBinding {
                 })
             })?;
         let gate = GitHubActionsRetryGoGate {
+            agent,
             inner: Arc::downgrade(&self.inner),
         };
         let supervisor = &self.inner.bridge.supervisor;

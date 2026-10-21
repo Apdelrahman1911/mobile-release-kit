@@ -32,6 +32,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path = "../src/service_tool_setup_protocol.rs"] mod service_tool_setup_protocol;
+#[path = "../src/service_tool_setup_requests.rs"] mod service_tool_setup_requests;
 #[path = "../src/service_upload_key_protocol.rs"] mod service_upload_key_protocol;
 #[path = "../src/service_upload_key_requests.rs"] mod service_upload_key_requests;
 #[path = "../src/service_play_cleanup_protocol.rs"] mod service_play_cleanup_protocol;
@@ -39,6 +41,12 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path="../src/service_version_edit_protocol.rs"] mod service_version_edit_protocol;
 #[path="../src/service_version_edit_requests.rs"] mod service_version_edit_requests;
 #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
+#[path="../src/bounded_json_seed.rs"]
+mod bounded_json_seed;
+#[path="../src/service_metadata_text_protocol.rs"]
+mod service_metadata_text_protocol;
+#[path="../src/service_metadata_text_requests.rs"]
+mod service_metadata_text_requests;
 #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
 #[path="../src/service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
@@ -46,6 +54,10 @@ mod service_version_reserve_protocol;
 mod service_store_protocol;
 #[path="../src/service_store_requests.rs"]
 mod service_store_requests;
+#[path="../src/service_github_action_protocol.rs"]
+mod service_github_action_protocol;
+#[path="../src/service_github_action_requests.rs"]
+mod service_github_action_requests;
 #[path="../src/service_apple_provisioning_protocol.rs"]
 mod service_apple_provisioning_protocol;
 #[path="../src/service_apple_provisioning_requests.rs"]

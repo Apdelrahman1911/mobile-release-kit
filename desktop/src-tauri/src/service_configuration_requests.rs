@@ -493,8 +493,17 @@ impl Entry {
         }
     }
 }
+// One Book/mutex/32-row budget for both fixed editor families.
+enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>) }
+impl SharedRow {
+    fn origin(&self)->&p::Query {match self{Self::Configuration(e)=>&e.input.origin,Self::MetadataText(e)=>&e.input().origin}}
+    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()}}}
+    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at)}}
+    fn configuration(&self)->Option<&Arc<Entry>>{match self{Self::Configuration(e)=>Some(e),_=>None}}
+    fn metadata(&self)->Option<&Arc<crate::service_metadata_text_requests::Entry>>{match self{Self::MetadataText(e)=>Some(e),_=>None}}
+}
 struct Book {
-    rows: Vec<Arc<Entry>>,
+    rows: Vec<SharedRow>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -538,8 +547,9 @@ impl Inbox {
         if let Some(old) = book
             .rows
             .iter()
-            .find(|r| r.input.origin.request_id == input.origin.request_id)
+            .find(|r| r.origin().request_id == input.origin.request_id)
         {
+            let old=old.configuration().ok_or(Error::Conflict)?;
             if old.input != input {
                 return Err(Error::Conflict);
             }
@@ -555,7 +565,6 @@ impl Inbox {
             return Err(Error::Conflict);
         }
         for row in &book.rows {
-            let _ = row.status()?;
             if row.occupied()? {
                 return Err(Error::Busy);
             }
@@ -604,7 +613,7 @@ impl Inbox {
             failed: self.failed.clone(),
             changes: self.changes.clone(),
         });
-        book.rows.push(entry.clone());
+        book.rows.push(SharedRow::Configuration(entry.clone()));
         {
             let mut row = entry.lock()?;
             bump(&mut row, &self.changes, &self.failed)?
@@ -617,14 +626,14 @@ impl Inbox {
         }
         self.lock()?
             .rows
-            .iter()
+            .iter().filter_map(SharedRow::configuration)
             .find(|r| &r.input.origin == q)
             .cloned()
             .ok_or(Error::Conflict)
     }
     pub(crate) fn desktop(&self) -> Result<p::DesktopStatus, Error> {
         let book = self.lock()?;
-        let request = book.rows.last().map(|r| r.status()).transpose()?;
+        let request = book.rows.iter().rev().find_map(SharedRow::configuration).map(|r| r.status()).transpose()?;
         let result = p::DesktopStatus {
             service_instance: self.instance.clone(),
             revision: *self.changes.borrow(),
@@ -646,7 +655,7 @@ impl Inbox {
         Ok(result)
     }
     pub(crate) fn entries(&self) -> Result<Vec<Arc<Entry>>, Error> {
-        Ok(self.lock()?.rows.clone())
+        Ok(self.lock()?.rows.iter().filter_map(SharedRow::configuration).cloned().collect())
     }
     pub(crate) fn close(&self, at: Instant) {
         if let Ok(mut book) = self.book.lock() {
@@ -658,6 +667,31 @@ impl Inbox {
             self.failed.store(true, Ordering::Release)
         }
     }
+    pub(crate) fn metadata_read(&self,input:crate::service_metadata_text_protocol::Read,source:Source,read:Arc<ReadPermission>)->Result<crate::service_metadata_text_protocol::Status,Error>{
+        input.validate()?;let mut book=self.lock()?;
+        if input.origin.service_instance!=self.instance{return Err(Error::Conflict)}
+        if let Some(row)=book.rows.iter().find(|r|r.origin().request_id==input.origin.request_id){
+            let old=row.metadata().ok_or(Error::Conflict)?;if old.input()!=&input{return Err(Error::Conflict)}return old.status();
+        }
+        if book.closed||self.failed.load(Ordering::Acquire){return Err(Error::Unavailable)}
+        if input.expected_observation_revision!=source.observation_revision||read.stop(Instant::now())?.is_some(){return Err(Error::Conflict)}
+        for row in &book.rows{if row.occupied()?{return Err(Error::Busy)}}
+        if book.rows.len()>=p::REQUEST_LIMIT{return Err(Error::Busy)}
+        let entry=Arc::new(crate::service_metadata_text_requests::Entry::new(input,source,read,self.failed.clone(),self.changes.clone())?);
+        book.rows.push(SharedRow::MetadataText(entry.clone()));
+        self.changes.send_modify(|n|if let Some(next)=n.checked_add(1){*n=next}else{self.failed.store(true,Ordering::Release)});
+        entry.status()
+    }
+    pub(crate) fn metadata_entry(&self,q:&p::Query)->Result<Arc<crate::service_metadata_text_requests::Entry>,Error>{
+        if q.service_instance!=self.instance{return Err(Error::Conflict)}
+        self.lock()?.rows.iter().filter_map(SharedRow::metadata).find(|e|&e.input().origin==q).cloned().ok_or(Error::Conflict)
+    }
+    pub(crate) fn metadata_desktop(&self,q:Option<&p::Query>)->Result<crate::service_metadata_text_protocol::DesktopStatus,Error>{
+        let request=if let Some(q)=q{Some(self.metadata_entry(q)?.status()?)}else{self.lock()?.rows.iter().rev().find_map(SharedRow::metadata).map(|e|e.status()).transpose()?};
+        let s=crate::service_metadata_text_protocol::DesktopStatus{service_instance:self.instance.clone(),revision:*self.changes.borrow(),request};s.validate()?;Ok(s)
+    }
+    pub(crate) fn metadata_entries(&self)->Result<Vec<Arc<crate::service_metadata_text_requests::Entry>>,Error>{Ok(self.lock()?.rows.iter().filter_map(SharedRow::metadata).cloned().collect())}
+
     pub(crate) fn fence(&self) {
         self.failed.store(true, Ordering::Release);
     }
@@ -670,10 +704,10 @@ impl Inbox {
             .lock()?
             .rows
             .iter()
-            .filter(|r| &r.input.origin.project_id == project)
+            .filter(|r| &r.origin().project_id == project)
             .map(|r| AdditionalRequest {
-                family: AdditionalFamily::Configuration,
-                request_id: r.input.origin.request_id.clone(),
+                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText},
+                request_id: r.origin().request_id.clone(),
             })
             .collect())
     }

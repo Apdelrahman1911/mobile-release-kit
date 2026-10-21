@@ -15,6 +15,7 @@ impl Admitted {
     pub(crate) fn release(self) -> Status { if let Some(release) = self.release { let _ = release.send(()); } self.status }
 }
 impl AndroidBuildOwner {
+    pub(crate) fn tool_setup_original(&self)->&SavedCommandOwner{&self.saved}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn candidate_claim_matches(&self,claim:&crate::saved_command_owner::LocalHistoryClaim)->bool{claim.matches_owner(&self.saved)}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]

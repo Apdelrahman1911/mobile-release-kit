@@ -22,6 +22,7 @@ WORKFLOW = '.github/workflows/desktop-macos-candidate-consume.yml'
 BRANCH = 'verify/desktop-macos-candidate-consume'
 REMOVAL_BRANCH = 'task/ci-simplification-20261015'
 SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-carrier-selection.json'
+REMOVAL_SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-removal-selection.json'
 CHILD_SOURCE_LIMIT = 256 << 10
 PARSER_SOURCE_LIMIT = 64 << 10
 LEGACY_PATH = 'desktop/tools/macos_fixed_carrier_resume.py'
@@ -279,7 +280,8 @@ class CandidateResume(resume.Resume):
 
     def load_nomination(self, target):
         resume.need(self.__nomination is None, 'candidate-source-selection-once')
-        body = self.source(SELECTION_PATH, 8192)
+        path = REMOVAL_SELECTION_PATH if self.purpose == 'acquire-removal' else SELECTION_PATH
+        body = self.source(path, 8192)
         self.__nomination = MappingProxyType(selection_data(body, target))
 
     def verify_sources(self):

@@ -1,5 +1,10 @@
 import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
 import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
+import { AgentGithubActionAccessController } from './agentGithubActionAccessController.ts';
+import type { GithubActionSelection } from './agentGithubActionAccess.ts';
+import { AgentGithubActionAccess } from './components/AgentGithubActionAccess.tsx';
+import { AgentToolSetupController } from './agentToolSetupController.ts';
+import { AgentToolSetup } from './components/AgentToolSetup.tsx';
 import { AgentUploadKeyAccessController } from './agentUploadKeyAccessController.ts';
 import { AgentUploadKeyAccess } from './components/AgentUploadKeyAccess.tsx';
 import { ServiceConfigurationAccess } from './components/ServiceConfigurationAccess.tsx';
@@ -260,6 +265,7 @@ export function App() {
   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
   const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
+  const agentToolSetupRef=useRef<AgentToolSetupController|null>(null);
   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
   const agentAppleControllerRef = useRef<AgentAppleProvisioningController | null>(null);
@@ -282,6 +288,9 @@ export function App() {
   // Both counter owners participate in every existing admission. Each one's
   // own callback below excludes only itself, never its peer or the editor.
   const versionEnrollmentBusy = useCallback(() => versionEnrollmentRef.current?.ownerReason() ?? versionReserveRef.current?.ownerReason() ?? null, []);
+  const agentGithubActionRef=useRef<AgentGithubActionAccessController|null>(null);
+  const agentGithubActionAdmission=useRef<()=>string|null>(()=>'Wait for the native service.');
+  const agentGithubActionBusy=useCallback(()=>agentGithubActionRef.current?.ownerReason()??null,[]);
   const repositoryCreateRef = useRef<GitHubRepositoryCreateController | null>(null);
   const repositoryCreateAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const repositoryCreateBusy = useCallback(() => repositoryCreateRef.current?.ownerReason() ?? null, []);
@@ -394,7 +403,7 @@ export function App() {
   const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
   const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? agentAppleControllerRef.current?.ownerReason() ?? null, []);
   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
-  const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
+  const toolPreparationBusy = useCallback(() => agentToolSetupRef.current?.ownerReason() ?? toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
   const iosBusy = useCallback(() => iosArchiveControllerRef.current ? iosArchiveOwnerReason(iosArchiveControllerRef.current.getSnapshot()) : null, []);
@@ -402,7 +411,7 @@ export function App() {
   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false, excludePlayCleanup = false, excludeGithubAction = false, excludeToolRegistration = false) => (excludeGithubAction?null:agentGithubActionBusy()) ?? localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? (excludeToolRegistration ? null : androidBusy()) ?? iosBusy() ?? recoveryBusy() ??
     (excludeHistory ? null : historyBusy()) ??
     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
     (excludeActivity ? null : activityBusy()) ??
@@ -415,7 +424,7 @@ export function App() {
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy]);
+    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy, agentGithubActionBusy]);
   // Tools excludes only itself. Existing peers, passive observation and every
   // ordinary mutation admission include the original tool operation below.
   const savedOwnersBusy = useCallback((...args: Parameters<typeof savedOwnersWithoutToolsBusy>) =>
@@ -612,6 +621,20 @@ export function App() {
     }, () => actionsRetryAdmission.current()));
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
+  const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
+    syncOriginal:()=>{repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();},
+    delegate:(r)=>r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:r.kind==='draft-pr-create'?pullRequestRef.current?.delegatePrepared(r)??null:actionsRetryRef.current?.delegatePrepared(r)??null,
+    current:()=>{const service=pathService.current;return {
+      port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
+      projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
+      reviews:[repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection()].filter((r):r is GithubActionSelection=>!!r),
+      blockedReason:agentGithubActionAdmission.current(),
+    };},
+  }));
+  agentGithubActionRef.current=agentGithubAction;
+  useSyncExternalStore(agentGithubAction.subscribe,agentGithubAction.getSnapshot,agentGithubAction.getSnapshot);
+  useEffect(()=>{agentGithubAction.syncContext();});
+  useEffect(()=>()=>agentGithubAction.dispose(),[agentGithubAction]);
   const [githubPlayCleanup] = useState(() => new GitHubPlayCleanupController(
     githubConnection.getSnapshot, () => {
       const current = workspaceRef.current, id = current.selectedId;
@@ -792,12 +815,12 @@ export function App() {
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
-  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false, gitScope?: GitConnectedAdmission): string | null => {
+  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false, forGhEntry = false, gitScope?: GitConnectedAdmission, excludeToolDoctor = false): string | null => {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
     const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initializationOwnerReason(initialization.getSnapshot(),projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
-      metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ??
+      metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? (excludeToolDoctor ? null : diagnosticsOwnerReason(diagnostics.getSnapshot())) ??
       (excludeVersion ? null : versionOwnerReason(versionEdit.getSnapshot(), projectId)) ??
       (excludeImages ? null : metadataImagesOwnerReason(metadataImages.getSnapshot(), projectId));
     if (owned) return owned;
@@ -916,6 +939,19 @@ export function App() {
       current.account.state === 'observed' && current.repository.state === 'observed'
       ? null : 'Connect the intended GitHub repository and account first.';
   };
+  agentGithubActionAdmission.current=()=>{
+    const selected=agentGithubActionRef.current?.peerSelection()??null;
+    const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
+    const pr=!!selected&&selected.kind==='draft-pr-create'&&pullRequestRef.current?.agentSelected(selected)===true;
+    const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
+    const blocked=savedCommandBusy(false,false,false,false,false,false,false,false,repository,false,pr,retry,false,true)??
+      savedOwnersPrerequisiteReason(false,false,undefined,false,true);
+    if(blocked)return blocked;
+    if(githubPreflight.getSnapshot().status?.prepared||githubRelease.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';
+    const connection=githubConnection.getSnapshot(),project=workspaceRef.current.selectedId,current=connection.status;
+    return current?.session?.state==='connected'&&current.session.projectId===project&&connection.context?.projectId===project&&current.account.state==='observed'&&
+      (repository||current.repository.state==='observed')?null:'Connect the exact reviewed GitHub account and project first.';
+  };
   // The fixed cleanup review shares this selected Connection and excludes
   // only its own original calls. No release/candidate/Store grant comes from UI.
   playCleanupAdmission.current = () => {
@@ -982,7 +1018,7 @@ export function App() {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
-    otherOperationReason: () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
+    otherOperationReason: () => agentToolSetupRef.current?.toolPreparePeerReason() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
       externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null,
     knownTools: () => {
       const state = androidBuildControllerRef.current?.getSnapshot();
@@ -1088,6 +1124,29 @@ export function App() {
   useEffect(()=>{agentStoreAccess.syncContext();});
   useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
   const agentStoreReason=agentStoreAccess.ownerReason();
+  // One shared five-kind facade. These exceptions exclude only the selected
+  // controller's own prepared object; its private delegate method rematches it.
+  const [agentToolSetup]=useState(()=>new AgentToolSetupController({
+    prepareRequirements:()=>toolAcquisition.prepareForCli(),prepareReason:()=>toolAcquisition.checkReason(),
+    delegate:r=>r.kind==='doctor'?diagnostics.delegateToolSetup(r):r.prepared?toolAcquisition.delegateToolSetup(r):androidBuild.delegateToolSetup(r),
+    current:kind=>{
+      const service=cliService.current,w=workspaceRef.current,p=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
+      const doctor=diagnostics.toolSetupReview(),tools=toolAcquisition.toolSetupReview();
+      const inspect=androidBuild.toolSetupReview('inspect-picked-sources'),register=androidBuild.toolSetupReview('register-reviewed-sources');
+      const sources=kind==='inspect-picked-sources'||kind==='register-reviewed-sources',prepared=kind==='inspect-requirements'||kind==='acquire-missing';
+      const peers=versionEnrollmentBusy()??gitBusy()??githubGhBusy()??identityBusy()??
+        savedOwnersWithoutToolsBusy(false,false,false,false,false,false,false,false,false,false,false,false,false,false,sources)??
+        (prepared?null:toolAcquisition.ownerReason())??savedOwnersPrerequisiteReason(false,false,undefined,false,false,false,undefined,kind==='doctor')??
+        externalBusy()??cliReadAccessControllerRef.current?.pendingReason()??null;
+      return {port:service.api?.mode==='native'?service.api.agentToolSetup??null:null,nativeSession:service.api?.mode==='native'?service:null,
+        projectId:p?.project.id??null,epoch:p??service,preview:service.api?.mode==='preview',
+        reviews:[...(doctor?[doctor]:[]),...(tools?[tools]:[]),...(inspect?[inspect]:[]),...(register?[register]:[])],blockedReason:peers};
+    }}));
+  agentToolSetupRef.current=agentToolSetup;
+  useSyncExternalStore(agentToolSetup.subscribe,agentToolSetup.getSnapshot,agentToolSetup.getSnapshot);
+  useEffect(()=>{agentToolSetup.syncContext();});
+  useEffect(()=>()=>agentToolSetup.dispose(),[agentToolSetup]);
+
 
   const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
     project: () => {
@@ -2349,7 +2408,7 @@ export function App() {
             </section>}
           </ProgressiveDisclosure></>}
         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
-          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
+          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<AgentToolSetup controller={agentToolSetup}/>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
           nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
@@ -2365,6 +2424,7 @@ export function App() {
               originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} /><GitHubDeviceConnection controller={githubDevice} /></>} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
+            <AgentGithubActionAccess controller={agentGithubAction} />
             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
             localActions={gitRepository ? <>
               <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}

@@ -310,6 +310,12 @@ fn roster(host: Host, platform: Platform) -> &'static [CheckId] {
     }
 }
 impl Terminal {
+    pub(crate) fn tool_setup_summary(&self)->Vec<crate::service_tool_setup_protocol::Finding>{
+        use crate::service_tool_setup_protocol::{Check as C,CheckStatus as S,Finding};
+        self.checks.iter().map(|c|Finding{check:match c.id{CheckId::DeveloperSelection=>C::DeveloperSelection,CheckId::Git=>C::Git,CheckId::Java=>C::Java,CheckId::Javac=>C::Javac,CheckId::Xcode=>C::Xcode},
+            status:match(c.state,c.reason){(CheckState::Completed,CheckReason::Observed)=>S::Ok,(CheckState::Completed|CheckState::Attempted,_)=>S::Failed,
+                (CheckState::NotRun,CheckReason::Stopped|CheckReason::PlatformDisabled|CheckReason::HostMismatch)=>S::Skipped,_=>S::Unavailable}}).collect()
+    }
     pub(crate) fn completed_rows(&self) -> usize { self.checks.iter().filter(|c| c.state == CheckState::Completed).count() }
     /// Read-only version observation. The caller must FIRST require the
     /// existing original owner's settled Projection; a Terminal is not finality.

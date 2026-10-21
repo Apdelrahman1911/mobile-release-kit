@@ -14,6 +14,7 @@ fn empty_state() -> DocumentState {
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,

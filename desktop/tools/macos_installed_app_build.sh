@@ -1,8 +1,5 @@
 set -euo pipefail
-cd desktop
-npm ci --ignore-scripts --no-audit --no-fund --cache "$MRK_MACOS_WORK/npm-cache"
-npm run build
-cd src-tauri
+cd desktop/src-tauri
 set -o noclobber
 if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
 # Same fixed observer target and original Cargo artifact checks;

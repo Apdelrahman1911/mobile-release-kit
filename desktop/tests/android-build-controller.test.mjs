@@ -1341,3 +1341,40 @@ test('Home retains the original build after its terminal event until the actual 
   assert.deepEqual(home().activities, []); assert.equal(updates.at(-1), 0, 'actual finally publishes the pending-bit transition to Home');
   assert.equal(h.calls.length, 2, 'view updates neither repeat the build nor start another check');
 });
+
+
+test('CLI chosen-source inspection uses the same controller originals and needs service return plus fresh native read',async t=>{
+  const h=toolSetupHarness(t);await h.ready;h.controller.setVisible(false);h.controller.setToolSetupVisible(true);
+  const scope=h.controller.toolSetupReview('inspect-picked-sources');assert.ok(scope);
+  const pin=h.controller.delegateToolSetup(scope);assert.ok(pin);assert.equal(pin.current(),true);
+  await h.controller.inspectToolSources();assert.equal(h.registrationCalls.length,0);
+  const native=sourceReview({input:{context:pin.input.sourceContext}});h.emitRegistration(native);
+  assert.equal(h.state.registrationConsent,null);assert.equal(h.state.registrationPending,'inspect');
+  const returned={review:scope,settlement:'settled',operation:{operationId:OP,ownerGeneration:null,registrationGeneration:1}};
+  assert.equal(await pin.readAfterReturned(returned),true);
+  assert.equal(h.state.registrationPending,null);assert.equal(h.state.registrationConsent.reviewId,OTHER);
+  assert.equal(h.state.registrationConsent.acknowledged,false);assert.equal(h.registrationCalls.length,0);
+  const register=h.controller.toolSetupReview('register-reviewed-sources');assert.ok(register);
+  const copyPin=h.controller.delegateToolSetup(register);assert.ok(copyPin);assert.equal(copyPin.input.nativeConsent,ANDROID_TOOL_REGISTRATION_CONSENT);
+  assert.equal(copyPin.input.licenseAcknowledged,true);await h.controller.registerToolSources(OP,1,OTHER);assert.equal(h.registrationCalls.length,0);
+  const refused={...native,statusRevision:2,registrationGeneration:2,phase:'refused',reason:'registration-refused',review:null,
+    operation:{...native.operation,operationId:OWNER,registrationGeneration:2,kind:'registration'}};
+  h.emitRegistration(refused);assert.equal(h.state.registrationPending,'register');
+  assert.equal(await copyPin.readAfterReturned({review:register,settlement:'settled',operation:{operationId:OWNER,ownerGeneration:null,registrationGeneration:2}}),true);
+  assert.equal(h.state.registrationPending,null);assert.equal(h.state.registrationConsent,null);assert.equal(h.state.integrityFailed,false);
+  assert.deepEqual([h.calls.length,h.registrationCalls.length,h.catalogCalls.length],[0,0,0]);
+});
+
+test('unused CLI copy restores only the same retained earlier native review, not a later status lookalike',async t=>{
+  const h=toolSetupHarness(t),native=await reviewInToolSetup(h),old=h.state.registrationConsent;
+  const scope=h.controller.toolSetupReview('register-reviewed-sources'),pin=h.controller.delegateToolSetup(scope);assert.ok(pin);
+  assert.equal(h.state.registrationConsent,null);assert.equal(await pin.readAfterReturned(null),true);
+  assert.equal(h.state.registrationConsent.binding,old.binding);assert.equal(h.state.registrationConsent.deadline,old.deadline);
+  assert.equal(h.state.registrationConsent.acknowledged,old.acknowledged);assert.equal(h.registrationCalls.length,1);
+  const pin2=h.controller.delegateToolSetup(h.controller.toolSetupReview('register-reviewed-sources'));assert.ok(pin2);
+  h.emitRegistration({...native,statusRevision:2});assert.equal(await pin2.readAfterReturned(null),false);
+  assert.equal(h.state.registrationConsent,null);assert.equal(h.registrationCalls.length,1);
+  // Ordinary cancellation still targets the actual original, not a new CLI invoke.
+  h.controller.cancelToolRegistration();const cancel=h.registrationCalls.at(-1);
+  if(cancel?.kind==='cancel'){h.replyRegistration(cancel,discardedSourceReview({...native,statusRevision:2}));await flush();}
+});

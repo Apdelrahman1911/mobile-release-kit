@@ -123,6 +123,25 @@ pub(super) fn android_registration_census<'a>(document: &'a DocumentBinding, sta
     { let _ = (document, state, pickers); Err(Reason::Capacity) }
 }
 
+// The delegated path also retains the shared Service rows and its exact
+// native approval/link. Use the SAME lookup/Seen plus the original additional
+// document fields, not an uncharged service overlay or a second native budget.
+// Ordinary GUI registration keeps its original census below unchanged.
+pub(super) fn android_registration_agent_census<'a>(document: &'a DocumentBinding, state: &'a DocumentState,
+    pickers: &'a [Arc<OriginalWork>; 3]) -> Result<AndroidRegistrationCensus<'a>, Reason> {
+    if !android_fixture_histories_empty(document) { return Err(Reason::Capacity); }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {
+        let bytes = lookup_memory::tool_setup_registration_document_bytes(&document.inner, state, pickers)
+            .map_err(|_| Reason::Capacity)?;
+        let bytes = bytes.checked_add(known::additional_document_bytes(state)?).ok_or(Reason::Capacity)?;
+        if bytes > SESSION_BYTES { return Err(Reason::Capacity); }
+        Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
+    }
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    { let _ = (document, state, pickers); Err(Reason::Capacity) }
+}
+
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod known {
@@ -567,6 +586,7 @@ mod known {
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
@@ -686,6 +706,7 @@ mod known {
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_store_grant:None,
         #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_tool_setup:agent_tool_setup::State::default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,

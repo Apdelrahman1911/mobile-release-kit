@@ -103,6 +103,93 @@ class CandidateConsumerTests(unittest.TestCase):
         for retained, host, image in ((True, 0, None), (0, -1, None), (0, 0, True), (0, 0, R.LIMIT + 1)):
             with self.assertRaises(ValueError): C.candidate_resource_requirements(nomination(), retained, host, image_bytes=image)
 
+    def test_removal_nomination_is_separate_once_only_and_matches_checkout_routing(self):
+        import json
+        bodies = {path: (ROOT / path).read_bytes() for path in (C.SELECTION_PATH, C.REMOVAL_SELECTION_PATH)}
+        old, removal = (json.loads(bodies[path])['targets'] for path in (C.SELECTION_PATH, C.REMOVAL_SELECTION_PATH))
+        self.assertEqual(removal['x86_64-apple-darwin'], old['x86_64-apple-darwin'])
+        self.assertNotEqual(removal['aarch64-apple-darwin']['source'], old['aarch64-apple-darwin']['source'])
+        workflow = (ROOT / C.WORKFLOW).read_text()
+        ordinary, manual = workflow.split('\n  remove-delivery:\n', 1)
+        self.assertIn("MRK_CANDIDATE_SOURCE: '" + old['aarch64-apple-darwin']['source'] + "'", ordinary)
+        line, = (line.strip() for line in manual.splitlines() if line.strip().startswith('MRK_CANDIDATE_SOURCE:'))
+        prefix, suffix = "MRK_CANDIDATE_SOURCE: ${{ fromJSON('", "')[matrix.target] }}"
+        self.assertTrue(line.startswith(prefix) and line.endswith(suffix))
+        routing = json.loads(line[len(prefix):-len(suffix)])
+        self.assertEqual(routing, {target: row['source'] for target, row in removal.items()})
+        self.assertEqual(json.loads((ROOT / 'desktop/macos-installed-inputs/update-predecessors.json').read_bytes()),
+                         {'schemaVersion': 1, 'mode': 'unconfigured'})
+        for purpose in C.PURPOSES:
+            selected = C.REMOVAL_SELECTION_PATH if purpose == 'acquire-removal' else C.SELECTION_PATH
+            for target in old:
+                with self.subTest(purpose=purpose, target=target), mock.patch.object(R.Resume, '__init__', return_value=None):
+                    owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None, purpose=purpose)
+                    owner.source = mock.Mock(side_effect=lambda path, _limit: bodies[path])
+                    owner.load_nomination(target)
+                    owner.source.assert_called_once_with(selected, 8192)
+                    self.assertEqual(owner.nomination, C.selection_data(bodies[selected], target))
+                    exposed = owner.nomination; exposed['jobId'] = '1'
+                    self.assertNotEqual(owner.nomination['jobId'], '1')
+                    with self.assertRaisesRegex(R.Refused, 'candidate-source-selection-once'): owner.load_nomination(target)
+                    self.assertEqual(owner.source.call_count, 1)
+            for failure in (FileNotFoundError('inert missing source'), R.Refused('inert original source refusal')):
+                with mock.patch.object(R.Resume, '__init__', return_value=None):
+                    owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None, purpose=purpose)
+                owner.source = mock.Mock(side_effect=failure)
+                with self.assertRaises(type(failure)) as caught: owner.load_nomination('aarch64-apple-darwin')
+                self.assertIs(caught.exception, failure)
+                owner.source.assert_called_once_with(selected, 8192)  # No old-donor fallback.
+                with self.assertRaisesRegex(R.Refused, 'candidate-source-selection-not-loaded'): _ = owner.nomination
+
+    def test_all_removal_phases_hold_and_decode_only_the_removal_nomination(self):
+        import resource
+        from desktop.tools import macos_android_helper_package as H
+        body = (ROOT / C.REMOVAL_SELECTION_PATH).read_bytes()
+        decode = C.selection_data
+        identity = tuple(range(9))  # Inert SOURCE port, not a native receipt.
+        bootstrap = (C.resume_identity({'identity': identity}),
+                     C.HELPER_ROOT / 'desktop/tools/macos_android_helper_package.py', b'inert held source')
+        for target, machine, arch in (('aarch64-apple-darwin', 'arm64', 'ARM64'), ('x86_64-apple-darwin', 'x86_64', 'X64')):
+            for phase in C.REMOVAL_PHASES:
+                env = dict(MRK_MACOS_TARGET=target, GITHUB_WORKSPACE=str(C.CANDIDATE_ROOT), RUNNER_TEMP='/Users/runner/work/_temp',
+                    GITHUB_REPOSITORY=R.REPOSITORY, GITHUB_EVENT_NAME='workflow_dispatch', MRK_CANDIDATE_MODE='remove-delivery',
+                    GITHUB_REF='refs/heads/' + C.REMOVAL_BRANCH,
+                    GITHUB_WORKFLOW_REF=R.REPOSITORY + '/' + C.WORKFLOW + '@refs/heads/' + C.REMOVAL_BRANCH,
+                    GITHUB_SHA='d'*40, GITHUB_WORKFLOW_SHA='d'*40, RUNNER_OS='macOS', RUNNER_ARCH=arch,
+                    RUNNER_ENVIRONMENT='github-hosted', GITHUB_RUN_ID='51', GITHUB_RUN_ATTEMPT='2',
+                    MRK_MACOS_WORK='/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH')
+                allowed = (H.INSTALLER_CREDENTIAL_VARIABLES + (H.NOTARY_KEY_VARIABLE,) if phase == 'finalize-remove-package' else
+                           H.CREDENTIAL_VARIABLES if phase == 'package-remove' else
+                           (H.NOTARY_KEY_VARIABLE,) if phase == 'finalize-remove-image' else ())
+                env.update({key: 'inert-not-a-credential' for key in allowed})
+                context = C.context_data(env, C.HELPER_ROOT, machine)
+                op = H.Operation(None, C.CANDIDATE_ROOT, context['work'].parent,
+                    'package-remove' if phase == 'remove-preview' else phase, env, None, target=target)
+                op.source_original = mock.Mock(side_effect=lambda path, *_args: {'path': path, 'identity': identity})
+                op.read = mock.Mock(side_effect=lambda entry: body if entry['path'] ==
+                    '.candidate-consumer-helper/' + C.REMOVAL_SELECTION_PATH else bootstrap[2])
+                op.open, op.finish = mock.Mock(), mock.Mock()
+                op.execute = mock.Mock(side_effect=lambda: op.candidate_removal_load())
+                stop = RuntimeError('inert stop before native owner/module entry')
+                def selected(value, selected_target):
+                    self.assertEqual(value, body)
+                    self.assertEqual(decode(value, selected_target), decode(body, target))
+                    raise stop
+                with self.subTest(target=target, phase=phase), mock.patch.dict(C.os.environ, env, clear=True), \
+                        mock.patch.object(C, 'ROOT', C.HELPER_ROOT), mock.patch.object(C.platform, 'machine', return_value=machine), \
+                        mock.patch.object(resource, 'getrlimit', return_value=(256, 256)), \
+                        mock.patch.object(H, 'Operation', return_value=op), mock.patch.object(H, 'emit_failure_diagnostic'), \
+                        mock.patch.object(C, 'selection_data', side_effect=selected) as selection, mock.patch.object(R, 'load_module') as native:
+                    with self.assertRaises(RuntimeError) as caught: H.candidate_removal_phase(C, context, phase, bootstrap)
+                    self.assertIs(caught.exception, stop)
+                    selection.assert_called_once_with(body, target)
+                    paths = [call.args[0] for call in op.source_original.call_args_list]
+                    self.assertEqual(paths.count('.candidate-consumer-helper/' + C.REMOVAL_SELECTION_PATH), 1)
+                    self.assertNotIn('.candidate-consumer-helper/' + C.SELECTION_PATH, paths)
+                    native.assert_not_called()
+                    self.assertEqual(op.calls, [])
+                    self.assertEqual(op.finish.call_count, int(phase == 'remove-preview'))
+
     def test_staged_image_read_retains_zip_allowance_until_original_post(self):
         import json
         from tests.desktop.test_macos_candidate_carrier import fixture, archive

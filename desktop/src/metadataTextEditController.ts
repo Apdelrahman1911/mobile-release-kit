@@ -1,3 +1,6 @@
+import { MetadataServiceController } from './serviceMetadataTextController.ts';
+import type { MetadataServiceWitness } from './serviceMetadataTextController.ts';
+import type { MetadataServiceRequest } from './serviceMetadataTextProtocol.ts';
 // App-retained observer/draft orchestration. This class never owns a child,
 // filesystem handle, journal or write token independently of the native owner.
 import { sameJson } from './catalog.ts';
@@ -6,7 +9,7 @@ import { savedTextRecoveryApplyBinding, savedTextRecoveryPreparedMatches, savedT
 import type { SavedTextRecoveryApplyBinding, SavedTextRecoveryAttempt, SavedTextRecoveryContext, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { METADATA_TEXT_CACHE_BUNDLES, METADATA_TEXT_CACHE_BYTES, METADATA_TEXT_FIELD_BYTES,
-  metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
+  metadataProjectDirty, metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
 import type { MetadataConfiguredContext, MetadataDisplayBinding, MetadataDraftBaseline, MetadataFieldId, MetadataTextBaseline, MetadataTextDraft,
   MetadataRetainedDraftChange, NormalMetadataTextEditProjection, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
 import { metadataProjectionProgress, metadataStatusProgress, metadataTextError, metadataTextRequestFits,
@@ -74,6 +77,7 @@ interface MetadataOwnerState {
   recovery: SavedTextRecoveryAttempt<'metadata_text'> | null;
 }
 export interface MetadataTextState {
+  delegationPending?: boolean;
   mode: BridgeMode;
   serviceGeneration: number;
   selectionGeneration: number;
@@ -117,6 +121,7 @@ const availabilityCopy: Record<EditAvailability, string> = {
   other_edit_active: 'A configuration or workflow edit owns the shared native service. Finish or close that original session first.',
 };
 export function metadataOwnerReason(state: MetadataTextState, projectId: string): string | null {
+  if (state.delegationPending) return 'An original CLI metadata request or permission is still retained; Check or stop it before another file operation.';
   const owner = state.edit;
   if (owner.nativeBlocked || owner.integrityFailed || owner.generationLost || owner.observationIssue) return 'Metadata edit ownership is unverified. Observe the original native status, not a competing edit.';
   if (owner.status?.active || !settled(owner.attempt) || owner.attempt && !owner.attempt.handled ||
@@ -126,7 +131,7 @@ export function metadataOwnerReason(state: MetadataTextState, projectId: string)
 }
 export function metadataRetainsDraft(state: MetadataTextState, projectId: string): boolean {
   const edit = state.edit;
-  return edit.attempt?.binding.projectId === projectId && (!settled(edit.attempt) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
+  return !!state.delegationPending || edit.attempt?.binding.projectId === projectId && (!settled(edit.attempt) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
     edit.recovery?.binding.projectId === projectId && (!savedTextRecoverySettled(edit.recovery) || edit.integrityFailed || edit.nativeBlocked || edit.observationIssue !== null) ||
     edit.status?.active?.projectId === projectId || edit.unknownEvidence?.projectId === projectId;
 }
@@ -173,7 +178,50 @@ export class MetadataTextEditController {
   // One private, context-bound completion; never an owner-generation ordering.
   private recoveryCompletion: { binding: SavedTextRecoveryContext; statusRevision: number } | null = null;
 
-  constructor(context: Context) { this.context = context; }
+  readonly agent: MetadataServiceController;
+  constructor(context: Context) {
+    this.context = context;
+    this.agent = new MetadataServiceController({
+      capture: (r) => this.agentWitness(r, true), current: (r, w) => this.agentWitnessCurrent(r, w),
+      native: () => this.state.edit.status, nativeUsable: () => usable(this.state.edit) && !this.reading && !this.state.edit.readPending,
+      observe: value => this.receive(value, 'reply'), checkNative: () => this.checkStatus(),
+      busy: value => {if (Boolean(this.state.delegationPending) !== value) this.publish({...this.state, delegationPending: value});},
+      boundary: (r, w) => this.agentApplyBoundary(r, w),
+    });
+  }
+  private agentWitness(r: MetadataServiceRequest, opening: boolean): MetadataServiceWitness | null {
+    const session=this.context.selectedProject(), context=this.selectedContext(), edit=this.state.edit;
+    if (this.disposed || !this.recoveryVisible || this.selectionPending || this.state.mode!=='native' || !session || !context ||
+      session.project.id!==r.runtimeProjectId || context.platform!==r.platform || context.locale!==r.locale || !this.state.choices.some(c=>c.key===context.key) ||
+      this.liveContextReason() || this.state.observeReason || !this.state.help || this.passivePending>0 || this.reading || edit.readPending ||
+      !edit.initialized || !edit.listening || edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.observationIssue ||
+      !settled(edit.attempt) || edit.attempt && !edit.attempt.handled || !savedTextRecoverySettled(edit.recovery) || edit.recovery && !edit.recovery.handled ||
+      edit.recoveryProjects.includes(r.runtimeProjectId) || opening && edit.status?.active || metadataProjectDirty(this.state.entries,r.runtimeProjectId) ||
+      this.context.otherEditReason(r.runtimeProjectId) || this.context.otherOperationReason?.()) return null;
+    const draft=this.state.entries[context.key]??null;
+    return {session,context,serviceGeneration:this.state.serviceGeneration,selectionGeneration:this.state.selectionGeneration,
+      draft,draftRevision:draft?.revision??0,baselineGeneration:draft?.baselineGeneration??0,observationGeneration:draft?.observationGeneration??0};
+  }
+  private agentWitnessCurrent(r:MetadataServiceRequest,w:MetadataServiceWitness):boolean {
+    const now=this.agentWitness(r,false);
+    return !!now&&now.session===w.session&&now.context.key===w.context.key&&now.context.metadataRoot===w.context.metadataRoot&&
+      now.serviceGeneration===w.serviceGeneration&&now.selectionGeneration===w.selectionGeneration&&now.draft===w.draft&&
+      now.draftRevision===w.draftRevision&&now.baselineGeneration===w.baselineGeneration&&now.observationGeneration===w.observationGeneration;
+  }
+  private agentApplyBoundary(r: MetadataServiceRequest, w: MetadataServiceWitness): MetadataServiceWitness | null {
+    if (!this.agentWitnessCurrent(r, w)) return null;
+    // Comparison-only: this is the precise existing boundary mutation, not a
+    // capture of a newer draft/selection after subscribers have run. Every
+    // other member must keep its original scalar or object reference (ABA too).
+    const expected = w.draft && { ...w.draft, stale: true, observationPredatesSave: true,
+      validation: null, validationRequest: null, loadRequest: null };
+    this.recoveryBoundary(r.runtimeProjectId);
+    const draft = this.state.entries[w.context.key] ?? null;
+    if (expected ? !draft || Object.keys(expected).length !== Object.keys(draft).length ||
+        Object.entries(expected).some(([key, value]) => Object.getOwnPropertyDescriptor(draft, key)?.value !== value) : draft !== null) return null;
+    const boundary = { ...w, draft };
+    return this.agentWitnessCurrent(r, boundary) ? boundary : null;
+  }
   getSnapshot = (): MetadataTextState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(next: MetadataTextState): void {
@@ -217,10 +265,12 @@ export class MetadataTextEditController {
     if (this.disposed || this.recoveryVisible === value) return;
     this.recoveryCompletion = null;
     this.recoveryVisible = value;
+    this.agent.invalidate();
     this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
     this.retireRecovery(true); this.process();
   }
   shutdownIntent(): void {
+    this.agent.invalidate();
     this.recoveryCompletion = null;
     this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
     this.retireRecovery(true); this.process();
@@ -229,6 +279,7 @@ export class MetadataTextEditController {
     if (action.type === 'select' || action.type === 'switch' || action.projectId === this.state.projectId || action.projectId === this.state.edit.recovery?.binding.projectId) {
       if (['select', 'switch', 'snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal', 'forget-removal',
         'reset', 'adopt-suggestion', 'config-save-intent', 'config-save-final', 'config-save-recovery'].includes(action.type)) {
+        this.agent.invalidate();
         this.recoveryCompletion = null;
         this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
         this.retireRecovery(true); this.process();
@@ -237,12 +288,14 @@ export class MetadataTextEditController {
   }
   snapshotIntent(projectId: string): void {
     if (projectId === this.state.projectId || projectId === this.state.edit.recovery?.binding.projectId) {
+      this.agent.invalidate();
       this.recoveryCompletion = null;
       this.recoveryNavigationGeneration = Math.min(U32_MAX, this.recoveryNavigationGeneration + 1);
       this.retireRecovery(true); this.process();
     }
   }
   beginConnection(): void {
+    this.agent.invalidate();
     this.passiveApi = null;
     this.publish({ ...this.state, mode: 'unavailable', help: null,
       serviceGeneration: Math.min(U32_MAX, this.state.serviceGeneration + 1), observeReason: 'The service context is being reloaded.', validateReason: 'The service context is being reloaded.' });
@@ -262,6 +315,7 @@ export class MetadataTextEditController {
   setSelectionPending(value: boolean): void {
     if (this.disposed || value === this.selectionPending) return;
     this.selectionPending = value;
+    this.agent.invalidate();
     this.publish({ ...this.state, selectionGeneration: Math.min(U32_MAX, this.state.selectionGeneration + 1) });
     this.retirePassive(); this.process();
   }
@@ -271,6 +325,7 @@ export class MetadataTextEditController {
     const fingerprint = JSON.stringify([session?.project.id, session?.revision, session?.baselineGeneration, session?.observationGeneration,
       session?.snapshotRequest, session?.sourceChanged, session?.saveRecoveryRequired, metadataConfigReason(session), choices]);
     if (fingerprint !== this.fingerprint) {
+      this.agent.invalidate();
       this.fingerprint = fingerprint;
       const sameProject = session?.project.id === this.state.projectId;
       const old = this.state.selectedKey;
@@ -284,6 +339,7 @@ export class MetadataTextEditController {
   selectContext(key: string): boolean {
     if (this.disposed || key === this.state.selectedKey || !this.state.choices.some((choice) => choice.key === key) &&
         (!Object.hasOwn(this.state.entries, key) || this.state.entries[key]?.context.projectId !== this.state.projectId)) return false;
+    this.agent.invalidate();
     this.publish({ ...this.state, selectedKey: key, selectionGeneration: Math.min(U32_MAX, this.state.selectionGeneration + 1), cacheError: null });
     this.retirePassive(); this.process(); return true;
   }
@@ -301,6 +357,7 @@ export class MetadataTextEditController {
   }
   passiveBusyReason(): string | null { return this.passivePending > 0 ? 'An original public-text observation or validation is still pending.' : null; }
   loadReason(): string | null {
+    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
     const other = this.context.otherOperationReason?.(); if (other) return other;
     if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
     return this.state.mode !== 'native' ? metadataTextError(null).message : this.state.observeReason ?? (!this.state.help ? metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message : null) ??
@@ -308,6 +365,7 @@ export class MetadataTextEditController {
       (this.selectedEntry()?.loadRequest ? 'The original text observation is still pending.' : null);
   }
   validateReason(): string | null {
+    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
     const other = this.context.otherOperationReason?.(); if (other) return other;
     if (!savedTextRecoverySettled(this.state.edit.recovery)) return 'Finish or close the original metadata recovery inspection before another text request.';
     if (this.state.mode !== 'native') return metadataTextError(null).message;
@@ -370,12 +428,19 @@ export class MetadataTextEditController {
     } finally { this.passivePending -= 1; if (!this.disposed) { this.publish({ ...this.state }); this.process(); } }
   }
   editField(key: string, id: MetadataFieldId, text: string): boolean {
-    const entry = this.state.entries[key];
+    const state = this.state, entry = state.entries[key];
     if (this.disposed || !entry?.fields || entry.revision >= U32_MAX - 1 || !entry.fields.some((field) => field.id === id)) return false;
     if (typeof text !== 'string' || /[\ud800-\udfff]/u.test(text) || new TextEncoder().encode(text).byteLength > METADATA_TEXT_FIELD_BYTES) {
       this.put({ ...entry, editError: metadataTextError({ code: 'MetadataTextDraftLimit' }) }); return false;
     }
     if (entry.fields.find((field) => field.id === id)?.text === text) return false;
+    const project = this.context.selectedProject(), api = this.api, passive = this.passiveApi;
+    this.agent.invalidate();
+    // Revocation publishes synchronously. Never put the old entry over a
+    // subscriber's newer edit, edit/restore, selection or connection.
+    if (this.disposed || this.state.entries[key] !== entry || this.context.selectedProject() !== project ||
+        this.api !== api || this.passiveApi !== passive || this.state.serviceGeneration !== state.serviceGeneration ||
+        this.state.selectionGeneration !== state.selectionGeneration || this.state.selectedKey !== state.selectedKey || this.state.projectId !== state.projectId) return false;
     const accepted = this.put({ ...entry, revision: entry.revision + 1, fields: entry.fields.map((field) => field.id === id ? { id, text } : field), editError: null,
       loadRequest: null, validationRequest: null, validationError: null });
     this.process(); return accepted;
@@ -501,7 +566,7 @@ export class MetadataTextEditController {
   async connect(api: DesktopApi): Promise<void> {
     if (this.disposed || this.api) return;
     this.api = api; this.edit({ ...this.state.edit, mode: api.mode });
-    if (api.mode === 'native') await this.checkStatus();
+    if (api.mode === 'native') {await this.checkStatus(); await this.agent.connect(api);}
   }
   async checkStatus(): Promise<void> {
     if (this.disposed || !this.api || this.api.mode !== 'native') return;
@@ -520,7 +585,7 @@ export class MetadataTextEditController {
       }
     });
     this.reading = work; this.edit({ ...this.state.edit, readPending: true });
-    try { await work; } finally { if (this.reading === work) this.reading = null; }
+    try { await work; } finally { if (this.reading === work) this.reading = null; this.agent.nativeChanged(); }
   }
   private observationFailed(protocol: boolean): void {
     this.edit({ ...this.state.edit, readPending: false, integrityFailed: this.state.edit.integrityFailed || protocol,
@@ -705,6 +770,7 @@ export class MetadataTextEditController {
       this.state.selectionGeneration === binding.selectionGeneration && this.recoveryNavigationGeneration === binding.navigationGeneration;
   }
   inspectRecoveryReason(): string | null {
+    if(this.state.delegationPending)return 'Finish or stop the original CLI metadata request first; its Load/preview is not replaced.';
     const edit = this.state.edit, project = this.context.selectedProject();
     if (this.disposed || this.state.mode !== 'native' || edit.mode !== 'native') return 'Recovery inspection requires the qualified native metadata-text service; browser preview cannot inspect files.';
     if (edit.integrityFailed || edit.generationLost || edit.nativeBlocked || edit.unknownEvidence || edit.observationIssue)
@@ -870,6 +936,7 @@ export class MetadataTextEditController {
         }
       } while (this.processAgain);
     } finally { this.processing = false; }
+    this.agent.nativeChanged();
   }
   private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: MetadataReviewBinding, call: () => Promise<MetadataTextEditStatus>): Promise<void> {
     try { this.receive(await call(), 'reply'); }
@@ -886,6 +953,7 @@ export class MetadataTextEditController {
   }
   dispose(): void {
     if (this.disposed) return;
+    this.agent.dispose();
     this.recoveryCompletion = null;
     this.disposed = true;
     const attempt = this.state.edit.attempt;

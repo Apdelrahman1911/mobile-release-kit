@@ -128,13 +128,22 @@ mod service_upload_key_requests;
 mod service_version_edit_protocol;
 mod service_version_edit_requests;
 mod service_configuration_protocol;
+mod bounded_json_seed;
+mod service_metadata_text_protocol;
+mod service_metadata_text_requests;
 mod service_configuration_requests;
 #[path="service_version_reserve_protocol.rs"]
 mod service_version_reserve_protocol;
 #[path="service_store_protocol.rs"]
 mod service_store_protocol;
+mod service_tool_setup_protocol;
+mod service_tool_setup_requests;
 #[path="service_store_requests.rs"]
 mod service_store_requests;
+#[path="service_github_action_protocol.rs"]
+mod service_github_action_protocol;
+#[path="service_github_action_requests.rs"]
+mod service_github_action_requests;
 #[path="service_apple_provisioning_protocol.rs"]
 mod service_apple_provisioning_protocol;
 #[path="service_apple_provisioning_requests.rs"]

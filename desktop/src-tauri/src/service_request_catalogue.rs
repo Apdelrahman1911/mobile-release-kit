@@ -16,7 +16,9 @@ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_
     + crate::service_store_protocol::REQUEST_LIMIT
     + crate::service_play_cleanup_protocol::REQUEST_LIMIT
     + crate::service_apple_provisioning_protocol::REQUEST_LIMIT
-    + crate::service_version_edit_protocol::REQUEST_LIMIT;
+    + crate::service_version_edit_protocol::REQUEST_LIMIT
+    + crate::service_github_action_protocol::REQUEST_LIMIT
+    + crate::service_tool_setup_protocol::REQUEST_LIMIT;
 pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
 pub const VIEW_BYTES: usize = 64 * 1024;
 // Same eight IPC workers: one typed view, its encoded output, finite borrowed
@@ -175,11 +177,14 @@ pub enum AdditionalFamily {
     VersionReservation,
     AndroidUploadKey,
     Configuration,
+    MetadataText,
     Store,
     PlayCleanup,
     AppleProvisioning,
     VersionEdit,
+    GitHubAction,
     VersionTag,
+    ToolSetup,
 }
 impl AdditionalFamily {
     fn namespace(self) -> usize {
@@ -188,11 +193,13 @@ impl AdditionalFamily {
             Self::Identity => 1,
             Self::VersionReservation => 2,
             Self::AndroidUploadKey => 3,
-            Self::Configuration => 4,
+            Self::Configuration | Self::MetadataText => 4,
             Self::Store => 5,
             Self::PlayCleanup | Self::VersionTag => 6,
             Self::AppleProvisioning=>7,
             Self::VersionEdit=>8,
+            Self::GitHubAction => 9,
+            Self::ToolSetup=>10,
         }
     }
     fn status_command(self) -> &'static str {
@@ -205,11 +212,14 @@ impl AdditionalFamily {
             Self::VersionReservation => "version-reserve-status",
             Self::AndroidUploadKey => "upload-key-status",
             Self::Configuration => "configuration-status",
+            Self::MetadataText => "metadata-text-status",
             Self::Store => "store-status",
             Self::PlayCleanup => "play-cleanup-status",
             Self::AppleProvisioning=>"apple-provisioning-status",
             Self::VersionEdit=>"version-edit-status",
+            Self::GitHubAction => "github-status",
             Self::VersionTag => "version-tag-status",
+            Self::ToolSetup => "tool-setup-status",
         }
     }
 }
@@ -271,7 +281,7 @@ impl Catalogue {
         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
             return Err(Error::InvalidRequest);
         }
-        let mut counts = [0usize; 9];
+        let mut counts = [0usize; 11];
         for (index, row) in additional.iter().enumerate() {
             let namespace = row.family.namespace();
             counts[namespace] += 1;
@@ -290,6 +300,8 @@ impl Catalogue {
             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
             || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
             || counts[8] > crate::service_version_edit_protocol::REQUEST_LIMIT
+            || counts[9] > crate::service_github_action_protocol::REQUEST_LIMIT
+            || counts[10] > crate::service_tool_setup_protocol::REQUEST_LIMIT
         {
             return Err(Error::InvalidRequest);
         }
@@ -500,12 +512,15 @@ mod tests {
         }
         fullest.schema_version = 2;
         fullest.additional_requests = Some(
-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit]
+            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::GitHubAction, AdditionalFamily::ToolSetup]
                 .into_iter()
                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
                 .collect(),
         );
         fullest.validate().unwrap();
+        assert_eq!(LIMIT,416); // 64 detailed + ELEVEN original32-row namespaces.
+        assert_eq!(AdditionalFamily::GitHubAction.namespace(),9);
+        assert_eq!(AdditionalFamily::ToolSetup.namespace(),10);
         let response = crate::service_protocol::Response {
             version: crate::service_protocol::VERSION,
             request_id: id(10),
@@ -514,6 +529,11 @@ mod tests {
             session_id: id(12),
             response: crate::service_protocol::ResponseBody::Requests(fullest),
         };
+        let mut aliased = response.clone();
+        if let crate::service_protocol::ResponseBody::Requests(v) = &mut aliased.response {
+            for row in v.additional_requests.as_mut().unwrap() {if row.family==AdditionalFamily::PlayCleanup {row.family=AdditionalFamily::VersionTag;}}
+        }
+        assert!(crate::service_protocol::encode_response(&aliased).unwrap().len()<=VIEW_BYTES);
         let encoded = crate::service_protocol::encode_response(&response).unwrap();
         assert!(encoded.len() <= VIEW_BYTES);
         assert!(DOCUMENT_BACKING < 1024 * 1024);
@@ -560,12 +580,14 @@ mod tests {
             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
             AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
             AdditionalRequest { family: AdditionalFamily::VersionEdit, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::GitHubAction, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::ToolSetup, request_id: id(3) },
         ]);
         current.validate().unwrap();
         let text = human(&current);
         assert!(!text.contains("No requests retained"));
         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3)] {
+            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3), ("version-edit-status",3), ("github-status",3), ("tool-setup-status",3)] {
             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
         }
         let encoded = serde_json::to_value(&current).unwrap();
@@ -580,7 +602,7 @@ mod tests {
         assert!(!accepted(changed));
         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit] {
+        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning, AdditionalFamily::VersionEdit, AdditionalFamily::GitHubAction, AdditionalFamily::ToolSetup] {
             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
             assert!(current.validate().is_err());
             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);
@@ -648,7 +670,7 @@ mod tests {
     fn future_tag_discovery_shares_cleanup_namespace_and_routes_exact_status() {
         let mut v=view(vec![]);v.schema_version=2;
         v.additional_requests=Some(vec![AdditionalRequest {family:AdditionalFamily::VersionTag,request_id:id(3)}]);
-        v.validate().unwrap();assert_eq!(LIMIT,352); // Apple and VersionEdit namespaces remain separately counted.
+        v.validate().unwrap(); // VersionTag remains the ONE Cleanup6 pool; capacity is tested above.
         assert!(human(&v).contains("mrk version-tag-status"));assert!(!human(&v).contains("mrk version-tag-submit"));
         v.additional_requests.as_mut().unwrap().push(AdditionalRequest {family:AdditionalFamily::PlayCleanup,request_id:id(3)});
         assert!(v.validate().is_err()); // same ID cannot appear through a family alias.

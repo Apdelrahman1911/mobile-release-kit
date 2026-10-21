@@ -5,7 +5,7 @@
 //! JSON/CLI argument/environment value. Peer UID is checked on BOTH ends.
 use crate::{application_service::{ApplicationService, ClientSession}, application_state_store as store, service_protocol as p};
 use p::{Error, Id};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{UnixListener, UnixStream}, sync::watch, task::{JoinHandle, JoinSet}, time::{timeout_at, Instant}};
 use zeroize::Zeroizing;
 
@@ -47,7 +47,42 @@ impl ConnectionCapability {
     }
 }
 
-struct Endpoint { socket: store::FileKey, descriptor: store::FileKey, capability: ConnectionCapability }
+struct Endpoint { socket: store::FileKey, descriptor: store::FileKey, capability: ConnectionCapability, metadata_exchange: AtomicBool }
+// Only concurrent allocation exclusion on the SAME endpoint, not a service
+// grant/native owner. No waiting queue or renewed deadline is introduced.
+struct MetadataExchange<'a> { active: &'a AtomicBool }
+impl<'a> MetadataExchange<'a> {
+    fn require(active: &'a AtomicBool, held: &mut Option<Self>) -> Result<(), Error> {
+        if let Some(original) = held {
+            return if std::ptr::eq(original.active, active) { Ok(()) } else { Err(Error::StateUnknown) };
+        }
+        active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).map_err(|_| Error::Busy)?;
+        *held = Some(Self { active });
+        Ok(())
+    }
+}
+impl Drop for MetadataExchange<'_> {
+    fn drop(&mut self) { self.active.store(false, Ordering::Release); }
+}
+// Quote the entire original endpoint (including padding), plus each existing
+// worker's retained option and BOTH nested futures' option borrows. No extra
+// worker: serve_exchange and read_request_frame borrow the same outer cell.
+pub(crate) const METADATA_CONTROL_BACKING: usize = std::mem::size_of::<Endpoint>()
+    + CLIENTS * (std::mem::size_of::<Option<MetadataExchange<'static>>>()
+        + 2 * std::mem::size_of::<&mut Option<MetadataExchange<'static>>>());
+fn metadata_request(body: &p::RequestBody) -> bool {
+    matches!(body, p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_)
+        | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_))
+}
+fn admit_request_size<'a>(size: usize, active: &'a AtomicBool, held: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
+    if size == 0 || size > crate::service_metadata_text_protocol::REQUEST_BYTES { return Err(Error::InvalidRequest); }
+    if size > p::REQUEST_BYTES { MetadataExchange::require(active, held)?; }
+    Ok(())
+}
+fn admit_request_body<'a>(body: &p::RequestBody, active: &'a AtomicBool, held: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
+    if metadata_request(body) { MetadataExchange::require(active, held)?; }
+    Ok(())
+}
 impl Endpoint {
     fn check(&self, service: &ApplicationService) -> Result<(), Error> {
         let guard = service.state_directory().ipc_directory().map_err(|e| e.code)?;
@@ -144,7 +179,7 @@ fn bind(service: &ApplicationService) -> Result<(UnixListener, Endpoint), (Error
         let descriptor = store::create_private(fd, DESCRIPTOR, &capability.bytes()).map_err(|e| e.code)?;
         store::sync(fd).map_err(|e| e.code)?;
         directory.check().map_err(|e| e.code)?;
-        Ok(Endpoint { socket, descriptor, capability })
+        Ok(Endpoint { socket, descriptor, capability, metadata_exchange: AtomicBool::new(false) })
     })();
     match prepared {
         Ok(endpoint) => {
@@ -221,16 +256,21 @@ fn close_stream(stream: UnixStream) -> Result<(), Error> {
 async fn serve_one(mut stream: UnixStream, service: Arc<ApplicationService>, endpoint: Arc<Endpoint>, mut stop: watch::Receiver<bool>, deadline: Instant) -> Result<(), Error> {
     // Errors/refusals/disconnects are not leaked to logs and are not operation
     // outcomes. The owner still closes this exact stream before its task joins.
+    // OUTSIDE the cancelled future: a timeout/STOP cannot release this lease
+    // before the same original stream has taken its explicit close path.
+    let mut metadata = None;
     let _exchange = tokio::select! {
         _ = stop.changed() => Err(Error::Unavailable),
-        result = timeout_at(deadline, serve_exchange(&mut stream, &service, &endpoint)) => result.unwrap_or(Err(Error::Unavailable)),
+        result = timeout_at(deadline, serve_exchange(&mut stream, &service, &endpoint, &mut metadata)) => result.unwrap_or(Err(Error::Unavailable)),
     };
-    close_stream(stream)
+    let closed = close_stream(stream);
+    drop(metadata);
+    closed
 }
 fn same_user(stream: &UnixStream) -> Result<(), Error> {
     if stream.peer_cred().map_err(|_| Error::AccessDenied)?.uid() != store::uid() { Err(Error::AccessDenied) } else { Ok(()) }
 }
-async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, endpoint: &Endpoint) -> Result<(), Error> {
+async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationService, endpoint: &'a Endpoint, metadata: &mut Option<MetadataExchange<'a>>) -> Result<(), Error> {
     same_user(stream)?;
     endpoint.check(service)?;
     let mut handshake = Zeroizing::new([0u8; HANDSHAKE]);
@@ -245,18 +285,25 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     };
     stream.write_all(b"A").await.map_err(|_| Error::Unavailable)?;
     stream.write_all(service.instance().as_str().as_bytes()).await.map_err(|_| Error::Unavailable)?;
-    let bytes = read_frame(stream, p::REQUEST_BYTES).await?;
+    let bytes = read_request_frame(stream, endpoint, metadata).await?;
     // One frame/connection; extra bytes are rejected rather than ignored as a
     // possible second action. The client half-closes after its exact request.
     let mut extra = [0u8; 1];
     if stream.read(&mut extra).await.map_err(|_| Error::Unavailable)? != 0 { return Err(Error::InvalidRequest); }
     let request = p::decode_request(&bytes)?;
+    drop(bytes); // Parser-only input never overlaps response encoding. Original owners remain retained.
+    // All short Metadata methods, especially Status/Cancel returning public
+    // Load data, share the same exclusion before any dispatch/result clone.
+    admit_request_body(&request.request, &endpoint.metadata_exchange, metadata)?;
     endpoint.check(service)?;
     let response = service.dispatch(&client, request);
     let bytes = p::encode_response(&response)?;
     match &response.response {
+        p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::ConfigurationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::VersionEditRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+        p::ResponseBody::ToolSetupRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::VersionReserveRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::PlayCleanupRequest(view) => service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
@@ -271,6 +318,17 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
         _ => service.client_current(&client)?,
     }
     write_frame(stream, &bytes).await
+}
+async fn read_request_frame<'a>(stream: &mut UnixStream, endpoint: &'a Endpoint, metadata: &mut Option<MetadataExchange<'a>>) -> Result<Vec<u8>, Error> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await.map_err(|_| Error::Unavailable)?;
+    let size = u32::from_be_bytes(header) as usize;
+    // Before ANY extended Vec allocation/read. Old <=4KiB requests retain the
+    // original eight-worker path; oversize old actions still fail the decoder.
+    admit_request_size(size, &endpoint.metadata_exchange, metadata)?;
+    let mut bytes = vec![0u8; size];
+    stream.read_exact(&mut bytes).await.map_err(|_| Error::Unavailable)?;
+    Ok(bytes)
 }
 async fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>, Error> {
     let mut header = [0u8; 4];
@@ -358,6 +416,152 @@ mod tests {
     use tokio::time::timeout;
     fn list() -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
+    #[test]
+    fn metadata_exchange_admission_is_fixed_fail_fast_and_reuses_only_its_original_lease() {
+        use crate::service_metadata_text_protocol as wire;
+        let id = |n: char| Id::parse(&n.to_string().repeat(32)).unwrap();
+        let query = wire::Query { service_instance: id('1'), project_id: id('2'), request_id: id('3') };
+        let bodies = [
+            p::RequestBody::MetadataTextRead(wire::Read { origin: query.clone(), expected_observation_revision: 1, platform: wire::Platform::Android, locale: "en-US".into() }),
+            p::RequestBody::MetadataTextPrepare(wire::Prepare { origin: query.clone(), proposal: wire::Fields { platform: wire::Platform::Android, fields: wire::Platform::Android.ids().iter().map(|id| wire::Field { id: (*id).into(), text: String::new() }).collect() } }),
+            p::RequestBody::MetadataTextApply(wire::Apply { origin: query.clone(), original: wire::Original { session_id: id('4'), owner_generation: id('5'), revision: id('6') }, plan_token: id('7'), reviewed: true }),
+            p::RequestBody::MetadataTextStatus(query.clone()),
+            p::RequestBody::MetadataTextCancel(query),
+        ];
+        let active = AtomicBool::new(false);
+        let mut held = None;
+        for size in [0, wire::REQUEST_BYTES + 1] {
+            assert_eq!(admit_request_size(size, &active, &mut held), Err(Error::InvalidRequest));
+            assert!(held.is_none() && !active.load(Ordering::Acquire));
+        }
+        admit_request_size(p::REQUEST_BYTES + 1, &active, &mut held).unwrap();
+        assert!(active.load(Ordering::Acquire));
+        let mut other = None;
+        assert_eq!(admit_request_size(wire::REQUEST_BYTES, &active, &mut other), Err(Error::Busy));
+        assert!(other.is_none()); // The production size cut precedes Vec allocation.
+        for body in [p::RequestBody::Info(p::Empty {}), p::RequestBody::Projects(p::Empty {})] {
+            let request = p::Request { version: p::VERSION, request_id: id('8'), request: body };
+            let mut bytes = p::encode_request(&request).unwrap();
+            bytes.resize(p::REQUEST_BYTES, b' ');
+            let ordinary = p::decode_request(&bytes).unwrap();
+            admit_request_size(bytes.len(), &active, &mut other).unwrap();
+            admit_request_body(&ordinary.request, &active, &mut other).unwrap();
+            assert!(other.is_none()); // All eight ordinary workers remain available.
+        }
+        for body in &bodies {
+            let request = p::Request { version: p::VERSION, request_id: id('8'), request: body.clone() };
+            let bytes = p::encode_request(&request).unwrap();
+            assert!(bytes.len() <= p::REQUEST_BYTES);
+            let decoded = p::decode_request(&bytes).unwrap();
+            assert!(metadata_request(&decoded.request));
+            assert_eq!(admit_request_body(&decoded.request, &active, &mut other), Err(Error::Busy));
+            assert!(other.is_none());
+            admit_request_body(&decoded.request, &active, &mut held).unwrap();
+        }
+        // Already admitted large input retains its SAME original lease; a
+        // different Endpoint can never adopt that cell as its own admission.
+        admit_request_size(wire::REQUEST_BYTES, &active, &mut held).unwrap();
+        let foreign = AtomicBool::new(false);
+        assert_eq!(MetadataExchange::require(&foreign, &mut held), Err(Error::StateUnknown));
+        assert!(!foreign.load(Ordering::Acquire));
+        drop(held);
+        assert!(!active.load(Ordering::Acquire));
+        for body in &bodies {
+            let mut fresh = None;
+            admit_request_size(p::REQUEST_BYTES, &active, &mut fresh).unwrap();
+            assert!(fresh.is_none());
+            admit_request_body(body, &active, &mut fresh).unwrap();
+            assert!(fresh.is_some() && active.load(Ordering::Acquire));
+            drop(fresh);
+            assert!(!active.load(Ordering::Acquire));
+        }
+        assert_eq!(CLIENTS, 8);
+        assert_eq!(SERVER_DEADLINE, Duration::from_secs(5));
+        assert_eq!(METADATA_CONTROL_BACKING, std::mem::size_of::<Endpoint>() + CLIENTS *
+            (std::mem::size_of::<Option<MetadataExchange<'static>>>() + 2 * std::mem::size_of::<&mut Option<MetadataExchange<'static>>>()));
+    }
+    #[test]
+    fn metadata_stalled_large_frame_keeps_lease_until_original_stop_close_and_return() {
+        // Genuine private Store/Service/socket fixture, not native Load/Edit
+        // evidence. All three original serve_one futures and clients return;
+        // no standalone task, forged grant or background cleanup is used.
+        runtime().block_on(async {
+            use crate::service_metadata_text_protocol as wire;
+            let f = Fixture::short();
+            let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+            let (id, root) = register_fixture(&service, &f.app, "project", "metadata-project");
+            service.publish_passive_snapshot("metadata-project", &passive(&root, &"a".repeat(64))).unwrap();
+            service.allow_agent_read(vec![id.clone()], Duration::from_secs(300)).unwrap();
+            store.begin_endpoint().unwrap();
+            let (listener, endpoint) = bind(&service).unwrap();
+            let endpoint = Arc::new(endpoint);
+            let (signal, stop) = watch::channel(false);
+            let mut client = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut large = Box::pin(serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE));
+            let header_only = async {
+                client.write_all(&endpoint.capability.bytes()).await.unwrap();
+                let mut accepted = [0u8; 1]; client.read_exact(&mut accepted).await.unwrap();
+                assert_eq!(accepted, *b"A");
+                let mut instance = [0u8; 32]; client.read_exact(&mut instance).await.unwrap();
+                assert_eq!(instance, service.instance().as_str().as_bytes());
+                client.write_all(&((p::REQUEST_BYTES + 1) as u32).to_be_bytes()).await.unwrap();
+                while !endpoint.metadata_exchange.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+            };
+            tokio::select! {
+                _ = large.as_mut() => panic!("incomplete body cannot return an exchange"),
+                result = timeout(Duration::from_secs(2), header_only) => result.unwrap(),
+            }
+            // Ordinary IPC still uses this original listener/Endpoint and
+            // closes independently while the admitted large body is stalled.
+            let listing = list();
+            let (listed, returned) = timeout(Duration::from_secs(2), async {
+                tokio::join!(request(&f.app, &listing), async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE).await
+                })
+            }).await.unwrap();
+            returned.unwrap();
+            let revision = match listed.unwrap().response {
+                p::ResponseBody::Projects(rows) => { assert_eq!(rows.len(), 1); rows[0].observation.as_ref().unwrap().revision },
+                _ => panic!("wrong ordinary response"),
+            };
+            let query = wire::Query { service_instance: service.instance().clone(), project_id: id, request_id: Id::random().unwrap() };
+            let read = p::Request { version: p::VERSION, request_id: Id::random().unwrap(), request: p::RequestBody::MetadataTextRead(wire::Read {
+                origin: query.clone(), expected_observation_revision: revision, platform: wire::Platform::Android, locale: "en-US".into(),
+            }) };
+            let (blocked, returned) = timeout(Duration::from_secs(2), async {
+                tokio::join!(request(&f.app, &read), async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    serve_one(stream, service.clone(), endpoint.clone(), stop.clone(), Instant::now() + SERVER_DEADLINE).await
+                })
+            }).await.unwrap();
+            returned.unwrap();
+            assert!(blocked.is_err());
+            assert!(service.configuration_requests().metadata_entry(&query).is_err());
+            assert!(endpoint.metadata_exchange.load(Ordering::Acquire));
+            // STOP is not a close/return. The outer original retains its guard
+            // even when the borrowed exchange future is about to be cancelled.
+            signal.send(true).unwrap();
+            assert!(endpoint.metadata_exchange.load(Ordering::Acquire));
+            timeout(Duration::from_secs(2), large.as_mut()).await.unwrap().unwrap();
+            drop(large);
+            assert!(!endpoint.metadata_exchange.load(Ordering::Acquire));
+            let mut extra = [0u8; 1];
+            assert_eq!(client.read(&mut extra).await.unwrap(), 0);
+            close_stream(client).unwrap();
+            let mut after_close = None;
+            MetadataExchange::require(&endpoint.metadata_exchange, &mut after_close).unwrap();
+            drop(after_close);
+            nix::unistd::close(listener.into_std().unwrap()).unwrap();
+            let endpoint = match Arc::try_unwrap(endpoint) { Ok(endpoint) => endpoint, Err(_) => panic!("original endpoint still retained") };
+            endpoint.remove(&service).unwrap();
+            store.endpoint_settled(true).unwrap();
+            service.stop().unwrap();
+            store.close().unwrap();
+        });
+    }
     #[test]
     fn real_socket_two_clients_share_completed_observations_and_history() {
         runtime().block_on(async {

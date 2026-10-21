@@ -425,6 +425,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
   readonly agentVersionEdit?: import('./serviceVersionEditProtocol.ts').VersionEditAgentApi | null;
+  readonly agentMetadataText?: import('./serviceMetadataTextProtocol.ts').MetadataServiceApi | null;
   readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
@@ -440,7 +441,9 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+  readonly agentGithubAction?: import('./agentGithubActionAccess.ts').AgentGithubActionPort | null;
   readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
+  readonly agentToolSetup?: import('./agentToolSetup.ts').AgentToolSetupPort | null;
   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;

@@ -1,5 +1,6 @@
 //! Explicit failed/dependent-job retry in the SAME authenticated connection and original Supervisor.
 use super::*;
+use std::sync::{Arc, Weak};
 use crate::{
     asset_source::RegisteredRoot,
     edit_owner::{SavedEditGuard, SavedEditStamp},
@@ -87,6 +88,7 @@ fn error_reason(e: &BridgeError) -> p::Reason {
         .unwrap_or_else(|| connection_reason(outcome_error(e)))
 }
 struct Active {
+    agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     ticket: GitHubActionsRetryTicket,
     request: p::Request,
     session_id: String,
@@ -98,6 +100,8 @@ struct Active {
     consent_end: Option<Instant>,
 }
 struct Consent {
+    identity: Arc<()>,
+    agent: Option<Weak<crate::service_github_action_requests::NativeScope>>,
     id: String,
     prepared: p::Prepared,
     end: Instant,
@@ -152,6 +156,7 @@ impl State {
         }
     }
     pub(super) fn revoke_consent(&mut self) {
+        action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
         self.consent = None;
         self.view.consent = None;
     }
@@ -182,6 +187,7 @@ impl State {
         self.observe_go();
     }
     fn unknown(&mut self) {
+        if let Some(a) = &self.active { action_delegation::unknown(&a.agent); }
         self.stop();
         self.view.available = false;
         self.view.reason = p::Reason::CleanupUnknown;
@@ -456,6 +462,8 @@ impl ConnectionState {
             return Err(refused(p::Reason::ResourcesUnavailable));
         }
         let before = self.actions_retry.view.clone();
+        let agent = gate.agent().cloned();
+        gate.agent_entering()?;
         let ticket = supervisor
             .start_actions_retry(request.clone(), gate, end)
             .map_err(|e| refused(error_reason(&e)))?;
@@ -491,6 +499,7 @@ impl ConnectionState {
             },
         });
         self.actions_retry.active = Some(Active {
+            agent,
             ticket,
             request,
             session_id: session_id.clone(),
@@ -632,7 +641,8 @@ impl ConnectionState {
             old.selection.clone(),
             now,
         )?;
-        if !a.confirm
+        if !action_delegation::origin(&self.actions_retry.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
+            || !a.confirm
             || !self.actions_retry.consent.as_ref().is_some_and(|c| {
                 c.id == a.consent_id
                     && c.session_id == a.session_id
@@ -917,6 +927,8 @@ impl ConnectionState {
             self.unknown_inner();
             return;
         };
+        let agent = a.agent.clone();
+        let agent_id = a.ticket.operation_id().to_owned();
         let mut effect = if a.request.kind == p::Kind::Retry {
             if a.ticket.go_claimed() {
                 p::Effect::PotentiallyApplied
@@ -954,6 +966,7 @@ impl ConnectionState {
             self.retire_inner(Reason::Expired, false);
         }
         if self.unknown || reason == p::Reason::CleanupUnknown {
+            action_delegation::unknown(&agent);
             self.actions_retry.active = Some(a);
             self.unknown_inner();
             if let Some(o) = &mut self.actions_retry.view.operation {
@@ -1016,6 +1029,7 @@ impl ConnectionState {
                             prepared: prepared.clone(),
                         });
                         self.actions_retry.consent = Some(Consent {
+                            identity: Arc::new(()), agent: None,
                             id: a.consent_id,
                             prepared,
                             end,
@@ -1073,6 +1087,9 @@ impl ConnectionState {
             self.retire_inner(r, false);
         }
         self.actions_retry_finish_retirement();
+        if let Some(o)=&self.actions_retry.view.operation {
+            if o.id==agent_id && o.phase==p::Phase::Settled { action_delegation::accepted(&agent,&agent_id,self.actions_retry.view.reason,o.effect); } else { action_delegation::unknown(&agent); }
+        } else { action_delegation::unknown(&agent); }
     }
     fn actions_retry_finish_retirement(&mut self) {
         // A settled Prepare/Retry is not a request to disconnect. The shared
@@ -1085,5 +1102,20 @@ impl ConnectionState {
         {
             self.complete_retirement();
         }
+    }
+}
+
+impl ConnectionState {
+    pub(crate) fn actions_retry_agent_review(&self, a: &action_delegation::Selection, g:u32, root:&RegisteredRoot, edit:&SavedEditGuard<'_>, now:Instant) -> Result<action_delegation::Review,BridgeError> {
+        let c=self.actions_retry.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
+        if a.kind!=crate::service_github_action_protocol::Kind::FailedJobsRetry || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.actions_retry.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.actions_retry.active.is_some() || self.actions_retry.exhausted {return Err(refused(p::Reason::ConsentExpired))}
+        action_delegation::review(a.kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
+    }
+    pub(crate) fn actions_retry_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
+        let c=self.actions_retry.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
+        if !Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
+    }
+    pub(crate) fn actions_retry_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
+        if self.actions_retry.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.actions_retry.view.clone();self.actions_retry.revoke_consent();self.actions_retry.finish(before);}
     }
 }

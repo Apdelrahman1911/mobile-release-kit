@@ -975,7 +975,7 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     let cohort = snapshot.cohort.lock().map_err(|_| wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
     if !owner.inner.android_registration_control.current_claim(&cohort) { return Err(wire::invalid()); }
     let (stop, _) = watch::channel(false); let (audit, audit_read) = watch::channel(hard);
-    let control = Arc::new(Control {
+    let control = Arc::new(Control { agent:snapshot.agent.clone(),
                 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                 removal:std::sync::OnceLock::new(), lane:ControlLane::Sources, owner: Arc::downgrade(&owner.inner), id: checked.id.clone(), generation,
         admitted: snapshot.at, work, hard, slot: Arc::downgrade(&owner.inner.android_registration_control),
@@ -1031,6 +1031,7 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     registry.android_registration.review = None;
     registry.android_registration.generation = generation;
     registry.android_registration.active = Some(original.clone());
+    agent::entered(&original);
     // Publication changes error semantics. From here, retain/settle originals
     // even on lost reply/GO; never fall back to pre-admission unavailable.
     let publish_handles = || -> Result<(), ()> {

@@ -202,7 +202,11 @@ impl Inspection {
         wire::footprint(&self.terminal.result.as_ref().ok_or_else(wire::invalid)?["footprint"])
     }
 }
+#[path = "saved_command_agent_tool_acquisition.rs"]
+pub(in crate::saved_command_owner) mod agent;
+pub(crate) use agent::{Approval as AgentToolAcquisitionApproval, Binding as AgentToolAcquisitionBinding};
 pub(super) struct Intent {
+    agent: std::sync::OnceLock<Arc<agent::Binding>>,
     known: Arc<Known>,
     document: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
     inspection: Option<Arc<Inspection>>,
@@ -486,6 +490,7 @@ impl SavedCommandOwner {
                 ),
             };
             Arc::new(Intent {
+                agent:std::sync::OnceLock::new(),
                 known: census.known.clone(),
                 document,
                 inspection,
@@ -553,11 +558,14 @@ impl SavedCommandOwner {
         census: &Census,
         budget: &crate::asset_session::ToolAcquisitionMemoryAdmission<'_>,
     ) -> Result<Admitted, BridgeError> {
+        self.start_tool_acquisition_agent(input,at,registered,gate,census,budget,None)
+    }
+    pub(crate) fn start_tool_acquisition_agent(&self,input:wire::Start,at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:wire::Availability,census:&Census,budget:&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>,entry:Option<&Arc<crate::service_tool_setup_requests::Entry>>) -> Result<Admitted,BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
         if !input.consents() {
             return Err(wire::invalid());
         }
-        let admitted = self.start_bound_admitted(
+        let admitted = self.start_bound_requests_tools(
             Start {
                 operation_id: input.operation_id,
                 owner_generation: input.owner_generation,
@@ -567,7 +575,7 @@ impl SavedCommandOwner {
             Availability::from_tools(gate),
             None,
             None,
-            Some((census, budget)),
+            Some((census, budget)),None,None,None,entry,
         )?;
         Ok(Admitted {
             status: admitted.status.tools()?,
