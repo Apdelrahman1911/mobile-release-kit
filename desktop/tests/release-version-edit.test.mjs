@@ -724,6 +724,31 @@ test('reserved handoff waits for real Open then explicit review and Apply on sam
   h.publish(h.owner('final')); assert.equal(h.count('apply'), 1);
   assert.deepEqual(h.controller.selectedEntry().original.values, VALUES); assert.equal(h.state.edit.attempt.handled, true);
 });
+test('build-only reserved saved 1.2 reaches separate Review and Save without rewriting the name', async () => {
+  const raw = ORIGINAL.replace("'1.2.3'", "'1.2'"), opened = checkout(raw, { name: '1.2', build: '7' });
+  const h = await connected({ raw, opened }), reservation = { ...RESERVATION, name: '1.2', build: 8 };
+  const values = { name: '1.2', build: '8' };
+  assert.equal(h.controller.openReserved(reservation), true);
+  assert.deepEqual(h.last('open').args, { projectId: 'p', reservationId: reservation.id });
+  assert.equal(h.controller.selectedEntry(), null); assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
+  const opening = h.publish(h.owner('opening')); h.last('open').resolve(opening); await flush();
+  h.publish(h.owner('editing'));
+  assert.deepEqual(h.controller.selectedEntry().original.values, { name: '1.2', build: '7' });
+  assert.deepEqual(h.controller.selectedEntry().values, values);
+  assert.equal(h.state.edit.nativeBlocked, false); assert.equal(h.state.edit.integrityFailed, false);
+  assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
+  assert.equal(h.controller.review(), true); assert.deepEqual(h.last('prepare').args.values, values);
+  const reviewing = h.publish(h.owner('reviewing')); h.last('prepare').resolve(reviewing); await flush();
+  assert.equal(h.state.edit.attempt.projection.prepared.view.file.after.text, raw.replace('"7"', '"8"'));
+  const binding = currentVersionApplyBinding(h.state); assert.ok(binding);
+  assert.equal(h.count('apply'), 0); assert.equal(h.controller.apply(binding), true);
+  const applying = h.publish(h.owner('applying')); h.last('apply').resolve(applying); await flush();
+  h.publish(h.owner('final'));
+  assert.equal(h.count('open'), 1); assert.equal(h.count('prepare'), 1); assert.equal(h.count('apply'), 1);
+  assert.deepEqual(h.controller.selectedEntry().original.values, values);
+  assert.equal(normalVersionEditResult(h.controller.selectedEntry().outcome), 'saved');
+  assert.equal(h.state.edit.attempt.handled, true);
+});
 test('Android-only reserved handoff above 9999 reaches explicit review and Save on the original controller', async () => {
   const config = { ...clone(BASE), android: { enabled: true }, ios: { enabled: false } };
   const opened = checkout(ORIGINAL, { name: '1.2.3', build: '7' }, { iosEnabled: false,

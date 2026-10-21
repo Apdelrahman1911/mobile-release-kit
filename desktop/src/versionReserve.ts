@@ -45,7 +45,9 @@ export function parseReservedVersion(raw: unknown): ReservedVersion | null {
     if (Object.hasOwn(v, 'ci') && !ci) return null;
     return reserveId(v.id) && typeof v.candidateId === 'string' &&
       v.candidateId.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v.candidateId) &&
-      typeof v.name === 'string' && v.name.length <= 64 && !/[^0-9.]/.test(v.name) && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v.name) &&
+      // The automatic core preserves two components for build-only increments.
+      typeof v.name === 'string' && v.name.length <= 64 &&
+      /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?$(?![\s\S])/.test(v.name) &&
       integer(v.build, 2_100_000_000) && v.build > 0 ? Object.freeze({ id: v.id, candidateId: v.candidateId, name: v.name, build: v.build,
         ...(ci ? { ci } : {}) }) : null;
   } catch { return null; }

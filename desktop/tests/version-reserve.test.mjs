@@ -46,10 +46,35 @@ test('strict status rejects malformed, contradictory, accessor and bounded-array
   let called=0;const raw=frame('reserved');Object.defineProperty(raw,'reservation',{enumerable:true,get(){called++;return reserved;}});
   assert.equal(parseVersionReserveStatus(raw),null);assert.equal(called,0);assert.equal(parseVersionReserveStatus(Array(100000)),null);
 });
+test('reserved name grammar keeps canonical two or three components and the original bounds',()=>{
+  for(const name of ['0.0','1.2','0.0.0','1.2.3','1'.repeat(62)+'.0']) {
+    const status=parseVersionReserveStatus(frame('reserved',2,{reservation:{...reserved,name}}));
+    assert.equal(status?.reservation?.name,name);
+  }
+  for(const name of ['', '1', '1.', '.2', '1..2', '1.2.', '1.2.3.4', '01.2', '1.02', '1.2.03',
+    '+1.2', '1.2-beta', '1.2+meta', ' 1.2', '1.2 ', '1.2\n', '1.2\r\n', '1.2\0', '１.2', '1'.repeat(63)+'.0']) {
+    assert.equal(parseVersionReserveStatus(frame('reserved',2,{reservation:{...reserved,name}})),null,JSON.stringify(name));
+  }
+});
 test('explicit review reserve and editor handoff are separate single-use actions',async()=>{
   const h=setup();await allocation(h);assert.equal(h.calls.length,2);assert.equal(h.edits.length,0);assert.equal(h.c.ownerReason(),null);
   assert.equal(h.c.editReason(),null);assert.equal(h.c.edit(),true);assert.deepEqual(h.edits,[reserved]);assert.equal(h.c.edit(),false);
   assert.equal(h.calls.length,2); // editor original owns its eventual Open/Prepare/Apply, not this controller
+});
+test('build-only two-component reservation stays confirmed until one explicit editor handoff',async()=>{
+  const h=setup();h.ready();h.c.configure({...options,increment:'build'});
+  const review=h.c.review();
+  assert.equal(h.last('review').args[1].increment,'build');
+  h.last('review').resolve(frame('reviewed',1,{review:{...frame('reviewed').review,increment:'build'}}));
+  await review;assert.equal(h.c.reserveReason(),null);
+  const pending=h.c.reserve(),value={...reserved,name:'1.2',build:8};
+  h.last('reserve').resolve(frame('reserved',2,{reservation:value}));await pending;
+  assert.equal(h.c.getSnapshot().unknown,false);assert.equal(h.c.getSnapshot().stale,false);
+  assert.deepEqual(h.c.getSnapshot().status.reservation,value);
+  assert.equal(h.calls.filter(x=>x.kind==='reserve').length,1);assert.equal(h.edits.length,0);
+  assert.equal(await h.c.reserve(),false);assert.equal(h.c.editReason(),null);
+  assert.equal(h.c.edit(),true);assert.deepEqual(h.edits,[value]);assert.equal(h.c.edit(),false);
+  assert.equal(h.calls.length,2); // No retry, status poll, automatic file edit, or name normalization.
 });
 test('status cannot mint reviewed or reserved intent; policy change retires original intent',async()=>{
   const h=setup();h.ready();let p=h.c.check();h.last('status').resolve(frame('reviewed'));await p;assert.notEqual(h.c.reserveReason(),null);
