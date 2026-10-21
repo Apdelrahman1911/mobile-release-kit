@@ -147,7 +147,7 @@ fn repository_output_is_family_bound_and_init_preview_never_fabricates_an_index_
     let status = repository::Status {
         origin: q.clone(),
         grant_id: id('d'),
-        selection: repository::Selection::new(repository::Action::Initialize).unwrap(),
+        selection: repository::Selection::new(repository::Action::Initialize {}).unwrap(),
         revision: 3,
         state: git::State::Prepared,
         prepare_operation_id: Some("git-local-1".into()),

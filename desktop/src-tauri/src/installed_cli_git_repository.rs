@@ -158,7 +158,7 @@ pub(super) fn output(
 }
 fn selection_text(action: &repository::Action) -> String {
     match action {
-        repository::Action::Initialize=>"Initialize an empty local repository on main; keep project files, no commit. Absence is checked only by native Prepare.\n".into(),
+        repository::Action::Initialize {}=>"Initialize an empty local repository on main; keep project files, no commit. Absence is checked only by native Prepare.\n".into(),
         repository::Action::BranchCreate {name,..}=>format!("Create local branch {name}; do not switch.\n"),
         repository::Action::BranchSwitch {name,..}=>format!("Switch to local branch {name}; native review checks supported tracked-file effects.\n"),
         repository::Action::BranchRename {name,..}=>format!("Rename the current local branch to {name}; no remote branch rename.\n"),

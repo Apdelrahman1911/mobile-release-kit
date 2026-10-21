@@ -41,7 +41,7 @@ pub(crate) fn decode_repository_allow(bytes: &[u8]) -> Result<RepositoryAllow, B
         || args.consent_version != repository::CONSENT
         || args.action.validate().is_err()
         || match args.action {
-            repository::Action::Initialize => args.read_operation_id.is_some(),
+            repository::Action::Initialize {} => args.read_operation_id.is_some(),
             _ => !args
                 .read_operation_id
                 .as_deref()
@@ -110,7 +110,7 @@ pub(super) fn basis_current(
     scope: &requests::NativeScope,
     original: &Arc<Observation>,
 ) -> bool {
-    if matches!(&scope.selection, shared::Selected::Repository(s) if matches!(s.action,repository::Action::Initialize))
+    if matches!(&scope.selection, shared::Selected::Repository(s) if matches!(s.action,repository::Action::Initialize {}))
     {
         return scope.read_operation_id.is_none();
     }
@@ -184,7 +184,7 @@ impl DocumentBinding {
                 return Err(public(Error::StateUnknown));
             }
             let original = match &selection.action {
-                repository::Action::Initialize => {
+                repository::Action::Initialize {} => {
                     if args.read_operation_id.is_some() {
                         return Err(BridgeError::invalid());
                     }

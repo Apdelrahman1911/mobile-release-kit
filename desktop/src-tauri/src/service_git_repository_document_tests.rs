@@ -22,7 +22,7 @@ fn branches() -> read::Projection {
     value
 }
 fn scope(doc: &Arc<()>, action: repository::Action) -> requests::NativeScope {
-    let init = matches!(action, repository::Action::Initialize);
+    let init = matches!(action, repository::Action::Initialize {});
     requests::NativeScope {
         project_id: Id::parse(&"a".repeat(32)).unwrap(),
         runtime_id: "project-1".into(),
@@ -106,8 +106,8 @@ fn current_positive_observe_or_branches_is_distinct_from_failed_read_and_cached_
             assert!(!selected(&bad, &action));
         }
     }
-    assert!(!selected(&observed, &repository::Action::Initialize));
-    assert!(!selected(&branches, &repository::Action::Initialize));
+    assert!(!selected(&observed, &repository::Action::Initialize {}));
+    assert!(!selected(&branches, &repository::Action::Initialize {}));
     let ff = repository::Action::FastForward {
         expected_revision: "a".repeat(64),
         expected_reference_revision: "c".repeat(64),
@@ -139,7 +139,7 @@ fn fixed_native_action_and_original_review_summary_keep_source_identity_and_init
 {
     let doc = Arc::new(());
     let mut actions = vec![
-        repository::Action::Initialize,
+        repository::Action::Initialize {},
         branch_action("branch-create"),
         branch_action("branch-switch"),
         branch_action("branch-rename"),
@@ -160,7 +160,7 @@ fn fixed_native_action_and_original_review_summary_keep_source_identity_and_init
     }
     for init in [false, true] {
         let selected = if init {
-            repository::Action::Initialize
+            repository::Action::Initialize {}
         } else {
             branch_action("branch-create")
         };

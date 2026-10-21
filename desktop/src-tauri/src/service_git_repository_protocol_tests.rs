@@ -9,7 +9,7 @@ fn id(c: char) -> Id {
 }
 fn actions() -> Vec<Action> {
     vec![
-        Action::Initialize,
+        Action::Initialize {},
         Action::BranchCreate {
             expected_revision: "a".repeat(64),
             expected_reference_revision: "b".repeat(64),
@@ -45,7 +45,7 @@ fn review(action: &Action) -> Review {
         document_revision: 1,
         registration_generation: 1,
         preview: match action {
-            Action::Initialize => Preview::Initialize {
+            Action::Initialize {} => Preview::Initialize {
                 initial_branch: "main".into(),
                 object_format: "sha1".into(),
             },
@@ -107,6 +107,10 @@ fn prepared(action: Action) -> Status {
 
 #[test]
 fn closed_five_actions_bind_digest_and_reject_commands_network_and_extra_authority() {
+    // Keep the old wire bytes (and therefore the selection digest), while
+    // refusing unknown fields even for the otherwise empty Initialize action.
+    assert_eq!(serde_json::to_vec(&Action::Initialize {}).unwrap(), br#"{"kind":"initialize"}"#);
+    assert!(serde_json::from_value::<Action>(json!({})).is_err());
     for action in actions() {
         let selected = Selection::new(action.clone()).unwrap();
         assert_eq!(
@@ -127,7 +131,8 @@ fn closed_five_actions_bind_digest_and_reject_commands_network_and_extra_authori
         ] {
             let mut value = serde_json::to_value(&action).unwrap();
             value[key] = json!("forged");
-            assert!(serde_json::from_value::<Action>(value).is_err());
+            assert!(serde_json::from_value::<Action>(value).is_err(),
+                "{} accepted unexpected field {key}", action.label());
         }
     }
     for kind in ["fetch", "push", "stage", "commit", "reset", "clean"] {
@@ -178,7 +183,7 @@ fn new_access_requires_all_nulls_and_does_not_change_old_family_wire_shape() {
         consumed: false,
         project_id: Some(id('a')),
         grant_id: Some(id('b')),
-        selection: Some(Selection::new(Action::Initialize).unwrap()),
+        selection: Some(Selection::new(Action::Initialize {}).unwrap()),
     };
     access.validate().unwrap();
     let mut bad = access.clone();
@@ -221,7 +226,7 @@ fn typed_previews_require_exact_source_reference_target_and_no_fake_init_index()
         let mut bad = good.clone();
         bad.registration_generation = 0;
         assert!(!bad.matches(&selected));
-        if matches!(action, Action::Initialize) {
+        if matches!(action, Action::Initialize {}) {
             let mut bad = good.clone();
             bad.expected_index = Some("e".repeat(64));
             assert!(!bad.matches(&selected));

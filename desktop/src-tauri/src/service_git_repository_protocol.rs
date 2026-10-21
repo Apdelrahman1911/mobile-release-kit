@@ -59,7 +59,9 @@ pub(crate) fn tracking_ref(value: &str) -> bool {
     deny_unknown_fields
 )]
 pub enum Action {
-    Initialize,
+    // A struct variant makes Serde enforce deny_unknown_fields for this tag.
+    // An internally tagged unit variant silently ignores extra object fields.
+    Initialize {},
     BranchCreate {
         expected_revision: String,
         expected_reference_revision: String,
@@ -85,7 +87,7 @@ pub enum Action {
 impl Action {
     pub fn validate(&self) -> Result<(), Error> {
         let valid = match self {
-            Self::Initialize => true,
+            Self::Initialize {} => true,
             Self::BranchCreate {
                 expected_revision,
                 expected_reference_revision,
@@ -130,7 +132,7 @@ impl Action {
             s.into_boxed_str().into_string()
         }
         match self {
-            Self::Initialize => Self::Initialize,
+            Self::Initialize {} => Self::Initialize {},
             Self::BranchCreate {
                 expected_revision,
                 expected_reference_revision,
@@ -173,7 +175,7 @@ impl Action {
     }
     pub(crate) fn revisions(&self) -> Option<(&str, &str)> {
         match self {
-            Self::Initialize => None,
+            Self::Initialize {} => None,
             Self::BranchCreate {
                 expected_revision,
                 expected_reference_revision,
@@ -198,7 +200,7 @@ impl Action {
     }
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            Self::Initialize => "initialize",
+            Self::Initialize {} => "initialize",
             Self::BranchCreate { .. } => "branch-create",
             Self::BranchSwitch { .. } => "branch-switch",
             Self::BranchRename { .. } => "branch-rename",
@@ -208,7 +210,7 @@ impl Action {
     pub(crate) fn history_action(&self) -> crate::service_protocol::Action {
         use crate::service_protocol::Action as H;
         match self {
-            Self::Initialize => H::GitInitialize,
+            Self::Initialize {} => H::GitInitialize,
             Self::BranchCreate { .. } => H::GitBranchCreate,
             Self::BranchSwitch { .. } => H::GitBranchSwitch,
             Self::BranchRename { .. } => H::GitBranchRename,
@@ -470,7 +472,7 @@ impl Review {
             return false;
         }
         match (&selected.action, &self.preview) {
-            (Action::Initialize, Preview::Initialize { .. }) => true,
+            (Action::Initialize {}, Preview::Initialize { .. }) => true,
             (Action::BranchCreate { name, .. }, Preview::BranchCreate { target_ref, .. })
             | (Action::BranchSwitch { name, .. }, Preview::BranchSwitch { target_ref, .. })
             | (Action::BranchRename { name, .. }, Preview::BranchRename { target_ref, .. }) => {

@@ -9,7 +9,7 @@ use crate::{
 pub(super) fn action(selected: &repository::Action) -> Result<local::Action, BridgeError> {
     selected.validate().map_err(public)?;
     let action = match selected {
-        repository::Action::Initialize => local::Action::Initialize(init::Action {
+        repository::Action::Initialize {} => local::Action::Initialize(init::Action {
             kind: init::Kind::Initialize,
         }),
         repository::Action::BranchCreate {

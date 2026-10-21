@@ -31,7 +31,7 @@ fn scope(doc: &Arc<()>, family: Family, init: bool) -> Arc<NativeScope> {
         document: Arc::downgrade(doc),
         selection: match family {
             Family::Repository => repository::Selection::new(if init {
-                repository::Action::Initialize
+                repository::Action::Initialize {}
             } else {
                 action()
             })

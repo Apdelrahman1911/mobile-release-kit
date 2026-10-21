@@ -537,6 +537,11 @@ mod tests {
         wrong.remote_ref = "refs/heads/other".into();
         let mut changed = r.clone();
         changed.upstream_ref = wrong.remote_ref.clone();
+        // A changed upstream with the old tracking ref is not a valid review.
+        assert!(!changed.valid());
+        assert!(!changed.matches(&wrong));
+        changed.tracking_ref = push::tracking(&changed.remote, &changed.upstream_ref).unwrap();
+        assert!(changed.valid());
         assert!(changed.matches(&wrong));
         assert!(s
             .git_push_review_current(&pins, &wrong, &changed, at, end)

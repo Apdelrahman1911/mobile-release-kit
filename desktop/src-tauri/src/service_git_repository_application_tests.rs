@@ -35,7 +35,7 @@ fn actual_service_dispatch_requires_read_plus_repository_grant_and_preserves_ori
         input_revision: 1,
         read_operation_id: None,
         document: Arc::downgrade(&doc),
-        selection: repository::Selection::new(repository::Action::Initialize)
+        selection: repository::Selection::new(repository::Action::Initialize {})
             .unwrap()
             .into(),
         commit: None,

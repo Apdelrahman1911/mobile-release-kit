@@ -55,7 +55,7 @@ impl NativeScope {
                 _ => false,
             }
             && match &self.selection {
-                shared::Selected::Repository(v) if matches!(v.action,repository::Action::Initialize) => self.read_operation_id.is_none(),
+                shared::Selected::Repository(v) if matches!(v.action,repository::Action::Initialize {}) => self.read_operation_id.is_none(),
                 _ => self.read_operation_id.as_deref().is_some_and(p::native_id),
             }
             && (1..=64).contains(&self.runtime_id.len())
