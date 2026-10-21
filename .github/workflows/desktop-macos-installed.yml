@@ -1287,7 +1287,7 @@ jobs:
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_installed_app_compiler.sh
-      - name: Check 31 pending Store, paired-version, P12 and request-discovery contracts in the same observer feature graph
+      - name: Check 77 pending Store, versions, publication, Apple and discovery contracts in the same observer feature graph
         id: git_selected_contracts
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && matrix.target == 'aarch64-apple-darwin' && steps.app_build.outcome == 'success' && steps.app_compiler.outcome == 'success'
         timeout-minutes: 20
