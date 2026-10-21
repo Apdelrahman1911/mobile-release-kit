@@ -11,10 +11,10 @@
     },
     {
       "id": "token", "label": "Advanced session-only user token", "requiredness": "conditional",
-      "what": "A future qualified native connection may accept an explicitly supplied user token for read-only GitHub observations. This source-preparation increment does not collect one.",
-      "why": "The preferred publisher App/device login is not configured. An advanced token would be an independent, explicitly consented session-only route, not a credential asset or persistent secret.",
-      "where": "GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens. Select only the application repository and minimal Metadata/Actions read permissions. Never paste the token into a repository field, chat, config or file.",
-      "format": "When separately enabled: nonempty printable ASCII without whitespace, at most 4096 bytes, entered only into the native gated password field. No trimming, prefix-based trust, file import or plaintext persistence.",
+      "what": "When native entry is available, explicitly supply a user token in the gated password field to check your GitHub account and application repository. This app retains it for the native session only.",
+      "why": "This independent, explicitly consented option does not require a GitHub CLI login or change its saved configuration/default account. It uses no GitHub App registration and is not a credential asset or persistent secret.",
+      "where": "GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens. Select only the application repository and minimal Metadata/Actions read permissions. A token does not grant new repository access; organization approval may still be required. Never paste the token into a repository field, chat, config or file.",
+      "format": "When native entry is available: nonempty printable ASCII without whitespace, at most 4096 bytes, entered only into the gated password field. No trimming, prefix-based trust, file import or plaintext persistence.",
       "failure": "Unqualified runtime, unavailable help or missing native ownership disables entry before collection. Unauthorized requires explicit new authentication after settlement. Forbidden can reflect token, organization or SSO policy; do not automatically escalate permissions."
     }
   ],
@@ -23,8 +23,8 @@
       "id": "authentication", "label": "Account observation is not release readiness",
       "what": "An authenticated account observation says which GitHub account answered the supplied read. Repository access is a separate fact.",
       "why": "Account login, local Apply and workflow listing do not authorize release, dispatch or remote setup. Broad powers of a supplied token would not be exercised here.",
-      "where": "Read the account and repository sections separately. Preferred device login needs a publisher-registered GitHub App and a separately qualified native browser boundary.",
-      "format": "One original native document/session, one explicit application repository and one original observation at a time. No ambient gh login, environment token, credential helper or browser fallback.",
+      "where": "Use the selected GitHub CLI account or the separate session-only token field. For user-managed CLI sign-in, see https://cli.github.com/manual/gh_auth_login; it may change CLI configuration/default account and fall back to plaintext token storage. Browser/device sign-in inside this app remains unavailable and needs its own registered provider configuration and native transport.",
+      "format": "One original native document/session, one explicit application repository and one original observation at a time. No automatic gh sign-in, account switch, environment token, credential helper or browser fallback.",
       "failure": "Unqualified, runtime-unavailable, publisher-unconfigured and not-connected are distinct from failed authentication. Busy blocks new Connect/Refresh, never retained Status or immediate exact-session Disconnect."
     },
     {
@@ -37,8 +37,8 @@
     },
     {
       "id": "session-memory", "label": "Session-only lifetime and original settlement",
-      "what": "The proposed native route retains a credential only in private session memory, never in the public status, draft, history, logs or a credential asset.",
-      "why": "No persistence is required for a consented session-only connection. Absence of a qualified keyring never permits plaintext storage.",
+      "what": "This app retains its connection credential only in private native session memory, never in public status, draft, history, logs or a credential asset.",
+      "why": "This app does not persist connection tokens or fall back to plaintext storage. User-managed GitHub CLI login stores credentials separately and may fall back to plaintext if secure storage fails.",
       "where": "Use Disconnect to retire local admission. Project/target/document changes, expiry and shutdown also require the native owner to stop its original consumers.",
       "format": "Proposed ceiling: 60 minutes from acceptance, shortened by known expiry. Status reads, refreshes and navigation do not renew it. Display timestamps are not deadline authority.",
       "failure": "Expired or cancelled facts are stale. Cleanup-unknown blocks further requests and cannot be cleared by late success. Dropping a Promise, disposing a view or requesting Disconnect is not proof of native settlement or memory erasure."

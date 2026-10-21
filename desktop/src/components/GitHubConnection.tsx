@@ -79,6 +79,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
           state.status && !state.status.capability.readOnlySessionAvailable ? GITHUB_CONNECTION_REASON_HELP[state.status.capability.reason] :
           entryReady ? 'Use a token limited to your selected repository. It is used for this app session only, not saved in project files.' :
           'Finish or check the original connection before entering a token.'} This option never runs automatically if GitHub CLI fails. No GitHub App registration or project signing key is used.</p>
+        <p>No GitHub CLI login is required for this option, and it does not change the CLI’s saved configuration or default account. A token does not grant repository access by itself: GitHub must verify the account and repository, and organization approval may still be required.</p>
       {entryReady && <form className="github-form" onSubmit={(event) => {
         event.preventDefault();
         try {
@@ -96,7 +97,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
         <button type="submit" className="button primary"><Icon name="key" size={17} />Connect for read-only observations</button>
       </form>}
         {!entryReady && <button type="button" className="button secondary" disabled aria-describedby={reasonId}><Icon name="key" size={17} />Token connection unavailable</button>}
-        <p className="save-note">App/device login is not available. Disconnecting here does not revoke a token on GitHub.</p>
+        <p className="save-note">Browser/device-code sign-in inside this app is not available. Disconnecting here does not revoke a token on GitHub.</p>
       </details>
       {state.helpState !== 'current' && <p className="review-caution" role="status">{state.helpState === 'previous' ? 'Previously loaded help is retained for reading only; it does not enable entry.' : 'Core connection help is unavailable; entry remains disabled.'}</p>}
       <details className="progressive-disclosure">

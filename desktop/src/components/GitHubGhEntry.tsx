@@ -41,13 +41,20 @@ export function GitHubGhEntry({ controller, compact = false, originalProjectName
             {state.accounts.logins.map((login) => <option key={login} value={login}>{login}</option>)}
           </select>
           <span className="field-help">These are local names, not verified accounts. Connecting checks the chosen account and repository with GitHub.</span>
-        </label> : <p>No supported account names were listed. This does not prove you are signed out. You can use the manual option below; nothing falls back automatically.</p>}
+        </label> : <p>No supported account names were listed. This does not prove you are signed out. The options below explain how to connect without a listed account.</p>}
         {!state.accountsFresh && <p className="save-note">This earlier list cannot be selected. Read local accounts again for the current project.</p>}
       </>}
       {state.manual && <p>Using the username you typed: <strong>{state.login || 'not entered yet'}</strong>. It has not been verified.</p>}
       <button type="button" className="button primary" disabled={reason !== null} aria-describedby={reasonId}
         onClick={() => controller.connect()}><Icon name="github" size={17} />Choose GitHub CLI &amp; connect</button>
       <p id={reasonId} className="save-note">{reason ?? 'Checks this account and repository only. No repository change or workflow starts; the selected path and token stay in the native app.'}</p>
+      <p>No suitable CLI account? Open <strong>Advanced: use a personal access token</strong> below, or follow the external sign-in steps here. Neither route starts automatically; finish any original request first.</p>
+      <details>
+        <summary>Sign in with GitHub CLI outside this app</summary>
+        <p>Follow GitHub CLI’s official guide in your own terminal: <code>https://cli.github.com/manual/gh_auth_login</code>. This app does not start that login or open a browser.</p>
+        <p>External sign-in can change GitHub CLI’s saved configuration and default account. Its token may be saved as plaintext if secure storage fails or is unavailable. Review the requested permissions; signing in does not grant new repository access.</p>
+        <p>After signing in, return here, read local accounts again, choose the intended account, then use <strong>Choose GitHub CLI &amp; connect</strong>. Connecting verifies the account and repository; an old list or typed username is not verification.</p>
+      </details>
       <details>
         <summary>Enter a username instead (Advanced)</summary>
         <p>Use this if your local account-list format is unsupported. Enter an account already signed in with GitHub CLI. There is no automatic sign-in or fallback to another account.</p>
