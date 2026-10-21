@@ -1287,7 +1287,7 @@ jobs:
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_installed_app_compiler.sh
-      - name: Check 35 affected Git and Apple recovery contracts in the same observer feature graph
+      - name: Check 46 affected Git, Apple recovery and Android backup contracts in the same observer feature graph
         id: git_selected_contracts
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && matrix.target == 'aarch64-apple-darwin' && steps.app_build.outcome == 'success' && steps.app_compiler.outcome == 'success'
         timeout-minutes: 20

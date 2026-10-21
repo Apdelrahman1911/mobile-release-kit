@@ -32,6 +32,10 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path = "../src/service_upload_key_protocol.rs"] mod service_upload_key_protocol;
+#[path = "../src/service_upload_key_requests.rs"] mod service_upload_key_requests;
+#[path = "../src/service_play_cleanup_protocol.rs"] mod service_play_cleanup_protocol;
+#[path = "../src/service_play_cleanup_requests.rs"] mod service_play_cleanup_requests;
 #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
 #[path="../src/service_configuration_requests.rs"] mod service_configuration_requests;
 #[path="../src/service_version_reserve_protocol.rs"]
@@ -199,6 +203,7 @@ mod service_version_reserve_requests;
 #[path = "../src/github_preflight_protocol.rs"] mod github_preflight_protocol;
 #[path = "../src/github_preflight_session.rs"] mod github_preflight_session;
 #[path = "../src/github_release_protocol.rs"] mod github_release_protocol;
+#[path = "../src/github_play_cleanup_protocol.rs"] mod github_play_cleanup_protocol;
 #[path = "../src/github_release_session.rs"] mod github_release_session;
 #[path = "../src/github_setup_protocol.rs"] mod github_setup_protocol;
 #[path = "../src/github_setup_session.rs"] mod github_setup_session;

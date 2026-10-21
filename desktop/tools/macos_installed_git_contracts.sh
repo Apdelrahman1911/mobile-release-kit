@@ -7,8 +7,10 @@ umask 077
 # The canonical harness=false observer build/JSON remains untouched.
 # This ONE ordinary libtest links against the same debug feature graph
 # and same original source/release environment. No release/profile switch.
-# 34 DATA cases plus one existing private Service/Store fixture; that
+# 45 DATA cases plus one existing private Service/Store fixture; that
 # fixture stops/closes/drops its own directory. No native Git or account.
+# The 11 Android backup/restore cases exercise the newly integrated permission,
+# original-return and strict output contracts in this same libtest compilation.
 rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
 export PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc"
 export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTUP_AUTO_INSTALL=0
@@ -48,8 +50,19 @@ selected_tests=(
   apple_provisioning_protocol::certificate_recovery::tests::restored_prior_stays_reconcile_only_and_both_key_hashes_are_rechecked
   saved_command_owner::apple_provisioning::tests::certificate_history_requires_original_entered_returned_key_ack_not_completed_data
   shell::installed_observation::git_upstream::tests::configured_without_tracking_is_not_remote_or_commit_publication
+  service_upload_key_requests::tests::backup::backup_selections_are_distinct_closed_consents_without_file_or_password_inputs
+  service_upload_key_requests::tests::backup::delivery_and_restored_reference_cannot_cross_kind_or_settlement
+  service_upload_key_requests::tests::backup::both_backup_kinds_keep_the_same_three_original_return_barriers_in_all_orders
+  service_upload_key_requests::tests::backup::lost_caller_or_continuation_and_wrong_native_kind_are_absorbing_unknown
+  service_upload_key_requests::tests::backup::late_original_stop_suppresses_delivery_and_new_reference_without_replaying
+  asset_session::vault::backup_delegation::tests::authenticated_kind_policy_has_no_wrong_link_fallback_before_new
+  asset_session::vault::backup_delegation::tests::full_reference_comparison_keeps_random_revision_and_original_read_witness
+  asset_session::vault::backup_delegation::tests::untouched_original_cannot_supply_backup_retirement_or_an_import_stamp
+  installed_cli::upload_key::tests::backup_and_restore_output_keep_delivery_new_reference_and_assignment_distinct
+  installed_cli::upload_key::tests::backup_cli_still_accepts_only_ids_not_a_file_pair_or_restore_override
+  asset_session::agent_upload_key::tests::main_requests_are_small_explicit_action_and_consent_pairs_not_status_authority
 )
-[[ "${#selected_tests[@]}" == 35 ]] || exit 1
+[[ "${#selected_tests[@]}" == 46 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -59,9 +72,9 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '35 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '46 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 35 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 46 passed; 0 failed; 0 ignored;' "$run_log"
