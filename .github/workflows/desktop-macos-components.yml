@@ -624,13 +624,48 @@ jobs:
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
             grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             # Current Apple certificate/P12, shared CLI and Fetch/Push logic.
-            # Same library binary/cache: 107 new cases plus 24 affected cases.
+            # Same library binary/cache: 132 new cases plus 24 affected cases.
             # Cases with Store I/O use existing exclusive private fixtures and
             # synchronous close; none invokes Git, a provider or a system tool.
             # Prefix selectors intentionally omit --exact; the count prevents
             # a missing/renamed test from silently becoming a pass.
             (
               umask 077
+              # Exact additions must each resolve once in the same real libtest.
+              remote_tool_tests=(
+                service_git_remote_protocol::tests::fixed_actions_and_digest_refuse_authority_or_cross_family_additions
+                service_git_remote_protocol::tests::required_null_access_and_fetch_preview_never_default_missing_fields
+                service_git_remote_protocol::tests::effects_are_diagnostics_not_paths_or_a_success_upgrade
+                service_git_remote_protocol::tests::bounded_maximum_reference_summary_remains_below_status_envelope
+                service_git_requests::remote_requests::tests::both_return_orders_withhold_ready_history_and_start_until_all_three_originals
+                service_git_requests::remote_requests::tests::cancelled_failed_and_no_review_still_wait_for_connection_and_caller_return
+                service_git_requests::remote_requests::tests::expiry_and_removed_candidate_do_not_close_before_original_return_or_renew_review
+                service_git_requests::remote_requests::tests::armed_apply_keeps_own_return_and_effect_after_consumed_prepare_review_drops
+                service_git_requests::remote_requests::tests::lost_caller_missing_finish_and_unknown_never_rearm_or_accept_status_as_settlement
+                service_git_requests::remote_requests::tests::connection_return_refuses_foreign_review_identity_and_contradictory_terminal_effect
+                service_git_requests::remote_requests::tests::cross_family_foreign_ids_and_duplicate_body_cannot_select_a_remote_or_another_apply
+                service_git_requests::remote_requests::tests::ordinary_local_family_keeps_its_original_finality_and_has_no_remote_finish_capability
+                asset_session::agent_git_index::remote::tests::only_actual_observe_shape_and_exact_cached_push_target_are_eligible_data
+                asset_session::agent_git_index::remote::tests::desktop_consent_is_kind_specific_and_cli_fields_cannot_select_credentials
+                application_service::git_index::remote::tests::actual_service_dispatch_requires_read_plus_remote_grant_and_preserves_original_on_reconnect
+                application_service::git_index::remote::tests::remote_scope_and_presend_reject_changed_project_alias_and_old_read_session
+                installed_cli::git_index::remote_tests::actual_collector_admits_only_the_five_id_only_remote_commands
+                installed_cli::git_index::remote_tests::wire_and_lost_reply_preserve_exact_ids_without_an_action_or_replay
+                installed_cli::git_index::remote_tests::exact_ready_effect_unknown_and_family_mismatch_remain_distinct
+                installed_cli::git_index::remote_tests::complete_capabilities_remain_bounded_and_discovery_includes_remote
+                github_connection_session::fetch::tests::remote_delegation_current_uses_original_pins_and_never_renews_expiry
+                github_connection_session::push::tests::remote_delegation_current_uses_original_pins_and_never_renews_expiry
+                tool_acquisition_protocol::prerequisite::tests::prerequisite_errors_are_closed_nonretryable_hints_not_generic_failures
+                saved_command_owner::tool_acquisition::tests::unqualified_prepare_census_is_not_a_resumable_missing_prerequisite
+                saved_command_owner::android_catalog::frozen_row_data_tests::missing_catalogue_hint_needs_pristine_state_or_actual_positive_originals
+              )
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+                "${remote_tool_tests[@]}" --exact --list | tee "$WORK_ROOT/app-typecheck-remote-tools-list.log"
+              grep -Fx '25 tests, 0 benchmarks' "$WORK_ROOT/app-typecheck-remote-tools-list.log"
+              for test_name in "${remote_tool_tests[@]}"; do
+                [[ "$(grep -Fxc "$test_name: test" "$WORK_ROOT/app-typecheck-remote-tools-list.log")" == 1 ]]
+              done
               rustup run 1.98.1 cargo test --locked --no-default-features \
                 --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
                 credential_format::apple::provisioning_certificate::distribution_policy::tests:: \
@@ -716,8 +751,9 @@ jobs:
                 supervisor::git_local::push::tests::returned_push_only_compares_exact_original_request_and_never_local_publication \
                 supervisor::git_local::push::tests::original_known_receipt_and_joined_control_are_both_required_without_retaining_owner \
                 runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider \
+                "${remote_tool_tests[@]}" \
                 --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
-              grep -Eq '^test result: ok\. 131 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 156 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
             )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
