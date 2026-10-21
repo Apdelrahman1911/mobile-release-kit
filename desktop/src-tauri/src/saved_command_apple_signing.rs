@@ -255,7 +255,7 @@ impl AppleProfileSession {
         }
         Ok(owner)
     }
-    fn same_asset(&self, original: &Arc<OriginalWork>) -> bool {
+    pub(in crate::saved_command_owner) fn same_asset(&self, original: &Arc<OriginalWork>) -> bool {
         self.clock.original_matches(original)
             && self.asset.try_lock().is_ok_and(|slot| {
                 slot.original

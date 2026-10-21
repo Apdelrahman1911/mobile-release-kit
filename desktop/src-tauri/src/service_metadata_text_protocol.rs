@@ -23,7 +23,8 @@ pub(crate) const IPC_PEAK: usize = 5 * REQUEST_BYTES + INPUT_NODES * 1024 + TYPE
 // All eight workers can still hold an ordinary <=4KiB decode before its method
 // is known. Reserve each Seed's128 nodes PLUS64KiB raw/string/field-vector
 // overlap and two actual Request cells (small Prepare decodes twice). The
-// large request/response cap is unchanged; no credit removes old family debits.
+// large request/response cap is unchanged. These are the unpooled reference
+// terms; the Document now charges SAME8 max(8O,M+7O), not eight extra callers.
 pub(crate) const SMALL_INPUT_PEAK: usize = INPUT_NODES * 1024
     + 16 * crate::service_protocol::REQUEST_BYTES
     + 2 * std::mem::size_of::<crate::service_protocol::Request>();
@@ -38,7 +39,8 @@ fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     Option::<T>::deserialize(d)
 }
 /// Count BEFORE allocation. Vec capacity is fixed to the checked encoded size;
-/// old service encoders and their limits are unchanged.
+/// Used for every outer service Response; validation, wire bytes and all
+/// existing request/response frame limits are unchanged.
 pub(crate) fn encoded<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>, Error> {
     struct Count {
         n: usize,

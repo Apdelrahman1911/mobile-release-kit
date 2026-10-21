@@ -12,10 +12,12 @@ use std::sync::{
 use std::time::Instant;
 use tokio::sync::Notify;
 
-pub(crate) const DOCUMENT_BACKING: usize = 32
-    * (p::REQUEST_BYTES + 2 * p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>())
-    + 8 * (p::REQUEST_BYTES + 2 * p::STATUS_BYTES)
-    + 2 * p::STATUS_BYTES;
+// SAME Book.rows<32 contains either Preparation or Apply. The parent
+// charges32*max(actual row quotes), not two independent32-row pools. Keep
+// this preparation's off-worker/relay scratch in addition to Apply's scratch.
+pub(crate) const ROW_BACKING: usize = p::REQUEST_BYTES + 2 * p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>();
+pub(crate) const NON_ROW_BACKING: usize = 2 * p::STATUS_BYTES;
+pub(crate) const IPC_WORKER_BACKING: usize = p::REQUEST_BYTES + 2 * p::STATUS_BYTES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Open,

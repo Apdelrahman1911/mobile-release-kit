@@ -24,6 +24,20 @@ pub(crate) struct AppleProvisioningSavedInput {
     comparison: SavedComparisonData,
 }
 impl AppleProvisioningSavedInput {
+    #[cfg(test)]
+    pub(in crate::asset_session) fn unreturned_census_data() -> Self {
+        // Existing control fixture retains its original RESERVED lane; never
+        // call arm/complete/returned or install a saved-input observation.
+        let (completion, probe) = SavedObservationCompletion::control_fixture();
+        assert!(!probe.returned() && !probe.completion_returned() && !probe.has_binding());
+        let lane = Arc::clone(&completion.lane);
+        drop((completion, probe));
+        assert!(!lane.returned());
+        Self { document: Weak::new(), lane, comparison: SavedComparisonData {
+            source: [0; 512], source_len: 0, name: [0; 64], name_len: 0, build: 0,
+            config_bytes: 0, config_sha256: [0; 32], version_bytes: 0, version_sha256: [0; 32] } }
+    }
+
     pub(in crate::asset_session) fn same_binding(&self, other: &Self) -> bool {
         Weak::ptr_eq(&self.document, &other.document)
             && Arc::ptr_eq(&self.lane, &other.lane)

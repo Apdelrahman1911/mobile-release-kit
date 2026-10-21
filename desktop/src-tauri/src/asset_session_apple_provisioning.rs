@@ -8,6 +8,9 @@ use super::*;
 pub(crate) mod agent;
 #[path="asset_session_apple_p12_input.rs"]
 mod p12_input;
+#[cfg(test)]
+#[path = "asset_session_apple_memory_fixture.rs"]
+mod memory_fixture;
 use crate::{
     apple_provisioning_journal::{
         AccountRef, BundleTarget, NativeProvenance, ProvisioningContext, RegisteredRootData,
@@ -72,6 +75,16 @@ struct PreparedAppleSources {
     material: Arc<SelectedStoreMaterial>,
 }
 impl AppleProvisioningDocumentInput {
+    /// Memory-only snapshot of the originals retained by this same Input.
+    /// No context recheck/Host call or retirement is performed under Census.
+    /// A contested/poisoned cell is not an absent asset or zero retained bytes.
+    pub(crate) fn census_assets(&self) -> Result<[Option<Arc<OriginalWork>>; 2], BridgeError> {
+        let profile = self.profile_asset.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let key = self.key_asset.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if profile.is_some() && key.is_some() { return Err(BridgeError::cleanup_unknown()); }
+        Ok([profile.clone(), key.clone()])
+    }
+
     pub(crate) fn context(&self) -> &wire::Context {
         &self.context
     }

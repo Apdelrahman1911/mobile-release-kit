@@ -12,6 +12,9 @@ use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{ato
 
 const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);
 
+#[path = "service_ipc_response_memory.rs"]
+pub(crate) mod ipc_response_memory;
+
 #[path = "application_service_history_policy.rs"]
 mod history_policy;
 pub(crate) use history_policy::{HistoryLease, HISTORY_STARTUP_WORK};

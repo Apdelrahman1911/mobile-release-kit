@@ -19,14 +19,15 @@ use std::{
 // simultaneous Remote selection (<=2.5KiB), private/public/pending review
 // summaries (<=3KiB each), final effect (<=1KiB) and transition copies. Local
 // rows stay within that quote. The SAME eight IPC workers below reserve their
-// typed+encoded scope/status copies (SCOPE_BACKING exceeds Remote metadata).
+// typed+encoded scope/status copies in the common pool (SCOPE_BACKING
+// exceeds Remote metadata). No row/source/draft debit is removed.
 // Full native action/review/Connection runtime remains on its existing owners.
 // Private Commit draft remains only in the original active scope/handoff.
 const SCOPE_BACKING: usize = p::PATH_LIMIT * (1024 + std::mem::size_of::<String>()) + 8192;
+pub(crate) const IPC_WORKER_BACKING: usize = p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT
     * (crate::service_git_remote_protocol::ROW_HEAP + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
-    + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING)
-    + 8 * (p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096);
+    + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING);
 
 pub(crate) struct NativeScope {
     pub(crate) project_id: Id,

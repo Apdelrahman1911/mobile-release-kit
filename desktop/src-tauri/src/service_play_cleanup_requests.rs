@@ -13,9 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Only this explicit IPC term moves into the SAME8 mixed pool.
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * (4096 + std::mem::size_of::<Entry>())
-    + 4 * 8192
-    + 8 * (crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT);
+    + 4 * 8192;
 
 /// Issued only for the genuine retained prepared Consent, never a public view.
 pub(crate) struct NativeScope {

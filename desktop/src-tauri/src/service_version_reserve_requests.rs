@@ -12,14 +12,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Includes all metadata strings, one old/current comparison scope, and eight
-// original IPC workers' input/output copies. Native SOURCE/Lane backing is
-// charged by its unchanged original owner, not multiplied by tombstones.
+// All metadata strings and old/current comparison scopes stay charged.
+// Native SOURCE/Lane backing remains on its original owner. Only the explicit
+// IPC term joins the SAME8 pool (including the initial4KiB before the1KiB gate).
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * (4096 + std::mem::size_of::<Entry>())
-    + 4 * 8192
-    // The shared reader admits at most 4 KiB before the decoded fixed route
-    // applies its stricter 1 KiB limit. Charge that original first buffer too.
-    + 8 * (crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT);
+    + 4 * 8192;
 
 /// Read-only facet of the SAME original service Grant. The Grant's Drop
 /// revokes this comparison; dropping an Arc facet cannot revoke or renew it.

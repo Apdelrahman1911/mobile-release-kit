@@ -17,9 +17,27 @@ pub const LIMIT: usize = 32;
 pub const LIFETIME: Duration = Duration::from_secs(900);
 pub const CONSENT: &str = "agent-saved-local-android-checks-v1";
 pub const REPORT_LIMIT: usize = 64 * 1024;
-// All 32 original request/scope/typed-report records, two public copies and
-// the one current serialized report/claim. Not a process RSS allowance.
-pub(crate) const DOCUMENT_BACKING: usize = 2 * 1024 * 1024;
+// One immutable terminal report per retained row, even if its history write
+// fails: latest and that claim share the SAME allocation. An older distinct
+// claim can only be a report-free progress value. All 32 rows remain charged.
+const ROW_BACKING: usize = 16 * 1024;
+const ANCILLARY_BACKING: usize = 64 * 1024;
+pub(crate) const STATUS_HEAP_BYTES: usize = 8 * 1024;
+// Native last/incoming projection, bounded normalization overlap and the one
+// off-IPC history value remain here. The eight public IPC copies/encoders are
+// in the ONE shared endpoint quote, not eight new workers for every family.
+pub(crate) const DOCUMENT_BACKING: usize =
+    LIMIT * ROW_BACKING + ANCILLARY_BACKING + 4 * REPORT_LIMIT;
+const ID_HEAP_BYTES: usize = 64;
+const ROOT_HEAP_BYTES: usize = 4096;
+// A newly rebuilt nine-entry enum/u32 BTreeMap has at most nine nodes. 512
+// bytes per node covers the pinned std implementation's 11 key/value slots,
+// 12 child pointers and node bookkeeping. No old tree capacity is adopted.
+const SUMMARY_HEAP_BYTES: usize = 9 * 512;
+
+fn compact_string(value: &mut String) {
+    *value = std::mem::take(value).into_boxed_str().into_string();
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -287,6 +305,42 @@ impl Operation {
             },
         }
     }
+    /// Physical owned DATA only. The bounded original projection is checked
+    /// BEFORE allocating a compact successor; value validation alone does not
+    /// bound String/Vec capacity. Original+successor overlap is in 4*REPORT.
+    fn heap_bytes(&self) -> Option<usize> {
+        let mut n = self.operation_id.retained_bytes()
+            .checked_add(self.owner_generation.retained_bytes())?;
+        if let Some(r) = &self.result {
+            n = n.checked_add(r.scope.capacity())?
+                .checked_add(r.used_config.sha256.capacity())?
+                .checked_add(r.findings.capacity().checked_mul(std::mem::size_of::<Finding>())?)?
+                .checked_add(r.limitations.capacity().checked_mul(std::mem::size_of::<Limitation>())?)?
+                .checked_add(SUMMARY_HEAP_BYTES)?;
+        }
+        Some(n)
+    }
+    fn compact(mut self) -> Result<Self, Error> {
+        if self.operation_id.retained_bytes() > ID_HEAP_BYTES
+            || self.owner_generation.retained_bytes() > ID_HEAP_BYTES
+            || self.heap_bytes().is_none_or(|n| n > REPORT_LIMIT)
+        {
+            return Err(Error::StateUnknown);
+        }
+        if let Some(r) = &mut self.result {
+            compact_string(&mut r.scope);
+            compact_string(&mut r.used_config.sha256);
+            r.findings = std::mem::take(&mut r.findings).into_boxed_slice().into_vec();
+            r.limitations = std::mem::take(&mut r.limitations).into_boxed_slice().into_vec();
+            r.summary.counts = std::mem::take(&mut r.summary.counts).into_iter().collect();
+        }
+        if self.heap_bytes().and_then(|n| n.checked_add(3 * ID_HEAP_BYTES))
+            .is_none_or(|n| n > STATUS_HEAP_BYTES)
+        {
+            return Err(Error::StateUnknown);
+        }
+        Ok(self)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -346,8 +400,12 @@ impl NativeScope {
             && self.baseline_generation < u32::MAX
             && self.document.strong_count() != 0
             && (1..=64).contains(&self.runtime_id.len())
+            && self.project_id.retained_bytes() <= ID_HEAP_BYTES
+            && self.runtime_id.capacity() <= 64
+            && self.config.sha256.capacity() <= 64
             && self.root.is_absolute()
             && self.root.as_os_str().len() <= 4096
+            && self.root.capacity() <= ROOT_HEAP_BYTES
     }
 }
 pub(crate) struct SavedPoint {
@@ -405,7 +463,7 @@ struct Original {
 }
 struct Publication {
     acknowledged: Option<u32>,
-    claim: Option<Operation>,
+    claim: Option<Arc<Operation>>,
     failed: bool,
 }
 pub(crate) struct Entry {
@@ -415,9 +473,33 @@ pub(crate) struct Entry {
     original: OnceLock<Original>,
     cancelled: OnceLock<Instant>,
     native_stop: OnceLock<tokio::sync::watch::Sender<bool>>,
-    latest: Mutex<Option<Operation>>,
+    latest: Mutex<Option<Arc<Operation>>>,
     publication: Mutex<Publication>,
 }
+// Typed payload ceilings, not allocator/RSS measurements. Scope capacity is
+// checked before Allow, report capacity before publication, and no public
+// Status/history value is retained back into an Entry. Eight Arc headers and
+// two512-byte watch cells cover their fixed control allocations conservatively.
+const SCOPE_HEAP_CEILING: usize = ROOT_HEAP_BYTES + 3 * ID_HEAP_BYTES;
+const PUBLIC_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES
+    + "saved-local-android-project-checks".len() + 64
+    + 128 * std::mem::size_of::<Finding>()
+    + 7 * std::mem::size_of::<Limitation>() + SUMMARY_HEAP_BYTES;
+const ROW_CEILING: usize = std::mem::size_of::<Entry>()
+    + std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+    + 2 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
+    + 8 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
+    + SCOPE_HEAP_CEILING + STATUS_HEAP_BYTES;
+const ANCILLARY_CEILING: usize = std::mem::size_of::<Inbox>()
+    + std::mem::size_of::<Book>() + 2 * LIMIT * std::mem::size_of::<Arc<Entry>>()
+    + 4 * (std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+        + SCOPE_HEAP_CEILING + 512)
+    + 8 * (std::mem::size_of::<Access>() + ID_HEAP_BYTES) + 4096;
+const _: () = {
+    assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
+    assert!(ROW_CEILING <= ROW_BACKING);
+    assert!(ANCILLARY_CEILING <= ANCILLARY_BACKING);
+};
 impl Entry {
     pub(crate) fn input(&self) -> &Submit {
         &self.input
@@ -511,7 +593,8 @@ impl Entry {
     }
     pub(crate) fn status(&self) -> Result<Status, Error> {
         self.occupies();
-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?
+            .as_deref().cloned();
         let request_state = self.observed_request_state(operation.is_some());
         let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
         let history_available = operation
@@ -588,7 +671,9 @@ impl Entry {
         }
         let first = p.acknowledged.is_none();
         p.claim = Some(latest.clone());
-        Ok(Some((first, latest)))
+        // The retained claim aliases the immutable latest, but the public
+        // history DTO remains an owned copy. A caller cannot mutate the row.
+        Ok(Some((first, latest.as_ref().clone())))
     }
     pub(crate) fn history_returned(
         &self,
@@ -662,22 +747,23 @@ impl NativeLink {
         }
         let mut latest = self.entry.latest.lock().map_err(|_| Error::StateUnknown)?;
         if let Some(old) = latest.as_ref() {
-            if old.settlement == Settlement::Unknown || *old == data {
+            if old.settlement == Settlement::Unknown || old.as_ref() == &data {
                 return Ok(());
             }
             if data.status_revision < old.status_revision
-                || data.status_revision == old.status_revision && *old != data
-                || old.settlement == Settlement::Settled && *old != data
+                || data.status_revision == old.status_revision && old.as_ref() != &data
+                || old.settlement == Settlement::Settled && old.as_ref() != &data
             {
                 return Err(Error::StateUnknown);
             }
         }
+        let data = data.compact()?;
         // A returned native retirement may resolve a lost admission ACK. It
         // never clears a NATIVE Unknown (the absorbing check is above).
         if data.settlement == Settlement::Settled {
             self.entry.phase.store(BOUND, Ordering::Release);
         }
-        *latest = Some(data);
+        *latest = Some(Arc::new(data));
         self.entry.scope().changes.send_modify(|_| {});
         Ok(())
     }

@@ -1889,6 +1889,8 @@ mod lookup_memory {
         book.handle.is_none() && matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned)
     }
 
+    mod apple_memory;
+
     struct Census<'a> {
         current: Option<(&'a Arc<OriginalWork>, &'a SourceBook, &'a Retirement)>,
         bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen, secret_loans: Seen,
@@ -2011,6 +2013,7 @@ mod lookup_memory {
             self.artifact_document(&document)
         }
         fn artifact_document(&mut self,document:&Arc<Inner>)->Result<(),Problem>{
+            self.apple_retained_document(document)?;
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             self.add(vault::installed_backup_observation::document_bytes(document).map_err(|_|Problem::Capacity)?)?;
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -2183,7 +2186,7 @@ mod lookup_memory {
             self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.vault_loan(sources.loan())?;
             if let Some(payload)=sources.certificate_payload() { self.payload(&payload)?; }
-            if let Some(selected)=sources.selected_p12() { self.apple_profile_source(&selected)?; }
+            if let Some(selected)=sources.selected_p12_census().map_err(|_|Problem::CleanupUnknown)? { self.apple_profile_source(&selected)?; }
             if let Some(inventory)=sources.inventory() {
                 if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
                 self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
@@ -2211,7 +2214,7 @@ mod lookup_memory {
             self.add(crate::saved_command_owner::apple_provisioning_retained_document_backing_bytes().ok_or(Problem::Capacity)?)?;
             // This Document binding can outlive every Apple review/input. It
             // is distinct from the owner's fixed retained comparison buffers.
-            if let Some(ready) = &state.apple_provisioning_ready { self.add(native_state_ready_bytes(ready)?)?; }
+            if let Some(ready) = &state.apple_provisioning_ready { self.apple_state_ready(ready)?; }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::application_service_host::identity_history_document_backing_bytes())?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2225,7 +2228,7 @@ mod lookup_memory {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
+            self.add(crate::application_service::ipc_response_memory::document_backing().ok_or(Problem::Capacity)?)?; // SAME8 originals; one Metadata lease through actual stream close, not per-family pools.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2234,7 +2237,7 @@ mod lookup_memory {
             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
-            self.add(crate::service_github_action_protocol::DOCUMENT_BACKING)?; // ONE complete three-kind inbox + scopes/8 replies, never per-kind credit.
+            self.add(crate::service_github_action_protocol::DOCUMENT_BACKING)?; // ONE complete GitHub inbox/scopes/history; IPC-only replies are in the SAME8 pool.
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_upload_key_requests::DOCUMENT_BACKING)?;
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2252,7 +2255,7 @@ mod lookup_memory {
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
             #[cfg(any(target_os="linux",target_os="macos"))]
-            self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/8 replies, not per-mode pools.
+            self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/history; IPC-only replies are in the SAME8 pool.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
@@ -2415,15 +2418,7 @@ mod lookup_memory {
         let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
             sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
         census.artifact_document(document)?;census.document(state)?;
-        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
-        if let Some((bytes,pickers))=loan.execute_census().ok_or(Problem::CleanupUnknown)?{
-            census.add(bytes)?;for picker in pickers.iter().flatten(){census.owner(picker)?;}
-        }
-        let(context,payload)=loan.census_parts();census.context(context)?;census.payload(payload)?;
-        for(_,payload)in loan.supplemental_census(){census.payload(payload)?;}
-        if let Some(sources)=loan.profile_sources(){census.profile_sources(sources)?;}
-        if let Some(sources)=loan.key_sources(){census.key_sources(sources)?;}
-        census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(loan.supplemental_frame_bytes())?;
+        census.selected_store_material(loan)?;census.add(loan.supplemental_frame_bytes())?;
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
         if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)

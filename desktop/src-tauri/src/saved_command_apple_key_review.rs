@@ -21,6 +21,7 @@ fn review_expires(admitted: Instant, received: Instant) -> Option<Instant> {
     )
 }
 impl Review {
+    pub(super) fn census_input(&self) -> &Arc<crate::asset_session::AppleProvisioningDocumentInput> { &self.input }
     pub(super) fn matches(
         &self,
         input: &crate::asset_session::AppleProvisioningDocumentInput,

@@ -35,6 +35,10 @@ pub(super) struct P12Source {
     checks: [Mutex<Check>; 2],
 }
 impl P12Source {
+    fn census_selected(&self) -> Result<Option<Arc<AppleP12Loan>>, Reason> {
+        self.selected.try_lock().map(|selected| selected.clone()).map_err(|_| Reason::CleanupUnknown)
+    }
+
     pub(super) fn capture(
         document: &DocumentBinding,
         state: &DocumentState,
@@ -120,6 +124,11 @@ impl AppleKeySources {
             && Arc::ptr_eq(&self.p8.key, &source.key)
             && Arc::ptr_eq(&self.p8.store, &source.store)
     }
+    /// Lossless census only: a failed TRY lock must never become an absent
+    /// selected P12. The ordinary producer accessor below is unchanged.
+    pub(in crate::asset_session) fn selected_p12_census(&self) -> Result<Option<Arc<AppleP12Loan>>, Reason> {
+        self.p12.as_ref().map(P12Source::census_selected).transpose().map(Option::flatten)
+    }
     pub(in crate::asset_session) fn selected_p12(&self) -> Option<Arc<AppleP12Loan>> {
         self.p12.as_ref()?.selected.try_lock().ok()?.clone()
     }
@@ -180,6 +189,29 @@ impl AppleKeySources {
                     && loan.p12_sha256() == *p12
                     && loan.current(document, state, None)
             })
+    }
+}
+
+#[cfg(test)]
+mod census_tests {
+    use super::*;
+
+    #[test]
+    fn selected_p12_census_distinguishes_real_none_contention_and_poison() {
+        let source = P12Source { selected: Mutex::new(None), selection: None,
+            checks: std::array::from_fn(|_| Mutex::new(Check::default())) };
+        assert!(source.census_selected().unwrap().is_none());
+        let held = source.selected.lock().unwrap();
+        assert!(matches!(source.census_selected(), Err(Reason::CleanupUnknown)));
+        drop(held);
+        assert!(source.census_selected().unwrap().is_none());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = source.selected.lock().unwrap();
+            panic!("inert P12 census lock poison");
+        }));
+        assert!(matches!(source.census_selected(), Err(Reason::CleanupUnknown)));
+        // A poisoned private slot is not an observed retired absence.
+        assert!(!source.retire_private());
     }
 }
 

@@ -7,16 +7,14 @@ umask 077
 # The canonical harness=false observer build/JSON remains untouched.
 # This ONE ordinary libtest links against the same debug feature graph
 # and same original source/release environment. No release/profile switch.
-# Replace the completed 77 roster, not the original owner or native observer.
-# 19 VersionEdit + 11 FutureTag + 28 GitHub3 + 28 Metadata + 16 ToolSetup
-# + 5 Apple admission + 1 Config fit + 3 catalogue + 3 older affected checks;
-# the FutureTag alias method is counted once (113 subtotal).
-# Add 9 Publication CLI + 5 original publication protocol + 6 session + 3 reserved-Open admission cases (136 total).
-# Reuse 60 of 76 prior successes; the two catalogue methods, CLI discovery,
-# 11 publication cases, 2 handoff predicates and prior failed Apple fit remain selected.
-# Six tests use private StatePort/Service fixtures; one more uses bounded local
-# Unix IPC. Two Tool tests join inert tasks/threads; all others are memory DATA.
-# Preserve their original closes/joins. No native/provider/product operation.
+# One focused140-case union: all five actual prior failures, 40 affected
+# prior successes, and 95 cases not in run39630318617's old136 roster.
+# Reuse91 unaffected successful cases instead of repeating that full run.
+# Covers reviewed A+B+C memory accounting, Version Prepare, Apple recovery,
+# Tool Prepare, ready-for-review PR and credential backup boundaries.
+# Three cases use original private State/Service fixtures (one bounded local
+# socket); others are DATA/in-memory/codec checks. No native provider, tool,
+# credential or Git operation/qualification. Preserve original closes/joins.
 rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
 export PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc"
 export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTUP_AUTO_INSTALL=0
@@ -25,144 +23,148 @@ export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTUP_
 # test binary. The embedded frontend has already been built for Tauri.
 "$rust_bin/cargo" fetch --locked --target "$MRK_MACOS_TARGET" --manifest-path desktop/src-tauri/Cargo.toml
 selected_tests=(
-  service_version_edit_protocol::tests::exact_submit_cannot_supply_path_values_or_borrow_other_consent
-  service_version_edit_protocol::tests::access_requires_exact_nulls_and_bound_result_never_empty_success
-  service_version_edit_requests::tests::install_precedes_public_allow_and_revoke_before_allow_is_not_rearmed
-  service_version_edit_requests::tests::permanent_submit_binds_same_lease_and_duplicate_never_enters_twice
-  service_version_edit_requests::tests::gui_winner_spends_unused_lease_without_borrowing_its_later_stop
-  service_version_edit_requests::tests::final_seal_serializes_submit_without_a_dropped_unobserved_entry
-  service_version_edit_requests::tests::original_read_clock_and_earliest_stop_survive_unavailable_renderer_or_renewal
-  service_version_edit_requests::tests::missing_original_or_unknown_is_absorbing_and_counter_overflow_never_rearms
-  service_version_edit_requests::tests::failed_native_retirement_and_exact_old_query_cannot_be_relabelled_current
-  service_version_edit_requests::tests::revoke_nonce_capacity_preserves_other_live_original_and_never_evicts
-  application_service::agent_version_edit::tests::genuine_service_read_reconnect_revoke_and_alias_never_mint_prepared_apply
-  edit_owner::agent_version_edit::tests::real_owner_without_original_prepared_cannot_mint_or_claim_lease
-  edit_owner::agent_version_edit::tests::borrowed_original_version_and_foreign_last_capacities_are_never_free_credit
-  asset_session::agent_version_edit::tests::actual_raw_variant_requires_only_exact_original_not_values_or_window
-  asset_session::agent_version_edit::tests::real_document_and_original_edit_future_include_retained_buffer_and_overflow
-  installed_cli::version_edit::tests::actual_collector_preserves_three_id_only_verbs_and_explicit_review
-  installed_cli::version_edit::tests::output_matches_same_original_and_unknown_never_claims_new_save_permission
-  installed_cli::version_edit::tests::compiled_capabilities_disclose_prepared_only_scope_and_same_catalogue
-  service_version_edit_requests::tests::known_cleanup_poll_keeps_original_cutoff_and_resamples_earlier_read_revocation
-  version_allocation_state_native::future_tag::tests::future_tag_shapes_do_not_relabel_branch_or_accept_null
-  version_allocation_state_native::future_tag::tests::future_wire_domain_is_separate_from_real_inventory_policy
-  version_allocation_state_native::future_tag::tests::v5_pending_uses_the_same_retained_port_and_never_relabels_inventory_or_source
-  github_play_cleanup_protocol::version_tag::tests::selection_has_no_tag_command_path_token_or_platform_authority
-  github_play_cleanup_protocol::version_tag::tests::prepared_tag_is_exact_branch_bound_body_and_once_key_excludes_final_commit
-  github_play_cleanup_protocol::version_tag::tests::pending_discovery_is_typed_but_has_no_prepare_or_dispatch_selection
-  github_play_cleanup_protocol::version_tag::tests::automatic_tag_versions_keep_two_or_three_components_and_platform_ceilings
-  service_play_cleanup_protocol::tests::typed_tag_wire_never_widens_old_default_or_accepts_free_provider_arguments
-  service_play_cleanup_requests::tests::tag_and_cleanup_share_one_grant_and_namespace_but_never_each_others_consent
-  service_request_catalogue::tests::future_tag_discovery_shares_cleanup_namespace_and_routes_exact_status
-  installed_cli::play_cleanup::tests::original_collector_routes_tag_ids_and_lost_ack_to_exact_typed_status_only
-  service_github_action_protocol::tests::exact_three_kinds_and_original_operation_ids_do_not_upgrade_another_grant
-  service_github_action_protocol::tests::strict_request_framing_refuses_private_fields_and_omitted_required_nulls
-  service_github_action_protocol::tests::effect_and_never_admitted_are_not_interchangeable_with_native_success
-  service_github_action_protocol::tests::all_closed_metadata_fits_status_with_wrapper_and_never_contains_material
-  service_github_action_requests::tests::three_kinds_require_caller_native_and_same_history_in_either_order
-  service_github_action_requests::tests::known_pre_registration_refusal_has_no_native_receipt
-  service_github_action_requests::tests::entered_failure_or_lost_caller_is_unknown_not_never_admitted
-  service_github_action_requests::tests::progress_history_ack_cannot_settle_later_final
-  service_github_action_requests::tests::history_failure_and_drop_are_absorbing_even_after_native_return
-  service_github_action_requests::tests::same_id_reconnect_is_not_a_second_submit_or_claim
-  service_github_action_requests::tests::exact_scope_and_service_ids_are_required
-  service_github_action_requests::tests::old_read_revoke_keeps_earlier_failure_after_later_stop
-  service_github_action_requests::tests::wrong_kind_id_and_foreign_effect_do_not_supply_completion
-  service_github_action_requests::tests::go_fact_is_monotone_and_does_not_imply_http_success
-  service_github_action_requests::tests::metadata_census_includes_rows_and_all_eight_worker_copies
-  service_github_action_requests::tests::short_metadata_with_overbound_physical_capacity_is_not_admitted
-  service_github_action_requests::tests::one_32_row_pool_retains_old_three_kind_tombstones_and_refuses_the_33rd
-  service_github_action_requests::tests::same_original_stop_advances_once_and_earlier_read_refines_without_finality
-  service_github_action_requests::tests::exact_document_query_survives_new_lease_without_adopting_another_doc
-  installed_cli::github_action::tests::three_fixed_verbs_use_only_ids_and_submit_requires_reviewed_confirmation
-  installed_cli::github_action::tests::returned_status_and_lost_reply_keep_exact_original_ids_and_no_replay
-  installed_cli::github_action::tests::real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output
-  github_connection_session::action_delegation::tests::streamed_review_binds_private_input_and_actual_original_edit_stamp
-  github_connection_session::action_delegation::tests::optional_origin_requires_same_claimed_live_scope_not_equal_metadata
-  github_connection_session::action_delegation::tests::typed_native_refusal_mapping_cannot_clear_unknown_or_supply_other_returns
+  agent_build_requests::tests::all32_mixed_family_failed_claims_share_terminal_and_public_copies_cannot_mutate_them
+  agent_build_requests::tests::earlier_failed_progress_is_preserved_beside_one_full_immutable_terminal
+  agent_build_requests::tests::ios_historical_report_has_real_counts_and_rejects_paths_synthetic_digests_or_signing
+  agent_build_requests::tests::ios_unknown_absorbs_and_lost_ack_blocks_both_families_without_native_receipt
+  agent_build_requests::tests::private_scope_and_incoming_report_capacity_refuse_without_rebinding_either_family
+  agent_build_requests::tests::typed_row_public_and_ancillary_bounds_keep_all32_and_four_nonipc_reports
+  agent_local_checks::tests::all32_failed_history_claims_share_exact_terminal_without_replay_or_public_mutation
+  agent_local_checks::tests::coalesced_latest_never_overwrites_retained_original_history_claim
+  agent_local_checks::tests::codes_only_report_and_config_must_match_without_turning_failures_into_passes
+  agent_local_checks::tests::duplicate_projection_is_noop_and_quote_covers_bounded_typed_rows_not_rss
+  agent_local_checks::tests::exact_native_ids_and_progress_order_and_terminal_immutability
+  agent_local_checks::tests::native_unknown_absorbs_later_terminal_and_history_never_changes_it
+  agent_local_checks::tests::older_failed_progress_claim_and_terminal_are_retained_without_two_full_reports
+  agent_local_checks::tests::oversized_native_scope_or_projection_capacity_cannot_replace_original_storage
+  apple_provisioning_journal::data::key_recovery::tests::armed_written_unknown_and_foreign_scope_do_not_gain_an_association
+  apple_provisioning_journal::data::key_recovery::tests::exact_durable_reference_is_required_and_old_pending_never_changes
+  apple_provisioning_journal::key_recovery::tests::recovery_records_share_the_original_operation_domain_and_32_row_capacity
+  apple_provisioning_journal::key_recovery::tests::recovery_store_write_retains_lost_ack_without_replay_or_old_row_rewrite
+  apple_provisioning_journal::key_recovery::tests::recovery_v5_preserves_legacy_rows_and_only_the_exact_key_fence
+  apple_provisioning_protocol::certificate_recovery::tests::durable_recovery_selection_keeps_pending_and_has_a_distinct_certificate_origin
+  apple_provisioning_protocol::certificate_recovery::tests::key_saved_history_is_extra_fullref_gate_not_current_loan_or_restored_authority
+  apple_provisioning_protocol::tests::key_contract::local_key_modes_keep_old_grammar_and_consent_closed_and_future_modes_unavailable
+  apple_provisioning_protocol::tests::key_contract::recovery_actual_decoder_requires_exact_original_comparison_before_terminal
+  apple_provisioning_protocol::tests::key_contract::recovery_decoder_rejects_crossref_both_hash_mismatches_foreign_mode_and_partial_frame
+  apple_provisioning_protocol::tests::key_contract::review_without_complete_inventory_cannot_mint_local_preparation_selection
+  apple_provisioning_protocol::tests::profile_contract::identity_phase_bound_and_unsupported_base64_are_not_silently_truncated
+  application_service::agent_version_edit::tests::combined_prepare_uses_saved_config_freshness_but_no_cached_version_proof
+  application_service::ipc_response_memory::tests::actual_typed_routes_and_inline_enum_cells_fit_the_closed_worker_quote
+  application_service::ipc_response_memory::tests::layout_growth_and_checked_overflow_refuse_instead_of_clamping_or_dropping_cells
+  application_service::ipc_response_memory::tests::only_the_named_old_worker_allocations_are_replaced_by_the_mixed_maximum
+  application_service::ipc_response_memory::tests::same_eight_workers_allow_one_metadata_not_a_ninth_or_second_large_exchange
+  application_service::ipc_response_memory::tests::transferred_ipc_terms_leave_metadata_active_rows_and_github_tombstones_charged
+  asset_commands::apple_distribution_key_fields::tests::recovery_frame_comparison_includes_private_scalar_not_only_csr_and_spki
+  asset_session::agent_configuration::configuration_storage_tests::actual_default_document_fits_configuration_quote_and_retained_capacity_refuses
   asset_session::agent_github_action::tests::fixed_main_decoder_accepts_only_the_original_closed_three_selections
-  asset_session::agent_github_action::tests::request_byte_bound_precedes_typed_parse_without_a_generic_value_tree
-  application_service::agent_github_action::tests::copied_status_presend_rechecks_project_alias_and_same_read_grant
-  service_request_catalogue::tests::combined_build_capacity_and_id_namespace_are_not_per_family
-  service_request_catalogue::tests::additional_ids_have_strict_schema_presence_privacy_and_original_commands
-  service_metadata_text_protocol::tests::conventional_complete_ios_and_android_unicode_bundles_cross_old_limit_without_truncation
-  service_metadata_text_protocol::tests::strict_large_entry_refuses_old_methods_duplicates_extras_and_unbounded_containers
-  service_metadata_text_protocol::tests::ordinary_four_kib_and_complete_field_order_limits_remain_exact
-  service_metadata_text_protocol::tests::bounded_encoder_counts_real_escaping_before_allocation_and_names_same_eight_callers
-  service_metadata_text_protocol::tests::native_load_data_requires_all_paths_hashes_baseline_and_empty_absent_distinction
-  service_metadata_text_requests::tests::load_visibility_waits_both_original_returns_in_either_order
-  service_metadata_text_requests::tests::original_unknown_or_lost_caller_is_absorbing_and_cannot_release_the_shared_queue
-  service_metadata_text_requests::tests::same_loaded_arc_and_prepare_digest_are_not_reloaded_or_retargeted
-  service_metadata_text_requests::tests::exact_revoke_before_allow_and_read_expiry_never_rearm_the_review
-  service_metadata_text_requests::tests::apply_consumes_once_and_final_waits_return_while_cancelled_effect_is_not_saved
-  service_metadata_text_requests::tests::same_thirty_two_combined_rows_have_closed_family_ids_and_original_query_after_coalescing
-  service_metadata_text_requests::tests::public_load_lifetime_ends_at_original_read_stop_not_a_later_status
-  application_service::agent_metadata_text::tests::current_read_enqueues_without_store_mutation_and_does_not_authorize_apply
-  application_service::agent_metadata_text::tests::renewal_observes_and_stops_old_request_but_never_revives_original_facet
-  application_service::agent_metadata_text::tests::wrong_project_stale_alias_and_unobserved_poison_are_not_read_or_native_authority
-  edit_owner::agent_metadata_text::tests::exact_metadata_publications_cannot_skip_repeat_or_rebase
-  edit_owner::agent_metadata_text::tests::metadata_agent_commands_accept_only_original_ids_and_separate_consent
-  edit_owner::agent_metadata_text::tests::fresh_open_comparison_retains_all_config_field_and_root_witnesses
-  edit_owner::agent_metadata_text::tests::missing_metadata_retirement_chain_never_changes_resource_facts_into_saved
-  edit_owner::agent_configuration::memory::metadata_tests::metadata_borrowed_census_keeps_original_other_domain_last_and_actual_capacity
-  edit_owner::agent_configuration::memory::metadata_tests::complete_metadata_submission_and_frame_are_bounded_before_adopting_or_cloning
-  installed_cli::metadata_text::tests::actual_collector_keeps_five_fixed_verbs_and_explicit_apply_review
-  installed_cli::metadata_text::tests::stdin_accepts_complete_long_public_fields_but_not_sparse_or_oversize_inputs
-  installed_cli::metadata_text::tests::capability_output_preserves_old_request_bound_and_names_new_only_limits
-  installed_cli::metadata_text::tests::missing_ack_output_retains_only_original_ids_and_never_invites_replay
   asset_session::agent_metadata_text::metadata_storage_tests::actual_default_document_fits_metadata_quote_and_retained_capacity_refuses
+  asset_session::agent_tool_setup::inspect::tests::current_service_saved_config_must_equal_the_original_allow_context
+  asset_session::agent_tool_setup::tests::actual_default_document_and_near_limit_copied_doctor_input_fit
+  asset_session::agent_tool_setup::tests::document_limit_is_checked_not_inferred_from_a_successful_census
+  asset_session::agent_version_edit::tests::real_document_and_original_edit_future_include_retained_buffer_and_overflow
+  asset_session::agent_version_prepare::tests::actual_main_variants_accept_only_origin_and_bounded_ui_counters
+  asset_session::agent_version_prepare::tests::real_document_preopen_future_keeps_payload_and_additional_original_debts
+  asset_session::apple_provisioning::agent::tests::apple_cli_uses_actual_default_document_plus_two_profile_payload_quotes
+  asset_session::apple_provisioning::memory_fixture::input_census_never_treats_contended_poisoned_or_dual_assets_as_absence
+  asset_session::lookup_memory::apple_memory::tests::active_same_original_live_and_pending_census_keep_borrowed_source_and_retirement
+  asset_session::lookup_memory::apple_memory::tests::old_review_original_without_return_is_refused_not_credited
+  asset_session::lookup_memory::apple_memory::tests::retained_review_material_is_counted_after_current_document_replacement
+  asset_session::lookup_memory::apple_memory::tests::same_ready_context_payloads_and_distinct_material_wrapper_are_deduplicated
+  asset_session::play_cleanup::tests::actual_document_growth_preserves_separate_cleanup_and_document_limits
+  asset_session::shared_memory_tests::actual_document_and_retained_capacity_obey_shared_admission
+  asset_session::shared_memory_tests::actual_document_plus_apple_future_fits_original_session_limit
+  asset_session::shared_memory_tests::actual_mac_native_quotes_fit_current_document_before_any_runtime_is_opened
+  asset_session::vault::backup_delegation::tests::authenticated_kind_policy_has_no_wrong_link_fallback_before_new
+  asset_session::vault::backup_delegation::tests::original_picker_import_is_android_only_without_narrowing_the_backend
+  asset_session::vault::backup_desktop::tests::android_upload_key_scope_does_not_qualify_other_desktop_contexts
+  asset_session::vault::backup_desktop::tests::idle_known_is_not_a_backup_publication_or_native_qualification
+  asset_session::vault::key_sources::p12::census_tests::selected_p12_census_distinguishes_real_none_contention_and_poison
+  edit_owner::agent_configuration::memory::tests::version_preparation_retains_original_last_backing_without_snapshot_credit
+  edit_owner::agent_configuration::memory::tests::version_preparation_whole_active_plus_incoming_frame_is_bounded_before_adoption
+  edit_owner::agent_version_prepare::tests::compact_opened_uses_actual_present_baselines_and_never_constructs_a_handoff
+  edit_owner::agent_version_prepare::tests::manual_publication_chain_has_only_the_original_seven_successors
+  github_connection_session::pull_request::pull_request_control_tests::pull_request_completion_never_invents_disconnect_or_another_stop_identity
+  github_pull_request_protocol::mode::tests::absent_only_defaults_to_draft_while_null_bool_object_unknown_and_duplicate_refuse
+  github_pull_request_protocol::mode::tests::both_modes_share_existing_record_response_and_heap_bounds_without_an_extra_pool
+  github_pull_request_protocol::mode::tests::legacy_draft_omits_mode_and_preserves_old_canonical_confirmation_and_digest
+  github_pull_request_protocol::mode::tests::original_private_go_and_prepare_input_require_the_same_mode
+  github_pull_request_protocol::mode::tests::ready_and_draft_cli_consents_match_the_native_prepared_not_the_shared_prefix
+  github_pull_request_protocol::mode::tests::ready_requires_explicit_retained_mode_and_correlated_boolean_not_false_alone
+  github_pull_request_protocol::pull_request_data_tests::pull_request_acknowledgement_and_unattributed_observation_are_distinct
+  github_pull_request_protocol::pull_request_data_tests::pull_request_pending_is_scope_only_and_never_restores_consent_or_write
+  github_pull_request_protocol::pull_request_data_tests::pull_request_private_text_is_bound_but_not_in_initial_or_public_review
+  github_pull_request_protocol::pull_request_data_tests::pull_request_raw_requires_exact_explicit_draft_and_never_merge_or_token
+  installed_cli::github_action::tests::real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output
+  installed_cli::tests::capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals
+  installed_cli::tool_setup::tests::lost_tools_request_receipt_is_id_only_no_replay
+  installed_cli::tool_setup::tests::three_tools_cli_verbs_admit_only_reviewed_ids
+  installed_cli::version_edit::tests::actual_collector_accepts_only_manual_values_or_original_reservation
+  installed_cli::version_edit::tests::actual_collector_preserves_three_id_only_verbs_and_explicit_review
+  installed_cli::version_edit::tests::compiled_capabilities_disclose_prepared_only_scope_and_same_catalogue
+  installed_cli::version_edit::tests::output_matches_same_original_and_unknown_never_claims_new_save_permission
+  installed_cli::version_edit::tests::preparation_output_is_exact_kind_original_and_never_an_apply_receipt
   installed_cli_ipc::tests::metadata_exchange_admission_is_fixed_fail_fast_and_reuses_only_its_original_lease
   installed_cli_ipc::tests::metadata_stalled_large_frame_keeps_lease_until_original_stop_close_and_return
-  asset_session::agent_configuration::configuration_storage_tests::actual_default_document_fits_configuration_quote_and_retained_capacity_refuses
+  release_version_edit_protocol::tests::agent_prepare_frame_bound_precedes_same_closed_version_decoder
+  saved_command_owner::apple_key::recovery::tests::recovery_normal_terminal_pipe_stop_never_substitutes_for_original_source_ack_and_joins
+  saved_command_owner::apple_provisioning::memory::tests::active_census_requires_same_parent_and_asset_including_key_recover
+  saved_command_owner::apple_provisioning::memory::tests::empty_registry_census_is_try_only_and_does_not_poison_or_publish
+  saved_command_owner::apple_provisioning::memory::tests::prepared_and_consumed_review_keep_two_exact_inputs_after_registry_unlock
+  saved_command_owner::apple_provisioning::memory::tests::retained_quote_keeps_original_buffers_and_only_replaces_absent_material_reservation
+  saved_command_owner::apple_provisioning::memory::tests::third_distinct_retained_input_is_refused_not_omitted
+  saved_command_owner::apple_provisioning::tests::apple_original_clock_and_finite_representation_quote_are_not_renewed
+  saved_command_owner::apple_provisioning::tests::apple_original_store_closure_keeps_mode_and_owner_gates
+  saved_command_owner::apple_provisioning::tests::apple_start_parent_dispatch_matches_actual_initialized_modes
+  saved_command_owner::tool_acquisition::agent::inspect::tests::later_preparation_cannot_renew_original_allow_read_or_first_failure
+  saved_command_owner::tool_acquisition::agent::inspect::tests::prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history
+  saved_command_owner::tool_acquisition::agent::inspect::tests::saved_inspect_wire_keeps_required_nulls_and_cannot_request_acquisition
+  saved_command_owner::tool_acquisition::tests::fixed_acquisition_deadline_and_buffers_are_not_renewed_by_later_phases
+  saved_command_owner::tool_acquisition::tests::unqualified_prepare_census_is_not_a_resumable_missing_prerequisite
+  service_github_action_requests::memory::tests::full_retained_row_and_ancillary_have_real_typed_bounds_not_response_size
+  service_github_action_requests::memory::tests::retained_ceiling_failure_never_borrows_a_retired_row_or_worker_credit
+  service_github_action_requests::tests::metadata_census_includes_rows_and_all_eight_worker_copies
+  service_github_action_requests::tests::one_32_row_pool_retains_old_three_kind_tombstones_and_refuses_the_33rd
+  service_github_action_requests::tests::short_metadata_with_overbound_physical_capacity_is_not_admitted
+  service_github_action_requests::tests::three_kinds_require_caller_native_and_same_history_in_either_order
+  service_metadata_text_protocol::tests::bounded_encoder_counts_real_escaping_before_allocation_and_names_same_eight_callers
+  service_protocol::ipc_response_tests::largest_closed_generic_lists_fit_the_source_derived_wire_and_typed_roster
+  service_protocol::ipc_response_tests::metadata_full_text_keeps_the_same_fixed_encoder_and_never_changes_frame_limits
+  service_protocol::ipc_response_tests::outer_fixed_encoder_preserves_old_envelopes_bytes_and_exact_capacity
+  service_protocol::ipc_response_tests::validation_and_oversize_errors_are_identical_without_growable_outer_output
+  service_request_catalogue::tests::combined_build_capacity_and_id_namespace_are_not_per_family
+  service_tool_setup_protocol::tests::exact_struct_report_and_global_frame_bounds
   service_tool_setup_protocol::tests::five_closed_reviews_require_exact_pairs_and_no_extra_fields
   service_tool_setup_protocol::tests::summaries_do_not_upgrade_completion_or_foreign_original
-  service_tool_setup_protocol::tests::exact_struct_report_and_global_frame_bounds
-  service_tool_setup_requests::tests::three_real_return_slots_required_in_both_callback_orders
+  service_tool_setup_requests::tests::bounded_consent_exhaustion_and_document_loss_do_not_reset
+  service_tool_setup_requests::tests::cancelled_unentered_still_needs_actual_caller_and_history
   service_tool_setup_requests::tests::exact_duplicate_nonce_and_foreign_cancel_do_not_replay_or_stop
   service_tool_setup_requests::tests::lost_caller_history_and_contradictory_callback_stay_unknown
   service_tool_setup_requests::tests::quiet_read_facet_preserves_earliest_failure_and_absolute_permission
-  service_tool_setup_requests::tests::cancelled_unentered_still_needs_actual_caller_and_history
-  service_tool_setup_requests::tests::bounded_consent_exhaustion_and_document_loss_do_not_reset
-  installed_cli::tool_setup::tests::three_tools_cli_verbs_admit_only_reviewed_ids
-  installed_cli::tool_setup::tests::lost_tools_request_receipt_is_id_only_no_replay
-  asset_session::agent_tool_setup::tests::document_limit_is_checked_not_inferred_from_a_successful_census
-  asset_session::agent_tool_setup::tests::actual_default_document_and_near_limit_copied_doctor_input_fit
-  environment_diagnostics_owner::agent::tests::quiet_read_revoke_reaches_original_doctor_join_and_keeps_earlier_f
-  environment_diagnostics_owner::agent::tests::doctor_quote_counts_real_value_heap_not_only_encoded_draft
-  saved_command_owner::android_registration::agent::tests::quiet_read_revocation_interrupts_original_registration_wait_without_relay
-  asset_session::shared_memory_tests::actual_document_plus_apple_future_fits_original_session_limit
-  asset_session::shared_memory_tests::actual_document_and_retained_capacity_obey_shared_admission
-  asset_session::shared_memory_tests::actual_mac_native_quotes_fit_current_document_before_any_runtime_is_opened
-  asset_session::apple_provisioning::agent::tests::apple_cli_uses_actual_default_document_plus_two_profile_payload_quotes
-  saved_command_owner::apple_provisioning::tests::apple_original_clock_and_finite_representation_quote_are_not_renewed
-  asset_session::play_cleanup::tests::actual_document_growth_preserves_separate_cleanup_and_document_limits
-  installed_cli::tests::capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals
-  installed_cli::tests::requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance
-  github_connection_session::publication::delegation::tests::exact_original_load_and_full_progress_are_required_not_marker_or_status_alone
-  github_connection_session::publication::delegation::tests::replacement_load_identity_is_distinct_even_with_equal_public_rows
-  github_connection_session::publication::delegation::tests::complete_roster_duplicate_foreign_and_nonpending_original_refuse
-  github_connection_session::publication::delegation::tests::original_native_edit_root_and_deadline_cannot_be_replaced_or_renewed
-  service_github_action_protocol::tests::publication_references_are_disjoint_typed_payloads_and_preserve_original_three_bytes
-  service_github_action_requests::tests::publication_read_go_and_return_stay_read_only_until_original_caller_and_history_return
-  service_github_action_requests::tests::publication_impossible_write_effect_and_lost_history_cannot_release_a_read_or_a_write
-  service_github_action_requests::tests::publication_never_admitted_is_not_a_native_return_and_shares_the_same_permission_pool
-  installed_cli::github_action::tests::publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusion
-  github_publication_protocol::tests::publication_commands_never_accept_paths_bytes_tokens_or_mutating_recovery
-  github_publication_protocol::tests::publication_initial_go_exact_review_and_pending_has_no_token
-  github_publication_protocol::tests::publication_ready_and_reply_refuse_duplicate_positional_partial_or_wrong_capture
-  github_publication_protocol::tests::publication_durable_phase_prefix_never_grants_replayed_writes
-  github_publication_protocol::tests::publication_positive_effect_requires_complete_matching_claims_and_pull
-  github_connection_session::publication::tests::settled_publication_request_only_retires_an_explicitly_retiring_connection
-  github_connection_session::publication::tests::final_go_uses_original_edit_root_request_and_one_use_owner_claim
-  github_connection_session::publication::tests::credential_consent_expiry_and_cooldown_cannot_claim_or_reset_original_clock
-  github_connection_session::publication::tests::cancellation_preserves_original_ticket_and_pre_or_post_go_effect
-  github_connection_session::publication::tests::unknown_cleanup_keeps_original_until_receipt_and_late_data_never_upgrades
-  github_connection_session::publication::tests::actual_consent_status_expiry_and_context_change_retire_private_prepared
-  edit_owner::version_reserve::tests::reserved_opened_matches_exact_platform_policy_and_original_source
-  edit_owner::version_reserve::tests::reserved_handoff_data_admits_only_exact_current_inventory_platform_policies
-  edit_owner::version_reserve::tests::paired_handoff_retains_original_envelope_provider_and_byte_bound
+  service_tool_setup_requests::tests::three_real_return_slots_required_in_both_callback_orders
+  service_version_edit_prepare_protocol::tests::compact_status_requires_nulls_and_exact_original_checkout_review
+  service_version_edit_prepare_protocol::tests::preparation_is_one_closed_manual_or_original_reservation_selection
+  service_version_edit_prepare_requests::tests::actual_call_returns_not_opened_or_prepared_events_enable_next_phase
+  service_version_edit_prepare_requests::tests::cancelled_unknown_foreign_or_unreturned_preparation_cannot_exempt_another_lease
+  service_version_edit_prepare_requests::tests::gui_winner_stops_only_delegation_and_keeps_later_original_read_revoke_out
+  service_version_edit_prepare_requests::tests::original_read_first_failure_and_lost_caller_never_rearm_or_become_final
+  service_version_edit_prepare_requests::tests::revision_overflow_and_exact_old_discovery_do_not_adopt_latest_preparation
+  service_version_edit_prepare_requests::tests::same_preparation_exemption_is_required_at_both_install_and_normal_submit
+  service_version_edit_prepare_requests::tests::shared_thirty_two_rows_include_preparation_and_apply_without_eviction
+  service_version_edit_prepare_requests::tests::unentered_return_claim_failure_and_late_final_data_have_distinct_custody
+  service_version_edit_requests::tests::actual_retained_enum_and_preparation_weak_lease_cells_keep_the_old_scope_allowance
+  service_version_edit_requests::tests::failed_native_retirement_and_exact_old_query_cannot_be_relabelled_current
+  service_version_edit_requests::tests::final_seal_serializes_submit_without_a_dropped_unobserved_entry
+  service_version_edit_requests::tests::gui_winner_spends_unused_lease_without_borrowing_its_later_stop
+  service_version_edit_requests::tests::install_precedes_public_allow_and_revoke_before_allow_is_not_rearmed
+  service_version_edit_requests::tests::known_cleanup_poll_keeps_original_cutoff_and_resamples_earlier_read_revocation
+  service_version_edit_requests::tests::missing_original_or_unknown_is_absorbing_and_counter_overflow_never_rearms
+  service_version_edit_requests::tests::original_read_clock_and_earliest_stop_survive_unavailable_renderer_or_renewal
+  service_version_edit_requests::tests::permanent_submit_binds_same_lease_and_duplicate_never_enters_twice
+  service_version_edit_requests::tests::revoke_nonce_capacity_preserves_other_live_original_and_never_evicts
+  service_version_edit_requests::tests::single_book_mixed_row_census_keeps_both_non_row_allowances
 )
-[[ "${#selected_tests[@]}" == 136 ]] || exit 1
+[[ "${#selected_tests[@]}" == 140 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -172,9 +174,9 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '136 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '140 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 136 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 140 passed; 0 failed; 0 ignored;' "$run_log"

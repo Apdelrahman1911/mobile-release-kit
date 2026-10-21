@@ -393,6 +393,18 @@ mod native {
         pub(crate) fn directory(&self) -> Result<&Directory> { self.book.directory() }
     }
     impl PrivateStateDirectory {
+        #[cfg(test)]
+        pub(crate) fn closed_apple_census_data() -> Self {
+            // Inert memory fixture ONLY: no directory/file, flock, loaded
+            // namespace or NativeUse can exist; begin_native_use must refuse.
+            let absent = FileKey { device: 0, inode: 0, mode: 0, uid: 0, gid: 0,
+                links: 0, size: 0, modified: (0, 0), changed: (0, 0) };
+            Self { book: Mutex::new(Book { directory: None, lock: None,
+                lock_key: absent, reservation: absent, version: StoreVersion::V1,
+                originals: BTreeMap::new(), poisoned: false, endpoint_active: false,
+                native_use: None, cut_after_rename: false }) }
+        }
+
         pub(crate) fn open(app_data: &Path) -> Result<Self> {
             Self::open_excluding_projects(app_data, &[])
         }

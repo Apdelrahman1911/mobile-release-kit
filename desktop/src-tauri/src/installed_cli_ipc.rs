@@ -13,7 +13,7 @@ const SOCKET: &str = "s";
 const DESCRIPTOR: &str = "agent.connection";
 const MAGIC: &[u8; 8] = b"MRKIPC01";
 const HANDSHAKE: usize = 72;
-const CLIENTS: usize = 8;
+pub(crate) const CLIENTS: usize = 8;
 const SERVER_DEADLINE: Duration = Duration::from_secs(5);
 const CLIENT_DEADLINE: Duration = Duration::from_secs(8);
 

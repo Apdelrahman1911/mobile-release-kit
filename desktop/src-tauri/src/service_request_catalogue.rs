@@ -21,20 +21,20 @@ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_
     + crate::service_tool_setup_protocol::REQUEST_LIMIT;
 pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
 pub const VIEW_BYTES: usize = 64 * 1024;
-// Same eight IPC workers: one typed view, its encoded output, finite borrowed
-// inbox-handle lists and small scalar projection scratch each. Existing inbox
-// owners and IPC frame/input allocations keep their original charges. No new
-// persistent/inbox backing and no Report/Review clone is part of this route.
-// This is named backing accounting, not an RSS estimate.
-pub(crate) const DOCUMENT_BACKING: usize = 8
-    * (VIEW_BYTES
+// One existing IPC worker: its typed view, exact encoded output, bounded
+// borrowed inbox-handle lists and scalar projection scratch. No Report/Review
+// clone, persistent inbox or native owner is part of this route. The actual
+// Document debit is the shared SAME8 mixed maximum, not this eightfold reference.
+pub(crate) const IPC_WORKER_BACKING: usize = VIEW_BYTES
         + std::mem::size_of::<Catalogue>()
         + 64
         + DETAIL_LIMIT * (std::mem::size_of::<Request>() + 3 * 32 + std::mem::size_of::<usize>())
         // The returned IDs plus ONE temporary immutable-input list. All
         // additional inboxes are copied in sequence, never held concurrently.
         + (ADDITIONAL_LIMIT + 32) * (std::mem::size_of::<AdditionalRequest>() + 32)
-        + 1024);
+        + 1024;
+// Unpooled reference retained for the original capacity regression only.
+pub(crate) const DOCUMENT_BACKING: usize = 8 * IPC_WORKER_BACKING;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

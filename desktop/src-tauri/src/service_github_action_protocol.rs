@@ -5,10 +5,12 @@ pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
 pub(crate) const INTENT_MS: u64 = 120_000;
-// 32 retained rows/scopes/native+history copies *16KiB +8 incremental typed/
-// encoded worker copies *32KiB +128KiB fixed/transient backing <1MiB. Includes
-// tombstones and full 4KiB root per row. Original IPC/native backing is separate.
-pub(crate) const DOCUMENT_BACKING: usize = 1024 * 1024;
+// All32 original rows/scopes/history remain, including tombstones and
+// actual root/string capacity. The requests child checks real typed row and
+// ancillary ceilings. Only the separately named IPC8 term is transferred.
+pub(crate) const ROW_BACKING: usize = 16 * 1024;
+pub(crate) const IPC_WORKER_BACKING: usize = 32 * 1024;
+pub(crate) const DOCUMENT_BACKING: usize = REQUEST_LIMIT * ROW_BACKING + 2 * 128 * 1024;
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::deserialize(d)
 }

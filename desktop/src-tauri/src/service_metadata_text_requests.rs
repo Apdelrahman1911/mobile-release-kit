@@ -18,13 +18,14 @@ pub(crate) const ROW_BACKING: usize =
     32 * (std::mem::size_of::<Entry>() + std::mem::size_of::<Row>() + 8192);
 // ONE active observation/proposal plus relay and native conversion copies. The
 // same8 socket callers' small inputs plus one admitted Metadata exchange are
-// separately charged by IPC_BACKING; no worker duplication or old debit credit.
+// separately charged by the SAME8 mixed pool. Retained/active/control backing
+// below is never pooled or removed on a returned/unknown worker.
 pub(crate) const ACTIVE_BACKING: usize = 4 * p::TYPED_INPUT_BYTES + 4 * p::READ_BYTES;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const IPC_CONTROL_BACKING: usize = crate::installed_cli_ipc::METADATA_CONTROL_BACKING;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const IPC_CONTROL_BACKING: usize = 0; // No installed IPC Endpoint on these targets.
-pub(crate) const DOCUMENT_BACKING: usize = ROW_BACKING + ACTIVE_BACKING + p::IPC_BACKING + IPC_CONTROL_BACKING;
+pub(crate) const DOCUMENT_BACKING: usize = ROW_BACKING + ACTIVE_BACKING + IPC_CONTROL_BACKING;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Read,

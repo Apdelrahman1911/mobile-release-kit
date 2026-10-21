@@ -14,6 +14,9 @@ mod store_versions;
 #[path="asset_session_paired_store_material.rs"]
 mod paired_material;
 pub(crate) use store_versions::StoreVersionMaterial;
+#[cfg(test)]
+#[path = "asset_session_apple_material_memory_fixture.rs"]
+mod apple_memory_fixture;
 
 pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
 pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";

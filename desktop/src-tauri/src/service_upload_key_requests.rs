@@ -21,7 +21,8 @@ const ARC_HEADER: usize = 2 * std::mem::size_of::<usize>();
 // lease consent and lease request (3). Published native/status references
 // coexist; sharing their meaning does not share their String allocations.
 const ROW_STRINGS: usize = (4 + 4 + 4 + 4 + 2 + 3) * ID_BYTES;
-const IPC_CONCURRENCY: usize = 8; // SAME existing installed IPC worker ceiling.
+// SAME8 common pool; all typed rows/old native links below remain charged.
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + p::RAW_LIMIT + 2 * p::VIEW_LIMIT;
 pub(crate) const DOCUMENT_BACKING: usize = std::mem::size_of::<Inbox>() + std::mem::size_of::<Book>() + ID_BYTES
     + p::CONSENT_LIMIT * (std::mem::size_of::<Id>() + ID_BYTES)
     + p::REQUEST_LIMIT * (std::mem::size_of::<Arc<Entry>>() + std::mem::size_of::<Entry>()
@@ -29,8 +30,7 @@ pub(crate) const DOCUMENT_BACKING: usize = std::mem::size_of::<Inbox>() + std::m
         + 5 * ARC_HEADER + 64 + ROW_STRINGS)
     // One not-yet-submitted scope/lease and the old/current native-link cells.
     + std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>() + std::mem::size_of::<ReadPermission>()
-    + 4 * ARC_HEADER + 3 * (std::mem::size_of::<NativeLink>() + ARC_HEADER) + 64 + 3 * ID_BYTES
-    + IPC_CONCURRENCY * (crate::service_protocol::REQUEST_BYTES + p::RAW_LIMIT + 2 * p::VIEW_LIMIT);
+    + 4 * ARC_HEADER + 3 * (std::mem::size_of::<NativeLink>() + ARC_HEADER) + 64 + 3 * ID_BYTES;
 
 pub(crate) struct ReadPermission {
     end: Instant,

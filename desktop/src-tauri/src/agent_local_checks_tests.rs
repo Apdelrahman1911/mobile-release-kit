@@ -446,12 +446,157 @@ fn duplicate_projection_is_noop_and_quote_covers_bounded_typed_rows_not_rss() {
     changes.borrow_and_update();
     link.publish(pending(OperationState::Prepared, 1)).unwrap();
     assert!(!changes.has_changed().unwrap());
-    let row_quote = std::mem::size_of::<Entry>()
-        + std::mem::size_of::<Lease>()
-        + std::mem::size_of::<NativeScope>()
-        + 4096
-        + 1024
-        + 2 * (std::mem::size_of::<Operation>() + 128 * std::mem::size_of::<Finding>() + 4096);
-    assert!((LIMIT + 2) * row_quote + 2 * REPORT_LIMIT < DOCUMENT_BACKING);
+    assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
+    assert!(ROW_CEILING <= ROW_BACKING);
+    assert!(ANCILLARY_CEILING <= ANCILLARY_BACKING);
+    assert_eq!(DOCUMENT_BACKING, 851_968);
+    assert!(LIMIT * ROW_CEILING + ANCILLARY_CEILING + 4 * REPORT_LIMIT <= DOCUMENT_BACKING);
+    eprintln!("local report DATA: row={ROW_CEILING}/16384 public={PUBLIC_HEAP_CEILING}/8192 ancillary={ANCILLARY_CEILING}/65536 retained={DOCUMENT_BACKING}; shared eight IPC copies excluded");
     claim.returned(true);
+}
+
+fn full_terminal(revision: u32) -> Operation {
+    let counts = STATUSES.into_iter().map(|status| {
+        (status, if status == CoreStatus::Fail { 128 } else { 0 })
+    }).collect();
+    Operation {
+        state: OperationState::Succeeded,
+        settlement: Settlement::Settled,
+        outcome: Some(Outcome::Complete),
+        result: Some(Report {
+            schema_version: 1,
+            scope: "saved-local-android-project-checks".into(),
+            used_config: Config { bytes: 123, sha256: "f".repeat(64) },
+            findings: (0..128).map(|ordinal| Finding {
+                ordinal, check: Check::ConfiguredProjectCheck,
+                message: Check::ConfiguredProjectCheck, status: CoreStatus::Fail,
+                project_check_index: Some(ordinal % 32),
+            }).collect(),
+            summary: Summary { total: 128, shown: 128, omitted: 0, counts },
+            limitations: LIMITATIONS.to_vec(),
+        }),
+        ..pending(OperationState::Prepared, revision)
+    }
+}
+
+#[test]
+fn all32_failed_history_claims_share_exact_terminal_without_replay_or_public_mutation() {
+    let mut f = Fixture::new();
+    let scope = Arc::get_mut(&mut f.scope).unwrap();
+    scope.root = PathBuf::from(format!("/{}", "r".repeat(ROOT_HEAP_BYTES - 1)));
+    scope.runtime_id = "r".repeat(64);
+    let mut original_queries = Vec::new();
+    for n in 1..=LIMIT {
+        f.allow();
+        let mut input = f.submit('c');
+        input.request_id = Id::parse(&format!("{n:032x}")).unwrap();
+        f.inbox.submit(input.clone(), &f.point()).unwrap();
+        let claim = f.inbox.claim().unwrap().unwrap();
+        let operation = Id::parse(&format!("{:032x}", n + 100)).unwrap();
+        let generation = Id::parse(&format!("{:032x}", n + 200)).unwrap();
+        let link = claim.entry().bind(operation.clone(), generation.clone(), 1).unwrap();
+        assert!(Arc::ptr_eq(&link.entry().lease.scope, &f.scope));
+        claim.returned(true);
+        let mut terminal = full_terminal(2);
+        terminal.operation_id = operation;
+        terminal.owner_generation = generation;
+        // A valid native projection with spare capacity is bounded before it
+        // is compacted. It does not leave that spare capacity in the32 rows.
+        let report = terminal.result.as_mut().unwrap();
+        report.findings.reserve(128);
+        report.scope.reserve(128);
+        report.limitations.reserve(32);
+        assert!(terminal.valid());
+        link.publish(terminal).unwrap();
+        let retained = link.entry().latest.lock().unwrap().clone().unwrap();
+        let report = retained.result.as_ref().unwrap();
+        assert_eq!(report.findings.capacity(), report.findings.len());
+        assert_eq!(report.scope.capacity(), report.scope.len());
+        assert_eq!(report.limitations.capacity(), report.limitations.len());
+        assert!(retained.heap_bytes().unwrap() + 3 * ID_HEAP_BYTES <= STATUS_HEAP_BYTES);
+        let (_, mut history_dto) = link.entry().claim_history().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&retained,
+            link.entry().publication.lock().unwrap().claim.as_ref().unwrap()));
+        // Public copies have no shared mutable access to the retained value.
+        history_dto.result.as_mut().unwrap().summary.counts.insert(CoreStatus::Fail, 0);
+        let mut status_dto = link.entry().status().unwrap();
+        status_dto.operation.as_mut().unwrap().result.as_mut().unwrap().findings.clear();
+        assert!(link.entry().history_returned(2, Err(Error::StateUnknown)).is_err());
+        assert_eq!(retained.result.as_ref().unwrap().findings.len(), 128);
+        assert_eq!(retained.result.as_ref().unwrap().summary.counts[&CoreStatus::Fail], 128);
+        assert!(link.entry().claim_history().unwrap().is_none());
+        let status = f.inbox.submit(input.clone(), &f.point()).unwrap();
+        assert!(status.do_not_replay && !status.history_available);
+        assert_eq!(status.operation.unwrap().settlement, Settlement::Settled);
+        assert!(f.inbox.claim().unwrap().is_none());
+        original_queries.push(input.query());
+    }
+    let entries = f.inbox.entries().unwrap();
+    assert_eq!(entries.len(), LIMIT);
+    for entry in &entries {
+        let latest = entry.latest.lock().unwrap().clone().unwrap();
+        let publication = entry.publication.lock().unwrap();
+        assert!(publication.failed);
+        assert!(Arc::ptr_eq(&latest, publication.claim.as_ref().unwrap()));
+    }
+    f.allow(); // Existing Allow behavior remains; full launch ledger refuses submit.
+    assert_eq!(f.inbox.submit(f.submit('d'), &f.point()).unwrap_err(), Error::Busy);
+    for query in original_queries {
+        assert!(f.inbox.query(&query, false).unwrap().do_not_replay);
+    }
+}
+
+#[test]
+fn older_failed_progress_claim_and_terminal_are_retained_without_two_full_reports() {
+    let f = Fixture::new();
+    let (_, claim) = f.claimed();
+    let link = claim.entry().bind(id('d'), id('e'), 1).unwrap();
+    claim.returned(true);
+    let (_, progress) = link.entry().claim_history().unwrap().unwrap();
+    let old_claim = link.entry().publication.lock().unwrap().claim.clone().unwrap();
+    link.publish(full_terminal(2)).unwrap();
+    let terminal = link.entry().latest.lock().unwrap().clone().unwrap();
+    assert!(!Arc::ptr_eq(&old_claim, &terminal));
+    assert!(old_claim.result.is_none());
+    assert_eq!(old_claim.status_revision, progress.status_revision);
+    assert!(terminal.result.is_some());
+    assert!(link.entry().history_returned(1, Err(Error::StateUnknown)).is_err());
+    assert!(Arc::ptr_eq(&old_claim,
+        link.entry().publication.lock().unwrap().claim.as_ref().unwrap()));
+    let mut changed = terminal.as_ref().clone();
+    changed.status_revision += 1;
+    assert_eq!(link.publish(changed), Err(Error::StateUnknown));
+    assert!(Arc::ptr_eq(&terminal, link.entry().latest.lock().unwrap().as_ref().unwrap()));
+    assert!(!link.entry().status().unwrap().history_available);
+}
+
+#[test]
+fn oversized_native_scope_or_projection_capacity_cannot_replace_original_storage() {
+    let live = Fixture::new();
+    live.allow();
+    let original_lease = live.inbox.book.lock().unwrap().lease.clone().unwrap();
+    let mut f = Fixture::new();
+    Arc::get_mut(&mut f.scope).unwrap().root.reserve(ROOT_HEAP_BYTES + 1);
+    assert!(f.scope.root.as_os_str().len() < ROOT_HEAP_BYTES);
+    assert!(matches!(live.inbox.allow(f.scope.clone()), Err(Error::InvalidRequest)));
+    assert!(Arc::ptr_eq(&original_lease, live.inbox.book.lock().unwrap().lease.as_ref().unwrap()));
+    assert!(original_lease.revoked.get().is_none());
+    assert!(live.inbox.access().unwrap().enabled);
+    assert!(live.inbox.entries().unwrap().is_empty());
+    let f = Fixture::new();
+    let (_, claim) = f.claimed();
+    let link = claim.entry().bind(id('d'), id('e'), 1).unwrap();
+    claim.returned(true);
+    let original = link.entry().latest.lock().unwrap().clone().unwrap();
+    let mut oversized = full_terminal(2);
+    oversized.result.as_mut().unwrap().findings.reserve(
+        REPORT_LIMIT / std::mem::size_of::<Finding>() + 1);
+    assert!(oversized.valid());
+    assert_eq!(link.publish(oversized), Err(Error::StateUnknown));
+    assert!(Arc::ptr_eq(&original, link.entry().latest.lock().unwrap().as_ref().unwrap()));
+    assert!(Arc::ptr_eq(&f.scope, &link.entry().lease.scope));
+    // The valid terminal still uses the original IDs; an allocation refusal
+    // does not reset its revision, owner identity or pending operation.
+    link.publish(full_terminal(2)).unwrap();
+    assert_eq!(link.entry().status().unwrap().operation.unwrap().settlement, Settlement::Settled);
 }

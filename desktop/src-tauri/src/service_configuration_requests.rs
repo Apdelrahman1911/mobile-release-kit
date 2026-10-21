@@ -19,9 +19,11 @@ use std::{
 // two main-window copies. Not RSS, not extra native owner credit. The existing
 // config owner retains its original buffers; bounded derivation is charged
 // separately at the native admission hook.
+// ONLY the separate raw4KiB worker term is pooled. The +18 typed/native/GUI
+// overlap is mixed ownership and remains charged in full.
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES;
 pub(crate) const DOCUMENT_BACKING: usize = (p::REQUEST_LIMIT + 18)
-    * (p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>())
-    + 8 * crate::service_protocol::REQUEST_BYTES;
+    * (p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>());
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Read,

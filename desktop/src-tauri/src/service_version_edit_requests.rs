@@ -15,12 +15,26 @@ use std::{
 };
 use tokio::sync::{watch, Notify};
 
-pub(crate) const DOCUMENT_BACKING: usize = 32
-    * (2 * p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>())
+pub(crate) const APPLY_ROW_BACKING: usize = 2 * p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>();
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + p::REQUEST_BYTES + 4 * p::STATUS_BYTES;
+// One locked Book.rows Vec<Retained>, both insertion arms refuse len>=32,
+// and neither erases old rows. A lease/caller retains the SAME Arc or a Weak;
+// no second copied row is omitted. Both non-row scratch allowances stay.
+pub(crate) const ROW_BACKING: usize = if APPLY_ROW_BACKING > crate::service_version_edit_prepare_requests::ROW_BACKING {
+    APPLY_ROW_BACKING
+} else { crate::service_version_edit_prepare_requests::ROW_BACKING };
+// Retained now tags each Arc slot; keep old+new Vec capacity during growth.
+// Every old Apply lease plus the unsubmitted current lease can also retain
+// the new OnceLock<Weak<Preparation>>, including one alignment allowance.
+pub(crate) const SHARED_TYPED_BACKING: usize = 2 * p::REQUEST_LIMIT
+    * (std::mem::size_of::<Retained>() - std::mem::size_of::<Arc<Entry>>())
+    + (p::REQUEST_LIMIT + 1) * (std::mem::size_of::<std::sync::OnceLock<Weak<crate::service_version_edit_prepare_requests::Entry>>>()
+        + std::mem::align_of::<Lease>());
+pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT * ROW_BACKING
     + 32 * 128
-    + 8 * (crate::service_protocol::REQUEST_BYTES + p::REQUEST_BYTES + 4 * p::STATUS_BYTES)
     + 2 * p::STATUS_BYTES
-    + crate::service_version_edit_prepare_requests::DOCUMENT_BACKING;
+    + crate::service_version_edit_prepare_requests::NON_ROW_BACKING
+    + SHARED_TYPED_BACKING;
 
 pub(crate) struct Scope {
     pub saved: SavedPoint,

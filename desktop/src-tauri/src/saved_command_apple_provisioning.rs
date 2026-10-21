@@ -23,6 +23,8 @@ mod certificate_review;
 mod p12_review;
 #[path = "saved_command_apple_profile_recovery.rs"]
 mod profile_recovery;
+#[path = "saved_command_apple_memory.rs"]
+mod memory;
 
 /// Worker/provider/source and material CONSUMERS, driver/manager and all
 /// PRE-final-CAS jobs have joined. The same material loan remains retained for
@@ -272,6 +274,8 @@ pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
 /// Retained private review/last-status backing remains after the operation
 /// releases its runtime. The original Document census charges this once for
 /// every later admission; the active quote below subtracts that same charge.
+/// Actual prior/current Input material descendants are visited through the
+/// same locked Document census, not a permanent guessed six-MiB allocation.
 pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
     store::document_backing_bytes()?
         .checked_add(APPLE_PROVISIONING_INPUT_LIMIT)?
@@ -279,7 +283,7 @@ pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
         .checked_add(recovery_backing_bytes()?)?
         .checked_add(8192)?
         .checked_add(16*1024)?
-        .checked_add(6*1024*1024)
+        .checked_add(memory::CONTROL_BYTES)
 }
 fn private_input_backing_bytes(mode: apple_wire::Mode) -> usize {
     // Bounds of the SAME native writer's borrowed parts, not a smaller
@@ -346,7 +350,7 @@ pub(crate) fn document_backing_bytes(mode: apple_wire::Mode) -> Option<usize> {
         .checked_add(std::mem::size_of::<profile_review::Review>())?
         .checked_add(std::mem::size_of::<key_review::Review>())?
         .checked_add(parent)?
-        .checked_add(6*1024*1024)?
+        .checked_add(memory::CONTROL_BYTES)?
         .checked_sub(retained_document_backing_bytes()?)
 }
 

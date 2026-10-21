@@ -14,6 +14,7 @@ fn expires(admitted: Instant, received: Instant) -> Option<Instant> {
     )
 }
 impl Review {
+    pub(super) fn census_input(&self) -> &Arc<crate::asset_session::AppleProvisioningDocumentInput> { &self.input }
     fn selection(&self, input: &crate::asset_session::AppleProvisioningDocumentInput) -> bool {
         let mode = input.context().mode;
         matches!(mode, apple_wire::Mode::P12Reuse | apple_wire::Mode::P12Save)

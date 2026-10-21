@@ -17,9 +17,30 @@ use std::{
 };
 pub const LIMIT: usize = 32;
 pub const START_WINDOW: Duration = Duration::from_secs(900);
-// ONE shared32-row allocation (not32 per family) plus the two fixed small
-// native grant comparisons. No native resource graph is duplicated.
-pub(crate) const DOCUMENT_BACKING: usize = 4 * 1024 * 1024;
+// ONE shared32-row allocation (not32 per family). The full terminal report is
+// immutable and shared by latest/history; an older distinct claim has no
+// report. No tombstone, failed claim or native resource graph is discarded.
+const ROW_BACKING: usize = 16 * 1024;
+const ANCILLARY_BACKING: usize = 64 * 1024;
+pub(crate) const STATUS_HEAP_BYTES: usize = 8 * 1024;
+// Keep original native/incoming reports, compacting overlap and one off-IPC
+// history DTO here. The original endpoint's eight IPC copies/encoders are
+// covered by its shared peak, not eight independent workers per family.
+pub(crate) const DOCUMENT_BACKING: usize =
+    LIMIT * ROW_BACKING + ANCILLARY_BACKING + 4 * android::REPORT_LIMIT;
+const ID_HEAP_BYTES: usize = 64;
+const ROOT_HEAP_BYTES: usize = 4096;
+// Same closed nine-entry enum/u32 map as the original report. Freshly rebuild
+// it; at most nine std nodes, each bounded by512 for the pinned11/12-slot tree.
+const SUMMARY_HEAP_BYTES: usize = 9 * 512;
+
+fn compact_string(value: &mut String) {
+    *value = std::mem::take(value).into_boxed_str().into_string();
+}
+fn compact_version(value: &mut android::Version) {
+    compact_string(&mut value.sha256);
+    compact_string(&mut value.name);
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Family {
     AndroidInspect,
@@ -42,6 +63,16 @@ impl Review {
             Self::Android(v) => v.valid(),
             Self::Ios(v) => v.valid(),
         }
+    }
+    fn capacity_valid(&self) -> bool {
+        self.config().sha256.capacity() <= 64
+            && self.version().sha256.capacity() <= 64
+            && self.version().name.capacity() <= 64
+            && match self {
+                Self::Android(v) => v.tools.record_sha256.capacity() <= 64
+                    && v.tools.instance.retained_bytes() <= ID_HEAP_BYTES,
+                Self::Ios(_) => true,
+            }
     }
     pub(crate) fn config(&self) -> &Config {
         match self {
@@ -138,6 +169,59 @@ impl Operation {
             }
             _ => false,
         }
+    }
+    fn heap_bytes(&self) -> Option<usize> {
+        let mut n = self.operation_id().retained_bytes()
+            .checked_add(self.owner_generation().retained_bytes())?;
+        match self {
+            Self::Android(o) => if let Some(r) = &o.result {
+                n = n.checked_add(r.used_config.sha256.capacity())?
+                    .checked_add(r.used_version.sha256.capacity())?
+                    .checked_add(r.used_version.name.capacity())?
+                    .checked_add(r.artifact.sha256.capacity())?
+                    .checked_add(r.findings.capacity().checked_mul(std::mem::size_of::<android::Finding>())?)?
+                    .checked_add(SUMMARY_HEAP_BYTES)?;
+            },
+            Self::Ios(o) => if let Some(r) = &o.result {
+                n = n.checked_add(r.used_config.sha256.capacity())?
+                    .checked_add(r.used_version.sha256.capacity())?
+                    .checked_add(r.used_version.name.capacity())?;
+            },
+        }
+        Some(n)
+    }
+    fn compact(mut self) -> Result<Self, Error> {
+        let report_limit = match self.family() {
+            Family::AndroidInspect => android::REPORT_LIMIT,
+            Family::IosArchive => ios::REPORT_LIMIT,
+        };
+        if self.operation_id().retained_bytes() > ID_HEAP_BYTES
+            || self.owner_generation().retained_bytes() > ID_HEAP_BYTES
+            || self.heap_bytes().is_none_or(|n| n > report_limit)
+        {
+            return Err(Error::StateUnknown);
+        }
+        match &mut self {
+            Self::Android(o) => if let Some(r) = &mut o.result {
+                compact_string(&mut r.used_config.sha256);
+                compact_version(&mut r.used_version);
+                compact_string(&mut r.artifact.sha256);
+                r.findings = std::mem::take(&mut r.findings).into_boxed_slice().into_vec();
+                r.summary.counts = std::mem::take(&mut r.summary.counts).into_iter().collect();
+            },
+            Self::Ios(o) => if let Some(r) = &mut o.result {
+                compact_string(&mut r.used_config.sha256);
+                compact_version(&mut r.used_version);
+            },
+        }
+        // Three Query IDs and the unchanged maximum five-heap Review coexist
+        // with the public operation. Inline enums/DTOs are charged separately.
+        if self.heap_bytes().and_then(|n| n.checked_add(8 * ID_HEAP_BYTES))
+            .is_none_or(|n| n > STATUS_HEAP_BYTES)
+        {
+            return Err(Error::StateUnknown);
+        }
+        Ok(self)
     }
     #[cfg(test)]
     pub(crate) fn android(&self) -> &android::Operation {
@@ -309,6 +393,7 @@ pub(crate) struct NativeScope {
 impl NativeScope {
     fn valid(&self) -> bool {
         self.review.valid()
+            && self.review.capacity_valid()
             && self.observation_revision != 0
             && self.inode != 0
             && self.registration != 0
@@ -317,8 +402,11 @@ impl NativeScope {
             && self.draft_revision < u32::MAX
             && self.baseline_generation < u32::MAX
             && (1..=64).contains(&self.runtime_id.len())
+            && self.project_id.retained_bytes() <= ID_HEAP_BYTES
+            && self.runtime_id.capacity() <= 64
             && self.root.is_absolute()
             && self.root.as_os_str().len() <= 4096
+            && self.root.capacity() <= ROOT_HEAP_BYTES
     }
     pub(crate) fn matches(&self, point: &crate::agent_local_checks::SavedPoint) -> bool {
         self.project_id == point.project_id
@@ -369,7 +457,7 @@ struct Original {
 }
 struct Publication {
     acknowledged: Option<u32>,
-    claim: Option<Operation>,
+    claim: Option<Arc<Operation>>,
     failed: bool,
 }
 pub(crate) struct Entry {
@@ -381,9 +469,33 @@ pub(crate) struct Entry {
     start_at: OnceLock<Instant>,
     cancelled: OnceLock<Instant>,
     native_stop: OnceLock<tokio::sync::watch::Sender<bool>>,
-    latest: Mutex<Option<Operation>>,
+    latest: Mutex<Option<Arc<Operation>>>,
     publication: Mutex<Publication>,
 }
+// Include two scalar operation cells but only one full terminal report graph.
+// Actual monotone publish rejects every changed successor of a terminal value.
+// Scope capacities are checked BEFORE Allow; compact report/public DTO bounds
+// include all hashes/IDs/version text and the freshly rebuilt nine-entry map.
+const REVIEW_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES;
+const SCOPE_HEAP_CEILING: usize = ROOT_HEAP_BYTES + 2 * ID_HEAP_BYTES
+    + REVIEW_HEAP_CEILING;
+const PUBLIC_HEAP_CEILING: usize = 5 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
+    + 4 * 64 + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
+const ROW_CEILING: usize = std::mem::size_of::<Entry>()
+    + std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+    + 2 * std::mem::size_of::<Operation>() + std::mem::size_of::<NativeLink>()
+    + 8 * 2 * std::mem::size_of::<usize>() + 2 * 512 + 9 * ID_HEAP_BYTES
+    + SCOPE_HEAP_CEILING + STATUS_HEAP_BYTES;
+const ANCILLARY_CEILING: usize = std::mem::size_of::<Inbox>()
+    + std::mem::size_of::<Book>() + 2 * LIMIT * std::mem::size_of::<Arc<Entry>>()
+    + 4 * (std::mem::size_of::<Lease>() + std::mem::size_of::<NativeScope>()
+        + SCOPE_HEAP_CEILING + 512)
+    + 8 * (std::mem::size_of::<Access>() + ID_HEAP_BYTES) + 4096;
+const _: () = {
+    assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
+    assert!(ROW_CEILING <= ROW_BACKING);
+    assert!(ANCILLARY_CEILING <= ANCILLARY_BACKING);
+};
 impl Entry {
     pub(crate) fn family(&self) -> Family {
         self.scope().review.family()
@@ -505,7 +617,8 @@ impl Entry {
     }
     pub(crate) fn status(&self) -> Result<Snapshot, Error> {
         self.occupies();
-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
+        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?
+            .as_deref().cloned();
         let request_state = self.observed_request_state();
         let start_state = self.observed_start_state();
         let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
@@ -619,7 +732,7 @@ impl Entry {
         }
         let first = p.acknowledged.is_none();
         p.claim = Some(latest.clone());
-        Ok(Some((first, latest)))
+        Ok(Some((first, latest.as_ref().clone())))
     }
     pub(crate) fn history_returned(
         &self,
@@ -713,7 +826,7 @@ impl NativeLink {
         }
         let mut latest = self.entry.latest.lock().map_err(|_| Error::StateUnknown)?;
         if let Some(old) = latest.as_ref() {
-            if old.settlement() == Settlement::Unknown || *old == data {
+            if old.settlement() == Settlement::Unknown || old.as_ref() == &data {
                 return Ok(());
             }
             if data.status_revision() <= old.status_revision()
@@ -722,12 +835,13 @@ impl NativeLink {
                 return Err(Error::StateUnknown);
             }
         }
+        let data = data.compact()?;
         // Actual same-owner retirement can resolve lost admission ACK, never
         // a native UNKNOWN. It cannot make the one-use Start available again.
         if data.settlement() == Settlement::Settled {
             self.entry.phase.store(BOUND, Ordering::Release);
         }
-        *latest = Some(data);
+        *latest = Some(Arc::new(data));
         self.entry.scope().changes.send_modify(|_| {});
         Ok(())
     }

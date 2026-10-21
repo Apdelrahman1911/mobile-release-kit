@@ -34,13 +34,14 @@ const ROW: usize = NATIVE_COMPARISONS
     + 64
     + 64
     + 4 * (p::REPORT_LIMIT + std::mem::size_of::<p::Report>());
+// All native comparisons/rows/current consent remain; only IPC8 is pooled.
+pub(crate) const IPC_WORKER_BACKING: usize = crate::service_protocol::REQUEST_BYTES + p::RAW_LIMIT + 2 * p::STATUS_LIMIT;
 pub(crate) const DOCUMENT_BACKING: usize = std::mem::size_of::<Inbox>()
     + std::mem::size_of::<Book>()
     + 32
     + p::REQUEST_LIMIT * (ROW + std::mem::size_of::<Arc<Entry>>())
     + p::CONSENT_LIMIT * (std::mem::size_of::<Id>() + 32)
-    + ROW
-    + 8 * (crate::service_protocol::REQUEST_BYTES + p::RAW_LIMIT + 2 * p::STATUS_LIMIT);
+    + ROW;
 
 pub(crate) struct Control {
     first: Mutex<Option<(p::Reason, Instant)>>,

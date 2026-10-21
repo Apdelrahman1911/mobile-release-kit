@@ -10,6 +10,10 @@ use std::{
     },
     time::Instant,
 };
+#[path = "service_github_action_memory.rs"]
+mod memory;
+pub(crate) use memory::retained_document_backing;
+
 pub(crate) struct NativeScope {
     pub(crate) project_id: Id,
     pub(crate) runtime_id: String,
@@ -110,7 +114,8 @@ impl NativeScope {
     }
     fn valid(&self) -> bool {
         let now = Instant::now();
-        self.review.valid()
+        retained_document_backing().is_some()
+            && self.review.valid()
             // These are new retained comparison copies, not new authority. A
             // short value with an oversized allocation cannot enter the fixed
             // row quote. Keep every old row; never borrow a retired-row credit.

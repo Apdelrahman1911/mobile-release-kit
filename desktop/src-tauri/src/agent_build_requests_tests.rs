@@ -289,3 +289,238 @@ fn ios_historical_report_has_real_counts_and_rejects_paths_synthetic_digests_or_
     r.bytes = 8 * 1024u64.pow(3) + 1;
     assert!(!r.valid());
 }
+
+// Additional bounded-storage cases reuse the original inert Fixture above.
+fn maximal_scope(f: &Fixture, family: Family) -> Arc<NativeScope> {
+    let mut scope = f.scope(family);
+    match &mut Arc::get_mut(&mut scope).unwrap().review {
+        Review::Android(r) => r.saved_version.name = "v".repeat(64),
+        Review::Ios(r) => r.saved_version.name = "v".repeat(64),
+    }
+    scope
+}
+fn memory_bound(f: &Fixture, scope: &Arc<NativeScope>, n: usize) -> (Prepare, Arc<NativeLink>) {
+    let family = scope.review.family();
+    f.inbox.allow(scope.clone()).unwrap();
+    let input = f.request((n + 10) as u8);
+    f.inbox.prepare(family, input.clone(), &f.point).unwrap();
+    let claim = f.inbox.claim(family).unwrap().unwrap();
+    let link = claim.entry().bind(family, id((n + 100) as u8), id((n + 200) as u8), 1,
+        Instant::now() + Duration::from_secs(300)).unwrap();
+    claim.returned(true);
+    assert!(Arc::ptr_eq(scope, &link.entry().lease.scope));
+    (input, link)
+}
+fn terminal(link: &NativeLink) -> Operation {
+    let mut op = link.entry().latest.lock().unwrap().as_ref().unwrap().as_ref().clone();
+    match &mut op {
+        Operation::Android(o) => {
+            use android::FindingStatus::*;
+            let counts = [Pass, Fail, Missing, Blocked, Invalid, Skip, Manual,
+                Configured, NotApplicable].into_iter()
+                .map(|status| (status, if status == Pass { 128 } else { 0 })).collect();
+            o.status_revision = 2;
+            o.state = OperationState::Succeeded;
+            o.settlement = Settlement::Settled;
+            o.outcome = Some(android::Outcome::Complete);
+            o.stage = Some(android::Stage::DisposingWork);
+            o.disposition = Some(android::Disposition {
+                work: android::WorkDisposition::Removed,
+                artifacts: android::ArtifactDisposition::RetainedLocalResult,
+            });
+            o.result = Some(android::Report {
+                scope: android::Scope::LocalPostBuildArtifactObservation,
+                used_config: link.entry().scope().review.config().clone(),
+                used_version: link.entry().scope().review.version().clone(),
+                findings: (0..128).map(|ordinal| android::Finding {
+                    ordinal, check: android::Check::OtherCoreFinding, status: Pass,
+                }).collect(),
+                summary: android::Summary { total: 128, shown: 128, omitted: 0, counts },
+                artifact: android::Artifact { size: 1024, sha256: "f".repeat(64) },
+            });
+        }
+        Operation::Ios(o) => {
+            o.status_revision = 2;
+            o.state = OperationState::Succeeded;
+            o.settlement = Settlement::Settled;
+            o.outcome = Some(ios::Outcome::Complete);
+            o.stage = Some(ios::Stage::DisposingWork);
+            o.disposition = Some(ios::Disposition {
+                snapshot: ios::SnapshotDisposition::Removed,
+                work: ios::WorkDisposition::Removed,
+                output: ios::OutputDisposition::RetainedLocalResult,
+            });
+            o.result = Some(ios::Report {
+                scope: ios::Scope::LocalUnsignedIosArchiveObservation,
+                used_config: link.entry().scope().review.config().clone(),
+                used_version: link.entry().scope().review.version().clone(),
+                entries: 100_000, bytes: 8 * 1024u64.pow(3),
+            });
+        }
+    }
+    assert!(op.valid_for(&link.entry().scope().review));
+    op
+}
+fn corrupt_copy(op: &mut Operation) {
+    match op {
+        Operation::Android(o) => o.result.as_mut().unwrap().findings.clear(),
+        Operation::Ios(o) => o.result.as_mut().unwrap().entries = 0,
+    }
+}
+
+#[test]
+fn typed_row_public_and_ancillary_bounds_keep_all32_and_four_nonipc_reports() {
+    assert!(PUBLIC_HEAP_CEILING <= STATUS_HEAP_BYTES);
+    assert!(ROW_CEILING <= ROW_BACKING);
+    assert!(ANCILLARY_CEILING <= ANCILLARY_BACKING);
+    assert_eq!(DOCUMENT_BACKING, 688_128);
+    assert!(LIMIT * ROW_CEILING + ANCILLARY_CEILING + 4 * android::REPORT_LIMIT
+        <= DOCUMENT_BACKING);
+    eprintln!("build report DATA: row={ROW_CEILING}/16384 public={PUBLIC_HEAP_CEILING}/8192 ancillary={ANCILLARY_CEILING}/65536 retained={DOCUMENT_BACKING}; shared eight IPC copies excluded");
+}
+
+#[test]
+fn all32_mixed_family_failed_claims_share_terminal_and_public_copies_cannot_mutate_them() {
+    let mut f = Fixture::new();
+    f.point.runtime_id = "r".repeat(64);
+    f.point.root = format!("/{}", "r".repeat(ROOT_HEAP_BYTES - 1)).into();
+    for n in 0..LIMIT {
+        let family = if n % 2 == 0 { Family::AndroidInspect } else { Family::IosArchive };
+        // Different maximal scope allocations exercise the closed32-row
+        // bound, not32 entries all borrowing one artificially cheap scope.
+        let scope = maximal_scope(&f, family);
+        let (input, link) = memory_bound(&f, &scope, n);
+        let start = Start {
+            origin: input.query(), operation_id: id((n + 100) as u8), owner_generation: id((n + 200) as u8),
+        };
+        f.inbox.start(family, &start).unwrap();
+        let claim = f.inbox.claim(family).unwrap().unwrap();
+        link.consume_start(family).unwrap();
+        claim.returned(true);
+        let mut op = terminal(&link);
+        match &mut op {
+            Operation::Android(o) => {
+                let r = o.result.as_mut().unwrap();
+                r.findings.reserve(128);
+                r.used_version.name.reserve(128);
+            }
+            Operation::Ios(o) => o.result.as_mut().unwrap().used_version.name.reserve(128),
+        }
+        link.publish(op).unwrap();
+        let retained = link.entry().latest.lock().unwrap().clone().unwrap();
+        match retained.as_ref() {
+            Operation::Android(o) => {
+                let r = o.result.as_ref().unwrap();
+                assert_eq!(r.findings.capacity(), 128);
+                assert_eq!(r.used_version.name.capacity(), r.used_version.name.len());
+            }
+            Operation::Ios(o) => {
+                let r = o.result.as_ref().unwrap();
+                assert_eq!(r.used_version.name.capacity(), r.used_version.name.len());
+            }
+        }
+        assert!(retained.heap_bytes().unwrap() + 8 * ID_HEAP_BYTES <= STATUS_HEAP_BYTES);
+        let (_, mut history_dto) = link.entry().claim_history().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&retained,
+            link.entry().publication.lock().unwrap().claim.as_ref().unwrap()));
+        corrupt_copy(&mut history_dto);
+        let mut status_dto = link.entry().status().unwrap();
+        corrupt_copy(status_dto.operation.as_mut().unwrap());
+        assert!(link.entry().history_returned(2, Err(Error::StateUnknown)).is_err());
+        assert!(retained.valid_for(&scope.review));
+        assert!(link.entry().claim_history().unwrap().is_none());
+        let status = f.inbox.prepare(family, input.clone(), &f.point).unwrap();
+        assert!(status.do_not_replay && !status.history_available);
+        assert_eq!(status.start_state, StartState::Consumed);
+        assert_eq!(status.operation.as_ref().unwrap().settlement(), Settlement::Settled);
+        // Exercise the actual unchanged public family projection/validator,
+        // not just a private compact record or a fabricated serialized value.
+        let bytes = match family {
+            Family::AndroidInspect => crate::service_metadata_text_protocol::encoded(
+                &android::Status::try_from(status).unwrap(), android::REPORT_LIMIT).unwrap(),
+            Family::IosArchive => crate::service_metadata_text_protocol::encoded(
+                &ios::Status::try_from(status).unwrap(), ios::REPORT_LIMIT).unwrap(),
+        };
+        assert!(!bytes.is_empty());
+        assert_eq!(f.inbox.start(family, &start).unwrap().start_state, StartState::Consumed);
+        assert!(f.inbox.claim(family).unwrap().is_none());
+    }
+    assert_eq!(f.inbox.book.lock().unwrap().entries.len(), LIMIT);
+    for family in [Family::AndroidInspect, Family::IosArchive] {
+        let entries = f.inbox.entries(family).unwrap();
+        assert_eq!(entries.len(), LIMIT / 2);
+        for entry in entries {
+            let latest = entry.latest.lock().unwrap().clone().unwrap();
+            let publication = entry.publication.lock().unwrap();
+            assert!(publication.failed);
+            assert!(Arc::ptr_eq(&latest, publication.claim.as_ref().unwrap()));
+        }
+        assert!(matches!(f.inbox.allow(maximal_scope(&f, family)), Err(Error::Busy)));
+    }
+}
+
+#[test]
+fn earlier_failed_progress_is_preserved_beside_one_full_immutable_terminal() {
+    for family in [Family::AndroidInspect, Family::IosArchive] {
+        let f = Fixture::new();
+        let scope = maximal_scope(&f, family);
+        let (_, link) = memory_bound(&f, &scope, 0);
+        let (_, progress) = link.entry().claim_history().unwrap().unwrap();
+        let old = link.entry().publication.lock().unwrap().claim.clone().unwrap();
+        link.publish(terminal(&link)).unwrap();
+        let latest = link.entry().latest.lock().unwrap().clone().unwrap();
+        assert!(!Arc::ptr_eq(&old, &latest));
+        assert_eq!(old.status_revision(), progress.status_revision());
+        assert!(match old.as_ref() {
+            Operation::Android(o) => o.result.is_none(), Operation::Ios(o) => o.result.is_none(),
+        });
+        assert!(link.entry().history_returned(1, Err(Error::StateUnknown)).is_err());
+        assert!(Arc::ptr_eq(&old,
+            link.entry().publication.lock().unwrap().claim.as_ref().unwrap()));
+        let mut changed = latest.as_ref().clone();
+        match &mut changed {
+            Operation::Android(o) => o.status_revision += 1,
+            Operation::Ios(o) => o.status_revision += 1,
+        }
+        assert_eq!(link.publish(changed), Err(Error::StateUnknown));
+        assert!(Arc::ptr_eq(&latest, link.entry().latest.lock().unwrap().as_ref().unwrap()));
+        assert!(!link.entry().status().unwrap().history_available);
+    }
+}
+
+#[test]
+fn private_scope_and_incoming_report_capacity_refuse_without_rebinding_either_family() {
+    for family in [Family::AndroidInspect, Family::IosArchive] {
+        let f = Fixture::new();
+        let original_scope = maximal_scope(&f, family);
+        f.inbox.allow(original_scope).unwrap();
+        let original_lease = f.inbox.book.lock().unwrap().lease.clone().unwrap();
+        let mut oversized_scope = maximal_scope(&f, family);
+        let review = &mut Arc::get_mut(&mut oversized_scope).unwrap().review;
+        match &mut *review {
+            Review::Android(r) => r.saved_version.name.reserve(256),
+            Review::Ios(r) => r.saved_version.name.reserve(256),
+        }
+        assert!(review.valid());
+        assert!(matches!(f.inbox.allow(oversized_scope), Err(Error::InvalidRequest)));
+        assert!(Arc::ptr_eq(&original_lease, f.inbox.book.lock().unwrap().lease.as_ref().unwrap()));
+        assert!(original_lease.revoked.get().is_none());
+        assert!(f.inbox.access(family).unwrap().enabled);
+        assert!(f.inbox.book.lock().unwrap().entries.is_empty());
+        let scope = maximal_scope(&f, family);
+        let (_, link) = memory_bound(&f, &scope, 0);
+        let original = link.entry().latest.lock().unwrap().clone().unwrap();
+        let mut oversized = terminal(&link);
+        match &mut oversized {
+            Operation::Android(o) => o.result.as_mut().unwrap().findings.reserve(
+                android::REPORT_LIMIT / std::mem::size_of::<android::Finding>() + 1),
+            Operation::Ios(o) => o.result.as_mut().unwrap().used_version.name.reserve(ios::REPORT_LIMIT),
+        }
+        assert!(oversized.valid_for(&scope.review));
+        assert_eq!(link.publish(oversized), Err(Error::StateUnknown));
+        assert!(Arc::ptr_eq(&original, link.entry().latest.lock().unwrap().as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&scope, &link.entry().lease.scope));
+        link.publish(terminal(&link)).unwrap();
+        assert_eq!(link.entry().status().unwrap().operation.unwrap().settlement(), Settlement::Settled);
+    }
+}

@@ -1,6 +1,60 @@
 //! DATA and original permission clocks only. These tests do not mint a native
 //! Prepared/Session, IO join or all-jobs witness; actual native use remains separate.
 use super::*;
+
+#[test]
+fn single_book_mixed_row_census_keeps_both_non_row_allowances() {
+    use crate::service_version_edit_prepare_requests as prepare;
+    assert_eq!(p::REQUEST_LIMIT, 32);
+    let row = APPLY_ROW_BACKING.max(prepare::ROW_BACKING);
+    assert_eq!(ROW_BACKING, row);
+    let other = 32 * 128 + 2 * p::STATUS_BYTES + prepare::NON_ROW_BACKING + SHARED_TYPED_BACKING;
+    assert_eq!(DOCUMENT_BACKING, p::REQUEST_LIMIT * row + other);
+    for applies in 0..=p::REQUEST_LIMIT {
+        let preparations = p::REQUEST_LIMIT - applies;
+        assert!(applies * APPLY_ROW_BACKING + preparations * prepare::ROW_BACKING
+            + other <= DOCUMENT_BACKING);
+    }
+    assert_eq!(prepare::IPC_WORKER_BACKING, 17_408);
+    // Actual old/new Vec cells + nonce strings, including reallocation overlap.
+    // The existing nonce/book allowance is not credited as per-row sharing.
+    let book_cells = std::mem::size_of::<Inbox>() + std::mem::size_of::<Book>()
+        + 2 * p::REQUEST_LIMIT * (std::mem::size_of::<Retained>() + std::mem::size_of::<Id>())
+        + p::REQUEST_LIMIT * 32;
+    assert!(book_cells <= 32 * 128 + 2 * p::STATUS_BYTES);
+}
+
+#[test]
+fn actual_retained_enum_and_preparation_weak_lease_cells_keep_the_old_scope_allowance() {
+    use std::mem::size_of;
+    // The real saved-point producer clones at most4KiB root/64byte runtime;
+    // allow twice those capacities plus ID. Review is closed: four IDs,
+    // name64/build10/source512/two digests64/optional candidate36. The larger
+    // finite capacities below include each copy, not just serialized length.
+    let scope_heap = 8192 + 128 + 64;
+    let review_heap = 4 * 64 + 128 + 32 + 1024 + 2 * 128 + 64;
+    let headers = 12 * size_of::<usize>();
+    let lease = size_of::<Lease>() // includes new OnceLock<Weak<PrepareEntry>>
+        + size_of::<crate::service_version_reserve_requests::ReadPermission>() + headers + scope_heap + review_heap;
+    let apply = size_of::<Entry>() + lease + 6 * 64
+        + 2 * (size_of::<p::Status>() + 4 * 64 + review_heap) + 2048;
+    assert!(apply <= APPLY_ROW_BACKING, "actual Apply row backing={apply}");
+    // Distinct old per-Apply leases stay in EACH row. The current unsubmitted
+    // lease, growing Retained/nonce Vec cells and read/control wrappers are
+    // additional; no weak/data equality is used to remove an allocation.
+    let ancillary = size_of::<Inbox>() + size_of::<Book>()
+        + 2 * p::REQUEST_LIMIT * (size_of::<Retained>() + size_of::<Id>())
+        + p::REQUEST_LIMIT * 32 + lease + 2048;
+    assert!(ancillary <= 32 * 128 + 2 * p::STATUS_BYTES,
+        "actual separate current lease/book backing={ancillary}");
+    assert_eq!(crate::service_version_edit_prepare_requests::NON_ROW_BACKING,
+        2 * crate::service_version_edit_prepare_protocol::STATUS_BYTES);
+    assert_eq!(SHARED_TYPED_BACKING,
+        2 * p::REQUEST_LIMIT * (size_of::<Retained>() - size_of::<Arc<Entry>>())
+        + (p::REQUEST_LIMIT + 1) * (size_of::<std::sync::OnceLock<Weak<crate::service_version_edit_prepare_requests::Entry>>>()
+            + std::mem::align_of::<Lease>()));
+}
+
 use std::{path::PathBuf, time::Duration};
 fn id(n: u8) -> Id {
     Id::parse(&format!("{n:032x}")).unwrap()

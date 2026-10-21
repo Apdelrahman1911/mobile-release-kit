@@ -9,11 +9,12 @@ pub(crate) const STATUS_LIMIT: usize = 8192;
 pub(crate) const REPORT_LIMIT: usize = 4096;
 pub(crate) const INTENT_MS: u64 = 300_000;
 // Fixed named backing: 32 immutable scopes/links and retained Row snapshots,
-// SAME eight IPC replies, one relay/history projection scratch, nonce book.
+// one relay/history projection scratch and nonce book. The explicitly named
+// IPC-only reply term is in the SAME8 mixed pool, never a per-mode pool.
 // The native Saved/Asset/material/journal originals keep their own census.
 pub(crate) const ROW_BACKING: usize = 24 * 1024;
-pub(crate) const DOCUMENT_BACKING: usize =
-    REQUEST_LIMIT * ROW_BACKING + 8 * (3 * STATUS_LIMIT + RAW_LIMIT) + 128 * 1024;
+pub(crate) const IPC_WORKER_BACKING: usize = 3 * STATUS_LIMIT + RAW_LIMIT;
+pub(crate) const DOCUMENT_BACKING: usize = REQUEST_LIMIT * ROW_BACKING + 128 * 1024;
 
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)

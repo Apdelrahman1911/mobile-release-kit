@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const VERSION: u32 = 1;
+
+#[cfg(test)]
+#[path = "service_ipc_response_codec_tests.rs"]
+mod ipc_response_tests;
 pub const REQUEST_BYTES: usize = 4096;
 pub const RESPONSE_BYTES: usize = 256 * 1024;
 pub const PROJECT_LIMIT: usize = 64;
@@ -417,9 +421,10 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
 }
 pub fn encode_response(response: &Response) -> Result<Vec<u8>, Error> {
     validate_response(response)?;
-    let bytes = if matches!(&response.response,ResponseBody::MetadataTextRequest(_)){
-        crate::service_metadata_text_protocol::encoded(response,RESPONSE_BYTES).map_err(|_|Error::StateUnknown)?
-    }else{serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?};
+    // SAME validated immutable Response and serializer. Count before the
+    // single exact-capacity outer allocation, as already done for Metadata.
+    let bytes = crate::service_metadata_text_protocol::encoded(response, RESPONSE_BYTES)
+        .map_err(|_| Error::StateUnknown)?;
     if bytes.len() > RESPONSE_BYTES { return Err(Error::StateUnknown); }
     Ok(bytes)
 }

@@ -36,6 +36,23 @@ impl ApplicationHost {
     }
 }
 impl NativeStateReady {
+    #[cfg(test)]
+    pub(crate) fn closed_apple_census_data() -> Arc<Self> {
+        // No Host registration/startup or original Source proof. The actual
+        // closed StateDirectory makes this comparison incapable of NativeUse.
+        let value = Arc::new(Self {
+            owner: Arc::new(()), source_epoch: 0,
+            original: NativeProject { runtime_id: "never-registered-census".into(),
+                canonical_root: "/never-opened-census".into(), device: 0, inode: 0,
+                registration_generation: 0, document_identity: Arc::new(()), input_revision: 0 },
+            store: Arc::new(PrivateStateDirectory::closed_apple_census_data()),
+            project: ProjectBinding { project_id: p::Id::parse(&"a".repeat(32)).unwrap(),
+                canonical_root: "/never-opened-census".into(), device: 0, inode: 0 },
+        });
+        assert!(value.begin_use().is_err());
+        value
+    }
+
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(self.original.runtime_id.capacity())?

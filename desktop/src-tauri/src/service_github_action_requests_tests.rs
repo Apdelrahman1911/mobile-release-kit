@@ -285,8 +285,11 @@ fn metadata_census_includes_rows_and_all_eight_worker_copies() {
         + 3 * (size_of::<p::Status>() + output_payload + 2 * p::STATUS_LIMIT)
         + 4096;
     assert!(worker <= 32 * 1024, "whole worker quote: {worker}");
-    assert!(32 * 16 * 1024 + 8 * 32 * 1024 + 128 * 1024 <= p::DOCUMENT_BACKING);
-    assert_eq!(p::DOCUMENT_BACKING, 1024 * 1024);
+    assert_eq!(retained_document_backing(), Some(p::DOCUMENT_BACKING));
+    assert_eq!(p::DOCUMENT_BACKING, 786_432);
+    assert_eq!(p::IPC_WORKER_BACKING, 32 * 1024);
+    // SAME original worker pool, not8 additional callers per family.
+    assert_eq!(p::DOCUMENT_BACKING + 8 * p::IPC_WORKER_BACKING, 1024 * 1024);
 }
 
 fn retained_scope(f: &F, kind: p::Kind) -> Arc<NativeScope> {
