@@ -568,6 +568,16 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
     }
 }}
 
+fn fetch_helper_name(selection:&VerifiedRuntime)->&'static str {
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    if let Some(name)=crate::runtime::fetch_observation::helper_name(selection){return name}
+    "git_remote_helper_bootstrap.py"
+}
+fn fetch_worker_name(selection:&VerifiedRuntime)->&'static str {
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    if let Some(name)=crate::runtime::fetch_observation::helper_name(selection){return name}
+    "git_remote_bootstrap.py"
+}
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { upload_key_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
@@ -980,7 +990,7 @@ impl Book {
                         if self.push_helper.is_some() || expected.size==0 || expected.size>64*1024 {return Err(AdmissionFailure::Inventory)}
                         self.push_helper=Some(index);
                     }
-                    if self.fetch_helper_required && path=="git_remote_helper_bootstrap.py" {
+                    if self.fetch_helper_required && path==fetch_helper_name(selection) {
                         if self.fetch_helper.is_some() || expected.size==0 || expected.size>64*1024 {return Err(AdmissionFailure::Inventory)}
                         self.fetch_helper=Some(index);
                     }
@@ -997,7 +1007,7 @@ impl Book {
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
                     || history_runtime::provider_retained(self,&path)
                     || self.tool_ca_required && path=="github-ca.pem"
-                    || self.fetch_helper_required && path=="git_remote_helper_bootstrap.py"
+                    || self.fetch_helper_required && path==fetch_helper_name(selection)
                     || self.push_helper_required && path=="git_push_helper_bootstrap.py"
                     || self.store.is_some() && store_runtime::retained(&path);
                 if !retain {
@@ -1153,8 +1163,8 @@ impl Book {
         if self.push_helper_required && (selection.bootstrap!=selection.cwd.join("git_push_bootstrap.py")
             || !files.contains_key("git_push_bootstrap.py") || !files.contains_key("git_push_helper_bootstrap.py")
             || !self.tool_ca_required || self.fetch_helper_required) {return Err(AdmissionFailure::Inventory)}
-        if self.fetch_helper_required && (selection.bootstrap!=selection.cwd.join("git_remote_bootstrap.py")
-            || !files.contains_key("git_remote_bootstrap.py") || !files.contains_key("git_remote_helper_bootstrap.py")
+        if self.fetch_helper_required && (selection.bootstrap!=selection.cwd.join(fetch_worker_name(selection))
+            || !files.contains_key(fetch_worker_name(selection)) || !files.contains_key(fetch_helper_name(selection))
             || !self.tool_ca_required || self.push_helper_required) {return Err(AdmissionFailure::Inventory)}
         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
             return Err(AdmissionFailure::Inventory);

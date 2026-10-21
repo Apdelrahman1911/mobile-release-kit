@@ -234,7 +234,10 @@ impl GitLocalSources {
             return Err(Reason::SourceChanged);
         }
         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
-        if !crate::runtime::git_fetch::matches_tool(&native.tool) {
+        let mut nominated=crate::runtime::git_fetch::matches_tool(&native.tool);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        {if self.fetch_observation.is_some(){nominated=self.observed_fetch_tool(stop)?;}}
+        if !nominated {
             return Err(Reason::SourceRefused);
         }
         // Fixed interpreter used by the two stock-Git exec shims. This is an

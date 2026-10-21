@@ -42,6 +42,8 @@ pub(super) struct Invocation {
     publication:Mutex<Option<GitLocalPublication>>,
     fetch_keep:Mutex<Option<wire::fetch_worker::Keep>>,
     fetch_go_claimed:AtomicBool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_fetch::Control>>,
     fetch_joined:Arc<std::sync::OnceLock<fetch::JoinedControl>>,
     push_go_claimed:AtomicBool,
     push_joined:Arc<std::sync::OnceLock<push::JoinedControl>>,
@@ -190,7 +192,8 @@ impl GitLocalAdmission {
             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
-                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),fetch_joined:Arc::new(std::sync::OnceLock::new()),
+                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:std::sync::OnceLock::new(),fetch_joined:Arc::new(std::sync::OnceLock::new()),
                 push_go_claimed:AtomicBool::new(false),push_joined:Arc::new(std::sync::OnceLock::new()),
                 sources:Arc::new(Mutex::new(crate::asset_source::GitLocalSources::new())),slots:slots.clone(),clock:Mutex::new(None)},
                 endpoints,slots})
@@ -251,6 +254,11 @@ fn state_error(error:StateError)->BridgeError {
     } else {host_error(error.code)}
 }
 impl Invocation {
+    fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=self.observation.get(){return c.stderr_allowed(id,bytes)}
+        let _=id;bytes.is_empty()
+    }
     pub(super) fn request(&self)->Result<Arc<wire::Request>,BridgeError> {
         self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)
     }
@@ -283,6 +291,9 @@ impl Invocation {
             (Err(error),_)=>Err(error),_=>Err(BridgeError::protocol()),
         };
         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(c)=self.observation.get(){match self.request(){Ok(r)=>c.retired(&r,&receipt),Err(_)=>c.fail()}}
+
         #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
@@ -296,6 +307,15 @@ impl Invocation {
             armed.map_err(|_|BridgeError::cleanup_unknown())?;
             let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
             owner.observe_native_failure(native.first_failure());result?};
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.action.kind()==wire::Kind::Fetch {
+            if let Some(c)=runtime.fetch_observation()? {
+                if !self.gate.observation_matches(&c){return Err(BridgeError::invalid())}
+                self.observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;
+                self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?
+                    .configure_fetch_observation(c).map_err(source_error)?;
+            }
+        }
         let review=self.gate.review();
         // Initialization's exclusive private mkdir is an effect. Refuse the
         // wrong/missing original Preparing ACK BEFORE entering SourceBook,
@@ -337,6 +357,8 @@ impl Invocation {
         let mut slot=self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let mut bridge=self.clock.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.observation.get().is_some_and(|c|!c.observed(&request)){return Err(BridgeError::invalid())}
         *slot=Some(request);*bridge=Some(clock);drop(bridge);drop(slot);
         self.gate.check_current(&owner.id)?;Ok(selected)
     }
@@ -389,7 +411,7 @@ impl Invocation {
         let stderr=r.err_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
         if r.waited.is_none_or(|s|!s.success()) || r.writer.is_some()||r.stdout.is_some()||r.stderr.is_some()
             || r.failed_writer.is_some()||r.failed_stdout.is_some()||r.failed_stderr.is_some()
-            || !output.eof||output.overflow||!stderr.eof||stderr.overflow||!stderr.bytes.is_empty()
+            || !output.eof||output.overflow||!stderr.eof||stderr.overflow||!self.observation_stderr(&owner.id,&stderr.bytes)
             || r.history_post.is_some()||r.history_post_join_failed {return Err(BridgeError::cleanup_unknown())}
         let request=self.request()?;
         let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone();

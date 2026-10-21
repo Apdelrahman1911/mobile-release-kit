@@ -1,0 +1,1235 @@
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -50,6 +50,8 @@
+ 
+ #[derive(Clone)]
+ pub struct RuntimeConfig { bundle_root: PathBuf,
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    git_fetch_observation: std::sync::Arc<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>,
+     // Clones share one Android owner claim. Neither a second constructor nor
+     // an observer can reset it after an unavailable or dead first original.
+     android_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+@@ -79,6 +81,10 @@
+     environment_fixture_core: Option<PathBuf>,
+ }
+ 
++#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++#[path="runtime_git_fetch_observation.rs"]
++pub(crate) mod fetch_observation;
++
+ // App-M2 census of this retained RuntimeConfig only, not process/framework RSS.
+ // No installed/native probes and no capability, one-use claim or weak binding
+ // mutation. The original Arc cells remain charged after their claims are spent.
+@@ -108,6 +114,11 @@
+         }
+         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell")))]
+         if let Some(path) = &self.environment_fixture_core { bytes = bytes.checked_add(path.capacity())?; }
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        {
++            bytes=bytes.checked_add(arc::<std::sync::OnceLock<std::sync::Weak<crate::shell::installed_observation::git_fetch::Control>>>()?)?;
++            if let Some(c)=self.git_fetch_observation.get(){bytes=bytes.checked_add(c.upgrade()?.retained_bytes()?)?;}
++        }
+         Some(bytes)
+     }
+ }
+@@ -326,10 +337,15 @@
+ // Separate session-only read domain. The same fixed Mac payload binding and
+ // original installed Book are required; passive/edit authority is not a grant.
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-pub(crate) struct GitHubReadOnlyInstalledProfile { _private: () }
++pub(crate) struct GitHubReadOnlyInstalledProfile { _private: (),
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
++}
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ impl GitHubReadOnlyInstalledProfile {
+     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if let Some(c)=&self.observation{return fetch_observation::selection(c,true)}
+         if !macos_bindings() { return Err(unavailable()); }
+         let cwd = crate::installed_runtime::runtime_root();
+         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+@@ -392,11 +408,18 @@
+ // Fixed local-write bootstrap. Selection alone is not mutation authority;
+ // the original Doc/Publisher, source, NativeUse and joins remain mandatory.
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-pub(crate) struct GitLocalInstalledProfile { _private: (), kind:crate::git_local_protocol::Kind }
++pub(crate) struct GitLocalInstalledProfile { _private: (), kind:crate::git_local_protocol::Kind,
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
++}
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ impl GitLocalInstalledProfile {
+     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+-        if self.kind==crate::git_local_protocol::Kind::Fetch {return git_fetch::selection();}
++        if self.kind==crate::git_local_protocol::Kind::Fetch {
++            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++            if let Some(c)=&self.observation{return fetch_observation::selection(c,false)}
++            return git_fetch::selection();
++        }
+         if self.kind==crate::git_local_protocol::Kind::Push {return git_push::selection();}
+         if !macos_bindings() { return Err(unavailable()); }
+         let cwd = crate::installed_runtime::runtime_root();
+@@ -473,7 +496,7 @@
+     let profile = runtime.github_readonly_installed_profile();
+     assert_eq!(runtime.github_readonly_installed_profile_available(), expected);
+     assert_eq!(profile.is_ok(), expected);
+-    assert_eq!(GitHubReadOnlyInstalledProfile { _private: () }.selection().is_ok(), expected);
++    assert_eq!(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:None }.selection().is_ok(), expected);
+     assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+     // Other families require their own compiled publisher binding; the
+     // read-only selection above supplies neither action grant.
+@@ -1456,6 +1479,8 @@
+ 
+ impl RuntimeConfig {
+     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    git_fetch_observation: std::sync::Arc::new(std::sync::OnceLock::new()),
+         android_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+         diagnostics_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+         #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+@@ -1826,7 +1851,7 @@
+     }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
+-        if macos_bindings() { Ok(GitHubReadOnlyInstalledProfile { _private: () }) } else { Err(unavailable()) }
++        if macos_bindings() { Ok(GitHubReadOnlyInstalledProfile { _private: (), #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()? }) } else { Err(unavailable()) }
+     }
+     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
+@@ -1905,6 +1930,8 @@
+         {false}
+     }
+     pub(crate) fn git_fetch_profile_available(&self)->bool {
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if self.git_fetch_observation.get().is_some(){return self.fetch_observation().is_ok_and(|v|v.is_some())}
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+         {git_fetch::available()}
+         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+@@ -1916,7 +1943,7 @@
+         if !self.git_local_profile_available()
+             || kind==crate::git_local_protocol::Kind::Fetch&&!self.git_fetch_profile_available()
+             || kind==crate::git_local_protocol::Kind::Push&&!self.git_push_profile_available(){return Err(unavailable())}
+-        originals.inspect_once(GitLocalInstalledProfile {_private:(),kind},end,stop)
++        originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()? },end,stop)
+     }
+     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -568,6 +568,16 @@
+     }
+ }}
+ 
++fn fetch_helper_name(selection:&VerifiedRuntime)->&'static str {
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    if let Some(name)=crate::runtime::fetch_observation::helper_name(selection){return name}
++    "git_remote_helper_bootstrap.py"
++}
++fn fetch_worker_name(selection:&VerifiedRuntime)->&'static str {
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    if let Some(name)=crate::runtime::fetch_observation::helper_name(selection){return name}
++    "git_remote_bootstrap.py"
++}
+ struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
+ struct Book { upload_key_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
+@@ -980,7 +990,7 @@
+                         if self.push_helper.is_some() || expected.size==0 || expected.size>64*1024 {return Err(AdmissionFailure::Inventory)}
+                         self.push_helper=Some(index);
+                     }
+-                    if self.fetch_helper_required && path=="git_remote_helper_bootstrap.py" {
++                    if self.fetch_helper_required && path==fetch_helper_name(selection) {
+                         if self.fetch_helper.is_some() || expected.size==0 || expected.size>64*1024 {return Err(AdmissionFailure::Inventory)}
+                         self.fetch_helper=Some(index);
+                     }
+@@ -997,7 +1007,7 @@
+                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
+                     || history_runtime::provider_retained(self,&path)
+                     || self.tool_ca_required && path=="github-ca.pem"
+-                    || self.fetch_helper_required && path=="git_remote_helper_bootstrap.py"
++                    || self.fetch_helper_required && path==fetch_helper_name(selection)
+                     || self.push_helper_required && path=="git_push_helper_bootstrap.py"
+                     || self.store.is_some() && store_runtime::retained(&path);
+                 if !retain {
+@@ -1153,8 +1163,8 @@
+         if self.push_helper_required && (selection.bootstrap!=selection.cwd.join("git_push_bootstrap.py")
+             || !files.contains_key("git_push_bootstrap.py") || !files.contains_key("git_push_helper_bootstrap.py")
+             || !self.tool_ca_required || self.fetch_helper_required) {return Err(AdmissionFailure::Inventory)}
+-        if self.fetch_helper_required && (selection.bootstrap!=selection.cwd.join("git_remote_bootstrap.py")
+-            || !files.contains_key("git_remote_bootstrap.py") || !files.contains_key("git_remote_helper_bootstrap.py")
++        if self.fetch_helper_required && (selection.bootstrap!=selection.cwd.join(fetch_worker_name(selection))
++            || !files.contains_key(fetch_worker_name(selection)) || !files.contains_key(fetch_helper_name(selection))
+             || !self.tool_ca_required || self.push_helper_required) {return Err(AdmissionFailure::Inventory)}
+         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
+             return Err(AdmissionFailure::Inventory);
+--- a/desktop/src-tauri/src/git_local_sources_macos.rs
++++ b/desktop/src-tauri/src/git_local_sources_macos.rs
+@@ -25,6 +25,10 @@
+ mod fetch_sources;
+ #[path="git_push_sources_macos.rs"]
+ mod push_sources;
++
++#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++#[path="git_fetch_observation_sources_macos.rs"]
++mod fetch_observation;
+ 
+ const SOURCE_LIMIT: usize = 128;
+ struct RefEdge {
+@@ -86,6 +90,10 @@
+     initialization:Option<init_sources::State>,
+     fetch:Option<fetch_sources::State>,
+     push:Option<push_sources::State>,
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    fetch_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    fetch_observation_file:Option<(usize,wire::Snapshot)>,
+ }
+ impl Drop for GitLocalSources {
+     fn drop(&mut self) {
+@@ -112,15 +120,25 @@
+             indices: [None; 4],
+             operation_id: None, review: None, reference: None, replacement: None,
+             post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,
++            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++            fetch_observation:None,
++            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++            fetch_observation_file:None,
+         }
+     }
+     pub(crate) fn not_started(&self) -> bool {
+         !self.started && !self.finished && !self.acl_entered && self.acl.is_none() && self.book.not_started()
++    }
++    fn fetch_observation_extra(&self)->usize {
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if self.fetch_observation.is_some(){return 1}
++        0
+     }
+     pub(crate) fn working_bytes() -> Option<usize> {
+         SOURCE_LIMIT
+             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
+             .checked_add(std::mem::size_of::<Self>() + 65536 + 5 * PATH_LIMIT + 4096)?
++            .checked_add(if cfg!(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))){128}else{0})?
+             .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
+             .checked_add(switch_sources::State::working_bytes()?)?
+             .checked_add(rename_sources::State::working_bytes()?)?
+@@ -396,6 +414,7 @@
+             let tool_parts = parts(Path::new(wire::TOOL_PATH))?;
+             let parent_parts = &tool_parts[..tool_parts.len() - 1];
+             let extra=(42usize).checked_add(source_extra(&project_parts))
++                .and_then(|n|n.checked_add(self.fetch_observation_extra()))
+                 .and_then(|n|switch_sources::State::extra(review).and_then(|s|n.checked_add(s)))
+                 .and_then(|n|rename_sources::State::extra(review).and_then(|s|n.checked_add(s)))
+                 .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s)))
+@@ -556,6 +575,8 @@
+         for alias in &self.book.aliases {
+             self.book.check_alias(alias, stop)?;
+         }
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        self.post_fetch_observation(stop)?;
+         if self.initialization.is_some() {return self.post_init(stop)}
+         let original = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+         for (index, expected, maximum) in [
+--- a/desktop/src-tauri/src/git_fetch_sources_macos.rs
++++ b/desktop/src-tauri/src/git_fetch_sources_macos.rs
+@@ -234,7 +234,10 @@
+             return Err(Reason::SourceChanged);
+         }
+         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
+-        if !crate::runtime::git_fetch::matches_tool(&native.tool) {
++        let mut nominated=crate::runtime::git_fetch::matches_tool(&native.tool);
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        {if self.fetch_observation.is_some(){nominated=self.observed_fetch_tool(stop)?;}}
++        if !nominated {
+             return Err(Reason::SourceRefused);
+         }
+         // Fixed interpreter used by the two stock-Git exec shims. This is an
+--- a/desktop/src-tauri/src/supervisor_git_local.rs
++++ b/desktop/src-tauri/src/supervisor_git_local.rs
+@@ -42,6 +42,8 @@
+     publication:Mutex<Option<GitLocalPublication>>,
+     fetch_keep:Mutex<Option<wire::fetch_worker::Keep>>,
+     fetch_go_claimed:AtomicBool,
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    pub(super) observation:std::sync::OnceLock<Arc<crate::shell::installed_observation::git_fetch::Control>>,
+     fetch_joined:Arc<std::sync::OnceLock<fetch::JoinedControl>>,
+     push_go_claimed:AtomicBool,
+     push_joined:Arc<std::sync::OnceLock<push::JoinedControl>>,
+@@ -190,7 +192,8 @@
+             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
+                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
+                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
+-                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),fetch_joined:Arc::new(std::sync::OnceLock::new()),
++                fetch_keep:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
++                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:std::sync::OnceLock::new(),fetch_joined:Arc::new(std::sync::OnceLock::new()),
+                 push_go_claimed:AtomicBool::new(false),push_joined:Arc::new(std::sync::OnceLock::new()),
+                 sources:Arc::new(Mutex::new(crate::asset_source::GitLocalSources::new())),slots:slots.clone(),clock:Mutex::new(None)},
+                 endpoints,slots})
+@@ -251,6 +254,11 @@
+     } else {host_error(error.code)}
+ }
+ impl Invocation {
++    fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if let Some(c)=self.observation.get(){return c.stderr_allowed(id,bytes)}
++        let _=id;bytes.is_empty()
++    }
+     pub(super) fn request(&self)->Result<Arc<wire::Request>,BridgeError> {
+         self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)
+     }
+@@ -283,6 +291,9 @@
+             (Err(error),_)=>Err(error),_=>Err(BridgeError::protocol()),
+         };
+         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if let Some(c)=self.observation.get(){match self.request(){Ok(r)=>c.retired(&r,&receipt),Err(_)=>c.fail()}}
++
+         #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
+     }
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+@@ -296,6 +307,15 @@
+             armed.map_err(|_|BridgeError::cleanup_unknown())?;
+             let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
+             owner.observe_native_failure(native.first_failure());result?};
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if self.action.kind()==wire::Kind::Fetch {
++            if let Some(c)=runtime.fetch_observation()? {
++                if !self.gate.observation_matches(&c){return Err(BridgeError::invalid())}
++                self.observation.set(c.clone()).map_err(|_|BridgeError::cleanup_unknown())?;
++                self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?
++                    .configure_fetch_observation(c).map_err(source_error)?;
++            }
++        }
+         let review=self.gate.review();
+         // Initialization's exclusive private mkdir is an effect. Refuse the
+         // wrong/missing original Preparing ACK BEFORE entering SourceBook,
+@@ -337,6 +357,8 @@
+         let mut slot=self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+         let mut bridge=self.clock.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+         if slot.is_some()||bridge.is_some() {return Err(BridgeError::cleanup_unknown())}
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        if self.observation.get().is_some_and(|c|!c.observed(&request)){return Err(BridgeError::invalid())}
+         *slot=Some(request);*bridge=Some(clock);drop(bridge);drop(slot);
+         self.gate.check_current(&owner.id)?;Ok(selected)
+     }
+@@ -389,7 +411,7 @@
+         let stderr=r.err_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+         if r.waited.is_none_or(|s|!s.success()) || r.writer.is_some()||r.stdout.is_some()||r.stderr.is_some()
+             || r.failed_writer.is_some()||r.failed_stdout.is_some()||r.failed_stderr.is_some()
+-            || !output.eof||output.overflow||!stderr.eof||stderr.overflow||!stderr.bytes.is_empty()
++            || !output.eof||output.overflow||!stderr.eof||stderr.overflow||!self.observation_stderr(&owner.id,&stderr.bytes)
+             || r.history_post.is_some()||r.history_post_join_failed {return Err(BridgeError::cleanup_unknown())}
+         let request=self.request()?;
+         let candidate=self.candidate.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone();
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -3058,7 +3058,10 @@
+     true
+ }
+ 
+-enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourceWork(version_allocation::Work), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
++#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++#[path="supervisor_git_fetch_observation.rs"]
++mod git_fetch_observation;
++enum Event { #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] GitFetchObservation, GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourceWork(version_allocation::Work), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+ 
+ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
+     let mut resources = owner.resources.lock().await;
+@@ -3802,7 +3805,11 @@
+         #[cfg(all(test, feature = "development-runtime"))]
+         { resources.stderr = Some(tokio::spawn(hosted_tests::observed_read(stderr, protocol::STDERR_LIMIT, faults.clone(), owner.observation.clone(), None, true))); }
+         #[cfg(not(all(test, feature = "development-runtime")))]
+-        { resources.stderr = Some(tokio::spawn(read_bounded(stderr, protocol::STDERR_LIMIT, faults.clone()))); }
++        {
++            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++            let stderr=git_fetch_observation::Stderr::new(stderr,owner.clone());
++            resources.stderr = Some(tokio::spawn(read_bounded(stderr, protocol::STDERR_LIMIT, faults.clone())));
++        }
+         }
+     }
+     }
+@@ -3826,6 +3833,8 @@
+             Some((&mut fault_rx, &mut faults_open))).await { return DriverEnd::RetainedUnknown; }
+     }
+     loop {
++        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++        git_fetch_observation::sample(&owner,&resources);
+         if Instant::now() >= owner.endpoint() && !owner.failed() { owner.fail(BridgeError::timeout()); }
+         if owner.failed() && !resources.kill_attempted && resources.waited.is_none() {
+             resources.kill_attempted = true;
+@@ -3859,6 +3868,17 @@
+         let event = {
+             let Resources { child, writer, stdout, stderr, history_post, version_allocation_source, git_local, .. } = &mut *resources;
+             tokio::select! {
++                _=async {
++                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++                    {git_fetch_observation::changed(&owner).await;}
++                    #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
++                    {std::future::pending::<()>().await;}
++                }=>{
++                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++                    {Event::GitFetchObservation}
++                    #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
++                    {unreachable!("unselected observer future")}
++                },
+                 candidate=async {match git_local {Some(local)=>local.receive_candidate().await,None=>std::future::pending().await}},
+                     if local_candidate_pending=>Event::GitLocalCandidate(candidate),
+                 request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
+@@ -3876,6 +3896,8 @@
+             }
+         };
+         match event {
++            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++            Event::GitFetchObservation=>{},
+             Event::GitLocalCandidate(candidate)=>git_local::candidate_returned(&mut resources,&inner,&owner,candidate).await,
+             Event::SourcePostRequest(request) => {
+                 source_post_receive.take();
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -7090,6 +7090,7 @@
+     /// receipts or custody owners. Slots are never removed or reused. Keeping
+     /// the original work book does not retain its retired private payloads.
+     include!("asset_session_tool_setup_observation.rs");
++    mod fetch_observation {use super::*;include!("asset_session_git_fetch_observation.rs");}
+     pub(super) struct SessionBook {
+         pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
+         // A distinct one-use instrumented P2 admission, never an asset/iOS
+@@ -7100,6 +7101,7 @@
+         input_case: Option<crate::shell::installed_observation::ios::Case>,
+         pub(super) vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+         pub(super) tool_setup: Option<Arc<crate::shell::installed_observation::tool_setup::Control>>,
++        pub(super) git_fetch:Option<Arc<crate::shell::installed_observation::git_fetch::Control>>,
+     }
+     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
+         match (project_fields, input_case) {
+@@ -7110,6 +7112,7 @@
+     }
+     impl SessionBook {
+         fn original_limit(&self) -> Option<u32> {
++            if self.git_fetch.is_some(){return (self.project_fields.is_none()&&self.input_case.is_none()&&self.vault.is_none()&&self.tool_setup.is_none()).then_some(2)}
+             if let Some(control)=&self.tool_setup {return (self.project_fields.is_none() && self.input_case.is_none() && self.vault.is_none()).then_some(control.case().maximum_original());}
+             if let Some(control) = &self.vault {
+                 return (self.project_fields.is_none() && self.input_case.is_none()).then_some(control.case.maximum_original());
+@@ -7208,7 +7211,7 @@
+             let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             if book.is_some() { return Err(BridgeError::invalid()); }
+             let control = token.consume(&self.inner.session_identity)?;
+-            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None });
++            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None });
+             Ok(())
+         }
+         pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
+@@ -7354,7 +7357,7 @@
+             if observation.is_some() { return Err(BridgeError::invalid()); }
+             let input_case = token.consume(&self.inner.session_identity)?;
+             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None }); Ok(())
++            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None }); Ok(())
+         }
+         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
+         pub(crate) fn register_installed_macos_project_fields(&self,
+@@ -7367,12 +7370,17 @@
+             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             if observation.is_some() { return Err(BridgeError::invalid()); }
+             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
+-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None }); Ok(())
++            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None }); Ok(())
+         }
+         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+             let Some(book) = book.as_mut() else { return Ok(()); };
+             let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
++            if let Some(control)=&book.git_fetch {
++                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
++                    return Err(AssetError::new(Reason::Unqualified))
++                }
++            }
+             if let Some(control) = &book.tool_setup {
+                 // Same exact observation may register only its ordinary
+                 // project/source picks and an early or final original Quit.
+@@ -7694,7 +7702,7 @@
+                         && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
+                             && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                         || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
+-                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project)),
++                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project)),
+                 (Some(project), None, true) => self.macos_project_loss(&state, project),
+                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
+                 _ => false,
+--- a/desktop/src-tauri/src/asset_session_git_local.rs
++++ b/desktop/src-tauri/src/asset_session_git_local.rs
+@@ -86,6 +86,11 @@
+                 _=>S::Failed,
+             },
+         };agent.retired(state);
++    }
++    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
++    pub(crate) fn observation_matches(&self,c:&Arc<crate::shell::installed_observation::git_fetch::Control>)->bool {
++        self.0.document.upgrade().is_some_and(|d|c.bound(&d.session_identity))
++            &&self.0.root.path==c.project()&&self.0.action.kind()==wire::Kind::Fetch&&self.0.agent.is_none()
+     }
+     pub(crate) fn context(&self)->wire::Context {self.0.context.clone()}
+     pub(crate) fn review(&self)->Option<wire::Review> {self.0.review.clone()}
+--- a/desktop/src-tauri/src/installed_shell_observation_macos.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos.rs
+@@ -37,12 +37,14 @@
+ pub(crate) mod checks;
+ #[path="installed_shell_observation_macos_tool_setup.rs"]
+ pub(crate) mod tool_setup;
++#[path="installed_shell_observation_macos_git_fetch.rs"]
++pub(crate) mod git_fetch;
+ pub(crate) use session::Command as SessionCommand;
+ 
+ // Closed public categories only. The first winner is published before failure;
+ // no Record lock, native call, path, or arbitrary error text enters this latch.
+ const FAILURE_REASONS: &[&str] = &[
+-    "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
++    "git-fetch-original-contract", "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
+     "identity-original-contract", "tool-setup-original-contract",
+     "local-edits-original-contract", "local-edits-dom-contract", "local-edits-fixture-contract",
+     "local-checks-original-contract", "local-checks-dom-contract", "local-checks-fixture-contract",
+@@ -257,9 +259,10 @@
+ "#;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case) }
++enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case) }
+ impl Case {
+     fn name(self) -> &'static str { match self {
++        Self::GitFetch(case) => case.name(),
+         Self::ToolSetup(case) => case.name(),
+         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
+         Self::PickerLoss => "picker-loss", Self::SaveLoss => "save-loss",
+@@ -299,7 +302,7 @@
+     } }
+     fn methods(self) -> usize { METHODS.len() }
+     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
+-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) => 0 } }
++    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) | Self::ToolSetup(_) | Self::GitFetch(_) => 0 } }
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ enum Step {
+@@ -312,7 +315,7 @@
+     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
+     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
+     PickerPending, Reload, Lost,
+-    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step), Identity(identity::Step), ToolSetup(tool_setup::Step),
++    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step), Identity(identity::Step), ToolSetup(tool_setup::Step), GitFetch(git_fetch::Step),
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ struct DomDispatch { step: Step, sequence: u16 }
+@@ -848,6 +851,7 @@
+     untouched: Option<[FileFact; 3]>, ignore: FileFact, config: Option<FileFact>, release: Option<[u64; 6]>,
+     ios: Option<ios::Fixture>, project_fields: Option<project_fields::Fixture>, recovery: Option<recovery::Fixture>, local_edits: Option<local_edits::Fixture>, checks: Option<checks::Fixture>, identity: Option<identity::Fixture>,
+     tools: Option<tool_setup::Fixture>,
++    git_fetch:Option<git_fetch::Fixture>,
+     written: bool, mutated: bool,
+ }
+ impl Fixture {
+@@ -857,48 +861,54 @@
+         if mutated { bytes.extend_from_slice(STALE_MARKER); } bytes
+     }
+     fn capture(root: PathBuf, uid: u32, case: Case) -> Result<Self, ()> {
++        if let Case::GitFetch(case)=case {
++            let f=git_fetch::Fixture::capture(&root,uid,case)?;
++            return Ok(Self{root,uid,root_identity:f.root_identity(),app_identity:Some(f.app()),untouched:None,
++                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,
++                local_edits:None,checks:None,identity:None,tools:None,git_fetch:Some(f),written:false,mutated:false});
++        }
+         if let Case::ToolSetup(case)=case {
+             let f=tool_setup::Fixture::capture(&root,uid,case)?;
+             return Ok(Self{root,uid,root_identity:f.root_identity(),app_identity:Some(f.app()),untouched:None,
+-                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:None,tools:Some(f),written:false,mutated:false});
++                ignore:f.ignore(),config:Some(f.config()),release:Some(f.release()),ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:None,tools:Some(f),git_fetch:None,written:false,mutated:false});
+         }
+         if let Case::Identity(case)=case {
+             let fixture=identity::Fixture::capture(&root,uid,case)?;
+             return Ok(Self {root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),untouched:None,
+                 ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
+-                ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),tools:None,written:false,mutated:false});
++                ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),tools:None,git_fetch:None,written:false,mutated:false});
+         }
+         if let Case::Checks(case)=case {
+             let fixture=checks::Fixture::capture(&root,uid,case)?;
+             return Ok(Self {root,uid,root_identity:fixture.dir(".").ok_or(())?,app_identity:fixture.dir("app"),
+                 untouched:None,ignore:fixture.file(".gitignore").ok_or(())?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
+-                ios:None,project_fields:None,recovery:None,local_edits:None,checks: Some(fixture), identity: None,tools:None,written:false,mutated:false});
++                ios:None,project_fields:None,recovery:None,local_edits:None,checks: Some(fixture), identity: None,tools:None,git_fetch:None,written:false,mutated:false});
+         }
+         if let Case::LocalEdits(case)=case {
+             let fixture=local_edits::Fixture::capture(&root,uid,case)?;
+             return Ok(Self { root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),
+                 untouched:None,ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
+-                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks: None, identity: None,tools:None,written:false,mutated:false });
++                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks: None, identity: None,tools:None,git_fetch:None,written:false,mutated:false });
+         }
+         if case == Case::PendingRecovery {
+             let fixture = recovery::Fixture::capture(&root, uid)?;
+             return Ok(Self { root, uid, root_identity: fixture.root_identity(), app_identity: None, untouched: None,
+                 ignore: fixture.ignore(), config: None, release: None, ios: None, project_fields: None,
+-                recovery: Some(fixture), local_edits: None, checks: None, identity: None,tools:None,written: false, mutated: false });
++                recovery: Some(fixture), local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+         }
+         if let Case::Ios(case) = case {
+             let fixture = ios::Fixture::capture(&root, uid, case)?;
+             let root_identity = directory(&root, uid, 0o700, &fixture.root_entries())?;
+             return Ok(Self { root, uid, root_identity, app_identity: fixture.source_identity(), untouched: None,
+                 ignore: fixture.ignore(), config: fixture.config(), release: fixture.release_identity(),
+-                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,written: false, mutated: false });
++                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+         }
+         if case == Case::ProjectFields {
+             let fixture = project_fields::Fixture::capture(&root, uid)?;
+             return Ok(Self { root, uid, root_identity: fixture.dir(".").ok_or(())?,
+                 app_identity: fixture.dir("app"), untouched: None, ignore: fixture.file(".gitignore").ok_or(())?,
+                 config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
+-                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, identity: None,tools:None,written: false, mutated: false });
++                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false });
+         }
+         let saved = case == Case::NoopStale || matches!(case,Case::Vault(vault::Case::UploadKey(_)));
+         let root_identity = directory(&root, uid, 0o700, if saved {
+@@ -911,12 +921,12 @@
+         let (config, release) = if saved { (Some(file_fact(&root.join("release/mobile-release.json"), CONFIG, uid)?),
+             Some(directory(&root.join("release"), uid, 0o755, &["mobile-release.json"])?)) } else { (None, None) };
+         Ok(Self { root, uid, root_identity, app_identity: Some(app_identity), untouched: Some(untouched), ignore, config, release,
+-            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,written: false, mutated: false })
++            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None,tools:None,git_fetch:None,written: false, mutated: false })
+     }
+     fn verify(&self, saved: bool) -> Result<(), ()> {
+         // Tool fixtures are verified outside Record on the SAME relay, not
+         // through the unrelated config-save fixture branch below.
+-        if self.tools.is_some() {return Err(());}
++        if self.tools.is_some()||self.git_fetch.is_some() {return Err(());}
+         if let Some(fixture)=&self.identity{return fixture.verify(&self.root,self.uid);}
+         if let Some(fixture)=&self.checks{return fixture.verify(&self.root,self.uid);}
+         if let Some(fixture)=&self.local_edits{return fixture.verify(&self.root,self.uid);}
+@@ -1028,7 +1038,7 @@
+     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
+     failure_close_requested: bool, failure_quit_attempted: bool,
+     ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
+-    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>,
++    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>, tool_setup: Option<tool_setup::Record>, git_fetch:Option<git_fetch::Record>,
+     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
+     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
+     fixture: Fixture,
+@@ -1338,6 +1348,7 @@
+     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, input_paths: Vec<PathBuf>, field_paths: Vec<PathBuf>, base: Value,
+     recovery: Option<Arc<recovery::Control>>, ios: Option<Arc<ios::Control>>, project_fields: Option<Arc<project_fields::Control>>, vault: Option<Arc<vault::Control>>,
+     tool_setup: Option<Arc<tool_setup::Control>>,
++    git_fetch:Option<Arc<git_fetch::Control>>,
+     failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
+ }
+ impl Observation {
+@@ -1345,13 +1356,14 @@
+         let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
+         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
+         let started = Instant::now();
+-        let end = started + Duration::from_secs(if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
++        let end = started + Duration::from_secs(if matches!(case,Case::GitFetch(_)){git_fetch::SECONDS}else if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
+         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
+         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
+         let project_path = fixture.root.clone();
+         let vault = if let Case::Vault(c) = case { Some(vault::Control::new(c, &project_path, fixture.uid)?) } else { None };
+         let tool_setup=if let Case::ToolSetup(c)=case{Some(tool_setup::Control::new(c,&project_path,fixture.uid)?)}else{None};
++        let git_fetch=if let Case::GitFetch(c)=case{Some(git_fetch::Control::new(c,&project_path,fixture.uid)?)}else{None};
+         let input_paths = if let Case::Ios(c) = case { session::targets(&project_path, c).ok_or(())? } else { Vec::new() };
+         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
+         let record = Mutex::new(Record {
+@@ -1385,12 +1397,13 @@
+                 checks: if let Case::Checks(c)=case{Some(checks::Record::new(c,started))}else{None},
+                 identity: if let Case::Identity(c)=case{Some(identity::Record::new(c))}else{None},
+                 tool_setup: tool_setup.as_ref().map(|_|tool_setup::Record::default()),
++                git_fetch:git_fetch.as_ref().map(|_|git_fetch::Record::default()),
+                 panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
+                 field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
+             });
+         let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
+         Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
+-            project_path, input_paths, field_paths, base, ios, project_fields, vault, recovery, tool_setup,
++            project_path, input_paths, field_paths, base, ios, project_fields, vault, recovery, tool_setup,git_fetch,
+             failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
+     }
+     fn fail(&self) { self.fail_with("observer-invariant"); }
+@@ -2030,6 +2043,10 @@
+                     }
+                     r.cancel_settled = true; r.step = Step::ReadCancelled; return;
+                 },
++                Step::Snapshot if matches!(self.case,Case::GitFetch(_)) => {
++                    if r.snapshot_pending||r.snapshots!=1{return;}
++                    r.step=Step::GitFetch(git_fetch::Step::Connect);return;
++                },
+                 Step::Snapshot if matches!(self.case,Case::ToolSetup(_)) => {
+                     if r.snapshot_pending || r.snapshots!=1{return;}
+                     r.step=Step::ToolSetup(tool_setup::Step::Context);return;
+@@ -2057,7 +2074,7 @@
+                         self.fail_with("native-completion-selection"); return;
+                     }
+                     r.project_witness = Some(witness); r.project_settled = true;
+-                    if (self.case.inputs() || self.case == Case::ProjectFields || matches!(self.case,Case::ToolSetup(_))) && !r.retain_open(self.case.selected_id()) {
++                    if (self.case.inputs() || self.case == Case::ProjectFields || matches!(self.case,Case::ToolSetup(_)|Case::GitFetch(_))) && !r.retain_open(self.case.selected_id()) {
+                         self.fail_with(if self.case == Case::ProjectFields { "project-fields-original-contract" } else { "session-original-contract" }); return;
+                     }
+                     r.step = Step::Snapshot; return;
+@@ -3199,6 +3216,7 @@
+                 session.as_ref().is_some_and(|s| record.final_originals(s)))
+             || self.vault.as_ref().is_some_and(|control| !r.vault_record.as_mut().is_some_and(|record|
+                 vault_snapshot.as_ref().is_some_and(|s|record.final_originals(s, control))))
++            || self.git_fetch.as_ref().is_some_and(|c|!r.git_fetch.as_mut().is_some_and(|v|v.final_originals(c,self.quit_id(),finality)))
+             || self.tool_setup.as_ref().is_some_and(|c|!r.tool_setup.as_mut().is_some_and(|v|v.final_originals(c,self.quit_id(),finality)))
+             || self.checks_case()&&!r.checks.as_ref().zip(r.fixture.checks.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
+             || self.local_case()&&!r.local_edits.as_ref().zip(r.fixture.local_edits.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
+@@ -3239,6 +3257,11 @@
+             && (self.case == Case::FirstSave || r.panel_attached == (if self.case == Case::Installation { [false,true,false,false] } else { [true,true,false,false] }))
+             && r.project_calls == (if self.case == Case::Installation { 0 } else if self.case == Case::FirstSave { 2 } else { 1 });
+         let specific = match self.case {
++            Case::GitFetch(_) => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
++                &&r.native_actions_returned==[false,true,false,true]&&r.sessions.is_empty()
++                &&r.git_fetch.as_ref().zip(self.git_fetch.as_ref()).is_some_and(|(v,c)|v.report(c).is_some())
++                &&r.panel_history.len()==1&&r.panel_history.iter().all(|p|p.sample.id==1&&p.sample.succeeded()
++                    &&p.progress.snapshot().state=="retired"&&p.identity.input_bound(1)&&p.completion.succeeded(1)),
+             Case::ToolSetup(_) => r.project_settled && r.snapshots==1 && r.close_count==1 && !r.quit_cancelled
+                 && r.native_actions_returned==[false,true,false,true] && r.sessions.is_empty()
+                 && r.tool_setup.as_ref().zip(self.tool_setup.as_ref()).is_some_and(|(v,c)|v.report(c).is_some())
+@@ -3327,6 +3350,7 @@
+                 "secondStarted":r.loss_seen,"originalLossSettled":r.loss_settled,"webProcessCrashTested":false},
+             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
+             "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
++        if let Some(c)=&self.git_fetch {report["gitFetch"]=r.git_fetch.as_ref()?.report(c)?;}
+         if let Some(c)=&self.tool_setup {report["toolSetup"]=r.tool_setup.as_ref()?.report(c)?;}
+         if self.checks_case(){report["localChecks"]=r.checks.as_ref()?.report(r.fixture.checks.as_ref()?)?;}
+         if self.local_case(){report["localEdits"]=r.local_edits.as_ref()?.report(r.fixture.local_edits.as_ref()?)?;}
+@@ -3914,12 +3938,17 @@
+     let upload_suffix;
+     let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
+-    let root = if let Case::ToolSetup(tool_case) = case {
++    let root = if matches!(case,Case::GitFetch(_)) {
++        let user=nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
++        if user.uid.as_raw()!=uid{return None}git_fetch::fixture_root(&user.dir)?
++    } else if let Case::ToolSetup(tool_case) = case {
+         let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+         if user.uid.as_raw() != uid { return None; }
+         tool_setup::fixture_root(&user.dir, tool_case)?
+     } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
+-    if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
++    if matches!(case,Case::GitFetch(_)){
++        directory(&root,uid,0o700,&[git_fetch::NAMES[0],git_fetch::NAMES[1],git_fetch::NAMES[2],git_fetch::NAMES[3],"state"]).ok()?;
++    } else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
+         directory(&root,uid,0o700,&[tool_setup::Case::ServicePreparation.name(),"state"]).ok()?;
+     } else if matches!(case,Case::ToolSetup(_)){
+         directory(&root,uid,0o700,&[tool_setup::NAMES[0],tool_setup::NAMES[1],tool_setup::NAMES[2],"state"]).ok()?;
+@@ -4672,6 +4701,7 @@
+         Some(v) if v.to_str().and_then(checks::Case::parse).is_some()=>Case::Checks(checks::Case::parse(v.to_str().expect("fixed checks selector")).expect("exact checks selector")),
+         Some(v) if v.to_str().and_then(identity::Case::parse).is_some()=>Case::Identity(identity::Case::parse(v.to_str().expect("fixed ASCII identity selector")).expect("exact identity selector")),
+         Some(v) if v.to_str().and_then(local_edits::Case::parse).is_some()=>Case::LocalEdits(local_edits::Case::parse(v.to_str().expect("fixed ASCII local selector")).expect("exact local selector")),
++        Some(v) if git_fetch::Case::parse(v).is_some()=>Case::GitFetch(git_fetch::Case::parse(v).expect("exact fetch case")),
+         Some(v) if tool_setup::Case::parse(v).is_some()=>Case::ToolSetup(tool_setup::Case::parse(v).expect("exact tool case")),
+         Some(v) if vault::Case::parse(v).is_some() => Case::Vault(vault::Case::parse(v).expect("exact vault selector")),
+         Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -4948,7 +4948,7 @@
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+             {
+                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+-                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application());
++                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application().or_else(||q.git_fetch_application()));
+                 #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+                 let observed_application:Option<&std::path::Path>=None;
+                 if let Some(path)=observed_application {document.bind_tool_acquisition(path)?;}
+@@ -4959,7 +4959,7 @@
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
++            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_git_fetch(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
+             let (relay_stop, stop_receiver) = watch::channel(false);
+             app.manage(ShellState {
+                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+--- a/desktop/src-tauri/src/asset_session_tool_setup_observation.rs
++++ b/desktop/src-tauri/src/asset_session_tool_setup_observation.rs
+@@ -50,7 +50,7 @@
+             project_fields: None,
+             input_case: None,
+             vault: None,
+-            tool_setup: Some(control),
++            tool_setup: Some(control),git_fetch:None,
+         });
+         Ok(())
+     }
+--- a/desktop/tools/macos_aqua_qualification.py
++++ b/desktop/tools/macos_aqua_qualification.py
+@@ -37,6 +37,14 @@
+ TOOLS = module_from_spec(_tool_spec)
+ _tool_spec.loader.exec_module(TOOLS)
+ del _tool_spec
++
++# Fixed nonshipping Fetch DATA/fixture leaf; actual run_owned remains below.
++_fetch_spec = spec_from_file_location("mrk_macos_git_fetch_qualification", Path(__file__).with_name("macos_git_fetch_qualification.py"))
++if _fetch_spec is None or _fetch_spec.loader is None:
++    raise RuntimeError("git-fetch-observation-module-unavailable")
++FETCH = module_from_spec(_fetch_spec)
++_fetch_spec.loader.exec_module(FETCH)
++del _fetch_spec
+ 
+ # Fixed sibling DATA/fixture extension works under the existing isolated -I -S
+ # interpreter. No user module/path or core process owner is imported here.
+@@ -1109,7 +1117,7 @@
+ )
+ PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
+                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
+-ALL_CASES = TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES
++ALL_CASES = (*FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
+ EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
+ REPOSITORY = "Apdelrahman1911/mobile-release-kit"
+ REF = "refs/heads/verify/desktop-macos-aqua"
+@@ -1745,7 +1753,9 @@
+ 
+ 
+ def selected_cases(scope=None):
+-    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
++    need(scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
++    if scope == FETCH.SCOPE:
++        return FETCH.CASES
+     if scope == TOOLS.SERVICE_SCOPE:
+         return TOOLS.SERVICE_CASES
+     if scope == TOOLS.SCOPE:
+@@ -1783,7 +1793,8 @@
+                                or argv == ["--scope", LOCAL_EDITS_SCOPE]
+                                or argv == ["--scope", LOCAL_CHECK_SCOPE]
+                                or argv == ["--scope", identity_qualification.SCOPE]
+-                               or argv == ["--scope", TOOLS.SCOPE]), "arguments-not-supported")
++                               or argv == ["--scope", TOOLS.SCOPE]
++                               or argv == ["--scope", FETCH.SCOPE]), "arguments-not-supported")
+     return argv[1] if argv else None
+ 
+ 
+@@ -1800,6 +1811,8 @@
+ 
+ def case_timeout(case):
+     need(type(case) is str and case in ALL_CASES, "case-binding")
++    if case in FETCH.CASES:
++        return FETCH.TIMEOUT
+     if case == TOOLS.SERVICE_CASE:
+         return TOOLS.SERVICE_TIMEOUT
+     if case in TOOLS.CASES:
+@@ -2585,9 +2598,11 @@
+         value["native"]["panelAttachments"] = [False, True, False, False]
+         value["reload"] = dict.fromkeys(value["reload"], False)
+         return value
+-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
++    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES:
+         value = expected_result(binding, "noop-stale")
+         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
++        if case in FETCH.CASES:
++            value["gitFetch"] = None  # Genuine returned original facts only.
+         if case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+             value["toolSetup"] = None  # Actual returned original facts are mandatory.
+         if case in LOCAL_CHECK_CASES:
+@@ -2841,6 +2856,9 @@
+     except (ValueError, RecursionError, UnicodeError) as error:
+         raise Refused("result-json") from error
+     expected = expected_result(binding, case)
++    if case in FETCH.CASES:
++        need(type(value) is dict and "gitFetch" in value, "fetch-original-report")
++        expected["gitFetch"] = FETCH.report(value["gitFetch"], case, need)
+     if case == TOOLS.SERVICE_CASE:
+         need(type(value) is dict and "toolSetup" in value, "tool-service-original-report")
+         expected["toolSetup"] = TOOLS.service_report(value["toolSetup"], need)
+@@ -4441,6 +4459,8 @@
+ 
+ 
+ def fixture_data(case, final, *, ios_output_created=None):
++    if case in FETCH.CASES:
++        return FETCH.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX, SOURCE)
+     need(case in ALL_CASES and type(final) is bool, "fixture-case")
+     if case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+         need(ios_output_created is None, "fixture-output-kind")
+@@ -4622,7 +4642,7 @@
+     def __init__(self, binding, uid, gid, scope=None):
+         self.binding, self.uid, self.gid = binding, uid, gid
+         self.cases = selected_cases(scope)
+-        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+@@ -4638,6 +4658,10 @@
+         self.case = None
+         self.stage = "prepare"
+         self.projects, self.states, self.originals, self.input_originals, self.field_outside_originals = {}, {}, {}, {}, {}
++        self.fetch_ancestors, self.fetch_tool_parents = [], []
++        self.fetch_namespace = self.fetch_tool = self.fetch_end = None
++        self.fetch_parents, self.fetch_paths, self.fetch_cases = {}, {}, {}
++        self.fetch_entered, self.fetch_completed = set(), set()
+         self.tool_fixture_ancestors = []
+         self.tool_ancestors, self.tool_parents, self.tool_paths = [], {}, {}
+         self.tool_namespace = self.tool_support = None
+@@ -4749,7 +4773,9 @@
+                  "fixture-write-original")
+ 
+     def prepare(self):
+-        if self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
++        if self.cases == FETCH.CASES:
++            FETCH.prepare_namespace(self)
++        elif self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
+             TOOLS.prepare_namespace(self, need, signature)
+         else:
+             self.parent = self._open("/private/tmp", directory=True)
+@@ -4802,6 +4828,8 @@
+             else:
+                 self.originals[case] = self._capture(case, False)
+         self._namespace()
++        if self.cases == FETCH.CASES:
++            FETCH.prepare_parents(self)
+         if self.cases == TOOLS.CASES:
+             TOOLS.prepare_parents(self, need, signature)
+         if self.cases in (VAULT_HELPER_CASES, COLD.CASES, BACKUP.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
+@@ -4810,7 +4838,9 @@
+             self._prepare_account()
+ 
+     def _namespace(self):
+-        if self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
++        if self.cases == FETCH.CASES:
++            FETCH.namespace_current(self)
++        elif self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
+             TOOLS.namespace_current(self, need, signature)
+         else:
+             need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
+@@ -4949,7 +4979,9 @@
+     def before_call(self, case):
+         self.case, self.stage = case, "before-invocation"
+         self._namespace()
+-        if case in identity_qualification.CASES:
++        if case in FETCH.CASES:
++            FETCH.before_call(self, case)
++        elif case in identity_qualification.CASES:
+             identity_qualification.before_call(self, case)
+         elif case == RECOVERY_CASE:
+             need(not self.inflight and self.last_returned and self.recovery_produced, "recovery-app-before-producer")
+@@ -5386,7 +5418,7 @@
+ 
+     def admit_normal_account_runtime(self, source, work, *, application_source):
+         """Same-job installed originals, not a fabricated producer/supplier result."""
+-        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES)
++        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES)
+               or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
+              and not self.inflight and self.recovery_runtime is None,
+              "normal-account-runtime-order")
+@@ -5791,7 +5823,7 @@
+     cases = selected_cases(scope)
+     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
+     not_executed = []
+-    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE):
++    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, FETCH.SCOPE):
+         # Root's CURRENT normal-package preparation must call the same original
+         # admit_normal_account_runtime first. No historical Aqua supplier route.
+         fixtures.recovery_runtime_paths()
+@@ -5804,8 +5836,10 @@
+         if scope == identity_qualification.SCOPE:
+             identity_qualification.before_invocation(fixtures, case, run_owned,
+                 app_environment(fixtures.path / "state" / case, uid, username))
++        if scope == FETCH.SCOPE:
++            FETCH.before_invocation(fixtures, case, run_owned, username)
+         fixtures.before_call(case)
+-        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, FETCH.SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+                                  upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+@@ -5822,7 +5856,7 @@
+         # unknown, with no readback, close or later invocation.
+         try:
+             result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
+-                               timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT)
++                               timeout=(FETCH.remaining(fixtures, case) if scope == FETCH.SCOPE else case_timeout(case)), capture=True, text=False, output_limit=OUTPUT_LIMIT)
+         except BaseException as error:
+             # Diagnostics only: preserve identical error, inflight, unknown
+             # finality and the no-readback/no-close/no-next-call boundary.
+@@ -5855,6 +5889,8 @@
+             fixtures.accept_account_app(report["iosArchive"])
+             _run_ios_account_child(fixtures, run_owned, uid, username, "observe")
+             readback = fixtures.readback_account(report["iosArchive"])
++        elif case in FETCH.CASES:
++            readback = FETCH.readback(fixtures, case, report["gitFetch"], need)
+         elif case == TOOLS.SERVICE_CASE:
+             readback = TOOLS.service_readback(fixtures, case, report["toolSetup"], need)
+             if report["toolSetup"]["execution"] != "ready":
+@@ -5895,6 +5931,8 @@
+                  "fixture-local-readback")
+         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
+               "originalCallReturned": True, "observer": report, "independentReadback": readback})
++        if scope == FETCH.SCOPE:
++            FETCH.remaining(fixtures, case)
+         if case in COLD.CASES:
+             # Current wrapper's emit_checked must really return from its held
+             # runtime POST before this can release the one second invocation.
+--- a/desktop/tools/macos_identity_current_runtime.py
++++ b/desktop/tools/macos_identity_current_runtime.py
+@@ -12,6 +12,7 @@
+ 
+ 
+ SCOPE = "project-identity-native"
++FETCH_SCOPE = "git-fetch-native"
+ TOOLS_SCOPE = "tool-setup"
+ SERVICE_SCOPE = "tool-service-prerequisite"
+ UPLOAD_SCOPES = ("upload-key-roundtrip", "upload-key-stop-before-go", "upload-key-stop-after-new")
+@@ -48,7 +49,7 @@
+     scope = environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled")
+     if scope == "disabled":
+         return None  # Preserve every original ordinary/prepared role decision.
+-    need(scope in (SCOPE, TOOLS_SCOPE) and target == TARGET
++    need(scope in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE) and target == TARGET
+          and environment.get("GITHUB_REF") == REF
+          and environment.get("MRK_MACOS_PACKAGE_ROLE") == ROLE
+          and phase in PACKAGE_PHASES + DATA_PHASES, "identity-native-package-scope")
+@@ -57,7 +58,7 @@
+ 
+ def current_context(environment, target):
+     """Fixed current-job DATA. No caller-selected source, work root or case."""
+-    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE)
++    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE, FETCH_SCOPE)
+          and package_role(environment, "package-install", target) == ROLE,
+          "identity-native-entry-scope")
+     source = environment.get("GITHUB_SHA", "")
+@@ -98,7 +99,7 @@
+     invocation. This is not prerequisite proof, a generic selector or a retry.
+     """
+     native = environment.get("MRK_MACOS_NATIVE_SCOPE")
+-    need(type(scope) is str and ((native == SCOPE and scope == SCOPE)
++    need(type(scope) is str and ((native == SCOPE and scope == SCOPE) or (native == FETCH_SCOPE and scope == FETCH_SCOPE)
+          or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE))),
+          "current-native-observation-scope")
+     return scope
+@@ -108,7 +109,7 @@
+     if argv == ["--target", TARGET]:
+         return SCOPE  # Preserve the original identity-only invocation.
+     need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
+-         and type(argv[3]) is str and argv[3] in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
++         and type(argv[3]) is str and argv[3] in (SCOPE, FETCH_SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE),
+          "identity-native-arguments")
+     return argv[3]
+ 
+@@ -217,7 +218,7 @@
+         not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
+         aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
+                   and len(set(not_executed)) == len(not_executed) and count == len(cases)
+-                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
++                  and len(cases) == (2 if scope == COLD_SCOPE else 1 if scope in (*UPLOAD_SCOPES, BACKUP_SCOPE) else {SCOPE: 4, FETCH_SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
+                   "identity-native-incomplete")
+         aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES, BACKUP_SCOPE), "identity-native-incomplete")
+         _current(aqua, fixtures)
+@@ -236,7 +237,7 @@
+             pass  # No retry or masking of the original unknown/failed call.
+         return 130 if isinstance(error, KeyboardInterrupt) else 1
+     try:
+-        kind = "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
++        kind = "macos-git-fetch-current-complete" if scope == FETCH_SCOPE else "macos-upload-key-backup-current-complete" if scope == BACKUP_SCOPE else "macos-upload-key-cold-restart-complete" if scope == COLD_SCOPE else "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
+             "macos-identity-current-complete" if scope == SCOPE else (
+                 "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete"))
+         if not_executed:
+--- a/desktop/tools/prepare_runtime.py
++++ b/desktop/tools/prepare_runtime.py
+@@ -42,6 +42,8 @@
+ )
+ # Keep the historical supplier preparation exact. Current product callers must
+ # select this complete roster explicitly; file presence never selects a domain.
++FETCH_OBSERVATION_BOOTSTRAPS = ("github_fetch_connection_observation_bootstrap.py", "git_fetch_observation_bootstrap.py")
++
+ CURRENT_BOOTSTRAPS = (
+     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+@@ -236,10 +238,10 @@
+ 
+ 
+ def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False,
+-                    store_component: Path | None = None) -> dict[str, str]:
++                    store_component: Path | None = None, fetch_observation: bool = False) -> dict[str, str]:
+     """Current complete fixed roster, still DATA only and never qualification."""
+     return _prepare(source, runtime, target, current=True, history_provider=history_provider,
+-                    store_component=store_component)
++                    store_component=store_component, fetch_observation=fetch_observation)
+ 
+ 
+ def _store_tooling_names(body: bytes) -> tuple[str, ...]:
+@@ -413,9 +415,13 @@
+ 
+ 
+ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
+-             history_provider: bool = False, store_component: Path | None = None) -> dict[str, str]:
++             history_provider: bool = False, store_component: Path | None = None, fetch_observation: bool = False) -> dict[str, str]:
+     bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
+     current_mac = current and target in {"aarch64-apple-darwin", "x86_64-apple-darwin"}
++    if type(fetch_observation) is not bool or fetch_observation and not current_mac:
++        raise PreparationError("Fetch observation is a fixed current Mac input only")
++    if fetch_observation:
++        bootstrap_names = (*bootstrap_names, *FETCH_OBSERVATION_BOOTSTRAPS)
+     file_limit = MAC_MAX_FILES if current_mac else MAX_FILES
+     entry_limit = MAC_MAX_ENTRIES if current_mac else MAX_ENTRIES
+     manifest_limit = MAC_MANIFEST_BYTES if current_mac else 1024 * 1024
+--- a/desktop/tools/stage_macos_installed.py
++++ b/desktop/tools/stage_macos_installed.py
+@@ -141,6 +141,8 @@
+               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"}
+ # Accepted historical supplier bytes keep their original entry roster. Newly
+ # composed payloads include every fixed current domain without rewriting them.
++FETCH_OBSERVATION_BOOTSTRAPS = set(("github_fetch_connection_observation_bootstrap.py", "git_fetch_observation_bootstrap.py"))
++
+ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
+     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+@@ -1702,7 +1704,17 @@
+             need(complete and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
+ 
+ 
+-def current_source(*, history_provider=False, store_runtime=False):
++def fetch_observation_inputs(role=None, scope=None):
++    # Comparison DATA only. The original admitted package caller supplies the
++    # SAME exact role/scope. No live runtime or production nomination is made.
++    if role is None and scope is None:
++        return False
++    need(role == "installed-shell-observation" and scope == "git-fetch-native",
++         "fetch-observation-package-role")
++    return True
++
++
++def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False):
+     """Capture DATA, including the committed CA's one explicit projection map."""
+     need(type(history_provider) is bool, "current-history-provider-profile")
+     need(type(store_runtime) is bool, "current-store-runtime-profile")
+@@ -1712,7 +1724,8 @@
+     need({"__init__.py", "_desktop_engine.py"} <= set(core), "current-core-required-inputs")
+     need(digest(core["_desktop_engine.py"][0]) == CURRENT_PROTOCOL, "current-protocol-source")
+     captured = {"src/mobile_release/" + name: value for name, value in core.items()}
+-    fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
++    need(type(fetch_observation) is bool, "fetch-observation-roster")
++    fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set())}
+     if store_runtime:
+         fixed["desktop/local_store_preflight_bootstrap.py"] = 64 * 1024
+         fixed["desktop/apple_provisioning_bootstrap.py"] = 64 * 1024
+@@ -1862,7 +1875,7 @@
+ 
+ 
+ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None,
+-                          store_rows=()):
++                          store_rows=(), fetch_observation=False):
+     target = mac_target(target)
+     files = tree(runtime, current_root_mode=0o700, mac_store_prefix="store" if store_rows else None)
+     preadmitted = supplier
+@@ -1873,7 +1886,8 @@
+     expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
+     need(len(expected_store) == len(store_rows) and not set(expected_store) & set(preadmitted),
+          "current-store-input-collision")
+-    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
++    need(type(fetch_observation) is bool, "fetch-observation-roster")
++    bootstraps = CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set()) | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
+     required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
+     need(set(files) == required, "current-runtime-complete-roster")
+     for name, value in preadmitted.items():
+@@ -1901,6 +1915,8 @@
+ def current_runtime_command(args):
+     target = command_target(args)
+     composing = args.command == "compose-store-runtime"
++    fetch_observation = fetch_observation_inputs(getattr(args, "package_role", None), getattr(args, "native_scope", None))
++    need(not fetch_observation or target == ARM_TARGET, "fetch-observation-arm-only")
+     configured = composing or getattr(args, "configured_signing", False)
+     if composing:
+         need(getattr(args, "store_component", None) is None and args.signed_store_root is not None
+@@ -1923,7 +1939,7 @@
+     if final and not composing:
+         need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
+     parents = current_paths(args)
+-    captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled)
++    captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation)
+     if provider_enabled:
+         need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
+     if final and not composing:
+@@ -1956,8 +1972,8 @@
+     provider_scope = contextlib.nullcontext(None)
+     if provider_enabled:
+         capacity = history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
+-            supplier_files=len(supplier), fixed_bytes=sum(len(projection["desktop/" + name][0])
+-                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
++            supplier_files=len(supplier) + (len(FETCH_OBSERVATION_BOOTSTRAPS) if fetch_observation else 0), fixed_bytes=sum(len(projection["desktop/" + name][0])
++                for name in CURRENT_BOOTSTRAPS | (FETCH_OBSERVATION_BOOTSTRAPS if fetch_observation else set()) | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
+         provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
+     with provider_scope as provider:
+         provider_body, provider_post = (None, None) if provider is None else provider
+@@ -1975,20 +1991,22 @@
+             old_mask = os.umask(0o077)
+             try:
+                 options = {"history_provider": True} if provider_enabled else {}
++                if fetch_observation:
++                    options["fetch_observation"] = True
+                 if store_enabled:
+                     options["store_component"] = store_component
+                 prepared = preparer.prepare_current(source, runtime, target, **options)
+             finally:
+                 os.umask(old_mask)
+             files, manifest = current_runtime_files(runtime, projection, supplier, target=target,
+-                history_provider=provider_body, store_rows=store_rows)
++                history_provider=provider_body, store_rows=store_rows, fetch_observation=fetch_observation)
+             if store_enabled:
+                 preparer._store_recheck(store)
+             manifest_digest = digest(files["manifest.json"][0])
+             need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
+                               "qualification": "prepared-not-native-verified"}, "current-preparer-result")
+             need(tree(source, current_root_mode=0o555) == projection
+-                 and current_source(history_provider=provider_enabled, store_runtime=store_enabled) == (captured, projection, source_digest),
++                 and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation) == (captured, projection, source_digest),
+                  "current-source-post-changed")
+             if fresh_inputs is not None:
+                 need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
+@@ -3565,12 +3583,16 @@
+     return result
+ 
+ 
+-def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
++def runtime_tree(root, expected, *, current=False, target=ARM_TARGET, observation_role=False):
+     target = mac_target(target)
+     need(type(current) is bool, "runtime-manifest-profile")
+     need(current or target == ARM_TARGET, "unqualified-intel-route")
+     provider_nomination, provider_source = history_provider_source(target=target) if current else (None, None)
+     files = tree(root, mac_store_prefix="store" if current else None)
++    need(type(observation_role) is bool, "runtime-observer-role")
++    present = set(files) & FETCH_OBSERVATION_BOOTSTRAPS
++    need(not present or current and observation_role and present == FETCH_OBSERVATION_BOOTSTRAPS,
++         "nonshipping-fetch-runtime-roster")
+     need("manifest.json" in files, "runtime-manifest-missing")
+     _, rows = manifest_files(files["manifest.json"][0], expected, current=current, target=target)
+     need(set(files) == set(rows) | {"manifest.json"}, "runtime-complete-roster")
+@@ -3627,7 +3649,8 @@
+     need((expected_desktop is not None) == (role == "ordinary-image")
+          and sha(expected_resident) and sha(getattr(args, "expected_android_helper", None)),
+          "package-role-signed-inputs")
+-    runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime, target=target)
++    runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime, target=target,
++                           observation_role=(role == "installed-shell-observation"))
+     app = tree(args.app)
+     _support_sha, support_rows = android_support_manifest()
+     support = {PAYLOAD_RELATIVE + "/" + row["resourcePath"] for row in support_rows}
+@@ -7389,6 +7412,8 @@
+             command.add_argument("--signed-store-root", required=True, type=Path)
+             command.add_argument("--binding-output", required=True, type=Path)
+             command.add_argument("--output", required=True, type=Path)
++        command.add_argument("--package-role", choices=("installed-shell-observation",))
++        command.add_argument("--native-scope", choices=("git-fetch-native",))
+         if name == "current-runtime":
+             command.add_argument("--configured-signing", action="store_true",
+                                  help="Require the fixed SOURCE capsule/S/M nomination, never a CLI replacement")
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
+@@ -342,6 +342,12 @@
+     /// Called by the SAME existing Relay task. An async native startup/saved
+     /// observation is awaited by that original; there is no new unjoined task.
+     pub(crate) async fn tick_original(self: &Arc<Self>, app: &tauri::AppHandle) {
++        let fetch=self.record().and_then(|r|match r.step {super::super::Step::GitFetch(step)=>Some(step),_=>None});
++        if let Some(step)=fetch {
++            if !self.timely(){self.tick(app);return;}
++            let Some(state)=app.try_state::<crate::shell::ShellState>()else{self.fail_with("git-fetch-original-contract");return};
++            self.git_fetch_tick(app,&state.document,step).await;return;
++        }
+         let tool=self.record().and_then(|r|match r.step {super::super::Step::ToolSetup(step) if !matches!(step,super::super::tool_setup::Step::Native(_))=>Some(step),_=>None});
+         if let Some(step)=tool {
+             if !self.timely(){self.tick(app);return;}

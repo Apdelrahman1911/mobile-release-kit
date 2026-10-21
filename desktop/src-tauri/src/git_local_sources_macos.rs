@@ -26,6 +26,10 @@ mod fetch_sources;
 #[path="git_push_sources_macos.rs"]
 mod push_sources;
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="git_fetch_observation_sources_macos.rs"]
+mod fetch_observation;
+
 const SOURCE_LIMIT: usize = 128;
 struct RefEdge {
     parent: usize,
@@ -86,6 +90,10 @@ pub(crate) struct GitLocalSources {
     initialization:Option<init_sources::State>,
     fetch:Option<fetch_sources::State>,
     push:Option<push_sources::State>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    fetch_observation:Option<std::sync::Arc<crate::shell::installed_observation::git_fetch::Control>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    fetch_observation_file:Option<(usize,wire::Snapshot)>,
 }
 impl Drop for GitLocalSources {
     fn drop(&mut self) {
@@ -112,15 +120,25 @@ impl GitLocalSources {
             indices: [None; 4],
             operation_id: None, review: None, reference: None, replacement: None,
             post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            fetch_observation:None,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            fetch_observation_file:None,
         }
     }
     pub(crate) fn not_started(&self) -> bool {
         !self.started && !self.finished && !self.acl_entered && self.acl.is_none() && self.book.not_started()
     }
+    fn fetch_observation_extra(&self)->usize {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.fetch_observation.is_some(){return 1}
+        0
+    }
     pub(crate) fn working_bytes() -> Option<usize> {
         SOURCE_LIMIT
             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
             .checked_add(std::mem::size_of::<Self>() + 65536 + 5 * PATH_LIMIT + 4096)?
+            .checked_add(if cfg!(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))){128}else{0})?
             .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
             .checked_add(switch_sources::State::working_bytes()?)?
             .checked_add(rename_sources::State::working_bytes()?)?
@@ -396,6 +414,7 @@ impl GitLocalSources {
             let tool_parts = parts(Path::new(wire::TOOL_PATH))?;
             let parent_parts = &tool_parts[..tool_parts.len() - 1];
             let extra=(42usize).checked_add(source_extra(&project_parts))
+                .and_then(|n|n.checked_add(self.fetch_observation_extra()))
                 .and_then(|n|switch_sources::State::extra(review).and_then(|s|n.checked_add(s)))
                 .and_then(|n|rename_sources::State::extra(review).and_then(|s|n.checked_add(s)))
                 .and_then(|n|fast_forward_sources::State::extra(review).and_then(|s|n.checked_add(s)))
@@ -556,6 +575,8 @@ impl GitLocalSources {
         for alias in &self.book.aliases {
             self.book.check_alias(alias, stop)?;
         }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        self.post_fetch_observation(stop)?;
         if self.initialization.is_some() {return self.post_init(stop)}
         let original = self.native.as_ref().ok_or(Reason::SourceChanged)?;
         for (index, expected, maximum) in [

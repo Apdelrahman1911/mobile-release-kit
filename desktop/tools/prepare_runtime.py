@@ -42,6 +42,8 @@ BOOTSTRAPS = (
 )
 # Keep the historical supplier preparation exact. Current product callers must
 # select this complete roster explicitly; file presence never selects a domain.
+FETCH_OBSERVATION_BOOTSTRAPS = ("github_fetch_connection_observation_bootstrap.py", "git_fetch_observation_bootstrap.py")
+
 CURRENT_BOOTSTRAPS = (
     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
@@ -236,10 +238,10 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
 
 
 def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False,
-                    store_component: Path | None = None) -> dict[str, str]:
+                    store_component: Path | None = None, fetch_observation: bool = False) -> dict[str, str]:
     """Current complete fixed roster, still DATA only and never qualification."""
     return _prepare(source, runtime, target, current=True, history_provider=history_provider,
-                    store_component=store_component)
+                    store_component=store_component, fetch_observation=fetch_observation)
 
 
 def _store_tooling_names(body: bytes) -> tuple[str, ...]:
@@ -413,9 +415,13 @@ def _copy_store(observed, runtime):
 
 
 def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
-             history_provider: bool = False, store_component: Path | None = None) -> dict[str, str]:
+             history_provider: bool = False, store_component: Path | None = None, fetch_observation: bool = False) -> dict[str, str]:
     bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     current_mac = current and target in {"aarch64-apple-darwin", "x86_64-apple-darwin"}
+    if type(fetch_observation) is not bool or fetch_observation and not current_mac:
+        raise PreparationError("Fetch observation is a fixed current Mac input only")
+    if fetch_observation:
+        bootstrap_names = (*bootstrap_names, *FETCH_OBSERVATION_BOOTSTRAPS)
     file_limit = MAC_MAX_FILES if current_mac else MAX_FILES
     entry_limit = MAC_MAX_ENTRIES if current_mac else MAX_ENTRIES
     manifest_limit = MAC_MANIFEST_BYTES if current_mac else 1024 * 1024

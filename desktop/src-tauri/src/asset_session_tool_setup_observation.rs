@@ -50,7 +50,7 @@ impl DocumentBinding {
             project_fields: None,
             input_case: None,
             vault: None,
-            tool_setup: Some(control),
+            tool_setup: Some(control),git_fetch:None,
         });
         Ok(())
     }
