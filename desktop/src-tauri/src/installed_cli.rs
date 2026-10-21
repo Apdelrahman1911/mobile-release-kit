@@ -126,7 +126,9 @@ Android build preparation and Start are separate, one-use requests for the exact
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
 Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
 Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
-There is no arbitrary edit, toolkit signing, credential or publishing route.\n";
+No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
+Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
+There is no public-release command.\n";
 
 struct Options { request: p::Request, json: bool }
 enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
@@ -318,7 +320,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             Reads require explicit consent: Desktop, or foreground mrk serve-history on macOS for the five cached-history commands only.\n\
             Saved observations are not live validation or native operation authority.\n\
             Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
-            Arbitrary edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+            No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
+            Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
+            There is no public-release command.\n\
             iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
             Prepare never starts a build; project code may have file/network/signing effects.\n\

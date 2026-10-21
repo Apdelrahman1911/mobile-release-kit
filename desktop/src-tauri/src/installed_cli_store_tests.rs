@@ -122,6 +122,15 @@ fn store_cli_lost_ack_has_only_original_status_cancel_and_no_replay() {
     assert_eq!(c["readGrantAuthorizesExecution"], false);
     for key in ["execute", "reconcile", "upload", "promotion", "requiresSeparateExactModeConsent"] { assert_eq!(c[key], true); }
     for key in ["oldAccessPrepareGrantsAuthorizeRelease", "automaticRetry", "publicRelease"] { assert_eq!(c[key], false); }
+    // Human discovery must disclose the same external effects as JSON rather
+    // than retaining the obsolete claim that all Store operations are absent.
+    let human = String::from_utf8(capabilities(false).unwrap()).unwrap();
+    for text in [HELP, human.as_str()] {
+        assert!(text.contains("Store steps can upload/promote/submit"));
+        assert!(text.contains("exact one-use Desktop approval"));
+        assert!(text.contains("no public-release command"));
+        assert!(!text.contains("publishing are not supported"));
+    }
 }
 
 #[path = "installed_cli_store_release_tests.rs"]
