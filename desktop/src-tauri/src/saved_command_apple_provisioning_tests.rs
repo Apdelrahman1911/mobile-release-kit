@@ -364,6 +364,103 @@ fn apple_original_terminal_dispatch_uses_the_retained_profile_mode() {
 }
 
 #[test]
+fn apple_original_store_closure_keeps_mode_and_owner_gates() {
+    use apple_wire::Mode;
+    // These existing inert Sessions and typed frames exercise the actual
+    // Store closure predicate, not a native runtime or positive join receipt.
+    for (mode, permits_profile_call) in [
+        (Mode::Review, false),
+        (Mode::Register, false),
+        (Mode::Reconcile, false),
+        (Mode::ProfileReview, true),
+        (Mode::ProfileReuse, true),
+        (Mode::ProfileCreate, true),
+        (Mode::ProfileReconcile, true),
+        (Mode::KeyReview, false),
+        (Mode::KeyPrepare, false),
+        (Mode::CertificateReview, false),
+        (Mode::CertificateCreate, false),
+        (Mode::CertificateReconcile, false),
+        (Mode::P12Review, true),
+        (Mode::P12Reuse, true),
+        (Mode::P12Save, true),
+    ] {
+        let mut scope = context();
+        scope.mode = mode;
+        scope.new_application = mode == Mode::Register;
+        if !matches!(mode, Mode::Review | Mode::ProfileReview | Mode::KeyReview
+            | Mode::CertificateReview | Mode::P12Review)
+        {
+            scope.reference = Some(apple_wire::Reference {
+                operation_id: "d".repeat(32), owner_generation: "e".repeat(32),
+            });
+        }
+        if mode.profile() || mode == Mode::P12Reuse {
+            scope.p12_record_id = Some("f".repeat(32));
+            scope.p12_record_revision = Some(1);
+        }
+        if mode.certificate() || mode.p12() {
+            scope.key_record_id = Some("1".repeat(32));
+            scope.key_record_revision = Some(1);
+        }
+        assert!(scope.valid());
+        for calls in 0..=2 {
+            let fixture = || super::super::tests::active_with_context(
+                SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+                    std::path::PathBuf::from("/unopened-apple-store-closure-runtime"),
+                )),
+                Context::AppleProvisioning(scope.clone()),
+            );
+            let (application, original) = fixture();
+            let (_foreign_application, foreign) = fixture();
+            let at = original.clocks.admitted;
+            {
+                let registry = application.inner.lock();
+                assert!(!store::closure_ready(&registry, &original, true, true));
+                // The original unclaimed/no-child branch still needs its
+                // direct-return input and exact Session, never a terminal.
+                assert!(store::closure_ready(&registry, &original, false, true));
+                assert!(!store::closure_ready(&registry, &original, false, false));
+                assert!(!store::closure_ready(&registry, &foreign, false, true));
+            }
+            application.inner.accept_at(
+                &original, Frame::AppleProvisioning(apple_wire::Frame::Accepted), at,
+            );
+            assert!(!store::closure_ready(&application.inner.lock(), &original, true, true));
+            let terminal: apple_wire::Terminal = serde_json::from_value(json!({
+                "schemaVersion":1,"context":scope,"outcome":"cancelled","reason":"cancelled","result":null,
+                "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":7,
+                    "profileCalls":calls,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"cancelled"}
+            })).unwrap();
+            application.inner.accept_at(
+                &original, Frame::AppleProvisioning(apple_wire::Frame::Terminal(terminal)), at,
+            );
+            let expected = calls <= u32::from(permits_profile_call);
+            let mut registry = application.inner.lock();
+            assert_eq!(store::closure_ready(&registry, &original, true, true), expected,
+                "mode {mode:?}, profile calls {calls}");
+            assert!(!store::closure_ready(&registry, &original, true, false));
+            // Same public IDs/context in another original owner are not the
+            // original Session, even when its terminal DATA would match.
+            assert!(!store::closure_ready(&registry, &foreign, true, true));
+            registry.active.as_mut().unwrap().accepted = false;
+            assert!(!store::closure_ready(&registry, &original, true, true));
+            registry.active.as_mut().unwrap().accepted = true;
+            registry.active.as_mut().unwrap().terminal = false;
+            assert!(!store::closure_ready(&registry, &original, true, true));
+            registry.active.as_mut().unwrap().terminal = true;
+            assert_eq!(store::closure_ready(&registry, &original, true, true), expected);
+            assert_eq!(registry.active.as_ref().unwrap().first_stop, Some(at));
+            assert!(*original.stop.borrow());
+            assert!(!original.startup.lock().unwrap().attempted);
+            assert!(!original.driver_joined.load(Ordering::SeqCst));
+            assert!(!original.watchdog_joined.load(Ordering::SeqCst));
+            assert!(!native_complete(&original));
+        }
+    }
+}
+
+#[test]
 fn profile_original_clock_and_preasset_refusal_do_not_invent_completion() {
     let mut scope = context();
     scope.mode = apple_wire::Mode::ProfileReview;

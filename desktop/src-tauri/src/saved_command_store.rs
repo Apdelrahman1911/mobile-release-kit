@@ -72,7 +72,7 @@ pub(super) fn installed_final(book: &Resources) -> bool {
 pub(super) fn closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
     direct_returned && matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && original_session(r, owner)
         && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
-            && match a.projection.result.as_ref(){Some(Terminal::AppleProvisioning(t))=>owner.domain==SavedCommandDomain::AppleProvisioning&&t.lifetime.settled(),Some(Terminal::LocalStorePreflight(t))=>owner.domain==SavedCommandDomain::LocalStorePreflight&&t.lifetime.settled(),Some(Terminal::LocalStorePrepare(t))=>owner.domain==SavedCommandDomain::LocalStorePrepare&&t.lifetime.settled(),Some(Terminal::LocalStoreReconcile(t))=>owner.domain==SavedCommandDomain::LocalStoreReconcile&&t.lifetime.settled(),_=>false}))
+            && match a.projection.result.as_ref(){Some(Terminal::AppleProvisioning(t))=>owner.domain==SavedCommandDomain::AppleProvisioning&&t.settled(),Some(Terminal::LocalStorePreflight(t))=>owner.domain==SavedCommandDomain::LocalStorePreflight&&t.lifetime.settled(),Some(Terminal::LocalStorePrepare(t))=>owner.domain==SavedCommandDomain::LocalStorePrepare&&t.lifetime.settled(),Some(Terminal::LocalStoreReconcile(t))=>owner.domain==SavedCommandDomain::LocalStoreReconcile&&t.lifetime.settled(),_=>false}))
 }
 
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
