@@ -304,7 +304,8 @@ fn export_current(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custod
     let row = Descriptor { authenticated, original: witness, mutation_pending: false };
     match_descriptor(&row, reference, &key)?;
     drop((row, bytes));
-    let record = book.read_record(reference.record, true, &mut || owner.interrupted()).map_err(problem)?;
+    let record = book.read_backup_record(&reference.original, request.budget.working,
+        &mut || owner.interrupted()).map_err(problem)?;
     let (bytes, witness, complete) = record.into_parts();
     if !complete || witness != reference.original || bytes.len() != quoted { return Err(Reason::SourceChanged); }
     request.budget.before_record_read(bytes.capacity())?;
@@ -390,7 +391,8 @@ fn import_new(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custody: &
     if exact_length.checked_add(crypto::CONTROL_BYTES).is_none_or(|bytes| bytes > allowance) {
         return Err(Reason::Capacity);
     }
-    let actual = book.read_record(record, true, &mut || owner.interrupted()).map_err(problem)?;
+    let actual = book.read_new_backup_record(record, revision, exact_length, allowance,
+        &mut || owner.interrupted()).map_err(problem)?;
     let (bytes, witness, complete) = actual.into_parts();
     if !complete || bytes.len() != exact_length
         || bytes.capacity().checked_add(crypto::CONTROL_BYTES).is_none_or(|bytes| bytes > allowance) {
