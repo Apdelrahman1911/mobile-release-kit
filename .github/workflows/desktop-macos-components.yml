@@ -45,7 +45,7 @@ on:
         default: both
         options: [both, arm64, x86_64]
       apple_key_component:
-        description: Also run the local Apple key/vault component with app-typecheck and arm64
+        description: Also run the local Apple key/P12 vault components with app-typecheck and arm64
         type: boolean
         default: false
 
@@ -1007,7 +1007,7 @@ jobs:
         id: apple-key-python
         with:
           python-version: '3.14.7'
-      - name: Restore the SOURCE-selected signed Ruby for the local Apple key component
+      - name: Restore the SOURCE-selected signed Ruby for the local Apple key/P12 components
         if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
         timeout-minutes: 5
         shell: bash
@@ -1022,7 +1022,7 @@ jobs:
           # runtime build, alternate artifact or retry.
           "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
             "$WORK_ROOT/component" --target aarch64-apple-darwin
-      - name: Verify real local Apple key generation, encrypted NEW and fresh reuse
+      - name: Verify real local Apple key/P12 assembly, encrypted NEW and fresh reuse
         if: inputs.component == 'app-native-tests' || (inputs.component == 'app-typecheck' && inputs.apple_key_component)
         id: apple-key-component
         timeout-minutes: 10
@@ -1124,13 +1124,17 @@ jobs:
                   native = receipt["nativeMembers"]
                   stager.need(len(native) == signing.NATIVE_COUNT, "apple-key-runtime-native-count")
                   source_paths = ("fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
-                      "desktop/tools/verify_macos_store_runtime.rb")
+                      "desktop/tools/verify_macos_store_runtime.rb", "tests/workflow/apple_p12_component.rb",
+                      "fastlane/apple_provisioning_p12.rb", "fastlane/apple_provisioning_p12_assemble.rb")
                   sources = tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths)
                   home, fixture = work / "apple-key-home", work / "apple-key-fixture"
-                  home.mkdir(mode=0o700); fixture.mkdir(mode=0o700)
+                  p12_fixture = work / "apple-p12-fixture"
+                  home.mkdir(mode=0o700); fixture.mkdir(mode=0o700); p12_fixture.mkdir(mode=0o700)
                   fixture_identity = directory(fixture.lstat())
-                  for name in ("generated", "native", "reopened"):
-                      (fixture / name).mkdir(mode=0o700)
+                  p12_fixture_identity = directory(p12_fixture.lstat())
+                  for root in (fixture, p12_fixture):
+                      for name in ("generated", "native", "reopened"):
+                          (root / name).mkdir(mode=0o700)
                   clean = {"PATH": str(runtime / "bin") + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home),
                       "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "CI": "true",
                       "FASTLANE_SKIP_UPDATE_CHECK": "1", "FASTLANE_OPT_OUT_USAGE": "1", "FASTLANE_HIDE_CHANGELOG": "1"}
@@ -1161,22 +1165,32 @@ jobs:
                           env=clean, cwd=home, check=True, timeout=90)
                   test_name = ("asset_session::vault::backup_native::component_tests::apple_key::"
                       "native_apfs_apple_key_new_reopen_and_private_reuse")
+                  p12_test = ("asset_session::vault::backup_native::component_tests::apple_key::p12::"
+                      "native_apfs_apple_p12_new_reopen_and_private_reuse")
                   phase = "test-selection"
                   with (work / "apple-key-selection.private").open("xb") as capture:
-                      subprocess.run(sandbox + [str(binary), test_name, "--exact", "--ignored", "--list"],
+                      subprocess.run(sandbox + [str(binary), test_name, p12_test, "--exact", "--ignored", "--list"],
                           stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
                           env=clean, cwd=home, check=True, timeout=15)
                   listing = private(work / "apple-key-selection.private", 64 * 1024)[0].splitlines()
                   stager.need(listing.count((test_name + ": test").encode("ascii")) == 1
-                      and b"1 test, 0 benchmarks" in listing, "apple-key-one-original-test")
+                      and listing.count((p12_test + ": test").encode("ascii")) == 1
+                      and b"2 tests, 0 benchmarks" in listing, "apple-key-p12-original-tests")
                   generated = fixture / "generated/pending-apple-key.mrk"
                   reopened = fixture / "reopened/pending-apple-key.mrk"
+                  assembled = p12_fixture / "generated/assembled-apple-p12.mrk"
+                  p12_reopened = p12_fixture / "reopened/distribution.p12"
+                  p12_password = p12_fixture / "reopened/p12-password"
                   magic = b"MRK-APPLE-DISTRIBUTION-KEY/1\n"
                   public_magic = b"MRK-APPLE-DISTRIBUTION-KEY-PUBLIC/1\n"
                   private_limit = len(magic) + 12 + 3072 + 4096 + 1024
                   public_limit = len(public_magic) + 8 + 4096 + 1024
-                  # One original90s end for ALL three calls and their checks.
+                  p12_magic, p12_public_magic = b"MRK-APPLE-P12/1\n", b"MRK-P12-PUBLIC/1\n"
+                  p12_header, p12_limit = len(p12_magic) + 4 + 64, 128 * 1024
+                  # One original90s end for ALL six calls and their checks.
                   # No phase retry/renewal and no private diagnosticTail.
+                  # This tiny synthetic fixture keeps the existing256KiB
+                  # FSIZE ceiling; no production package limit is raised.
                   end = time.monotonic() + 90
                   calls = (
                       ("generate", ruby + [str(checkout / source_paths[0])], generated, private_limit, 30),
@@ -1184,16 +1198,28 @@ jobs:
                           work / "apple-key-native.private", 64 * 1024, 35),
                       ("verify", ruby + [str(checkout / source_paths[1]), str(reopened)],
                           work / "apple-key-verifier.private", public_limit, 25),
+                      ("p12-assemble", ruby + [str(checkout / source_paths[3]), str(reopened)],
+                          assembled, p12_limit, 30),
+                      ("p12-native", [str(binary), p12_test, "--exact", "--ignored", "--test-threads=1"],
+                          work / "apple-p12-native.private", p12_limit, 35),
+                      ("p12-reuse", None, work / "apple-p12-reuse.private", p12_limit, 25),
                   )
                   for phase, argv, destination, limit, seconds in calls:
                       remaining = end - time.monotonic()
                       stager.need(remaining > 0 and directory(fixture.lstat()) == fixture_identity
+                          and directory(p12_fixture.lstat()) == p12_fixture_identity
                           and stager.signature(binary.lstat()) == binary_identity, "apple-key-original-cut")
+                      if phase == "p12-reuse":
+                          # Public expected leaf digest, not a native binding.
+                          # BOTH private inputs come only from fresh AEAD
+                          # readback after the preceding native original joined.
+                          argv = ruby + [str(checkout / source_paths[4]), str(p12_reopened), str(p12_password), p12_leaf_hash]
                       error_path = work / ("apple-key-" + phase + "-stderr.private")
                       resource.setrlimit(resource.RLIMIT_FSIZE, (limit, 256 * 1024))
                       with destination.open("xb") as output, error_path.open("xb") as errors:
                           environment = dict(clean)
                           if phase == "native": environment["MRK_MACOS_VAULT_FIXTURE_ROOT"] = str(fixture)
+                          if phase == "p12-native": environment["MRK_MACOS_VAULT_FIXTURE_ROOT"] = str(p12_fixture)
                           remaining = end - time.monotonic()
                           stager.need(remaining > 0, "apple-key-call-deadline")
                           # run() kills AND waits for this original on timeout;
@@ -1214,6 +1240,7 @@ jobs:
                               and len(body) == offset + 12 + sum(sizes), "apple-key-generated-frame-bound")
                           generated_identity, private_digest = output_identity, stager.digest(body)
                           expected_public = public_magic + body[offset+4:offset+12] + body[offset+12+sizes[0]:]
+                          key_spki = body[-sizes[2]:]
                       elif phase == "native":
                           stager.need(re.search(rb"^test result: ok\. 1 passed; 0 failed; 0 ignored;", body, re.MULTILINE)
                               is not None, "apple-key-native-count")
@@ -1221,7 +1248,7 @@ jobs:
                           original_body, current_identity = private(generated, private_limit)
                           stager.need(stager.digest(fresh) == stager.digest(original_body) == private_digest
                               and current_identity == generated_identity, "apple-key-native-private-readback")
-                      else:
+                      elif phase == "verify":
                           stager.need(body.startswith(public_magic) and len(body) >= len(public_magic) + 8,
                               "apple-key-verified-frame")
                           offset = len(public_magic)
@@ -1229,15 +1256,61 @@ jobs:
                           stager.need(0 < csr <= 4096 and 0 < spki <= 1024
                               and len(body) == offset + 8 + csr + spki and body == expected_public,
                               "apple-key-verified-frame-bound")
+                      elif phase == "p12-assemble":
+                          stager.need(body.startswith(p12_magic) and p12_header < len(body) <= p12_limit,
+                              "apple-p12-private-frame")
+                          size = int.from_bytes(body[len(p12_magic):len(p12_magic)+4])
+                          hashes = len(p12_magic) + 4
+                          stager.need(p12_header + size == len(body) and size > 0
+                              and body[hashes+32:p12_header].hex() == stager.digest(key_spki),
+                              "apple-p12-original-key")
+                          assembled_identity, assembled_hash = output_identity, stager.digest(body)
+                          p12_body_hash, p12_leaf_hash = stager.digest(body[p12_header:]), body[hashes:hashes+32].hex()
+                      elif phase == "p12-native":
+                          stager.need(re.search(rb"^test result: ok\. 1 passed; 0 failed; 0 ignored;", body, re.MULTILINE)
+                              is not None, "apple-p12-native-count")
+                          fresh, p12_reopened_identity = private(p12_reopened, p12_limit)
+                          password, p12_password_identity = private(p12_password, 64)
+                          original_body, current_identity = private(assembled, p12_limit)
+                          stager.need(stager.digest(fresh) == p12_body_hash and password == b"a" * 64
+                              and current_identity == assembled_identity and stager.digest(original_body) == assembled_hash,
+                              "apple-p12-native-private-readback")
+                      else:
+                          stager.need(phase == "p12-reuse" and body.startswith(p12_public_magic)
+                              and len(body) >= len(p12_public_magic) + 9, "apple-p12-reuse-frame")
+                          offset = len(p12_public_magic)
+                          leaf, spki, count = (int.from_bytes(body[offset:offset+4]),
+                              int.from_bytes(body[offset+4:offset+8]), body[offset+8])
+                          offset += 9
+                          stager.need(0 < leaf <= 16 * 1024 and 0 < spki <= 1024 and count == 2
+                              and offset + leaf + spki <= len(body)
+                              and stager.digest(body[offset:offset+leaf]) == p12_leaf_hash
+                              and body[offset+leaf:offset+leaf+spki] == key_spki, "apple-p12-reused-originals")
+                          offset += leaf + spki
+                          for _ in range(count):
+                              stager.need(offset + 4 <= len(body), "apple-p12-reuse-chain-frame")
+                              size = int.from_bytes(body[offset:offset+4]); offset += 4
+                              stager.need(0 < size <= 16 * 1024 and offset + size <= len(body), "apple-p12-reuse-chain-bound")
+                              offset += size
+                          stager.need(offset == len(body), "apple-p12-reuse-exact-frame")
                   phase = "post"
                   for path, expected_identity in ((generated, generated_identity), (reopened, reopened_identity)):
                       current_body, current_identity = private(path, private_limit)
                       stager.need(current_identity == expected_identity and stager.digest(current_body) == private_digest,
                           "apple-key-private-original-post")
+                  for path, expected_identity, limit, digest in (
+                      (assembled, assembled_identity, p12_limit, assembled_hash),
+                      (p12_reopened, p12_reopened_identity, p12_limit, p12_body_hash),
+                      (p12_password, p12_password_identity, 64, stager.digest(b"a" * 64)),
+                  ):
+                      current_body, current_identity = private(path, limit)
+                      stager.need(current_identity == expected_identity and stager.digest(current_body) == digest,
+                          "apple-p12-private-original-post")
                   stager.need(snapshot() == original_directories and stager.store_component_inputs(capsule, target) == original
                       and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service
                       and tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths) == sources
                       and stager.signature(binary.lstat()) == binary_identity and directory(fixture.lstat()) == fixture_identity
+                      and directory(p12_fixture.lstat()) == p12_fixture_identity
                       and directory(os.fstat(held)) == root_identity and directory(work.lstat()) == root_identity
                       and time.monotonic() < end, "apple-key-originals-post")
               finally:
@@ -1246,8 +1319,9 @@ jobs:
               # close may the existing caller clean its OWN private task root.
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="ascii") as output:
                   output.write("root_identity=" + ":".join(map(str, root_identity)) + "\n")
-              print(json.dumps({"localAppleKeyComponent": "passed", "nativeTests": 1, "networkDenied": True,
-                  "signedStoreRuby": "3.3.12", "productionProvisioningQualified": False}))
+              print(json.dumps({"localAppleKeyComponent": "passed", "localAppleP12Component": "passed",
+                  "nativeTests": 2, "networkDenied": True, "signedStoreRuby": "3.3.12",
+                  "productionProvisioningQualified": False, "appleCertificateTrustQualified": False}))
           except BaseException as error:
               # Never display argv, exception text, CSR/key bytes or captured
               # output. Unknown/failed ownership retains this private task root.
