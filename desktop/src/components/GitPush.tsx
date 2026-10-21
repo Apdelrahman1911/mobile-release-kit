@@ -27,67 +27,67 @@ export function GitPush({ controller, repository, connection, activity, original
   const prepareReason = controller.preparePushReason(), reason = controller.reviewReason();
   const recovery = controller.pushReadbackSource(), comparison = readback?.result() ?? null;
   const readReason = recovery ? activity.readReason({ kind: 'overview', branch: recovery.review.upstreamRef.slice('refs/heads/'.length) }) :
-    'The original Push must have finished returning with known cleanup, in this same project and account. Unknown work remains blocked.';
-  return <ProgressiveDisclosure title="Push committed changes to GitHub" needsAttention={!!prepared || !!originalPush &&
+    'Check the original Push status first. This comparison is available only after that task and its cleanup finish, in the same project and account. An unclear outcome stays blocked.';
+  return <ProgressiveDisclosure title="Send commits to GitHub (Push)" needsAttention={!!prepared || !!originalPush &&
     (!!controller.ownerReason() || !!writes.issue || writes.recovery || writes.uncertain)}>
-    <p>Send this branch’s existing commits to its configured GitHub branch. Working files and staged changes are not committed or sent automatically.</p>
+    <p>Upload changes you have already saved as Git commits to this branch’s linked GitHub branch. Uncommitted files and staged changes are not included.</p>
     <p>{account ? <>Connected account: <strong><bdi>{account.login}</bdi></strong> · <bdi>{account.repository}</bdi> ({account.visibility}).</> :
       'Connect the intended GitHub account and repository with push access first.'}</p>
-    <button type="button" className="button secondary" disabled={prepareReason !== null} onClick={() => void controller.preparePush()}>Review push…</button>
-    <p className="save-note">Review contacts GitHub privately but does not upload commits. Push is a separate approval. Only an existing configured upstream is supported here; no new remote, new branch, force-push or reset is offered.</p>
+    <button type="button" className="button secondary" disabled={prepareReason !== null} onClick={() => void controller.preparePush()}>Review commits to send…</button>
+    <p className="save-note">Review checks GitHub using this account but does not upload commits. You approve the upload separately. The destination must already be linked; first-time branch setup and force-push are not supported here.</p>
     {prepareReason && !prepared && <p className="save-note">{gitLocalIssueHelp(prepareReason)}</p>}
     {review && prepared && <section className="version-review" aria-label="Review ordinary GitHub push">
-      <h3>Push {prepared.commits.length} committed {prepared.commits.length === 1 ? 'change' : 'changes'}</h3>
+      <h3>Send {prepared.commits.length} {prepared.commits.length === 1 ? 'commit' : 'commits'} to GitHub</h3>
       <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>Account: <strong><bdi>{prepared.login}</bdi></strong> · Repository: <bdi>{prepared.repository}</bdi>.</p>
       <p>Local branch <strong><bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></strong> → GitHub branch <strong><bdi>{prepared.upstreamRef.slice('refs/heads/'.length)}</bdi></strong>.</p>
-      <p>GitHub tip when checked: <code>{prepared.expectedRemoteOid.slice(0, 12)}</code> → your reviewed commit: <code>{prepared.head.slice(0, 12)}</code>.</p>
-      <p><strong>This publishes committed content, including commits made in another Git client.</strong> Check those commits before approving. Commit messages, author emails and file bodies are not displayed here; this is not a secret scan.</p>
-      <p>Push must still match this exact account, branch and old remote tip. Later changes are refused, not overwritten or force-pushed. Your local branch, index, worktree and cached upstream stay unchanged.</p>
+      <p><strong>People with access to this repository can read the uploaded commits.</strong> This includes commits made outside MRK. Check for private information before approving: messages, author emails and file contents are not shown or scanned for secrets here.</p>
+      <p>The account, branch and latest GitHub commit must still match this review. If they changed, Push is refused instead of overwriting them. Your local files and branches stay unchanged.</p>
       {reason && <p className="review-caution" role="status">{gitLocalIssueHelp(reason)}</p>}
       <label className="save-confirm-check"><input type="checkbox" checked={review.approved && reason === null} disabled={reason !== null}
         onChange={(event) => controller.approve(event.target.checked)} /> I reviewed these commits and this destination. Push them once using this account.</label>
       <button type="button" className="button primary" disabled={reason !== null || !review.approved} onClick={() => void controller.apply()}>Push these commits</button>
-      <p className="save-note">Use the original Check, Stop and Close review controls above. Stop cannot undo a remote update; a lost reply is not permission to repeat Push.</p>
+      <p className="save-note">Use the original Check, Stop and Close review controls above. Stop cannot undo an upload. If the result is unclear, check status—do not push again.</p>
       <details><summary>Reviewed commits and account details</summary>
         <ol>{prepared.commits.map((oid) => <li key={oid}><code>{oid}</code></li>)}</ol>
         <p>Account ID: <code>{prepared.accountId}</code>. Repository ID: <code>{prepared.repositoryId}</code>.</p>
-        <p>Previous remote commit: <code>{prepared.expectedRemoteOid}</code>. Remote name: <bdi>{prepared.remote}</bdi>.</p>
+        <p>GitHub commit when reviewed: <code>{prepared.expectedRemoteOid}</code>. Your reviewed commit: <code>{prepared.head}</code>.</p>
+        <p>Remote name: <bdi>{prepared.remote}</bdi>.</p>
         <p>Review: <code>{review.prepared.reviewId}</code>.</p>
       </details>
     </section>}
     {originalPush && writes.recovery && <section className="version-review" aria-label="Read the remote branch after Push">
-      <h3>Check the remote branch without pushing again</h3>
-      <p>This starts a fresh, read-only GitHub Activity check of the exact destination branch. It does not repeat Push, change the saved journal, or clear the original recovery warning.</p>
+      <h3>Check GitHub without sending again</h3>
+      <p>Read the destination branch again to compare its latest commit. This does not upload anything or resolve the earlier Push warning.</p>
       <button type="button" className="button secondary" disabled={readReason !== null}
-        onClick={() => setReadback(startGitPushReadback(controller, activity))}>Check remote branch (read-only)</button>
+        onClick={() => setReadback(startGitPushReadback(controller, activity))}>Check GitHub branch (read-only)</button>
       {readReason && <p className="save-note">{readReason}</p>}
       {readback && <>
-        {activityState.pending ? <p role="status">The separate read is running or finishing. The original Push remains unchanged.</p> :
-          comparison ? <p role="status">{comparison.comparison === 'matches-intended' ? 'The remote branch now matches the intended commit.' :
-            comparison.comparison === 'still-old' ? 'The remote branch still reports the old commit.' : 'The remote branch now reports a different commit.'}
-            {' '}This later read does not prove which request changed GitHub and is not permission to retry.</p> :
-          <p role="status">No current comparison is available from this read. Missing, denied, changed or unconfirmed responses are not proof that Push did not happen.</p>}
-        {comparison && <details><summary>Later read details</summary><p>Tip: <code>{comparison.tip}</code>. Checked: {comparison.observedAt}.</p></details>}
+        {activityState.pending ? <p role="status">Checking GitHub. The original Push result will not be changed by this check.</p> :
+          comparison ? <p role="status">{comparison.comparison === 'matches-intended' ? 'GitHub reported the intended commit.' :
+            comparison.comparison === 'still-old' ? 'GitHub still reported the previous commit.' : 'GitHub reported a different commit.'}
+            {' '}This later check cannot prove which request changed GitHub. Do not use it as permission to push again.</p> :
+          <p role="status">This check could not provide a current comparison. That does not mean the upload failed or never happened.</p>}
+        {comparison && <details><summary>Later check details</summary><p>Commit: <code>{comparison.tip}</code>. Checked: {comparison.observedAt}.</p></details>}
         {activity.ownerReason() && <div className="inline-actions">
           <button type="button" className="button secondary" disabled={!activity.canCheck()} onClick={() => activity.checkStatus()}>Check read status</button>
           <button type="button" className="button secondary" disabled={!activity.canCancel()} onClick={() => activity.cancel()}>Stop read</button>
         </div>}
       </>}
     </section>}
-    <details><summary>Supported push and recovery limits</summary>
-      <p>This bounded route sends 1–64 existing outgoing commits to one configured upstream. Unsupported history, hooks, signing, LFS, submodules or transport settings need your Git client. MRK does not bypass repository policy.</p>
-      <p>Fetch, local fast-forward, creating an upstream and the first push of a new branch are separate actions. A recorded result is historical, not a promise about GitHub’s current state.</p>
+    <details><summary>Supported Git setups</summary>
+      <p>This action sends 1–64 existing commits to one already-linked GitHub branch. Unsupported history, hooks, signing, LFS, submodules or connection settings need your Git client. MRK does not bypass repository rules.</p>
+      <p>Downloading updates (Fetch), updating your local branch, linking a destination and the first push of a new branch are separate actions. A recorded result describes that attempt, not GitHub’s future state.</p>
     </details>
   </ProgressiveDisclosure>;
 }
 export function GitPushRecovery({ result }: { result: GitPushMutationResult }) {
   if (result.state !== 'recovery-required') return null;
   return <div className="review-caution" role="status">
-    <p>Last reported Push step: {GIT_PUSH_EFFECT_LABELS[result.effectPhase]}. The remote may have changed; this is not permission to resend.</p>
-    <p>Keep the original task and files. Only a separate read of the exact remote branch can compare its tip; a match does not prove this request performed the update or that native cleanup finished.</p>
+    <p>Last reported Push step: {GIT_PUSH_EFFECT_LABELS[result.effectPhase]}. GitHub may already have changed. Do not send again.</p>
+    <p>Keep this task and its files. A separate check can compare the GitHub branch, but a matching commit does not prove this Push succeeded or that cleanup finished.</p>
     {result.retainedPaths.length > 0 && <details open><summary>Retained private work — preserve it</summary>
-      <p>These are recorded private work names, not cleanup paths or commands.</p><ul>{result.retainedPaths.map((p) => <li key={p}><code>{p}</code></li>)}</ul>
+      <p>Keep these recorded work items. Their names are not instructions to delete anything or run a command.</p><ul>{result.retainedPaths.map((p) => <li key={p}><code>{p}</code></li>)}</ul>
     </details>}
   </div>;
 }
