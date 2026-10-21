@@ -4,6 +4,8 @@ use super::*;
 use crate::{
     service_protocol::Id, service_tool_setup_protocol as p, service_tool_setup_requests as req,
 };
+#[path = "saved_command_agent_tool_inspect.rs"]
+pub(crate) mod inspect;
 fn refused() -> BridgeError {
     wire::invalid()
 }
@@ -246,6 +248,9 @@ fn retired_projection(b: &Binding, p: &RunProjection) {
             p::Kind::InspectRequirements => p::Report::InspectRequirements {
                 missing: components(partition),
             },
+            p::Kind::InspectSavedRequirements => p::Report::InspectSavedRequirements {
+                missing: components(partition),
+            },
             p::Kind::AcquireMissing => p::Report::AcquireMissing {
                 staged: components(partition),
             },
@@ -258,7 +263,9 @@ fn retired_projection(b: &Binding, p: &RunProjection) {
         None
     };
     b.link.publish(
-        if b.link.has_entered() {
+        if b.link.has_entered() || b.approval.review.kind == p::Kind::InspectSavedRequirements {
+            // The original Prepared retirement may precede Session/entered.
+            // Its identity is comparison DATA, not a Start receipt.
             operation(p)
         } else {
             None

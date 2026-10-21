@@ -2,6 +2,8 @@ import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
 import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
 // App-held UI coordination, not a native owner. Only the original native
 // status after its own joins can report completion. A Promise/event cannot.
+import { savedRequirementsReview } from './toolSetupSavedRequirements.ts';
+import type { SavedRequirementsOrigin } from './toolSetupSavedRequirements.ts';
 import { isDirty } from './drafts.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import { offlineCounter, parseSavedConfigContent, savedConfigFromSnapshot, sameSavedConfig } from './offlinePreflightProtocol.ts';
@@ -36,6 +38,7 @@ interface Attempt {
   startClaimed: boolean; startSent: boolean; startJoined: boolean; delegated: boolean; delegatedReturned: boolean; retired: boolean; unconfirmed: boolean;
   terminalRead: boolean; cancelRequested: boolean; cancelSent: boolean;
   requirements: ToolRequirementsObservation | null;
+  savedDelegation: SavedRequirementsOrigin | null;
 }
 interface Inspection { witness: Witness; epoch: number; identity: ToolAcquisitionIdentity; result: ToolRequirementsObservation }
 type Issue = 'unconfirmed' | 'protocol' | 'unknown';
@@ -204,7 +207,7 @@ export class ToolAcquisitionController {
     if (this.issue) return attention;
     if (this.action || this.preparing || this.starting || this.cancelling || this.reading || this.subscribing)
       return 'A tool request is still finishing. Its original status and cancel control remain available.';
-    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
+    if (active(this.status?.operation) || (this.attempt?.prepareSent || this.attempt?.savedDelegation) && !this.attempt!.terminalRead && !this.attempt!.notAdmitted)
       return 'Finish or cancel the original tool preparation before starting another task.';
     return null;
   }
@@ -224,7 +227,7 @@ export class ToolAcquisitionController {
     const reason = this.newWorkReason(); if (reason) return reason;
     if (this.action || this.preparing || this.starting || this.cancelling || this.reading)
       return 'Wait for the current tool request to finish.';
-    if (active(this.status?.operation) || this.attempt?.prepareSent && !this.attempt.terminalRead && !this.attempt.notAdmitted)
+    if (active(this.status?.operation) || (this.attempt?.prepareSent || this.attempt?.savedDelegation) && !this.attempt!.terminalRead && !this.attempt!.notAdmitted)
       return 'Finish or cancel the original tool request first.';
     const prerequisite = this.currentPrerequisite();
     return prerequisite ? TOOL_ACQUISITION_PREREQUISITE_TEXT[prerequisite] : null;
@@ -309,7 +312,16 @@ export class ToolAcquisitionController {
     }
     const candidate = a?.prepareSent && !a.notAdmitted && op && s.statusRevision > a.after && !sameToolAcquisitionIdentity(a.previous, op) &&
       sameToolAcquisitionData(a.context, op.context);
-    if (a?.prepareSent && !a.notAdmitted) {
+    if (a?.savedDelegation && !a.notAdmitted) {
+      const origin = a.savedDelegation;
+      if (op && !sameToolAcquisitionIdentity(a.previous, op)) {
+        if (s.statusRevision <= a.after || !sameToolAcquisitionData(a.context, op.context) ||
+            origin.candidate && !sameToolAcquisitionIdentity(origin.candidate, op) || a.identity && !sameToolAcquisitionIdentity(a.identity, op)) {
+          this.fail('protocol'); return null;
+        }
+        origin.candidate ??= identity(op); // Provisional DATA only; never automatic Cancel/Acquire authority.
+      } else if (origin.candidate || a.identity) { this.fail('protocol'); return null; }
+    } else if (a?.prepareSent && !a.notAdmitted) {
       if (a.identity ? !sameToolAcquisitionIdentity(a.identity, op) : op && !sameToolAcquisitionIdentity(a.previous, op) && !candidate) {
         this.fail('protocol'); return null;
       }
@@ -339,7 +351,8 @@ export class ToolAcquisitionController {
     while (this.reading) { const previous = await this.reading; if (!fresh) return previous; }
     if (!this.api) return null;
     const api = this.api, a = this.attempt, barrier = this.mutation;
-    const afterInvoke = !!a && a.prepareJoined && (a.delegated ? a.delegatedReturned : !a.startSent || a.startJoined) && !this.preparing && !this.starting && !this.cancelling;
+    const afterInvoke = !!a && (a.savedDelegation ? a.savedDelegation.allowJoined && a.savedDelegation.allowConfirmed && a.delegatedReturned :
+      a.prepareJoined && (a.delegated ? a.delegatedReturned : !a.startSent || a.startJoined)) && !this.preparing && !this.starting && !this.cancelling;
     const work = Promise.resolve().then(async () => {
       try {
         const s = this.receive(await api.status(), 'read');
@@ -353,6 +366,7 @@ export class ToolAcquisitionController {
             a.notAdmitted = true; // A joined refused call, NOT a terminal operation or a native finality receipt.
           } else { a.unconfirmed = true; this.fail('unconfirmed'); }
         } else if (a && a === this.attempt && afterInvoke && barrier === this.mutation && sameToolAcquisitionIdentity(a.identity, op) && op?.phase === 'terminal') {
+          if (a.savedDelegation && (!a.savedDelegation.service || a.savedDelegation.service.outcome !== op.outcome)) { this.fail('protocol'); return null; }
           a.terminalRead = true; a.unconfirmed = false;
           if (this.issue === 'unconfirmed') this.issue = null;
           if (!this.issue && (a.startSent || a.delegatedReturned) && !a.retired && this.current(a) && a.context.action === 'inspect' &&
@@ -381,7 +395,7 @@ export class ToolAcquisitionController {
       beforeStatus: this.status, refusedBeforeAdmission: null, notAdmitted: false,
       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
       startClaimed: false, startSent: false, startJoined: false, delegated: false, delegatedReturned: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
-      requirements: action === 'acquire' ? inspected!.result : null };
+      requirements: action === 'acquire' ? inspected!.result : null, savedDelegation: null };
     this.sourceFolders.retire();
     this.attempt = a; this.cancelIdentity = null; this.consentOpen = false; this.acknowledged = false;
     this.inspection = null; // A checked observation can prepare at most one download.
@@ -444,6 +458,48 @@ export class ToolAcquisitionController {
         return !!read&&this.attempt===a&&a.terminalRead&&!this.issue&&sameToolAcquisitionIdentity(a.identity,read.operation)&&read.operation?.phase==='terminal';
       }};
   }
+  savedRequirementsReview(): ToolSetupReview | null {
+    const a=this.attempt;
+    if(a?.savedDelegation&&!a.terminalRead&&!a.notAdmitted)
+      return !a.retired&&this.current(a)&&!this.issue?a.savedDelegation.review:null;
+    if(this.newWorkReason(false,false)||this.ownerReason()||this.currentPrerequisite())return null;
+    return savedRequirementsReview(this.capture()?.context);
+  }
+  delegateSavedRequirements(review:ToolSetupReview):ToolSetupDelegation|null {
+    if(this.attempt?.savedDelegation&&!this.attempt.terminalRead&&!this.attempt.notAdmitted)return null;
+    if(!sameToolSetupReview(this.savedRequirementsReview(),review)||review.kind!=='inspect-saved-requirements')return null;
+    const witness=this.capture(),api=this.api,before=this.status;
+    if(!witness||!api||!before)return null;
+    const a:Attempt={witness,epoch:this.epoch,context:freeze({...witness.context}),after:before.statusRevision,previous:before.operation&&identity(before.operation),
+      beforeStatus:before,refusedBeforeAdmission:null,notAdmitted:false,identity:null,prepareSent:false,prepareJoined:false,prepareAccepted:false,
+      startClaimed:true,startSent:false,startJoined:false,delegated:true,delegatedReturned:false,retired:false,unconfirmed:false,terminalRead:false,cancelRequested:false,cancelSent:false,
+      requirements:null,savedDelegation:{review,allowJoined:false,allowConfirmed:false,candidate:null,service:null}};
+    // Install this closed service-origin attempt before notifying any listener.
+    // It is NOT an invoked or joined GUI Prepare/Start.
+    this.sourceFolders.retire();this.inspection=null;this.attempt=a;this.cancelIdentity=null;this.consentOpen=false;this.acknowledged=false;this.mutation++;this.publish();
+    return {input:{projectId:a.context.projectId,review,doctorDraft:null,sourceContext:a.context as unknown as Record<string,unknown>,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false},
+      current:()=>this.attempt===a&&this.api===api&&!a.retired&&this.current(a)&&!this.issue&&this.status?.statusRevision===a.after&&sameToolAcquisitionData(this.status,a.beforeStatus),
+      allowReturned:(sent,confirmed)=>{const origin=a.savedDelegation!;origin.allowJoined=true;origin.allowConfirmed=confirmed;
+        if(sent&&!confirmed){a.unconfirmed=true;this.fail('unconfirmed');}else this.publish();},
+      readAfterReturned:async status=>{
+        const origin=a.savedDelegation!;
+        if(this.attempt!==a||this.api!==api||!origin.allowJoined||!origin.allowConfirmed||this.issue||status&&(!sameToolSetupReview(status.review,review)||status.settlement!=='settled'))return false;
+        if(status?.operation){
+          const op=status.operation;
+          if(!op.ownerGeneration||op.registrationGeneration!==null||sameToolAcquisitionIdentity(a.previous,{operationId:op.operationId,ownerGeneration:op.ownerGeneration})||
+            origin.candidate&&!sameToolAcquisitionIdentity(origin.candidate,{operationId:op.operationId,ownerGeneration:op.ownerGeneration}))return false;
+          a.identity={operationId:op.operationId,ownerGeneration:op.ownerGeneration};origin.service=status;a.delegatedReturned=true;
+          const read=await this.checkStatus(true);
+          return !!read&&this.attempt===a&&a.terminalRead&&!this.issue&&sameToolAcquisitionIdentity(a.identity,read.operation)&&read.operation?.phase==='terminal';
+        }
+        // Truly unused or known pre-Prepared refusal: service caller/withdrawal
+        // already returned; only a fresh unchanged native baseline releases UI.
+        if(origin.candidate||a.identity||status?.state==='complete')return false;
+        const read=await this.checkStatus(true);
+        if(!read||this.attempt!==a||this.api!==api||origin.candidate||this.issue||!sameToolAcquisitionData(a.beforeStatus,read))return false;
+        a.notAdmitted=true;this.publish();return true;
+      }};
+  }
   setAcknowledged(operationId: string, ownerGeneration: string, value: boolean): void {
     const a = this.attempt;
     if (!this.consentOpen || !a || a.context.action !== 'acquire' || a.startClaimed ||
@@ -493,7 +549,7 @@ export class ToolAcquisitionController {
   private detachIfFinished(): void { if (this.disposed && !this.ownerReason()) this.detach(); }
   dispose(): void {
     this.disposed = true; this.retire(); this.listeners.clear();
-    if (active(this.status?.operation)) void this.cancel();
+    if (active(this.status?.operation) && (!this.attempt?.savedDelegation || this.attempt.identity)) void this.cancel();
     this.detachIfFinished();
   }
 }

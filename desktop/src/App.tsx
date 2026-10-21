@@ -1126,23 +1126,23 @@ export function App() {
   useEffect(()=>{agentStoreAccess.syncContext();});
   useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
   const agentStoreReason=agentStoreAccess.ownerReason();
-  // One shared five-kind facade. These exceptions exclude only the selected
+  // One shared facade. These exceptions exclude only the selected
   // controller's own prepared object; its private delegate method rematches it.
   const [agentToolSetup]=useState(()=>new AgentToolSetupController({
     prepareRequirements:()=>toolAcquisition.prepareForCli(),prepareReason:()=>toolAcquisition.checkReason(),
-    delegate:r=>r.kind==='doctor'?diagnostics.delegateToolSetup(r):r.prepared?toolAcquisition.delegateToolSetup(r):androidBuild.delegateToolSetup(r),
+    delegate:r=>r.kind==='doctor'?diagnostics.delegateToolSetup(r):r.kind==='inspect-saved-requirements'?toolAcquisition.delegateSavedRequirements(r):r.prepared?toolAcquisition.delegateToolSetup(r):androidBuild.delegateToolSetup(r),
     current:kind=>{
       const service=cliService.current,w=workspaceRef.current,p=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
-      const doctor=diagnostics.toolSetupReview(),tools=toolAcquisition.toolSetupReview();
+      const doctor=diagnostics.toolSetupReview(),tools=toolAcquisition.toolSetupReview(),savedInspect=toolAcquisition.savedRequirementsReview();
       const inspect=androidBuild.toolSetupReview('inspect-picked-sources'),register=androidBuild.toolSetupReview('register-reviewed-sources');
-      const sources=kind==='inspect-picked-sources'||kind==='register-reviewed-sources',prepared=kind==='inspect-requirements'||kind==='acquire-missing';
+      const sources=kind==='inspect-picked-sources'||kind==='register-reviewed-sources',prepared=kind==='inspect-requirements'||kind==='acquire-missing'||kind==='inspect-saved-requirements';
       const peers=versionEnrollmentBusy()??gitBusy()??githubGhBusy()??identityBusy()??
         savedOwnersWithoutToolsBusy(false,false,false,false,false,false,false,false,false,false,false,false,false,false,sources)??
         (prepared?null:toolAcquisition.ownerReason())??savedOwnersPrerequisiteReason(false,false,undefined,false,false,false,undefined,kind==='doctor')??
         externalBusy()??cliReadAccessControllerRef.current?.pendingReason()??null;
       return {port:service.api?.mode==='native'?service.api.agentToolSetup??null:null,nativeSession:service.api?.mode==='native'?service:null,
         projectId:p?.project.id??null,epoch:p??service,preview:service.api?.mode==='preview',
-        reviews:[...(doctor?[doctor]:[]),...(tools?[tools]:[]),...(inspect?[inspect]:[]),...(register?[register]:[])],blockedReason:peers};
+        reviews:[...(doctor?[doctor]:[]),...(tools?[tools]:[]),...(savedInspect?[savedInspect]:[]),...(inspect?[inspect]:[]),...(register?[register]:[])],blockedReason:peers};
     }}));
   agentToolSetupRef.current=agentToolSetup;
   useSyncExternalStore(agentToolSetup.subscribe,agentToolSetup.getSnapshot,agentToolSetup.getSnapshot);

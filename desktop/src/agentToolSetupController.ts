@@ -38,7 +38,7 @@ export class AgentToolSetupController {
   }
   private read():AgentToolSetupContext{try{
     const c=this.source.current(this.state.selected);if(!c||typeof c.epoch!=='object'||!c.epoch||typeof c.preview!=='boolean'||
-      c.nativeSession!==null&&(!c.nativeSession||typeof c.nativeSession!=='object')||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>5)return absent();
+      c.nativeSession!==null&&(!c.nativeSession||typeof c.nativeSession!=='object')||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>6)return absent();
     const reviews=c.reviews.map(parseToolSetupReview);if(reviews.some(r=>r===null)||new Set(reviews.map(r=>r!.kind)).size!==reviews.length)return absent();
     const port=c.port&&['access','allow','revoke','requestStatus'].every(k=>typeof c.port![k as keyof AgentToolSetupPort]==='function')?c.port:null;
     return {...c,port,reviews:reviews as ToolSetupReview[],projectId:typeof c.projectId==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(c.projectId)?c.projectId:null};
@@ -111,24 +111,34 @@ export class AgentToolSetupController {
     // The nonce is already retained when the first notification can reenter
     // Revoke; never stop a previous grant or miss a pre-Allow withdrawal.
     const original:Original={context:c,review:r,consent:nonce,pin:null,released:true,sent:false};this.original=original;
-    const w=this.begin('allow',c);let sent=false;
+    const w=this.begin('allow',c);let sent=false,confirmed=false;
     try{
       const current=()=>this.current(w)&&this.normal===w&&!this.revokeWork&&same(c,this.read())&&!this.read().blockedReason;
       if(!current()||!sameToolSetupReview(this.read().reviews.find(v=>v.kind===r.kind)??null,r))return false;
       const d=this.source.delegate(r);if(!d)return false;
       // Retain the original pin before any additional serialization or notify.
       // The private draft belongs only to this invocation, not long-lived UI history.
-      original.pin={current:d.current,readAfterReturned:d.readAfterReturned};original.released=false;
+      original.pin={current:d.current,readAfterReturned:d.readAfterReturned,allowReturned:d.allowReturned};original.released=false;
       const input=copyToolSetupInput(d.input);if(!input||!sameToolSetupReview(input.review,r)||input.projectId!==c.projectId||!d.current()||!current()){
         this.patch({issue:'This original was delegated but Allow was not sent. Request Stop, then check it; no automatic retry.'});return false;}
       this.patch({nativeReadJoined:false});
       if(!current()||!d.current())return false;
-      sent=true;original.sent=true;const promise=c.port!.allow(nonce,input);w.original=promise;const raw=await promise;this.accept(w,raw);
+      sent=true;original.sent=true;const promise=c.port!.allow(nonce,input);w.original=promise;const raw=await promise;
+      // A concurrent Revoke deliberately retires this display generation,
+      // not the actual Allow caller. A correlated late ACK may join only
+      // that original; it cannot revive the permission or become Start.
+      const returned=original.pin.allowReturned?parseAgentToolSetupAccess(raw):null,old=this.state.access;
+      confirmed=!!returned&&!returned.unknown&&returned.grantId===nonce&&sameToolSetupReview(returned.review,r)&&
+        (!old||old.grantId!==nonce||sameGrant(old,returned));
+      this.accept(w,raw);
     }catch{if(this.current(w)){
       if(sent)this.unknown();
       else this.patch({issue:'Allow was never invoked. Keep the original prepared step; use its Cancel control if needed, then Check here.'});
     }}
-    finally{this.finish(w);}return sent;}
+    finally{
+      try{original.pin?.allowReturned?.(sent,!sent||confirmed);}catch{this.unknown();}
+      this.finish(w);
+    }return sent;}
   private async observeUnsent(w:Work):Promise<void>{
     const original=this.original;
     if(!original||original.sent||original.released||this.state.unknown||

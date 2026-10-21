@@ -4,9 +4,10 @@ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { startEnvironmentDiagnosticsFits } from './environmentDiagnosticsProtocol.ts';
 import { copyAndroidBuildRequest } from './androidBuildProtocol.ts';
 import { TOOL_ACQUISITION_CONSENT } from './toolAcquisitionProtocol.ts';
+import { savedRequirementsContext } from './toolSetupSavedRequirements.ts';
 import { ANDROID_TOOL_REGISTRATION_CONSENT } from './androidToolRegistration.ts';
 import type { JsonObject } from './types.ts';
-export const TOOL_SETUP_KINDS = ['doctor','inspect-requirements','acquire-missing','inspect-picked-sources','register-reviewed-sources'] as const;
+export const TOOL_SETUP_KINDS = ['doctor','inspect-requirements','acquire-missing','inspect-picked-sources','register-reviewed-sources','inspect-saved-requirements'] as const;
 export type ToolSetupKind = typeof TOOL_SETUP_KINDS[number];
 export interface ToolSetupReview {
   readonly kind: ToolSetupKind; readonly platform: 'android'|'ios'; readonly draftRevision: number; readonly baselineGeneration: number;
@@ -39,6 +40,7 @@ export interface AgentToolSetupPort {
 export interface ToolSetupDelegation {
   readonly input:ToolSetupInput;
   current():boolean;
+  allowReturned?(sent:boolean, confirmed:boolean):void;
   // Only after the original permission/query returned known retirement. A new
   // original native read must independently match; never invent GUI StartJoined.
   readAfterReturned(status:ToolSetupStatus|null):Promise<boolean>;
@@ -53,7 +55,7 @@ export function freezeToolSetup<T>(v:T):T{if(v&&typeof v==='object'&&!Object.isF
 function review(v:unknown):v is ToolSetupReview {
   if(!keys(v,['kind','platform','draftRevision','baselineGeneration','prepared','sources'])||!one(v.kind,TOOL_SETUP_KINDS)||!one(v.platform,['android','ios'])||
       !uint(v.draftRevision)||!uint(v.baselineGeneration)||v.kind!=='doctor'&&v.platform!=='android')return false;
-  if(v.kind==='doctor')return v.prepared===null&&v.sources===null;
+  if(v.kind==='doctor'||v.kind==='inspect-saved-requirements')return v.prepared===null&&v.sources===null;
   if(v.kind==='inspect-requirements'||v.kind==='acquire-missing')return v.sources===null&&keys(v.prepared,['operationId','ownerGeneration','statusRevision'])&&
     toolSetupId(v.prepared.operationId)&&toolSetupId(v.prepared.ownerGeneration)&&uint(v.prepared.statusRevision,1);
   return v.prepared===null&&keys(v.sources,['registrationGeneration','sourceGeneration','reviewId'])&&uint(v.sources.registrationGeneration)&&uint(v.sources.sourceGeneration)&&
@@ -62,7 +64,7 @@ function review(v:unknown):v is ToolSetupReview {
 export function parseToolSetupReview(raw:unknown):ToolSetupReview|null{try{const v=copyBoundedComparisonData(raw,1024,48);return review(v)?freezeToolSetup(v):null;}catch{return null;}}
 export const sameToolSetupReview=(a:ToolSetupReview|null,b:ToolSetupReview|null):boolean=>a===null||b===null?a===b:JSON.stringify(a)===JSON.stringify(b);
 export const toolSetupConsent=(kind:ToolSetupKind):string=>({doctor:'agent-tool-doctor-once-v1','inspect-requirements':'agent-tool-requirements-once-v1',
-  'acquire-missing':'agent-tool-acquire-missing-once-v1','inspect-picked-sources':'agent-tool-inspect-picked-once-v1','register-reviewed-sources':'agent-tool-register-reviewed-once-v1'})[kind];
+  'inspect-saved-requirements':'agent-tool-inspect-saved-once-v1','acquire-missing':'agent-tool-acquire-missing-once-v1','inspect-picked-sources':'agent-tool-inspect-picked-once-v1','register-reviewed-sources':'agent-tool-register-reviewed-once-v1'})[kind];
 const query=(v:unknown):v is ToolSetupQuery=>keys(v,['projectId','serviceInstance','requestId'])&&Object.values(v).every(toolSetupId);
 const components=['jdk','gradle','android-platform','android-build-tools'];
 const unique=(v:unknown,max:number,values:readonly string[])=>Array.isArray(v)&&v.length<=max&&v.every(x=>one(x,values))&&new Set(v).size===v.length;
@@ -74,6 +76,7 @@ function report(v:unknown,r:ToolSetupReview):boolean {
   switch(r.kind){
     case 'doctor':return keys(v,['kind','checks'])&&Array.isArray(v.checks)&&v.checks.length<=5&&v.checks.every(c=>keys(c,['check','status'])&&
       one(c.check,['developer-selection','git','java','javac','xcode'])&&one(c.status,['ok','failed','unavailable','skipped']))&&new Set(v.checks.map(c=>c.check)).size===v.checks.length;
+    case 'inspect-saved-requirements':
     case 'inspect-requirements':return keys(v,['kind','missing'])&&unique(v.missing,4,components);
     case 'acquire-missing':return keys(v,['kind','staged'])&&unique(v.staged,4,components)&&(v.staged as unknown[]).length>0;
     case 'inspect-picked-sources':return keys(v,['kind','sources'])&&sources(v.sources)&&v.sources.length===3;
@@ -122,6 +125,11 @@ export function copyToolSetupInput(raw:unknown):ToolSetupInput|null{try{
     return freezeToolSetup({projectId:raw.projectId,review:r,doctorDraft:structuredClone(raw.doctorDraft) as JsonObject,sourceContext:null,nativeConsent:null,licenseAcknowledged:false});
   }
   if(raw.doctorDraft!==null)return null;
+  if(r.kind==='inspect-saved-requirements'){
+    const context=savedRequirementsContext(raw.sourceContext,r,raw.projectId);
+    if(!context||raw.nativeConsent!==TOOL_ACQUISITION_CONSENT||raw.licenseAcknowledged!==false)return null;
+    return freezeToolSetup({projectId:raw.projectId,review:r,doctorDraft:null,sourceContext:context as unknown as Record<string,unknown>,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false});
+  }
   if(r.prepared){if(raw.sourceContext!==null||raw.nativeConsent!==TOOL_ACQUISITION_CONSENT||raw.licenseAcknowledged!==false)return null;
     return freezeToolSetup({projectId:raw.projectId,review:r,doctorDraft:null,sourceContext:null,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false});}
   const context=copyAndroidBuildRequest('prepare_android_build',raw.sourceContext);
@@ -137,8 +145,9 @@ export function createAgentToolSetupPort(invoke:(name:string,raw:Uint8Array)=>Pr
 }
 export function toolSetupCommands(raw:AgentToolSetupAccess|null):readonly string[]{const a=parseAgentToolSetupAccess(raw);if(!a?.grantId)return [];const ids=`${a.projectId} ${a.serviceInstance}`;
   return a.requestId?[`mrk tool-setup-status ${ids} ${a.requestId}`,`mrk tool-setup-cancel ${ids} ${a.requestId}`]:a.enabled?[`mrk tool-setup-submit ${ids} ${a.grantId} ${a.reviewId} --reviewed`]:[];}
-export const toolSetupLabel:Readonly<Record<ToolSetupKind,string>>=Object.freeze({doctor:'Check tools for the approved draft','inspect-requirements':'Inspect saved project requirements','acquire-missing':'Download only the reviewed missing tools','inspect-picked-sources':'Inspect the three chosen tool folders','register-reviewed-sources':'Make the reviewed protected tool copy'});
+export const toolSetupLabel:Readonly<Record<ToolSetupKind,string>>=Object.freeze({'inspect-saved-requirements':'Prepare and inspect current saved requirements',doctor:'Check tools for the approved draft','inspect-requirements':'Inspect saved project requirements','acquire-missing':'Download only the reviewed missing tools','inspect-picked-sources':'Inspect the three chosen tool folders','register-reviewed-sources':'Make the reviewed protected tool copy'});
 export const toolSetupEffect:Readonly<Record<ToolSetupKind,string>>=Object.freeze({doctor:'Runs the existing fixed tool probes against an immutable copy of the draft approved below. Later edits do not change that copy. It is not a saved-file or build-readiness check.',
+  'inspect-saved-requirements':'Prepares and inspects only these currently saved project requirements. It does not download, select or register tools. Saved input and catalogue checks remain required.',
   'inspect-requirements':'Starts only the original prepared requirements inspection. It does not download, select or register tools.',
   'acquire-missing':'Uses the original missing-component review and pinned public downloads. Existing compatible tools are not replaced. Staged folders still require the ordinary picker and inspection.',
   'inspect-picked-sources':'Checks the three folders already chosen in Desktop, with the original saved project inputs. It does not make a protected copy.',

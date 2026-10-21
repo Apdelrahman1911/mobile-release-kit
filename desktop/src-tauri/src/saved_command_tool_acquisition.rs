@@ -205,6 +205,7 @@ impl Inspection {
 #[path = "saved_command_agent_tool_acquisition.rs"]
 pub(in crate::saved_command_owner) mod agent;
 pub(crate) use agent::{Approval as AgentToolAcquisitionApproval, Binding as AgentToolAcquisitionBinding};
+pub(crate) use agent::inspect::{Approval as AgentToolInspectApproval, Binding as AgentToolInspectBinding};
 pub(super) struct Intent {
     agent: std::sync::OnceLock<Arc<agent::Binding>>,
     known: Arc<Known>,
@@ -446,6 +447,11 @@ impl SavedCommandOwner {
         census: &Census,
         document: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
     ) -> Result<wire::Status, BridgeError> {
+        self.prepare_tool_acquisition_bound(input, registration, root, gate, census, document, None)
+    }
+    pub(crate) fn prepare_tool_acquisition_bound(&self, input: wire::Prepare, registration: u32, root: RegisteredRoot,
+        gate: wire::Availability, census: &Census, document: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
+        agent: Option<Arc<AgentToolInspectBinding>>) -> Result<wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
         if !input.valid()
             || !census.known.sources.matches_project(&input.project_id, registration, &root)
@@ -502,6 +508,11 @@ impl SavedCommandOwner {
                     .ok_or_else(wire::invalid)?,
             })
         };
+        if let Some(binding) = agent {
+            let preparation = agent::inspect::Preparation::new(binding, intent)?;
+            return self.prepare_bound_requests_tools(Context::ToolAcquisition(input), registration, root,
+                Availability::from_tools(gate), None, None, None, None, Some(preparation))?.tools();
+        }
         let status = self
             .prepare(
                 Context::ToolAcquisition(input),

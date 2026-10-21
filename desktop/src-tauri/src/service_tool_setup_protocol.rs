@@ -16,6 +16,7 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Optio
 pub(crate) enum Kind {
     Doctor,
     InspectRequirements,
+    InspectSavedRequirements,
     AcquireMissing,
     InspectPickedSources,
     RegisterReviewedSources,
@@ -25,6 +26,7 @@ impl Kind {
         match self {
             Self::Doctor => "agent-tool-doctor-once-v1",
             Self::InspectRequirements => "agent-tool-requirements-once-v1",
+            Self::InspectSavedRequirements => "agent-tool-inspect-saved-once-v1",
             Self::AcquireMissing => "agent-tool-acquire-missing-once-v1",
             Self::InspectPickedSources => "agent-tool-inspect-picked-once-v1",
             Self::RegisterReviewedSources => "agent-tool-register-reviewed-once-v1",
@@ -39,7 +41,7 @@ impl Kind {
         }
     }
     pub(crate) fn saved(self) -> bool {
-        matches!(self, Self::InspectRequirements | Self::AcquireMissing)
+        matches!(self, Self::InspectRequirements | Self::InspectSavedRequirements | Self::AcquireMissing)
     }
     pub(crate) fn sources(self) -> bool {
         matches!(
@@ -87,7 +89,7 @@ impl Review {
             && self.baseline_generation < u32::MAX
             && (self.kind == Kind::Doctor || self.platform == Platform::Android)
             && match (self.kind, &self.prepared, &self.sources) {
-                (Kind::Doctor, None, None) => true,
+                (Kind::Doctor | Kind::InspectSavedRequirements, None, None) => true,
                 (Kind::InspectRequirements | Kind::AcquireMissing, Some(p), None) => {
                     (1..u32::MAX).contains(&p.status_revision)
                 }
@@ -235,6 +237,9 @@ pub(crate) enum Report {
     InspectRequirements {
         missing: Vec<Component>,
     },
+    InspectSavedRequirements {
+        missing: Vec<Component>,
+    },
     AcquireMissing {
         staged: Vec<Component>,
     },
@@ -270,7 +275,8 @@ impl Report {
                             .enumerate()
                             .all(|(i, c)| !checks[..i].iter().any(|x| x.check == c.check))
                 }
-                (Kind::InspectRequirements, Self::InspectRequirements { missing }) => {
+                (Kind::InspectRequirements, Self::InspectRequirements { missing })
+                | (Kind::InspectSavedRequirements, Self::InspectSavedRequirements { missing }) => {
                     unique(missing, 4)
                 }
                 (Kind::AcquireMissing, Self::AcquireMissing { staged }) => {

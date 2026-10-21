@@ -8,7 +8,7 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
   const commands=toolSetupCommands(a),remaining=controller.remainingSeconds();
   return <ProgressiveDisclosure title="Advanced · let a local CLI run one tool step" description="Optional one-use delegation. Keep Desktop open; the normal tool setup above is unchanged.">
     <section className="card" aria-label="One tool setup permission">
-      <p>Desktop prepares the draft or native review and chooses source folders. The CLI can start only the one step you approve here—not an unattended install, a build, or a release.</p>
+      <p>Desktop approves the current saved requirements, prepared draft or native review and chooses source folders. The CLI can start only the one step you approve here—not an unattended install, a build, or a release.</p>
       <label>Step <select value={s.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as ToolSetupKind)}>
         {TOOL_SETUP_KINDS.map(k=><option key={k} value={k}>{toolSetupLabel[k]}</option>)}
       </select></label>
@@ -16,6 +16,7 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
       {s.selected==='inspect-requirements'&&<><button disabled={!!controller.prepareReason()} onClick={()=>void controller.prepareRequirements()}>Prepare requirements check for CLI</button>
         <p>This returns the original native review without starting it. The ordinary Check button above still runs its own inspection.</p>
         {controller.prepareReason()&&<p className="save-note">{controller.prepareReason()}</p>}</>}
+      {s.selected==='inspect-saved-requirements'&&<p>This permission pins the saved project inputs shown now. CLI Submit prepares and inspects them once. It cannot read newer inputs, download or register tools automatically.</p>}
       {s.selected==='acquire-missing'&&<p>Use the original Review download control above first. This permission replaces only its GUI Start choice; it does not change the missing-component review or native expiry.</p>}
       {(s.selected==='inspect-picked-sources'||s.selected==='register-reviewed-sources')&&<p>First choose all three folders and check saved inputs in the existing controls. Protected copy also needs the current finalized inspection. Service registration, settings approval, catalogue recovery/selection and subsequent phases stay explicit Desktop actions.</p>}
       {r&&<p>{r.platform==='ios'?'iOS':'Android'} · Draft revision {r.draftRevision}, baseline {r.baselineGeneration}.

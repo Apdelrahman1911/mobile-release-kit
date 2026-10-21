@@ -1280,7 +1280,7 @@ pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
 mod agent_store;
 pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
 pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
-pub(crate) use tool_acquisition::{AgentToolAcquisitionApproval,AgentToolAcquisitionBinding};
+pub(crate) use tool_acquisition::{AgentToolAcquisitionApproval,AgentToolAcquisitionBinding,AgentToolInspectApproval,AgentToolInspectBinding};
 
 struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
@@ -2319,9 +2319,15 @@ impl SavedCommandOwner {
         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>) -> Result<Status, BridgeError> {
         self.prepare_bound_requests(context, registration, project, gate, material, artifact_tools, agent_entry, None)
     }
-    fn prepare_bound_requests(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+    fn prepare_bound_requests(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
         material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>,
         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>) -> Result<Status, BridgeError> {
+        self.prepare_bound_requests_tools(context, registration, project, gate, material, artifact_tools, agent_entry, agent_build, None)
+    }
+    fn prepare_bound_requests_tools(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<PrivateSigningMaterial>, artifact_tools: Option<Arc<ArtifactToolLoan>>,
+        agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>,
+        tools: Option<tool_acquisition::agent::inspect::Preparation>) -> Result<Status, BridgeError> {
         if artifact_tools.is_some()&&!matches!(&context,Context::ArtifactInspection(c) if c.format==artifact_wire::Format::Aab){return Err(self.inner.domain.invalid_owner());}
         if artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(self.inner.domain.unavailable());}
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
@@ -2397,11 +2403,14 @@ impl SavedCommandOwner {
             r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?)?;
         let agent_build = agent_build::prepare(agent_build, &self.inner, &r, &context, registration, &project, &id, &generation,
             r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?, expires)?;
+        if let Some(original) = &tools { expires = original.clip_expiry(expires)?; }
+        let tools = tools.map(|original| original.link(&self.inner, &context, registration, &project, &id, &generation, expires)).transpose()?;
         let projection = RunProjection { agent_build: agent_build.as_ref().map(|link| link.projection_origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
         let android_selection = r.android_catalog.selection().cloned();
-        r.prepared = Some(Prepared { agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+        r.prepared = Some(Prepared { agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+        if r.prepared.as_ref().is_some_and(|p| p.tools.is_some()) { r.tool_acquisition.completed_sources = None; }
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.

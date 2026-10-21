@@ -1,4 +1,4 @@
-//! A MAIN-only delegation facade, not another tool manager. All five actions
+//! A MAIN-only delegation facade, not another tool manager. All actions
 //! enter their existing original admission/body/release and retirement paths.
 use super::*;
 use crate::{
@@ -7,6 +7,7 @@ use crate::{
     edit_owner::SavedEditStamp,
     environment_diagnostics_owner::{AgentDoctorApproval, AgentDoctorBinding},
     saved_command_owner::{
+        AgentToolInspectApproval, AgentToolInspectBinding,
         AgentToolAcquisitionApproval, AgentToolAcquisitionBinding, AgentToolRegistrationApproval,
         AgentToolRegistrationBinding,
     },
@@ -14,6 +15,8 @@ use crate::{
     service_tool_setup_protocol as p, service_tool_setup_requests as req,
 };
 use serde::Deserialize;
+#[path = "asset_session_agent_tool_inspect.rs"]
+mod inspect;
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
     if bytes.is_empty() || bytes.len() > crate::environment_diagnostics_protocol::REQUEST_LIMIT {
         return Err(BridgeError::invalid());
@@ -51,6 +54,7 @@ pub(crate) struct Revoke {
 enum Approval {
     Doctor(Arc<AgentDoctorApproval>),
     Acquisition(Arc<AgentToolAcquisitionApproval>),
+    SavedInspect(Arc<AgentToolInspectApproval>),
     Sources(Arc<AgentToolRegistrationApproval>),
 }
 impl Approval {
@@ -58,6 +62,7 @@ impl Approval {
         match self {
             Self::Doctor(a) => a.review(),
             Self::Acquisition(a) => a.review(),
+            Self::SavedInspect(a) => a.review(),
             Self::Sources(a) => a.review(),
         }
     }
@@ -65,6 +70,7 @@ impl Approval {
         match self {
             Self::Doctor(a) => a.expires(),
             Self::Acquisition(a) => a.expires(),
+            Self::SavedInspect(a) => a.expires(),
             Self::Sources(a) => a.expires(),
         }
     }
@@ -72,6 +78,7 @@ impl Approval {
         match self {
             Self::Doctor(a) => a.retained_bytes(),
             Self::Acquisition(a) => a.retained_bytes(),
+            Self::SavedInspect(a) => a.retained_bytes(),
             Self::Sources(a) => a.retained_bytes(),
         }
     }
@@ -79,6 +86,7 @@ impl Approval {
 enum NativeBinding {
     Doctor(Arc<AgentDoctorBinding>),
     Acquisition(Arc<AgentToolAcquisitionBinding>),
+    SavedInspect(Arc<AgentToolInspectBinding>),
     Sources(Arc<AgentToolRegistrationBinding>),
 }
 impl NativeBinding {
@@ -86,6 +94,7 @@ impl NativeBinding {
         match self {
             Self::Doctor(a) => a.retained_bytes(),
             Self::Acquisition(a) => a.retained_bytes(),
+            Self::SavedInspect(a) => a.retained_bytes(),
             Self::Sources(a) => a.retained_bytes(),
         }
     }
@@ -285,7 +294,7 @@ impl DocumentBinding {
                 self.environment_gate(s)
                     == crate::environment_diagnostics_protocol::Availability::Available
             }
-            p::Kind::InspectRequirements | p::Kind::AcquireMissing => {
+            p::Kind::InspectRequirements | p::Kind::InspectSavedRequirements | p::Kind::AcquireMissing => {
                 self.tool_acquisition_gate(s)
                     == crate::tool_acquisition_protocol::Availability::Available
             }
@@ -371,6 +380,7 @@ impl DocumentBinding {
                         .tool_setup_doctor_approval(input, generation, root.path, now)?,
                 )
             }
+            p::Kind::InspectSavedRequirements => Approval::SavedInspect(self.saved_tool_inspect_approval(s, args, &edit, now)?),
             p::Kind::InspectRequirements | p::Kind::AcquireMissing => {
                 if args.doctor_draft.is_some()
                     || args.source_context.is_some()
@@ -501,6 +511,9 @@ impl DocumentBinding {
             let point = service
                 .tool_setup_point(&native.runtime_id, approval.review().kind)
                 .map_err(public)?;
+            if let Approval::SavedInspect(a) = &approval {
+                if !inspect::same_saved_config(a.source().context(), point.saved.config.as_ref()) { return Err(public(Error::Conflict)); }
+            }
             let scope = Arc::new(req::NativeScope {
                 project_id: point.saved.project_id.clone(),
                 runtime_id: native.runtime_id.clone(),
@@ -528,6 +541,13 @@ impl DocumentBinding {
                 .tool_setup_requests()
                 .can_allow(&id)
                 .map_err(public)?;
+            if matches!(&approval, Approval::SavedInspect(_)) {
+                // Re-read the SAME service SavedPoint/Read before the second
+                // Doc cut. The lane below must still be the original Arc;
+                // neither a newer service observation nor equal new bytes
+                // can silently replace the approved source.
+                service.tool_setup_current(&scope).map_err(public)?;
+            }
             let mut state = self.lock();
             self.tool_setup_gate(&state, scope.review.kind)?;
             if !state
@@ -577,6 +597,11 @@ impl DocumentBinding {
                             .tool_acquisition
                             .bind_tool_setup_acquisition(a.clone(), link.clone())?,
                     )
+                }
+                Approval::SavedInspect(a) => {
+                    self.tool_inspect_input_current(&state, a.source(), &edit)?;
+                    if !inspect::same_saved_config(a.source().context(), scope.saved_config.as_ref()) { return Err(public(Error::Conflict)); }
+                    NativeBinding::SavedInspect(self.inner.bridge.tool_acquisition.bind_tool_setup_saved_inspect(a.clone(), link.clone())?)
                 }
                 Approval::Sources(a) => {
                     if !a.matches_root(g, &root) {
@@ -646,6 +671,7 @@ impl DocumentBinding {
                 .bridge
                 .tool_acquisition
                 .stop_tool_setup_acquisition(b, why, at),
+            NativeBinding::SavedInspect(b) => self.inner.bridge.tool_acquisition.stop_tool_setup_saved_inspect(b, why, at),
             NativeBinding::Sources(b) => self
                 .inner
                 .bridge
@@ -783,6 +809,7 @@ impl DocumentBinding {
                 self.start_tool_acquisition_agent(input, entry.submitted_at(), Some(entry))
                     .map(|_| ())
             }
+            NativeBinding::SavedInspect(b) => self.admit_saved_tool_inspect(b, entry),
             NativeBinding::Sources(b) => {
                 let snapshot = {
                     let state = self.lock();

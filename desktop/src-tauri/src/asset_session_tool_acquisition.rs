@@ -324,10 +324,34 @@ impl DocumentBinding {
             .tool_acquisition
             .status_tool_acquisition(self.tool_acquisition_gate(&state))
     }
+    pub(super) fn tool_inspect_input(&self, state: &DocumentState, input: &wire::Context,
+        edit: &crate::edit_owner::SavedEditGuard<'_>) -> Result<Arc<ToolAcquisitionDocumentInput>, BridgeError> {
+        if !input.valid() || input.action != wire::Action::Inspect || input.review.is_some() { return Err(wire::invalid()); }
+        let (registration, root) = self.inner.bridge.native_project(&input.project_id).map_err(|_| wire::invalid())?;
+        let roster = self.inner.bridge.native_roster().map_err(|_| wire::invalid())?;
+        if roster.generation != registration || roster.roots.len() > 64 || !roster.roots.contains(&root)
+            || roster.roots.iter().any(|v| v.path.as_os_str().len() > asset_source::PATH_LIMIT) { return Err(wire::invalid()); }
+        let saved = self.tool_acquisition_saved_lane(state, input, edit, registration, &root)?;
+        Ok(Arc::new(ToolAcquisitionDocumentInput { document: Arc::downgrade(&self.inner), context: input.clone(),
+            registration, root, roots: roster.roots, saved }))
+    }
+    pub(super) fn tool_inspect_input_current(&self, state: &DocumentState, original: &ToolAcquisitionDocumentInput,
+        edit: &crate::edit_owner::SavedEditGuard<'_>) -> Result<(), BridgeError> {
+        let (registration, root) = self.inner.bridge.native_project(&original.context.project_id).map_err(|_| wire::invalid())?;
+        let roster = self.inner.bridge.native_roster().map_err(|_| wire::invalid())?;
+        let lane = self.tool_acquisition_saved_lane(state, &original.context, edit, registration, &root)?;
+        if !same_roster(original, registration, &root, &roster) || !same_lane(&original.saved, &lane)
+            || !original.matches(&original.context, registration, &root) || !original.same_document(&self.inner.session_identity) { return Err(wire::invalid()); }
+        Ok(())
+    }
     pub(crate) fn prepare_tool_acquisition(
         &self,
         input: wire::Prepare,
     ) -> Result<wire::Status, BridgeError> {
+        self.prepare_tool_acquisition_bound(input, None)
+    }
+    pub(super) fn prepare_tool_acquisition_bound(&self, input: wire::Prepare,
+        agent: Option<(&Arc<crate::saved_command_owner::AgentToolInspectBinding>, &Arc<crate::service_tool_setup_requests::Entry>)>) -> Result<wire::Status, BridgeError> {
         if !input.valid() {
             return Err(wire::invalid());
         }
@@ -368,6 +392,10 @@ impl DocumentBinding {
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if let Some((_, entry)) = agent { self.tool_setup_admission_current(&state, entry, &edit)?; }
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        if agent.is_some() { return Err(wire::invalid()); }
         let saved = match self.tool_acquisition_saved_lane(&state, &input, &edit, registration, &root) {
             Ok(saved) => saved,
             Err(error) => {
@@ -380,21 +408,23 @@ impl DocumentBinding {
                 return Err(wire::prerequisite::Required::SavedInputs.error());
             }
         };
-        let original = Arc::new(ToolAcquisitionDocumentInput {
-            document: Arc::downgrade(&self.inner),
-            context: input.clone(),
-            registration,
-            root: root.clone(),
-            roots: roster.roots,
-            saved,
-        });
-        self.inner.bridge.tool_acquisition.prepare_tool_acquisition(
+        let original = if let Some((binding, _)) = agent {
+            let original = binding.source();
+            if !same_roster(original, registration, &root, &roster) || !same_lane(&original.saved, &saved)
+                || !original.matches(&input, registration, &root) || !original.same_document(&self.inner.session_identity) { return Err(wire::invalid()); }
+            original.clone() // Never replace the lane accepted at Allow.
+        } else { Arc::new(ToolAcquisitionDocumentInput {
+            document: Arc::downgrade(&self.inner), context: input.clone(), registration,
+            root: root.clone(), roots: roster.roots, saved,
+        }) };
+        self.inner.bridge.tool_acquisition.prepare_tool_acquisition_bound(
             input,
             registration,
             root,
             gate,
             &census,
             original,
+            agent.map(|(binding, _)| binding.clone()),
         )
     }
     pub(crate) fn start_tool_acquisition(
