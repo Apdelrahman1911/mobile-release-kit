@@ -1277,6 +1277,7 @@ pub(crate) use agent_ios_archive::Approval as AgentIOSArchiveApproval;
 pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
 #[path="saved_command_agent_store.rs"]
 mod agent_store;
+pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
 pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
 
 struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
@@ -1601,7 +1602,7 @@ impl Session {
     }
     async fn android_control_tick(&self) {
         // Store shares this original control-select slot; no new watchdog or clock.
-        if let Some(delay)=agent_store::control_poll(self){tokio::time::sleep(delay).await;return;}
+        if let Some(delay)=agent_store::control_poll(self).or_else(||apple_provisioning::agent::control_poll(self)){tokio::time::sleep(delay).await;return;}
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
         pending::<()>().await
@@ -2439,6 +2440,14 @@ impl SavedCommandOwner {
         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
         agent_store:Option<&Arc<crate::service_store_requests::Entry>>)->Result<Admitted,BridgeError>{
+        self.start_bound_requests_apple(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,agent_store,None)
+    }
+    fn start_bound_requests_apple(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
+        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
+        agent_store:Option<&Arc<crate::service_store_requests::Entry>>,
+        agent_apple:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>)->Result<Admitted,BridgeError>{
         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
         let mut r = self.inner.lock();
@@ -2447,16 +2456,18 @@ impl SavedCommandOwner {
         }
         // All Start routes share this guard BEFORE take. Ordinary GUI Start
         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store)) {
+        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store) && apple_provisioning::agent::start_matches(p,agent_apple)) {
             return Err(self.inner.domain.invalid_owner());
         }
         agent_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
         agent_store::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
+        apple_provisioning::agent::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
             agent_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
             agent_store::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+            apple_provisioning::agent::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
         }
@@ -2488,7 +2499,8 @@ impl SavedCommandOwner {
         // Starting any new work consumes the former inspected observation.
         // It cannot license a second recovery after even a known refusal.
         r.recovery = None;
-        let mut refused = if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
+        let mut refused = if let Some((reason,_))=apple_provisioning::agent::prepared_binding(&prepared).and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
+        else if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
             else if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
             else if !upload_key::start_matches(&self.inner,&prepared,clocks) { Some(Reason::StaleIntent) }
             else if prepared.artifact_tools.as_ref().is_some_and(|v|!v.current()) || !artifact_matches || !material_matches || !recovery_matches || !r.android_catalog.selection_matches(prepared.android_selection.as_ref(),&self.inner) || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
@@ -2506,6 +2518,7 @@ impl SavedCommandOwner {
             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+            apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
         }
@@ -2527,6 +2540,7 @@ impl SavedCommandOwner {
         let upload_key_native=upload_key::native_new(&prepared,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks)?;
         if let Some(link) = &prepared.agent_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
         if let Some(link)=&prepared.agent_store{link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
+        if let Some(link)=apple_provisioning::agent::prepared_binding(&prepared){link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
         if let Some(link) = &prepared.agent_local_check {
             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
         }
@@ -2889,6 +2903,7 @@ impl SavedCommandOwner {
                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
                 agent_build::retired(&active,r.revision.saturating_add(1));
                 agent_store::retired(&active,r.revision.saturating_add(1));
+                apple_provisioning::agent::retired(&active,r.revision.saturating_add(1),&r.apple);
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -3164,6 +3179,7 @@ impl Inner {
                     agent_local_checks::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
                     agent_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
                     agent_store::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                    apple_provisioning::agent::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
                 }
                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
@@ -3172,6 +3188,7 @@ impl Inner {
         agent_local_checks::changed(r);
         agent_build::changed(r);
         agent_store::changed(r);
+        apple_provisioning::agent::changed(r);
         self.changes.send_replace(r.revision); self.changed.notify_waiters();
     }
     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
@@ -3180,11 +3197,13 @@ impl Inner {
             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+            apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
         }
     }
     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref()).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+        if let Some((reason,_))=r.prepared.as_ref().and_then(apple_provisioning::agent::prepared_binding).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
         if r.prepared.as_ref().and_then(|p|p.agent_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
             self.retire_prepared(r,Reason::Cancelled);
         }
@@ -3334,6 +3353,7 @@ impl Inner {
     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
         if !original_session(r,owner){return;}
         if let Some((reason,at))=owner.agent_store.as_ref().and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+        if let Some((reason,at))=apple_provisioning::agent::binding(owner).and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
         if let Some(at)=owner.agent_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
             self.stop_locked(r,owner,Reason::Cancelled,at);
@@ -3378,7 +3398,7 @@ impl Inner {
         if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
             Some(owner.finality_end(a.first_stop))
         } else {Some(owner.clocks.work.min(owner.finality_end(None))
-            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())))}
+            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(apple_provisioning::agent::binding(owner).map_or(owner.clocks.work,|link|link.read_end())))}
     }
     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
     fn accept_at(&self, owner: &Session, frame: Frame, now: Instant) {
@@ -3932,7 +3952,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     // wake this existing watchdog independently of relay/store locks. There is
     // no new observer and a true latch never spins a newly-created receiver.
     let mut local_stop = owner.stop.subscribe();
-    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some() || owner.agent_store.is_some()) && !*local_stop.borrow_and_update();
+    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some() || owner.agent_store.is_some() || apple_provisioning::agent::binding(&owner).is_some()) && !*local_stop.borrow_and_update();
     loop {
         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},

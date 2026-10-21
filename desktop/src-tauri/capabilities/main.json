@@ -16,6 +16,7 @@
     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
+    "allow-agent-apple-provisioning-access","allow-allow-agent-apple-provisioning","allow-revoke-agent-apple-provisioning","allow-agent-apple-provisioning-request-status",
     "allow-agent-git-index-access",
     "allow-allow-agent-git-index",
     "allow-revoke-agent-git-index",

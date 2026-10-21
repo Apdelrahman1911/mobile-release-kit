@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { AppleP12Setup } from './AppleP12Setup.tsx';
 import { isAppleP12Mode } from '../appleP12SetupProtocol.ts';
 import type { AppleP12FingerprintEdit, AppleP12FingerprintView } from '../appleP12Fingerprint.ts';
@@ -14,6 +15,7 @@ interface Props {
   controller: AppleProvisioningController; state: AppleProvisioningState;
   onCredentials(): void; onProjectIdentity(): void; onSigningCredentials?(): void;
   p12Fingerprint?: AppleP12FingerprintView; onUseP12Fingerprint?(edit: AppleP12FingerprintEdit): boolean;
+  cliPanel?: ReactNode; cliRetained?: boolean;
   compact?: boolean; onShow?(): void;
   // Display-only saved-configuration labels, not account/team authority.
   savedBundleId?: string | null; configuredTeamId?: string | null;
@@ -39,10 +41,10 @@ function resultCopy(result: AppleProvisioningResult): { title: string; detail: s
   return { title: 'No registration decision is available', detail: 'The response, prerequisites or account-wide journal fence require attention. Do not create or revoke signing credentials to work around this result.' };
 }
 
-export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, p12Fingerprint, onUseP12Fingerprint, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
+export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, p12Fingerprint, onUseP12Fingerprint, cliPanel, cliRetained = false, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
   const op = state.status?.operation, result = state.result, copy = result ? resultCopy(result) : null;
   if (compact) {
-    if (!state.retained && !state.issue) return null;
+    if (!state.retained && !state.issue && !cliRetained) return null;
     return <section className="card" aria-label="Original Apple setup operation">
       <h2>Apple setup · original operation retained</h2>
       <p>{op ? `${modeLabel[op.context.mode]} · ${op.phase} · project ${op.context.projectId}` : 'Waiting for the original operation reference.'}</p>
@@ -53,6 +55,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
         <button type="button" disabled={!state.canCancel} onClick={() => void controller.cancel()}>Cancel original operation</button>
       </div>
       {state.cancelRequested && <p className="save-note">Cancellation was requested; the original operation remains retained.</p>}
+      {cliPanel}
     </section>;
   }
   return <section className="card" aria-labelledby="apple-bundle-registration-title">
@@ -128,5 +131,6 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <button disabled={!state.ios || !!state.reconcileReason} onClick={() => void controller.prepare('reconcile')}>Prepare read-only reconciliation</button>
       {state.reconcileReason && <p className="save-note">{state.reconcileReason}</p>}
     </details>
+    {cliPanel}
   </section>;
 }

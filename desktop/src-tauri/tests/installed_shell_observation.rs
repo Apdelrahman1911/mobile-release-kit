@@ -44,6 +44,10 @@ mod service_version_reserve_protocol;
 mod service_store_protocol;
 #[path="../src/service_store_requests.rs"]
 mod service_store_requests;
+#[path="../src/service_apple_provisioning_protocol.rs"]
+mod service_apple_provisioning_protocol;
+#[path="../src/service_apple_provisioning_requests.rs"]
+mod service_apple_provisioning_requests;
 #[path="../src/service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
 #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;

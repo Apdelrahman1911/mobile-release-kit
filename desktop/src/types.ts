@@ -439,6 +439,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
+  readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;

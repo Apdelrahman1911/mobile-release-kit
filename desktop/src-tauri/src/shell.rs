@@ -1896,6 +1896,52 @@ async fn revoke_agent_store(webview: Webview, request: tauri::ipc::Request<'_>, 
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
 }
 #[tauri::command]
+async fn agent_apple_provisioning_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_apple_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::apple_provisioning::agent::Allow = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_apple(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::apple_provisioning::agent::Revoke = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_apple(window,args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
+}
+#[tauri::command]
+async fn agent_apple_provisioning_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]{
+        let args:crate::service_apple_provisioning_protocol::Query=crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_apple_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Apple CLI delegation is unavailable on this platform."))}
+}
+#[tauri::command]
 async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -3346,6 +3392,10 @@ impl Drop for ToolAcquisitionRelayGuard {
 struct AgentStoreRelayGuard {document:DocumentBinding,closed:bool}
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();}}}
+#[cfg(any(target_os="linux",target_os="macos"))]
+struct AgentAppleRelayGuard {document:DocumentBinding,closed:bool}
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for AgentAppleRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_apple_relay_lost();}}}
 struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for AndroidBuildRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
@@ -3428,6 +3478,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let mut android_build = document.android_build_subscribe();
     #[cfg(any(target_os="linux",target_os="macos"))]
     let agent_store_guard=AgentStoreRelayGuard{document:document.clone(),closed:false};
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let agent_apple_guard=AgentAppleRelayGuard{document:document.clone(),closed:false};
     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let mut tool_acquisition = document.tool_acquisition_subscribe();
     let tool_acquisition_guard = ToolAcquisitionRelayGuard { document: document.clone(), closed: false }; // Same retained relay, before spawn.
@@ -3473,6 +3525,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_guard = android_build_guard;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut agent_store_guard=agent_store_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut agent_apple_guard=agent_apple_guard;
         let mut tool_acquisition_guard = tool_acquisition_guard;
         let mut project_recovery_guard = project_recovery_guard;
         let mut artifact_inspection_guard = artifact_inspection_guard;
@@ -3522,7 +3576,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         loop {
             if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
                 }
@@ -3565,6 +3619,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if !android_build_relay_failed { document.service_android_builds_tick(); }
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.service_store_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            document.service_apple_provisioning_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
             if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
             // status() releases its native locks before any renderer callback.
@@ -3912,7 +3968,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 biased;
                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
                 #[cfg(any(target_os="linux",target_os="macos"))] {
-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
+                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
                 }
@@ -4003,6 +4059,8 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding,
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
                     document.drain_agent_store_for_exit();
+                    #[cfg(any(target_os="linux",target_os="macos"))]
+                    document.drain_agent_apple_for_exit();
                     #[cfg(any(target_os="linux",target_os="macos"))]
                     document.drain_ios_archives_for_exit();
                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
@@ -5496,6 +5554,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_store_access, allow_agent_store, revoke_agent_store,
+            agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,
             installation_preparation_status, prepare_installation_quit,

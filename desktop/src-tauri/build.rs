@@ -292,6 +292,7 @@ fn main() {
     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
     "agent_store_access", "allow_agent_store", "revoke_agent_store",
+    "agent_apple_provisioning_access","allow_agent_apple_provisioning","revoke_agent_apple_provisioning","agent_apple_provisioning_request_status",
     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",

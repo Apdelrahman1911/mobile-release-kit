@@ -20,7 +20,7 @@ mod project_identity;
 mod saved_observation;
 use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioningSavedInput};
 #[path="asset_session_apple_provisioning.rs"]
-mod apple_provisioning;
+pub(crate) mod apple_provisioning;
 pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path="asset_session_apple_profile.rs"]
@@ -880,6 +880,8 @@ struct DocumentState {
     agent_ios_archive_grant: Option<Arc<agent_ios_archive::Grant>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_grant:Option<Arc<agent_store::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_apple:apple_provisioning::agent::State,
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
@@ -1184,6 +1186,8 @@ struct Inner {
     agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_apple_service:std::sync::OnceLock<std::sync::Weak<crate::application_service::ApplicationService>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
@@ -2207,6 +2211,8 @@ mod lookup_memory {
             self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/8 replies, not per-mode pools.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
@@ -2994,6 +3000,8 @@ impl DocumentBinding {
             #[cfg(any(target_os="linux",target_os="macos"))]
             agent_store_service:std::sync::OnceLock::new(),
             #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_apple_service:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
             agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
@@ -3010,7 +3018,8 @@ impl DocumentBinding {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
-                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0,
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
@@ -3691,6 +3700,8 @@ impl DocumentBinding {
         self.agent_android_builds_relay_lost();
         #[cfg(any(target_os="linux",target_os="macos"))]
         self.agent_store_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_apple_relay_lost();
         #[cfg(any(target_os="linux",target_os="macos"))]
         self.git_index_relay_lost();
         // Loss retires consent/STOP under the same gate. It is not settlement,
@@ -8569,7 +8580,8 @@ pub(crate) fn assert_project_path_document_contracts() {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
-                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
@@ -8709,7 +8721,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
-                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
@@ -8812,7 +8825,8 @@ mod tests {
                 agent_android_build_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
                 #[cfg(any(target_os="linux",target_os="macos"))]
-                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_store_grant:None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,

@@ -81,6 +81,8 @@ mod local_checks;
 mod agent_android_build;
 #[path="service_store_application.rs"]
 mod agent_store;
+#[path="service_apple_provisioning_application.rs"]
+mod agent_apple_provisioning;
 #[path = "application_service_agent_ios_archive.rs"]
 mod agent_ios_archive;
 #[path = "application_service_request_catalogue.rs"]
@@ -101,6 +103,7 @@ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instan
     git_index_requests: Arc<crate::service_git_requests::Inbox>,
     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
     store_requests: Arc<crate::service_store_requests::Inbox>,
+    apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
     upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
     configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
@@ -138,6 +141,7 @@ impl ApplicationService {
         let instance = Id::random()?;
         let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
+        let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
         let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
@@ -145,7 +149,7 @@ impl ApplicationService {
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -198,7 +202,7 @@ impl ApplicationService {
     /// Permanent original-service read fence. Native observation callbacks must
     /// not wait for the state mutex, which real store IO can hold. No Allow or
     /// later successful write clears this flag; original cleanup still runs.
-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence(); }
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
         // Nonblocking: an old facet must not survive an unobserved state
         // poison while another caller still has not attempted lock().
@@ -390,6 +394,7 @@ impl ApplicationService {
         let at = Instant::now();
         self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
         let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
+        let _=self.apple_provisioning_requests.revoke(crate::service_apple_provisioning_protocol::Reason::PermissionRevoked,at);
         let mut state = self.lock()?;
         if let Some(old) = &state.grant { old.reserve_read.revoke(at); old.upload_key_read.revoke(at); }
         state.grant = None; Ok(())
@@ -437,8 +442,11 @@ impl ApplicationService {
                 p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
                 p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
+                p::RequestBody::AppleProvisioningSubmit(v)=>return self.service_apple_provisioning_submit(client,v.clone()),
                 p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
+                p::RequestBody::AppleProvisioningStatus(q)=>return self.service_apple_provisioning_query(client,q,false),
                 p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
+                p::RequestBody::AppleProvisioningCancel(q)=>return self.service_apple_provisioning_query(client,q,true),
                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
@@ -499,6 +507,7 @@ impl ApplicationService {
                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
@@ -548,7 +557,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

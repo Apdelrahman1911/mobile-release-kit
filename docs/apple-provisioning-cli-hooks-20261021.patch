@@ -1,0 +1,1315 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -12,7 +12,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-apple-provisioning.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -292,6 +292,7 @@
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
+     "agent_upload_key_access", "allow_agent_upload_key", "revoke_agent_upload_key",
+     "agent_store_access", "allow_agent_store", "revoke_agent_store",
++    "agent_apple_provisioning_access","allow_agent_apple_provisioning","revoke_agent_apple_provisioning","agent_apple_provisioning_request_status",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -16,6 +16,7 @@
+     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
+     "allow-agent-upload-key-access", "allow-allow-agent-upload-key", "allow-revoke-agent-upload-key",
+     "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
++    "allow-agent-apple-provisioning-access","allow-allow-agent-apple-provisioning","allow-revoke-agent-apple-provisioning","allow-agent-apple-provisioning-request-status",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+     "allow-revoke-agent-git-index",
+diff --git a/desktop/src-tauri/src/android_build_wiring_tests.rs b/desktop/src-tauri/src/android_build_wiring_tests.rs
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -13,6 +13,7 @@
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
++        #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -81,6 +81,8 @@
+ mod agent_android_build;
+ #[path="service_store_application.rs"]
+ mod agent_store;
++#[path="service_apple_provisioning_application.rs"]
++mod agent_apple_provisioning;
+ #[path = "application_service_agent_ios_archive.rs"]
+ mod agent_ios_archive;
+ #[path = "application_service_request_catalogue.rs"]
+@@ -101,6 +103,7 @@
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
+     store_requests: Arc<crate::service_store_requests::Inbox>,
++    apple_provisioning_requests:Arc<crate::service_apple_provisioning_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+     upload_key_requests: Arc<crate::service_upload_key_requests::Inbox>,
+     configuration_requests: Arc<crate::service_configuration_requests::Inbox>,
+@@ -138,6 +141,7 @@
+         let instance = Id::random()?;
+         let configuration_requests = Arc::new(crate::service_configuration_requests::Inbox::new(instance.clone()));
+         let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
++        let apple_provisioning_requests=Arc::new(crate::service_apple_provisioning_requests::Inbox::new(instance.clone()));
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+         let upload_key_requests = Arc::new(crate::service_upload_key_requests::Inbox::new(instance.clone()));
+@@ -145,7 +149,7 @@
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, upload_key_requests, configuration_requests, store_requests, apple_provisioning_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -198,7 +202,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); self.upload_key_requests.fence(); self.configuration_requests.fence(); self.store_requests.fence();self.apple_provisioning_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -390,6 +394,7 @@
+         let at = Instant::now();
+         self.version_reserve_requests.read_revoked(at); self.upload_key_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+         let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
++        let _=self.apple_provisioning_requests.revoke(crate::service_apple_provisioning_protocol::Reason::PermissionRevoked,at);
+         let mut state = self.lock()?;
+         if let Some(old) = &state.grant { old.reserve_read.revoke(at); old.upload_key_read.revoke(at); }
+         state.grant = None; Ok(())
+@@ -437,8 +442,11 @@
+                 p::RequestBody::UploadKeyStatus(q) => return self.upload_key_query(client,q,false),
+                 p::RequestBody::UploadKeyCancel(q) => return self.upload_key_query(client,q,true),
+                 p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
++                p::RequestBody::AppleProvisioningSubmit(v)=>return self.service_apple_provisioning_submit(client,v.clone()),
+                 p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
++                p::RequestBody::AppleProvisioningStatus(q)=>return self.service_apple_provisioning_query(client,q,false),
+                 p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
++                p::RequestBody::AppleProvisioningCancel(q)=>return self.service_apple_provisioning_query(client,q,true),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+@@ -499,6 +507,7 @@
+                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
++                p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+@@ -548,7 +557,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.upload_key_requests.close(at); self.configuration_requests.close(at); self.store_requests.close(at);self.apple_provisioning_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+diff --git a/desktop/src-tauri/src/application_service_request_catalogue.rs b/desktop/src-tauri/src/application_service_request_catalogue.rs
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -62,6 +62,7 @@
+         additional_requests.extend(self.upload_key_requests.retained_ids(project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::AndroidUploadKey,request_id}));
+         additional_requests.extend(self.configuration_requests.catalogue(project)?);
+         additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.apple_provisioning_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.play_cleanup_requests.retained_ids(&self.instance, project)?.into_iter().map(|request_id| data::AdditionalRequest {family:data::AdditionalFamily::PlayCleanup,request_id}));
+         let view = data::Catalogue {
+             schema_version: 2,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -20,7 +20,7 @@
+ mod saved_observation;
+ use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioningSavedInput};
+ #[path="asset_session_apple_provisioning.rs"]
+-mod apple_provisioning;
++pub(crate) mod apple_provisioning;
+ pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+ #[path="asset_session_apple_profile.rs"]
+@@ -877,6 +877,8 @@
+     agent_ios_archive_grant: Option<Arc<agent_ios_archive::Grant>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_store_grant:Option<Arc<agent_store::Grant>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_apple:apple_provisioning::agent::State,
+     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
+     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+     compatibility_picker_pending: bool,
+@@ -1181,6 +1183,8 @@
+     agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_apple_service:std::sync::OnceLock<std::sync::Weak<crate::application_service::ApplicationService>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
+     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+@@ -2204,6 +2208,8 @@
+             self.add(crate::service_configuration_requests::DOCUMENT_BACKING)?; // 32 metadata rows, never 32 full configurations.
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_apple_provisioning_protocol::DOCUMENT_BACKING)?; // ONE finite Apple inbox/permission/8 replies, not per-mode pools.
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
+@@ -2991,6 +2997,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_store_service:std::sync::OnceLock::new(),
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_apple_service:std::sync::OnceLock::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             installed_session: Mutex::new(None),
+@@ -3007,7 +3015,8 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+-                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0,
++                agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+@@ -3688,6 +3697,8 @@
+         self.agent_android_builds_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.agent_store_relay_lost();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.agent_apple_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.git_index_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+@@ -8566,7 +8577,8 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+-                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8706,7 +8718,8 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+-                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8809,7 +8822,8 @@
+                 agent_android_build_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
+                 #[cfg(any(target_os="linux",target_os="macos"))]
+-                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_store_grant:None,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(), lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), #[cfg(any(target_os="linux",target_os="macos"))] agent_upload_key: agent_upload_key::State::default(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+diff --git a/desktop/src-tauri/src/asset_session_apple_provisioning.rs b/desktop/src-tauri/src/asset_session_apple_provisioning.rs
+--- a/desktop/src-tauri/src/asset_session_apple_provisioning.rs
++++ b/desktop/src-tauri/src/asset_session_apple_provisioning.rs
+@@ -3,6 +3,9 @@
+ //! starts the state service, grants CLI access or constructs a replacement
+ //! account/credential/registration capability.
+ use super::*;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_agent_apple_provisioning.rs"]
++pub(crate) mod agent;
+ #[path="asset_session_apple_p12_input.rs"]
+ mod p12_input;
+ use crate::{
+@@ -440,7 +443,11 @@
+         &self,
+         input: wire::Start,
+     ) -> Result<wire::Status, BridgeError> {
+-        let admitted_at = Instant::now();
++        self.start_apple_provisioning_delegated(input,None)
++    }
++    fn start_apple_provisioning_delegated(&self,input:wire::Start,
++        delegated:Option<(&Arc<agent::Grant>,&Arc<crate::service_apple_provisioning_requests::Entry>)>)->Result<wire::Status,BridgeError>{
++        let admitted_at=delegated.map_or_else(Instant::now,|(_,entry)|entry.submitted_at());
+         let mut state = self.lock();
+         let gate = self.apple_provisioning_gate(&state);
+         let original = self
+@@ -462,6 +469,7 @@
+             .bridge
+             .edits
+             .saved_registration_guard(&self.inner.session_identity)?;
++        if let Some((grant,entry))=delegated{self.agent_apple_start_current(&state,grant,entry,&edit,registration,&root)?;}
+         original.current_locked(&self.inner, &state, &edit)?;
+         self.recheck_apple_provisioning_material(
+             &state,
+@@ -474,12 +482,13 @@
+             .inner
+             .bridge
+             .apple_provisioning
+-            .start_apple_provisioning(
++            .start_apple_provisioning_bound(
+                 input,
+                 admitted_at,
+                 Some((registration, root)),
+                 gate,
+                 original.clone(),
++                delegated.map(|(_,entry)|entry),
+             )?;
+         drop(edit);
+         // All gates/census/saved originals were checked under the SAME Doc.
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -566,6 +566,7 @@
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
++        #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+@@ -684,6 +685,7 @@
+         agent_ios_archive_grant: None,
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_store_grant:None,
++        #[cfg(any(target_os="linux",target_os="macos"))] agent_apple:apple_provisioning::agent::State::default(),
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -31,6 +31,8 @@
+ mod version_reserve;
+ #[path="installed_cli_store.rs"]
+ mod store;
++#[path="installed_cli_apple_provisioning.rs"]
++mod apple_provisioning;
+ #[path="installed_cli_play_cleanup.rs"]
+ mod play_cleanup;
+
+@@ -56,6 +58,9 @@
+   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+   mrk configuration-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk configuration-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk apple-provisioning-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
++  mrk apple-provisioning-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk apple-provisioning-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -281,6 +286,11 @@
+                 "backupRestoreScope":"android-keystore-only","restoreNewUnassigned":true,"implicitAssignment":false,
+                 "rememberAssignment":false,"recoveryAcknowledgment":false,
+                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
++            "appleProvisioning":{"scope":"one-existing-desktop-prepared-apple-step","commands":apple_provisioning::COMMANDS,
++                "modeCount":15,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"headless":false,
++                "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
++                "maxPreparedMs":300000,"nativeWorkMs":1200000,"nativeHardMs":1210000,"providerEffectsPossible":true,
++                "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":false,"p12Reconcile":false},
+             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
+                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+@@ -304,7 +314,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup","apple-provisioning"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -434,6 +444,7 @@
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
++        p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
+         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+@@ -472,6 +483,7 @@
+     if upload_key::recognizes(&args) { return upload_key::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
+     if store::recognizes(&args){return store::run(args);}
++    if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+@@ -561,7 +573,7 @@
+         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
+         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
+-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 288); // Two detail inboxes plus seven distinct 32-row metadata namespaces.
++        assert_eq!(caps["requestDiscovery"]["maxRequests"], 320); // Two detail inboxes plus eight distinct 32-row metadata namespaces.
+         assert!(caps["requestDiscovery"]["families"].as_array().unwrap().iter().any(|family| family == "play-cleanup"));
+     }
+     #[test]
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -17,6 +17,10 @@
+ mod service_store_protocol;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
++#[path="service_apple_provisioning_protocol.rs"]
++mod service_apple_provisioning_protocol;
++#[path="service_apple_provisioning_requests.rs"]
++mod service_apple_provisioning_requests;
+ #[path="service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ #[path="service_play_cleanup_protocol.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -133,6 +133,10 @@
+ mod service_store_protocol;
+ #[path="service_store_requests.rs"]
+ mod service_store_requests;
++#[path="service_apple_provisioning_protocol.rs"]
++mod service_apple_provisioning_protocol;
++#[path="service_apple_provisioning_requests.rs"]
++mod service_apple_provisioning_requests;
+ #[path="service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ mod service_git_protocol;
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning.rs b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+@@ -11,6 +11,8 @@
+
+ use super::*;
+ use crate::apple_provisioning_protocol as apple_wire;
++#[path="saved_command_agent_apple_provisioning.rs"]
++pub(super) mod agent;
+ #[path="saved_command_apple_profile_review.rs"]
+ mod profile_review;
+ #[path = "saved_command_apple_key_review.rs"]
+@@ -94,6 +96,8 @@
+ }
+
+ pub(super) struct Intent {
++    agent: std::sync::OnceLock<Arc<agent::Binding>>,
++    witness: Arc<()>,
+     input: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
+     review: Option<Arc<AppleProvisioningReview>>,
+     profile_review: Option<Arc<profile_review::Review>>,
+@@ -711,6 +715,7 @@
+         if let Some(review)=&certificate_review { prepared.expires=prepared.expires.min(review.expires()); }
+         if let Some(review)=&p12_review {prepared.expires=prepared.expires.min(review.expires());}
+         prepared.apple = Some(Arc::new(Intent {
++            agent:std::sync::OnceLock::new(),witness:Arc::new(()),
+             input: document,
+             review,
+             profile_review, key_review, certificate_review,p12_review,
+@@ -743,6 +748,12 @@
+         gate: apple_wire::Availability,
+         document: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
+     ) -> Result<AppleProvisioningAdmitted, BridgeError> {
++        self.start_apple_provisioning_bound(input,admitted_at,registered,gate,document,None)
++    }
++    pub(crate) fn start_apple_provisioning_bound(&self,input:apple_wire::Start,admitted_at:Instant,
++        registered:Option<(u32,RegisteredRoot)>,gate:apple_wire::Availability,
++        document:Arc<crate::asset_session::AppleProvisioningDocumentInput>,
++        entry:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>)->Result<AppleProvisioningAdmitted,BridgeError>{
+         self.require_domain(SavedCommandDomain::AppleProvisioning)?;
+         let original =
+             self.prepared_apple_provisioning_input(&input.operation_id, &input.owner_generation)?;
+@@ -753,9 +764,12 @@
+         }
+         {
+             let registry = self.inner.lock();
++            // Refuse a GUI Start against the delegated original BEFORE consuming
++            // any private preceding review. The generic take guard repeats it.
+             let intent = registry
+                 .prepared
+                 .as_ref()
++                .filter(|prepared|agent::start_matches(prepared,entry))
+                 .and_then(|prepared| prepared.apple.as_ref())
+                 .ok_or_else(apple_wire::invalid)?;
+             if let Some(review) = &intent.review {
+@@ -766,7 +780,7 @@
+             if let Some(review) = &intent.certificate_review { review.claim(&document,Instant::now())?; }
+             if let Some(review)=&intent.p12_review {review.claim(&document,Instant::now())?;}
+         }
+-        let admitted = self.start_bound(
++        let admitted = self.start_bound_requests_apple(
+             Start {
+                 operation_id: input.operation_id,
+                 owner_generation: input.owner_generation,
+@@ -775,6 +789,7 @@
+             registered,
+             Availability::from_store(gate),
+             Some(PrivateSigningMaterial::Store(document.material().clone())),
++            None,None,None,None,None,entry,
+         )?;
+         let profile = {
+             let registry = self.inner.lock();
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1277,6 +1277,7 @@
+ pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
+ #[path="saved_command_agent_store.rs"]
+ mod agent_store;
++pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
+ pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
+
+ struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+@@ -1601,7 +1602,7 @@
+     }
+     async fn android_control_tick(&self) {
+         // Store shares this original control-select slot; no new watchdog or clock.
+-        if let Some(delay)=agent_store::control_poll(self){tokio::time::sleep(delay).await;return;}
++        if let Some(delay)=agent_store::control_poll(self).or_else(||apple_provisioning::agent::control_poll(self)){tokio::time::sleep(delay).await;return;}
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
+         pending::<()>().await
+@@ -2439,6 +2440,14 @@
+         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
+         agent_store:Option<&Arc<crate::service_store_requests::Entry>>)->Result<Admitted,BridgeError>{
++        self.start_bound_requests_apple(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,agent_store,None)
++    }
++    fn start_bound_requests_apple(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
++        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
++        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
++        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
++        agent_store:Option<&Arc<crate::service_store_requests::Entry>>,
++        agent_apple:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>)->Result<Admitted,BridgeError>{
+         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
+         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
+         let mut r = self.inner.lock();
+@@ -2447,16 +2456,18 @@
+         }
+         // All Start routes share this guard BEFORE take. Ordinary GUI Start
+         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
+-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store)) {
++        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store) && apple_provisioning::agent::start_matches(p,agent_apple)) {
+             return Err(self.inner.domain.invalid_owner());
+         }
+         agent_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
+         agent_store::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
++        apple_provisioning::agent::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
+         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
+             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
++            apple_provisioning::agent::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
+             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
+         }
+@@ -2488,7 +2499,8 @@
+         // Starting any new work consumes the former inspected observation.
+         // It cannot license a second recovery after even a known refusal.
+         r.recovery = None;
+-        let mut refused = if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
++        let mut refused = if let Some((reason,_))=apple_provisioning::agent::prepared_binding(&prepared).and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
++        else if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
+             else if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
+             else if !upload_key::start_matches(&self.inner,&prepared,clocks) { Some(Reason::StaleIntent) }
+             else if prepared.artifact_tools.as_ref().is_some_and(|v|!v.current()) || !artifact_matches || !material_matches || !recovery_matches || !r.android_catalog.selection_matches(prepared.android_selection.as_ref(),&self.inner) || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
+@@ -2506,6 +2518,7 @@
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
+             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
+         }
+@@ -2527,6 +2540,7 @@
+         let upload_key_native=upload_key::native_new(&prepared,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks)?;
+         if let Some(link) = &prepared.agent_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
+         if let Some(link)=&prepared.agent_store{link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
++        if let Some(link)=apple_provisioning::agent::prepared_binding(&prepared){link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
+         if let Some(link) = &prepared.agent_local_check {
+             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
+         }
+@@ -2889,6 +2903,7 @@
+                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
+                 agent_build::retired(&active,r.revision.saturating_add(1));
+                 agent_store::retired(&active,r.revision.saturating_add(1));
++                apple_provisioning::agent::retired(&active,r.revision.saturating_add(1),&r.apple);
+                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
+             }
+         } else {
+@@ -3164,6 +3179,7 @@
+                     agent_local_checks::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     agent_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     agent_store::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
++                    apple_provisioning::agent::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
+                 }
+                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
+@@ -3172,6 +3188,7 @@
+         agent_local_checks::changed(r);
+         agent_build::changed(r);
+         agent_store::changed(r);
++        apple_provisioning::agent::changed(r);
+         self.changes.send_replace(r.revision); self.changed.notify_waiters();
+     }
+     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
+@@ -3180,11 +3197,13 @@
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            apple_provisioning::agent::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
+         }
+     }
+     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
+         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref()).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
++        if let Some((reason,_))=r.prepared.as_ref().and_then(apple_provisioning::agent::prepared_binding).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+         if r.prepared.as_ref().and_then(|p|p.agent_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
+             self.retire_prepared(r,Reason::Cancelled);
+         }
+@@ -3334,6 +3353,7 @@
+     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+         if !original_session(r,owner){return;}
+         if let Some((reason,at))=owner.agent_store.as_ref().and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
++        if let Some((reason,at))=apple_provisioning::agent::binding(owner).and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+         if let Some(at)=owner.agent_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
+         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
+             self.stop_locked(r,owner,Reason::Cancelled,at);
+@@ -3378,7 +3398,7 @@
+         if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
+             Some(owner.finality_end(a.first_stop))
+         } else {Some(owner.clocks.work.min(owner.finality_end(None))
+-            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())))}
++            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())).min(apple_provisioning::agent::binding(owner).map_or(owner.clocks.work,|link|link.read_end())))}
+     }
+     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
+     fn accept_at(&self, owner: &Session, frame: Frame, now: Instant) {
+@@ -3932,7 +3952,7 @@
+     // wake this existing watchdog independently of relay/store locks. There is
+     // no new observer and a true latch never spins a newly-created receiver.
+     let mut local_stop = owner.stop.subscribe();
+-    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some() || owner.agent_store.is_some()) && !*local_stop.borrow_and_update();
++    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some() || owner.agent_store.is_some() || apple_provisioning::agent::binding(&owner).is_some()) && !*local_stop.borrow_and_update();
+     loop {
+         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -219,8 +219,11 @@
+     #[serde(rename="configuration.status")] ConfigurationStatus(crate::service_configuration_protocol::Query),
+     #[serde(rename="configuration.cancel")] ConfigurationCancel(crate::service_configuration_protocol::Query),
+     #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
++    #[serde(rename="apple-provisioning.submit")] AppleProvisioningSubmit(crate::service_apple_provisioning_protocol::Submit),
+     #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
++    #[serde(rename="apple-provisioning.status")] AppleProvisioningStatus(crate::service_apple_provisioning_protocol::Query),
+     #[serde(rename="store.cancel")] StoreCancel(crate::service_store_protocol::Query),
++    #[serde(rename="apple-provisioning.cancel")] AppleProvisioningCancel(crate::service_apple_provisioning_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -293,6 +296,7 @@
+     ConfigurationRequest(crate::service_configuration_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
+     StoreRequest(crate::service_store_protocol::Status),
++    AppleProvisioningRequest(crate::service_apple_provisioning_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+     GitCommitScope(crate::service_git_commit_protocol::Scope),
+@@ -351,6 +355,8 @@
+         && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if matches!(&request.request,RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
+         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
++    if matches!(&request.request,RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
++        &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+@@ -438,6 +444,10 @@
+         ResponseBody::StoreRequest(row)=>{
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_store_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
++        },
++        ResponseBody::AppleProvisioningRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_apple_provisioning_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+         },
+         ResponseBody::VersionReserveRequest(row) => {
+             row.validate()?;
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -14,7 +14,8 @@
+     + crate::service_upload_key_protocol::REQUEST_LIMIT
+     + crate::service_configuration_protocol::REQUEST_LIMIT
+     + crate::service_store_protocol::REQUEST_LIMIT
+-    + crate::service_play_cleanup_protocol::REQUEST_LIMIT;
++    + crate::service_play_cleanup_protocol::REQUEST_LIMIT
++    + crate::service_apple_provisioning_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -175,6 +176,7 @@
+     Configuration,
+     Store,
+     PlayCleanup,
++    AppleProvisioning,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -186,6 +188,7 @@
+             Self::Configuration => 4,
+             Self::Store => 5,
+             Self::PlayCleanup => 6,
++            Self::AppleProvisioning=>7,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -200,6 +203,7 @@
+             Self::Configuration => "configuration-status",
+             Self::Store => "store-status",
+             Self::PlayCleanup => "play-cleanup-status",
++            Self::AppleProvisioning=>"apple-provisioning-status",
+         }
+     }
+ }
+@@ -261,7 +265,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 7];
++        let mut counts = [0usize; 8];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -278,6 +282,7 @@
+             || counts[4] > crate::service_configuration_protocol::REQUEST_LIMIT
+             || counts[5] > crate::service_store_protocol::REQUEST_LIMIT
+             || counts[6] > crate::service_play_cleanup_protocol::REQUEST_LIMIT
++            || counts[7] > crate::service_apple_provisioning_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+@@ -488,7 +493,7 @@
+         }
+         fullest.schema_version = 2;
+         fullest.additional_requests = Some(
+-            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup]
++            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning]
+                 .into_iter()
+                 .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
+                 .collect(),
+@@ -546,12 +551,13 @@
+             AdditionalRequest { family: AdditionalFamily::Configuration, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::Store, request_id: id(3) },
+             AdditionalRequest { family: AdditionalFamily::PlayCleanup, request_id: id(3) },
++            AdditionalRequest { family: AdditionalFamily::AppleProvisioning, request_id: id(3) },
+         ]);
+         current.validate().unwrap();
+         let text = human(&current);
+         assert!(!text.contains("No requests retained"));
+         for (command, n) in [("git-index-status",3), ("git-commit-status",4),
+-            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3)] {
++            ("identity-request-status",3), ("version-reserve-status",3), ("upload-key-status",3), ("configuration-status",3), ("store-status",3), ("play-cleanup-status",3), ("apple-provisioning-status",3)] {
+             assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
+         }
+         let encoded = serde_json::to_value(&current).unwrap();
+@@ -566,7 +572,7 @@
+         assert!(!accepted(changed));
+         current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
+         assert!(current.validate().is_err()); // Stage and Commit share one namespace.
+-        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup] {
++        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation, AdditionalFamily::AndroidUploadKey, AdditionalFamily::Configuration, AdditionalFamily::Store, AdditionalFamily::PlayCleanup, AdditionalFamily::AppleProvisioning] {
+             current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
+             assert!(current.validate().is_err());
+             current.additional_requests = Some(vec![AdditionalRequest { family, request_id: id(3) }; 2]);
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1894,6 +1894,52 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_apple_provisioning_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_apple_access(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn allow_agent_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let args: crate::asset_session::apple_provisioning::agent::Allow = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.allow_agent_apple(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn revoke_agent_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let args: crate::asset_session::apple_provisioning::agent::Revoke = crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_apple(window,args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Apple CLI delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_apple_provisioning_request_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]{
++        let args:crate::service_apple_provisioning_protocol::Query=crate::asset_session::apple_provisioning::agent::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_apple_request_status(window,&args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]{let _=(window,request,state);Err(BridgeError::unavailable("Apple CLI delegation is unavailable on this platform."))}
+ }
+ #[tauri::command]
+ async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -3346,6 +3392,10 @@
+ struct AgentStoreRelayGuard {document:DocumentBinding,closed:bool}
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();}}}
++#[cfg(any(target_os="linux",target_os="macos"))]
++struct AgentAppleRelayGuard {document:DocumentBinding,closed:bool}
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for AgentAppleRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_apple_relay_lost();}}}
+ struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
+ impl Drop for AndroidBuildRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
+@@ -3428,6 +3478,8 @@
+     let mut android_build = document.android_build_subscribe();
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     let agent_store_guard=AgentStoreRelayGuard{document:document.clone(),closed:false};
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let agent_apple_guard=AgentAppleRelayGuard{document:document.clone(),closed:false};
+     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+     let mut tool_acquisition = document.tool_acquisition_subscribe();
+     let tool_acquisition_guard = ToolAcquisitionRelayGuard { document: document.clone(), closed: false }; // Same retained relay, before spawn.
+@@ -3473,6 +3525,8 @@
+         let mut android_build_guard = android_build_guard;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut agent_store_guard=agent_store_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut agent_apple_guard=agent_apple_guard;
+         let mut tool_acquisition_guard = tool_acquisition_guard;
+         let mut project_recovery_guard = project_recovery_guard;
+         let mut artifact_inspection_guard = artifact_inspection_guard;
+@@ -3522,7 +3576,7 @@
+         loop {
+             if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+@@ -3566,6 +3620,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             document.service_store_tick();
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            document.service_apple_provisioning_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
+             // status() releases its native locks before any renderer callback.
+             // Events are best effort: the UI subscribes then fetches status and
+@@ -3912,7 +3968,7 @@
+                 biased;
+                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;agent_apple_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                     upload_key.close(&document); upload_key.join_finished(&document).await; upload_key_guard.closed=upload_key.returned().await;
+                 }
+@@ -4003,6 +4059,8 @@
+                     document.drain_local_checks_for_exit();
+                     document.drain_android_builds_for_exit();
+                     document.drain_agent_store_for_exit();
++                    #[cfg(any(target_os="linux",target_os="macos"))]
++                    document.drain_agent_apple_for_exit();
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+                     document.drain_ios_archives_for_exit();
+                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
+@@ -5496,6 +5554,7 @@
+             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             agent_store_access, allow_agent_store, revoke_agent_store,
++            agent_apple_provisioning_access,allow_agent_apple_provisioning,revoke_agent_apple_provisioning,agent_apple_provisioning_request_status,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+             installation_preparation_status, prepare_installation_quit,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -44,6 +44,10 @@
+ mod service_store_protocol;
+ #[path="../src/service_store_requests.rs"]
+ mod service_store_requests;
++#[path="../src/service_apple_provisioning_protocol.rs"]
++mod service_apple_provisioning_protocol;
++#[path="../src/service_apple_provisioning_requests.rs"]
++mod service_apple_provisioning_requests;
+ #[path="../src/service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -20,6 +20,8 @@
+ import type { RehearsalAction, RehearsalContext, RehearsalTarget } from './releaseRehearsal.ts';
+ import { LocalStorePreflightController, localStoreOwnerReason, localStoreProjectObservation } from './localStorePreflight.ts';
+ import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
++import { AgentAppleProvisioningController } from './agentAppleProvisioningController.ts';
++import { AgentAppleProvisioningAccess } from './components/AgentAppleProvisioningAccess.tsx';
+ import { AppleProvisioningController } from './appleProvisioningController.ts';
+ import { AppleBundleRegistration } from './components/AppleBundleRegistration.tsx';
+ import { appleP12FingerprintView, applyAppleP12Fingerprint } from './appleP12Fingerprint.ts';
+@@ -258,6 +260,7 @@
+   const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
+   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
+   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
++  const agentAppleControllerRef = useRef<AgentAppleProvisioningController | null>(null);
+   const appleProvisioningControllerRef = useRef<AppleProvisioningController | null>(null);
+   const offlinePreflightControllerRef = useRef<OfflinePreflightController | null>(null);
+   const toolAcquisitionControllerRef = useRef<ToolAcquisitionController | null>(null);
+@@ -387,7 +390,7 @@
+   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
+   const agentStoreBusy=useCallback(()=>agentStoreControllerRef.current?.ownerReason()??null,[]);
+   const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
+-  const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? null, []);
++  const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? agentAppleControllerRef.current?.ownerReason() ?? null, []);
+   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
+   const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
+   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
+@@ -1019,6 +1022,20 @@
+   }));
+   appleProvisioningControllerRef.current = appleProvisioning;
+   const appleProvisioningState = useSyncExternalStore(appleProvisioning.subscribe, appleProvisioning.getSnapshot, appleProvisioning.getSnapshot);
++  const [agentAppleProvisioning] = useState(() => new AgentAppleProvisioningController({
++    syncOriginal: appleProvisioning.syncProject, delegate: appleProvisioning.delegatePrepared, current: () => {
++      const service = cliService.current, current = workspaceRef.current;
++      const project = current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
++      return {port: service.api?.mode === 'native' ? service.api.agentAppleProvisioning ?? null : null,
++        nativeSession: service.api?.mode === 'native' ? service : null, projectId: project?.project.id ?? null,
++        epoch: project ?? service, preview: service.api?.mode === 'preview', blockedReason: appleOtherOperationReason(),
++        review: appleProvisioning.delegationReview()};
++    },
++  }));
++  agentAppleControllerRef.current = agentAppleProvisioning;
++  useSyncExternalStore(agentAppleProvisioning.subscribe, agentAppleProvisioning.getSnapshot, agentAppleProvisioning.getSnapshot);
++  useEffect(() => { agentAppleProvisioning.syncContext(); });
++  useEffect(() => () => agentAppleProvisioning.dispose(), [agentAppleProvisioning]);
+   const [localStore] = useState(() => new LocalStorePreflightController({
+     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
+     otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+@@ -2189,6 +2206,7 @@
+         {page !== 'artifacts' && <ArtifactInspection state={artifactInspectionState} controller={artifactInspection} compact
+           projectName={session?.project.name??null} onHelp={setHelp} onShow={()=>navigate('artifacts')}/>}
+         {page !== 'dashboard' && <AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState} compact
++          cliPanel={<AgentAppleProvisioningAccess controller={agentAppleProvisioning} />} cliRetained={!!agentAppleProvisioning.ownerReason()}
+           onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }}
+           onShow={() => navigate('dashboard')} />}
+         {page !== 'releases' && <>
+@@ -2264,6 +2282,7 @@
+             workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
+             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}
+           appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
++            cliPanel={<AgentAppleProvisioningAccess controller={agentAppleProvisioning} />}
+             p12Fingerprint={appleP12FingerprintView(p12FingerprintContext())} onUseP12Fingerprint={useP12Fingerprint}
+             savedBundleId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.bundleId'))}
+             configuredTeamId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.teamId'))}
+@@ -2274,7 +2293,7 @@
+               navigate('credentials');
+             }}
+             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
+-          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
++          appleProvisioningNeedsAttention={!!agentAppleProvisioning.ownerReason() || appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.certificateResult?.decision === 'request-unconfirmed' || appleProvisioningState.p12Result?.decision === 'assembled' && appleProvisioningState.savedP12 === null || appleProvisioningState.p12Result?.decision === 'blocked' && appleProvisioningState.p12Result.reason === 'account-pending' || appleProvisioningState.keyResult?.decision === 'produced' && appleProvisioningState.savedKey === null || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+           initializationState={initializationState} versionEditState={versionEditState}
+           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
+           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} onGit={() => navigate('github')} /></>}
+diff --git a/desktop/src/appleProvisioningController.ts b/desktop/src/appleProvisioningController.ts
+--- a/desktop/src/appleProvisioningController.ts
++++ b/desktop/src/appleProvisioningController.ts
+@@ -1,5 +1,8 @@
+ // App-held UI coordination only. Neither promises, events nor comparison
+ // counters can settle the original native Session or its account-wide journal.
++import { appleCliId, parseAppleCliReview, sameAppleCliReview } from './agentAppleProvisioning.ts';
++import type { AppleCliReview, AppleCliStatus } from './agentAppleProvisioning.ts';
++import type { AppleCliDelegate } from './agentAppleProvisioningController.ts';
+ import { appleP12InputBase, retainedAppleP12Input, isAppleP12Mode } from './appleP12SetupProtocol.ts';
+ import type { AppleP12Result } from './appleP12SetupProtocol.ts';
+ import { appleCertificateKeyChoices, appleDistributionCertificateInputBase, retainedAppleDistributionCertificateInput, isAppleDistributionCertificateMode } from './appleDistributionCertificateSetupProtocol.ts';
+@@ -29,11 +32,12 @@
+ type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate' | 'p12';
+ const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+ interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
++interface DelegatedStart { nonce: string; review: AppleCliReview; anchor: number; allowJoined: boolean; submitted: boolean; final: boolean; checking: boolean; abandonedBeforeAllow: boolean }
+ interface Attempt {
+   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
+   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
+   preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; p12ReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
+-  prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean;
++  prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean; delegated: DelegatedStart | null;
+ }
+ interface Reference { identity: AppleProvisioningIdentity; witness: Witness; displayName: string; expires: number | null }
+ interface ActionSlot { kind: 'prepare' | 'start'; joined: boolean; original: Promise<unknown> | null; promise: Promise<void> | null }
+@@ -129,16 +133,16 @@
+       let base = family === 'p12' ? appleP12InputBase(project, assets, this.certificateKey) : family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
+         family === 'profile' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
+       const a = this.attempt;
+-      if (!base && family === 'key' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
++      if (!base && family === 'key' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
+         base = retainedAppleDistributionKeyInput(project, assets, a.witness.base);
+       }
+-      if (!base && family === 'certificate' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
++      if (!base && family === 'certificate' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
+         base = retainedAppleDistributionCertificateInput(project, assets, this.certificateKey, a.witness.base);
+       }
+-      if (!base && family === 'p12' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleP12Mode(a.request.mode)) {
++      if (!base && family === 'p12' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleP12Mode(a.request.mode)) {
+         base = retainedAppleP12Input(project, assets, this.certificateKey, a.witness.base, a.request.mode);
+       }
+-      if (!base && family === 'profile' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
++      if (!base && family === 'profile' && a && (a.startClaimed || a.delegated !== null) && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
+         base = retainedAppleProfileInput(project, assets, a.witness.base);
+       }
+       if (!project || !assets || !base || base.platform !== 'ios' || Object.hasOwn(base, 'query') ||
+@@ -151,12 +155,15 @@
+     return !attempt.retired && attempt.epoch === this.epoch && sameWitness(attempt.witness, this.witness) &&
+       attempt.request.displayName === this.displayName && !this.connectionRetired && !this.disposed;
+   }
++  private started(a: Attempt): boolean { return a.delegated ? a.delegated.submitted : a.startClaimed; }
++  private startReturned(a: Attempt): boolean { return a.delegated ? a.delegated.allowJoined && a.delegated.final && !a.delegated.checking : a.startJoined; }
++  private startAnchor(a: Attempt): number | null { return a.delegated?.anchor ?? a.startedAt; }
+   private settled(): boolean {
+     return !this.action && !this.cancellation && !this.read && !this.subscribing && !active(this.status?.operation) &&
+-      (!this.attempt || this.attempt.terminalRead) && !this.issue;
++      (!this.attempt || this.attempt.terminalRead && !this.attempt.delegated?.checking) && !this.issue;
+   }
+   ownerReason = (): string | null => this.issue || this.action || this.cancellation || this.subscribing || this.read ||
+-    active(this.status?.operation) || this.attempt && !this.attempt.terminalRead ?
++    active(this.status?.operation) || this.attempt && (!this.attempt.terminalRead || this.attempt.delegated?.checking) ?
+     'An Apple setup intent, request or original cleanup is retained. Finish or cancel it before other work.' : null;
+   private baseReason(family: InputFamily = 'bundle'): string | null {
+     if (!this.original || this.connectionRetired) return 'Use the installed Mac app. Browser preview cannot run Apple setup.';
+@@ -181,7 +188,7 @@
+   }
+   private previousAttempts(): AppleRecoveryHistory | null {
+     const a = this.attempt, op = this.status?.operation;
+-    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
++    if (!a?.terminalRead || !this.started(a) || !this.startReturned(a) || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+     return op.recovery;
+   }
+@@ -190,7 +197,7 @@
+   }
+   private previousProfileAttempts(): AppleProfileRecoveryHistory | null {
+     const a = this.attempt, op = this.status?.operation;
+-    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
++    if (!a?.terminalRead || !this.started(a) || !this.startReturned(a) || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'profile-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+     return op.profileRecovery ?? null;
+   }
+@@ -199,7 +206,7 @@
+   }
+   private previousCertificateAttempts(): AppleCertificateRecoveryHistory | null {
+     const a = this.attempt, op = this.status?.operation;
+-    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
++    if (!a?.terminalRead || !this.started(a) || !this.startReturned(a) || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+         !sameAppleIdentity(a.identity, op) || a.request.mode !== 'certificate-review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+     return op.certificateRecovery ?? null;
+   }
+@@ -220,23 +227,78 @@
+     if (mode === 'reconcile' && !this.reconciliationReference()) return 'Choose a saved attempt below, or use the prior registration from this session. Readback never repeats the write.';
+     return null;
+   }
++  // Pure provisional DATA. Only native Allow binds this actual Prepared;
++  // neither a renderer result nor these fields constructs native authority.
++  delegationReview = (): AppleCliReview | null => {
++    const a = this.attempt, op = this.status?.operation;
++    if (!this.visible || !this.original || !a || a.delegated || a.startClaimed || !a.prepareAccepted || !a.prepareJoined ||
++        !a.identity || !this.current(a) || !sameWitness(a.witness, this.capture()) || !sameAppleIdentity(a.identity, op) ||
++        op?.phase !== 'awaiting-consent' || !op.intentUsable || this.action || this.cancellation || this.read || this.issue ||
++        this.consentUntil === null || this.now() >= this.consentUntil || a.request.mode === 'register' && !this.declaredNew || this.source.otherOperationReason()) return null;
++    return parseAppleCliReview({mode:a.request.mode,...a.identity,statusRevision:this.status!.statusRevision,
++      savedConfig:a.request.savedConfig,savedVersion:{bytes:a.request.savedVersion.bytes,sha256:a.request.savedVersion.sha256,name:a.request.savedVersion.name,build:a.request.savedVersion.build}});
++  };
++  delegatePrepared = (review: AppleCliReview, nonce: string): AppleCliDelegate | null => {
++    this.syncProject();
++    const a = this.attempt, api = this.original;
++    if (!a || !api || !appleCliId(nonce) || !sameAppleCliReview(review, this.delegationReview())) return null;
++    const d: DelegatedStart = {nonce,review,anchor:this.now(),allowJoined:false,submitted:false,final:false,checking:false,abandonedBeforeAllow:false};
++    a.delegated = d; this.clearConsent(); this.mutation++;
++    const original = () => this.attempt === a && a.delegated === d && this.original === api;
++    const current = () => original() && this.current(a) && sameWitness(a.witness, this.capture()) && !this.issue && !this.cancelRequested;
++    // Set origin BEFORE notification; a reentrant ordinary Start is refused.
++    this.publish();
++    const readFinal = async () => { await this.postInvokeRead(); };
++    return {
++      current,
++      allowReturned: () => { if (original()) { d.allowJoined = true; this.publish(); } },
++      observe: async (status: AppleCliStatus) => {
++        if (!original() || !d.allowJoined || !sameAppleCliReview(review,status.review) || status.grantId !== nonce ||
++            status.state === 'unknown') return;
++        d.checking = true;
++        if (!d.submitted) {
++          d.submitted = true;
++          if (a.request.mode === 'register') this.registration = freeze({identity:identity(a.identity!),witness:a.witness,displayName:a.request.displayName,expires:null});
++          if (a.request.mode === 'profile-reuse' || a.request.mode === 'profile-create') this.profileAttempt = freeze({identity:identity(a.identity!),witness:a.witness,displayName:a.request.displayName,expires:null});
++          if (a.request.mode === 'certificate-create') this.certificateAttempt = freeze({identity:identity(a.identity!),witness:a.witness,displayName:a.request.displayName,expires:null});
++        }
++        // Exact Query has returned only after native private retirement, relay
++        // return AND history ACK. Read the SAME native owner as a separate cut.
++        if (status.settlement === 'settled') {
++          d.final = true; this.mutation++; await readFinal();
++          const native = this.status;
++          if (native && (!sameAppleIdentity(a.identity,native.operation) || native.statusRevision < (status.operation?.statusRevision ?? Infinity) ||
++              native.operation?.phase !== 'terminal' || native.operation.outcome !== status.outcome)) this.fail('protocol');
++        } else await this.checkStatus();
++      },
++      unusedReturned: async () => { if (original() && d.allowJoined && !d.submitted) { d.checking = true; d.final = true; this.mutation++; await readFinal(); } },
++      checkReturned: () => { if (original()) { d.checking = false; this.publish(); } },
++      uncertain: () => { if (original()) this.fail('unconfirmed'); },
++      notSubmitted: async () => {
++        if (!original() || d.allowJoined || d.submitted) return;
++        // The original JS caller never entered Allow. Do not invent an Allow
++        // return or restore Start: cancel/read the same real Prepared instead.
++        d.abandonedBeforeAllow = true; await this.cancel();
++      },
++    };
++  };
+   private startReason(): string | null {
+     const a = this.attempt, op = this.status?.operation;
+     if (!a || !a.prepareAccepted || !a.prepareJoined || !a.identity || !this.current(a) || !sameAppleIdentity(a.identity, op) ||
+         op?.phase !== 'awaiting-consent' || !op.intentUsable || this.action || this.cancellation || this.read || this.issue ||
+-        a.startClaimed || this.consentUntil === null || this.now() >= this.consentUntil) return 'This original intent is unavailable, expired or still pending. Do not replay Start.';
++        a.startClaimed || a.delegated !== null || this.consentUntil === null || this.now() >= this.consentUntil) return 'This original intent is unavailable, expired or still pending. Do not replay Start.';
+     if (a.request.mode === 'register' && !this.declaredNew) return 'The explicit new-application declaration is required.';
+     return this.source.otherOperationReason() ?? (this.acknowledged ? null : 'Confirm the separate permission for this exact original intent.');
+   }
+   private projected(): AppleProvisioningState {
+     const a = this.attempt, op = this.status?.operation;
+     const current = !!a && this.current(a) && sameAppleIdentity(a.identity, op);
+-    const readResult = !!a?.terminalRead && !this.action && !this.cancellation && !this.issue && sameAppleIdentity(a.identity, op) ? op?.result ?? null : null;
+-    const keyTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
++    const readResult = !!a?.terminalRead && (!a.delegated || this.startReturned(a)) && !this.action && !this.cancellation && !this.issue && sameAppleIdentity(a.identity, op) ? op?.result ?? null : null;
++    const keyTerminalRead = !!a?.terminalRead && a.prepareJoined && this.started(a) && this.startReturned(a) && !this.action && !this.cancellation &&
+       !this.issue && isAppleDistributionKeyMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+-    const certificateTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
++    const certificateTerminalRead = !!a?.terminalRead && a.prepareJoined && this.started(a) && this.startReturned(a) && !this.action && !this.cancellation &&
+       !this.issue && isAppleDistributionCertificateMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+-    const p12TerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
++    const p12TerminalRead = !!a?.terminalRead && a.prepareJoined && this.started(a) && this.startReturned(a) && !this.action && !this.cancellation &&
+       !this.issue && isAppleP12Mode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+     const cancelId = a?.identity ?? (active(op) ? op : null);
+     return Object.freeze({ native: !!this.original && !this.connectionRetired, visible: this.visible, initialized: this.initialized,
+@@ -244,7 +306,7 @@
+       cancelPending: !!this.cancellation, status: this.status, projectId: this.witness?.base.projectId ?? null,
+       ios: this.source.assets()?.scope.platform === 'ios', displayName: this.displayName, newApplication: this.declaredNew,
+       issue: this.issue, historical: !!op && !current,
+-      consent: a?.identity && this.consentUntil !== null && current && !a.startClaimed ?
++      consent: a?.identity && this.consentUntil !== null && current && !a.startClaimed && !a.delegated ?
+         Object.freeze({ ...identity(a.identity), mode: a.request.mode, acknowledged: this.acknowledged }) : null,
+       result: readResult?.scope === 'local-ios-bundle-provisioning' ? readResult : null,
+       profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
+@@ -329,7 +391,7 @@
+   };
+   acknowledge = (operationId: string, ownerGeneration: string, value: boolean): void => {
+     if (sameAppleIdentity(this.attempt?.identity, { operationId, ownerGeneration }) && this.consentUntil !== null &&
+-        this.now() < this.consentUntil && this.attempt && this.current(this.attempt) && !this.attempt.startClaimed) {
++        this.now() < this.consentUntil && this.attempt && this.current(this.attempt) && !this.attempt.startClaimed && !this.attempt.delegated) {
+       this.acknowledged = value; this.publish();
+     }
+   };
+@@ -376,34 +438,35 @@
+     this.status = freeze(next);
+     if (next.availability === 'cleanup-unknown' || op?.phase === 'unknown') this.fail('cleanup-unknown');
+     if (a && source === 'read' && read?.afterInvoke && read.mutation === this.mutation && a.prepareJoined &&
+-        (!a.startClaimed || a.startJoined) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal' && !this.issue) {
++        (a.delegated ? a.delegated.abandonedBeforeAllow || a.delegated.allowJoined && a.delegated.final : !a.startClaimed || a.startJoined) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal' && !this.issue) {
+       a.terminalRead = true; this.clearConsent();
+-      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'review' && op.outcome === 'complete' &&
+-          op.result?.scope === 'local-ios-bundle-provisioning' && op.result.decision === 'review-required' && op.result.observation === 'not-returned' && this.now() < a.startedAt + 300000) {
+-        this.review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+-      }
+-      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'key-review' && op.outcome === 'complete' &&
++      const anchor = this.startAnchor(a);
++      if (this.current(a) && this.started(a) && anchor !== null && a.request.mode === 'review' && op.outcome === 'complete' &&
++          op.result?.scope === 'local-ios-bundle-provisioning' && op.result.decision === 'review-required' && op.result.observation === 'not-returned' && this.now() < anchor + 300000) {
++        this.review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: anchor + 300000 });
++      }
++      if (this.current(a) && this.started(a) && anchor !== null && a.request.mode === 'key-review' && op.outcome === 'complete' &&
+           op.result?.scope === 'local-ios-distribution-key' && op.result.decision === 'prepare-review' && op.result.reason === 'local-key-required' &&
+-          this.now() < a.startedAt + 300000) {
++          this.now() < anchor + 300000) {
+         // Conservative UI age only: native expires from its original provider
+         // observation. A read/event/reconnect never starts another 300 seconds.
+-        this.keyReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+-      }
+-      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'certificate-review' && op.outcome === 'complete' &&
++        this.keyReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: anchor + 300000 });
++      }
++      if (this.current(a) && this.started(a) && anchor !== null && a.request.mode === 'certificate-review' && op.outcome === 'complete' &&
+           op.result?.scope === 'local-ios-distribution-certificate' && op.result.decision === 'request-review' && op.result.reason === 'certificate-required' &&
+-          this.now() < a.startedAt + 300000) {
+-        this.certificateReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+-      }
+-      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'p12-review' && op.outcome === 'complete' &&
++          this.now() < anchor + 300000) {
++        this.certificateReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: anchor + 300000 });
++      }
++      if (this.current(a) && this.started(a) && anchor !== null && a.request.mode === 'p12-review' && op.outcome === 'complete' &&
+           op.result?.scope === 'local-ios-p12-setup' && ['assemble-review', 'reuse-review'].includes(op.result.decision) &&
+-          this.now() < a.startedAt + 300000) {
+-        this.p12Review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000,
++          this.now() < anchor + 300000) {
++        this.p12Review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: anchor + 300000,
+           action: op.result.decision === 'reuse-review' ? 'p12-reuse' : 'p12-save' });
+       }
+-      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
++      if (this.current(a) && this.started(a) && anchor !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
+           op.result?.scope === 'local-ios-profile-setup' && ['reuse-available', 'create-available'].includes(op.result.decision) &&
+-          this.now() < a.startedAt + 300000) {
+-        this.profileReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000,
++          this.now() < anchor + 300000) {
++        this.profileReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: anchor + 300000,
+           action: op.result.decision === 'reuse-available' ? 'profile-reuse' : 'profile-create' });
+       }
+     }
+@@ -511,7 +574,7 @@
+       previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
+       certificateReviewExpires: mode === 'certificate-create' ? this.certificateReview?.expires ?? null : null,
+       p12ReviewExpires: mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.expires ?? null : null,
+-      retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false };
++      retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false, delegated: null };
+     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
+     if (isAppleP12Mode(mode)) this.clearP12Review(); // An uncertain Prepare never restores save/reuse consent.
+     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
+@@ -533,7 +596,7 @@
+         if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
+           this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity, a.p12ReviewExpires ?? Infinity); this.acknowledged = false;
+           if (this.now() >= this.consentUntil) this.invalidate();
+-          else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed) this.invalidate(); }, this.consentUntil - this.now());
++          else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed && !a.delegated) this.invalidate(); }, this.consentUntil - this.now());
+         }
+         this.cleanupListener(); this.publish();
+       }
+@@ -541,7 +604,7 @@
+   }
+   start = (operationId: string, ownerGeneration: string): Promise<void> => {
+     this.syncProject(); const a = this.attempt, api = this.original;
+-    if (!a || !api || a.startClaimed || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
++    if (!a || !api || a.startClaimed || a.delegated || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
+     a.startClaimed = true; a.startedAt = this.now(); this.clearConsent(); this.mutation++;
+     if (a.request.mode === 'profile-reuse' || a.request.mode === 'profile-create') this.profileAttempt = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
+     if (a.request.mode === 'certificate-create') this.certificateAttempt = freeze({ identity: identity(a.identity!), witness: a.witness, displayName: a.request.displayName, expires: null });
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -98,6 +98,7 @@
+ import { createVersionReservePort } from './versionReserve.ts';
+ import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
+ import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
++import { createAppleCliPort } from './agentAppleProvisioning.ts';
+ import { createAgentStoreAccessPort } from './agentStoreAccess.ts';
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+@@ -430,6 +431,7 @@
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+diff --git a/desktop/src/components/AppleBundleRegistration.tsx b/desktop/src/components/AppleBundleRegistration.tsx
+--- a/desktop/src/components/AppleBundleRegistration.tsx
++++ b/desktop/src/components/AppleBundleRegistration.tsx
+@@ -1,3 +1,4 @@
++import type { ReactNode } from 'react';
+ import { AppleP12Setup } from './AppleP12Setup.tsx';
+ import { isAppleP12Mode } from '../appleP12SetupProtocol.ts';
+ import type { AppleP12FingerprintEdit, AppleP12FingerprintView } from '../appleP12Fingerprint.ts';
+@@ -14,6 +15,7 @@
+   controller: AppleProvisioningController; state: AppleProvisioningState;
+   onCredentials(): void; onProjectIdentity(): void; onSigningCredentials?(): void;
+   p12Fingerprint?: AppleP12FingerprintView; onUseP12Fingerprint?(edit: AppleP12FingerprintEdit): boolean;
++  cliPanel?: ReactNode; cliRetained?: boolean;
+   compact?: boolean; onShow?(): void;
+   // Display-only saved-configuration labels, not account/team authority.
+   savedBundleId?: string | null; configuredTeamId?: string | null;
+@@ -39,10 +41,10 @@
+   return { title: 'No registration decision is available', detail: 'The response, prerequisites or account-wide journal fence require attention. Do not create or revoke signing credentials to work around this result.' };
+ }
+
+-export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, p12Fingerprint, onUseP12Fingerprint, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
++export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, p12Fingerprint, onUseP12Fingerprint, cliPanel, cliRetained = false, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
+   const op = state.status?.operation, result = state.result, copy = result ? resultCopy(result) : null;
+   if (compact) {
+-    if (!state.retained && !state.issue) return null;
++    if (!state.retained && !state.issue && !cliRetained) return null;
+     return <section className="card" aria-label="Original Apple setup operation">
+       <h2>Apple setup · original operation retained</h2>
+       <p>{op ? `${modeLabel[op.context.mode]} · ${op.phase} · project ${op.context.projectId}` : 'Waiting for the original operation reference.'}</p>
+@@ -53,6 +55,7 @@
+         <button type="button" disabled={!state.canCancel} onClick={() => void controller.cancel()}>Cancel original operation</button>
+       </div>
+       {state.cancelRequested && <p className="save-note">Cancellation was requested; the original operation remains retained.</p>}
++      {cliPanel}
+     </section>;
+   }
+   return <section className="card" aria-labelledby="apple-bundle-registration-title">
+@@ -128,5 +131,6 @@
+       <button disabled={!state.ios || !!state.reconcileReason} onClick={() => void controller.prepare('reconcile')}>Prepare read-only reconciliation</button>
+       {state.reconcileReason && <p className="save-note">{state.reconcileReason}</p>}
+     </details>
++    {cliPanel}
+   </section>;
+ }
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -439,6 +439,7 @@
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+   readonly agentUploadKeyAccess?: import('./agentUploadKeyAccess.ts').AgentUploadKeyAccessPort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
++  readonly agentAppleProvisioning?: import('./agentAppleProvisioning.ts').AppleCliPort | null;
+   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;

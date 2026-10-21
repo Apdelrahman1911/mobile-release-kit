@@ -11,6 +11,8 @@ use crate::{apple_provisioning_journal::OriginalReservation, application_state_s
 
 use super::*;
 use crate::apple_provisioning_protocol as apple_wire;
+#[path="saved_command_agent_apple_provisioning.rs"]
+pub(super) mod agent;
 #[path="saved_command_apple_profile_review.rs"]
 mod profile_review;
 #[path = "saved_command_apple_key_review.rs"]
@@ -94,6 +96,8 @@ impl AppleProvisioningReview {
 }
 
 pub(super) struct Intent {
+    agent: std::sync::OnceLock<Arc<agent::Binding>>,
+    witness: Arc<()>,
     input: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
     review: Option<Arc<AppleProvisioningReview>>,
     profile_review: Option<Arc<profile_review::Review>>,
@@ -711,6 +715,7 @@ impl SavedCommandOwner {
         if let Some(review)=&certificate_review { prepared.expires=prepared.expires.min(review.expires()); }
         if let Some(review)=&p12_review {prepared.expires=prepared.expires.min(review.expires());}
         prepared.apple = Some(Arc::new(Intent {
+            agent:std::sync::OnceLock::new(),witness:Arc::new(()),
             input: document,
             review,
             profile_review, key_review, certificate_review,p12_review,
@@ -743,6 +748,12 @@ impl SavedCommandOwner {
         gate: apple_wire::Availability,
         document: Arc<crate::asset_session::AppleProvisioningDocumentInput>,
     ) -> Result<AppleProvisioningAdmitted, BridgeError> {
+        self.start_apple_provisioning_bound(input,admitted_at,registered,gate,document,None)
+    }
+    pub(crate) fn start_apple_provisioning_bound(&self,input:apple_wire::Start,admitted_at:Instant,
+        registered:Option<(u32,RegisteredRoot)>,gate:apple_wire::Availability,
+        document:Arc<crate::asset_session::AppleProvisioningDocumentInput>,
+        entry:Option<&Arc<crate::service_apple_provisioning_requests::Entry>>)->Result<AppleProvisioningAdmitted,BridgeError>{
         self.require_domain(SavedCommandDomain::AppleProvisioning)?;
         let original =
             self.prepared_apple_provisioning_input(&input.operation_id, &input.owner_generation)?;
@@ -753,9 +764,12 @@ impl SavedCommandOwner {
         }
         {
             let registry = self.inner.lock();
+            // Refuse a GUI Start against the delegated original BEFORE consuming
+            // any private preceding review. The generic take guard repeats it.
             let intent = registry
                 .prepared
                 .as_ref()
+                .filter(|prepared|agent::start_matches(prepared,entry))
                 .and_then(|prepared| prepared.apple.as_ref())
                 .ok_or_else(apple_wire::invalid)?;
             if let Some(review) = &intent.review {
@@ -766,7 +780,7 @@ impl SavedCommandOwner {
             if let Some(review) = &intent.certificate_review { review.claim(&document,Instant::now())?; }
             if let Some(review)=&intent.p12_review {review.claim(&document,Instant::now())?;}
         }
-        let admitted = self.start_bound(
+        let admitted = self.start_bound_requests_apple(
             Start {
                 operation_id: input.operation_id,
                 owner_generation: input.owner_generation,
@@ -775,6 +789,7 @@ impl SavedCommandOwner {
             registered,
             Availability::from_store(gate),
             Some(PrivateSigningMaterial::Store(document.material().clone())),
+            None,None,None,None,None,entry,
         )?;
         let profile = {
             let registry = self.inner.lock();

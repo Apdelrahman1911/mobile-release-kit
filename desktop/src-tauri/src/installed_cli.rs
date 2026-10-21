@@ -31,6 +31,8 @@ mod git_remote;
 mod version_reserve;
 #[path="installed_cli_store.rs"]
 mod store;
+#[path="installed_cli_apple_provisioning.rs"]
+mod apple_provisioning;
 #[path="installed_cli_play_cleanup.rs"]
 mod play_cleanup;
 
@@ -56,6 +58,9 @@ Usage:\n\
   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
   mrk configuration-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk configuration-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk apple-provisioning-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+  mrk apple-provisioning-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk apple-provisioning-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
   mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -281,6 +286,11 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "backupRestoreScope":"android-keystore-only","restoreNewUnassigned":true,"implicitAssignment":false,
                 "rememberAssignment":false,"recoveryAcknowledgment":false,
                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
+            "appleProvisioning":{"scope":"one-existing-desktop-prepared-apple-step","commands":apple_provisioning::COMMANDS,
+                "modeCount":15,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"headless":false,
+                "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
+                "maxPreparedMs":300000,"nativeWorkMs":1200000,"nativeHardMs":1210000,"providerEffectsPossible":true,
+                "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":false,"p12Reconcile":false},
             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
@@ -304,7 +314,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","store","play-cleanup","apple-provisioning"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -434,6 +444,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+        p::ResponseBody::AppleProvisioningRequest(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
         p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
@@ -472,6 +483,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     if upload_key::recognizes(&args) { return upload_key::run(args); }
     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
     if store::recognizes(&args){return store::run(args);}
+    if apple_provisioning::recognizes(&args){return apple_provisioning::run(args);}
     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
     if git_index::recognizes(&args) { return git_index::run(args); }
     if git_commit::recognizes(&args) { return git_commit::run(args); }
@@ -561,7 +573,7 @@ mod tests {
         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 288); // Two detail inboxes plus seven distinct 32-row metadata namespaces.
+        assert_eq!(caps["requestDiscovery"]["maxRequests"], 320); // Two detail inboxes plus eight distinct 32-row metadata namespaces.
         assert!(caps["requestDiscovery"]["families"].as_array().unwrap().iter().any(|family| family == "play-cleanup"));
     }
     #[test]

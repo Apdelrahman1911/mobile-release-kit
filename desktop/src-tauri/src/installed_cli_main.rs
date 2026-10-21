@@ -17,6 +17,10 @@ mod service_version_reserve_protocol;
 mod service_store_protocol;
 #[path="service_store_requests.rs"]
 mod service_store_requests;
+#[path="service_apple_provisioning_protocol.rs"]
+mod service_apple_provisioning_protocol;
+#[path="service_apple_provisioning_requests.rs"]
+mod service_apple_provisioning_requests;
 #[path="service_version_reserve_requests.rs"]
 mod service_version_reserve_requests;
 #[path="service_play_cleanup_protocol.rs"]

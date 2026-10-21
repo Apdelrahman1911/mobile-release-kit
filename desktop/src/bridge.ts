@@ -98,6 +98,7 @@ import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionReservePort } from './versionReserve.ts';
 import { createAgentUploadKeyAccessPort } from './agentUploadKeyAccess.ts';
 import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
+import { createAppleCliPort } from './agentAppleProvisioning.ts';
 import { createAgentStoreAccessPort } from './agentStoreAccess.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
 import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
@@ -430,6 +431,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentUploadKeyAccess: mode === 'native' ? createAgentUploadKeyAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentAppleProvisioning: mode === 'native' ? createAppleCliPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),

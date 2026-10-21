@@ -3,6 +3,9 @@
 //! starts the state service, grants CLI access or constructs a replacement
 //! account/credential/registration capability.
 use super::*;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_agent_apple_provisioning.rs"]
+pub(crate) mod agent;
 #[path="asset_session_apple_p12_input.rs"]
 mod p12_input;
 use crate::{
@@ -440,7 +443,11 @@ impl DocumentBinding {
         &self,
         input: wire::Start,
     ) -> Result<wire::Status, BridgeError> {
-        let admitted_at = Instant::now();
+        self.start_apple_provisioning_delegated(input,None)
+    }
+    fn start_apple_provisioning_delegated(&self,input:wire::Start,
+        delegated:Option<(&Arc<agent::Grant>,&Arc<crate::service_apple_provisioning_requests::Entry>)>)->Result<wire::Status,BridgeError>{
+        let admitted_at=delegated.map_or_else(Instant::now,|(_,entry)|entry.submitted_at());
         let mut state = self.lock();
         let gate = self.apple_provisioning_gate(&state);
         let original = self
@@ -462,6 +469,7 @@ impl DocumentBinding {
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
+        if let Some((grant,entry))=delegated{self.agent_apple_start_current(&state,grant,entry,&edit,registration,&root)?;}
         original.current_locked(&self.inner, &state, &edit)?;
         self.recheck_apple_provisioning_material(
             &state,
@@ -474,12 +482,13 @@ impl DocumentBinding {
             .inner
             .bridge
             .apple_provisioning
-            .start_apple_provisioning(
+            .start_apple_provisioning_bound(
                 input,
                 admitted_at,
                 Some((registration, root)),
                 gate,
                 original.clone(),
+                delegated.map(|(_,entry)|entry),
             )?;
         drop(edit);
         // All gates/census/saved originals were checked under the SAME Doc.
