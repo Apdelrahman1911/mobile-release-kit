@@ -7,6 +7,9 @@ fn id(c: char) -> Id {
     Id::parse(&c.to_string().repeat(32)).unwrap()
 }
 fn scope(doc: &Arc<()>, push: bool) -> Arc<NativeScope> {
+    selected_scope(doc, remote::tests::selection(push))
+}
+fn selected_scope(doc: &Arc<()>, selection: remote::Selection) -> Arc<NativeScope> {
     Arc::new(NativeScope {
         project_id: id('a'),
         runtime_id: "project-1".into(),
@@ -18,16 +21,19 @@ fn scope(doc: &Arc<()>, push: bool) -> Arc<NativeScope> {
         input_revision: 1,
         read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(doc),
-        selection: remote::tests::selection(push).into(),
+        selection: selection.into(),
         commit: None,
         changes: tokio::sync::watch::channel(0).0,
     })
 }
 fn setup(push: bool) -> (Arc<()>, Inbox, p::Prepare) {
+    selected_setup(remote::tests::selection(push))
+}
+fn selected_setup(selection: remote::Selection) -> (Arc<()>, Inbox, p::Prepare) {
     let doc = Arc::new(());
     let inbox = Inbox::new(id('b'));
     let grant = inbox
-        .allow_remote(scope(&doc, push))
+        .allow_remote(selected_scope(&doc, selection))
         .unwrap()
         .grant_id
         .unwrap();
@@ -68,6 +74,165 @@ fn pending(inbox: &Inbox, input: &p::Prepare) {
     let s = status(inbox, input);
     assert_eq!(s.progress.settlement, Settlement::Pending);
     assert!(s.progress.review.is_none() && s.progress.outcome.is_none() && s.result.is_none());
+}
+#[test]
+fn new_branch_prepare_and_apply_keep_same_three_returns_and_single_consumed_kind() {
+    for prepare_caller_first in [false, true] {
+        for apply_caller_first in [false, true] {
+            let (doc, inbox, input) = selected_setup(remote::tests::new_branch_selection());
+            let (prepare, link) = claim(&inbox, &input);
+            let review = Some((
+                remote::tests::new_branch_review(),
+                Instant::now() + Duration::from_secs(299),
+            ));
+            if prepare_caller_first {
+                prepare.returned(Ok(()));
+                link.retired(OperationState::Succeeded);
+                pending(&inbox, &input);
+                assert!(inbox.start_remote(&start(&input)).is_err());
+                assert!(link.remote_connection_returned(review, None).unwrap());
+            } else {
+                link.retired(OperationState::Succeeded);
+                assert!(link.remote_connection_returned(review, None).unwrap());
+                pending(&inbox, &input);
+                assert!(inbox.start_remote(&start(&input)).is_err());
+                prepare.returned(Ok(()));
+            }
+            let ready = status(&inbox, &input);
+            assert!(matches!(
+                ready.progress.review.as_ref().unwrap().preview,
+                remote::Preview::PushNewBranch { .. }
+            ));
+            assert_eq!(
+                ready.progress.selection.action.kind(),
+                remote::Kind::PushNewBranch
+            );
+            let args = start(&input);
+            inbox.start_remote(&args).unwrap();
+            let mut apply = inbox.claim().unwrap().unwrap();
+            let next = apply.link().unwrap();
+            assert!(next.same_request(&link));
+            next.arm("git-local-2").unwrap();
+            link.review_removed();
+            let result = remote::Outcome {
+                operation_id: "git-local-2".into(),
+                action: remote::Kind::PushNewBranch,
+                state: remote::EffectState::RecoveryRequired,
+                effect_phase: remote::Effect::SendConsumed,
+                retained_paths: vec!["mrk-git-test/mrk-git-push-test".into()],
+            };
+            if apply_caller_first {
+                apply.returned(Ok(()));
+                next.retired(OperationState::RecoveryRequired);
+                pending(&inbox, &input);
+                next.remote_connection_returned(None, Some(result.clone()))
+                    .unwrap();
+            } else {
+                next.retired(OperationState::RecoveryRequired);
+                next.remote_connection_returned(None, Some(result.clone()))
+                    .unwrap();
+                pending(&inbox, &input);
+                apply.returned(Ok(()));
+            }
+            let final_status = status(&inbox, &input);
+            assert_eq!(final_status.result, Some(result));
+            assert_eq!(final_status.progress.settlement, Settlement::Settled);
+            assert_eq!(inbox.start_remote(&args).unwrap(), final_status);
+            assert_eq!(inbox.prepare_remote(input.clone()).unwrap(), final_status);
+            assert!(inbox.claim().unwrap().is_none());
+            assert!(inbox.allow_remote(scope(&doc, true)).is_err());
+        }
+    }
+}
+#[test]
+fn new_branch_lost_finish_caller_or_expired_review_never_rearms_from_status() {
+    for which in 0..4 {
+        let (doc, inbox, input) = selected_setup(remote::tests::new_branch_selection());
+        let (caller, link) = claim(&inbox, &input);
+        link.retired(OperationState::Succeeded);
+        let review = Some((
+            remote::tests::new_branch_review(),
+            Instant::now() + Duration::from_secs(299),
+        ));
+        match which {
+            0 => {
+                caller.returned(Ok(()));
+                pending(&inbox, &input);
+                // No Connection finish arrived. A terminal native event is
+                // not that missing original, even for an absence-only push.
+                link.entry.unknown();
+            }
+            1 => {
+                drop(caller);
+                assert!(!link.remote_connection_returned(review, None).unwrap());
+            }
+            2 => {
+                assert!(!link
+                    .remote_connection_returned(
+                        Some((remote::tests::new_branch_review(), Instant::now())),
+                        None
+                    )
+                    .unwrap());
+                pending(&inbox, &input);
+                caller.returned(Ok(()));
+            }
+            _ => {
+                assert!(link.remote_connection_returned(review, None).unwrap());
+                link.review_removed();
+                pending(&inbox, &input);
+                caller.returned(Ok(()));
+            }
+        }
+        let current = status(&inbox, &input);
+        assert!(current.progress.review.is_none());
+        assert_eq!(inbox.prepare_remote(input.clone()).unwrap(), current);
+        assert!(inbox.start_remote(&start(&input)).is_err());
+        assert!(inbox.claim().unwrap().is_none());
+        if which < 2 {
+            assert_eq!(current.progress.settlement, Settlement::Unknown);
+            assert!(inbox
+                .allow_remote(selected_scope(&doc, remote::tests::new_branch_selection()))
+                .is_err());
+        } else {
+            assert_eq!(current.progress.settlement, Settlement::Settled);
+        }
+    }
+}
+#[test]
+fn an_existing_fetch_or_push_grant_cannot_be_upgraded_to_new_branch_review() {
+    for old in [false, true] {
+        let (doc, inbox, input) = setup(old);
+        let (caller, link) = claim(&inbox, &input);
+        assert!(inbox
+            .allow_remote(selected_scope(&doc, remote::tests::new_branch_selection()))
+            .is_err());
+        caller.returned(Ok(()));
+        link.retired(OperationState::Succeeded);
+        assert!(link
+            .remote_connection_returned(
+                Some((
+                    remote::tests::new_branch_review(),
+                    Instant::now() + Duration::from_secs(299)
+                )),
+                None,
+            )
+            .is_err());
+        // The real caller marks any failed native-review comparison Unknown.
+        link.entry.unknown();
+        let original = status(&inbox, &input);
+        assert_eq!(
+            original.progress.selection.action.kind(),
+            if old {
+                remote::Kind::Push
+            } else {
+                remote::Kind::Fetch
+            }
+        );
+        assert_eq!(original.progress.settlement, Settlement::Unknown);
+        assert!(original.progress.review.is_none());
+        assert_eq!(inbox.prepare_remote(input.clone()).unwrap(), original);
+        assert!(inbox.start_remote(&start(&input)).is_err());
+    }
 }
 #[test]
 fn both_return_orders_withhold_ready_history_and_start_until_all_three_originals() {

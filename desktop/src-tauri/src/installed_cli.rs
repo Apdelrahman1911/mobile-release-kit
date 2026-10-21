@@ -244,7 +244,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "defaultEnabled":false,"oneUse":true,"sharesGitGrantAnd32Requests":true,"requiresRunningDesktop":true,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"fetch":false,"push":false,"nativeAvailabilityChecked":false,
                 "commands":git_repository::COMMANDS},
-            "gitRemote": {"actions":["fetch","push"],"commands":git_remote::NAMES,
+            "gitRemote": {"actions":["fetch","push","push-new-branch"],"commands":git_remote::NAMES,
                 "argumentPattern":"gitRepository.commands by position","defaultEnabled":false,"oneUse":true,
                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},

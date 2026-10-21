@@ -16,7 +16,8 @@ pub(super) const COMMANDS: [CommandCapability; 5] = [
     CommandCapability {
         command: "git-remote-scope",
         arguments: &["PROJECT_ID"],
-        description: "Read the exact Desktop-approved Fetch or Push.",
+        description:
+            "Read the exact Desktop-approved Fetch, Push or create-only branch publication.",
     },
     CommandCapability {
         command: "git-remote-prepare",
@@ -73,7 +74,7 @@ pub(super) fn output(
                     s.account.login,
                     s.account.account_id,
                     s.account.repository_id,
-                    s.action.remote(),
+                    s.action.remote().unwrap_or("(no configured upstream)"),
                     s.action.reference(),
                     s.selection_sha256
                 ));
@@ -85,6 +86,12 @@ pub(super) fn output(
                 } = &s.action
                 {
                     text.push_str(&format!("Committed {local_ref}: cached {old_oid} -> {new_oid}; original native review must still check the complete outgoing history.\n"));
+                }
+                if let remote::Action::PushNewBranch {
+                    local_ref, new_oid, ..
+                } = &s.action
+                {
+                    text.push_str(&format!("Create only {local_ref} at {new_oid}. A fresh native review must find the target not advertised and check all reachable commits; the server create-only update must reject any existing target, including an identical tip. This does not configure a remote or upstream.\n"));
                 }
                 if a.enabled {
                     text.push_str(&format!(
@@ -137,6 +144,7 @@ pub(super) fn output(
                 match &r.preview {
                     remote::Preview::Fetch {target_ref,expected_target,candidate_ref_oid}=>text.push_str(&format!("Fetch only {target_ref}: {} -> {candidate_ref_oid}; no checkout, merge or local branch movement.\n",expected_target.as_deref().unwrap_or("absent"))),
                     remote::Preview::Push {branch,upstream_ref,expected_remote_oid,head,commit_count,commits_sha256}=>text.push_str(&format!("Normal Push {branch} to {upstream_ref}: {expected_remote_oid} -> {head}; {commit_count} outgoing commits, digest {commits_sha256}. Messages/objects are withheld; this is not a secret-safety guarantee.\n")),
+                    remote::Preview::PushNewBranch {branch,target_ref,head,commit_count,commits_sha256,..}=>text.push_str(&format!("Create-only Push {branch} to {target_ref} at {head}: {commit_count} reachable commits, digest {commits_sha256}. Any occupied target refuses; no remote or upstream is configured. Messages/objects are withheld; this is not a secret-safety guarantee.\n")),
                 }
                 if s.state == git::State::Prepared && r.can_apply() {
                     text.push_str(&format!(

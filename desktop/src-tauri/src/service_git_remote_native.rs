@@ -143,6 +143,28 @@ pub(super) fn action(selected: &remote::Action) -> Result<local::Action, BridgeE
             connection_session_id: connection_session_id.clone(),
             expected_connection_revision: *expected_connection_revision,
         }),
+        remote::Action::PushNewBranch {
+            expected_revision,
+            expected_reference_revision,
+            local_ref,
+            remote_ref,
+            old_oid,
+            new_oid,
+            connection_session_id,
+            expected_connection_revision,
+            ..
+        } => local::Action::Push(push::Action {
+            kind: push::Kind::PushNewBranch,
+            expected_revision: expected_revision.clone(),
+            expected_reference_revision: expected_reference_revision.clone(),
+            remote: None,
+            local_ref: local_ref.clone(),
+            remote_ref: remote_ref.clone(),
+            old_oid: old_oid.clone(),
+            new_oid: new_oid.clone(),
+            connection_session_id: connection_session_id.clone(),
+            expected_connection_revision: *expected_connection_revision,
+        }),
     };
     if action.valid() {
         Ok(action)
@@ -188,13 +210,24 @@ pub(in crate::asset_session) fn review(
                 repository_id: r.repository_id.clone(),
                 repository: r.repository.clone(),
             },
-            remote::Preview::Push {
-                branch: r.branch.clone(),
-                upstream_ref: r.upstream_ref.clone(),
-                expected_remote_oid: r.expected_remote_oid.clone(),
-                head: r.head.clone(),
-                commit_count: u32::try_from(r.commits.len()).ok()?,
-                commits_sha256: r.commits_sha256(),
+            match r.action {
+                push::Kind::Push => remote::Preview::Push {
+                    branch: r.branch.clone(),
+                    upstream_ref: r.upstream_ref.clone(),
+                    expected_remote_oid: r.expected_remote_oid.clone(),
+                    head: r.head.clone(),
+                    commit_count: u32::try_from(r.commits.len()).ok()?,
+                    commits_sha256: r.commits_sha256(),
+                },
+                push::Kind::PushNewBranch => remote::Preview::PushNewBranch {
+                    branch: r.branch.clone(),
+                    target_ref: r.upstream_ref.clone(),
+                    expected_remote_oid: r.expected_remote_oid.clone(),
+                    head: r.head.clone(),
+                    commit_count: u32::try_from(r.commits.len()).ok()?,
+                    commits_sha256: r.commits_sha256(),
+                    basis: r.basis.clone(),
+                },
             },
         ),
         _ => return None,
@@ -279,7 +312,10 @@ pub(in crate::asset_session) fn outcome(
             };
             remote::Outcome {
                 operation_id: r.operation_id,
-                action: remote::Kind::Push,
+                action: match r.action {
+                    push::Kind::Push => remote::Kind::Push,
+                    push::Kind::PushNewBranch => remote::Kind::PushNewBranch,
+                },
                 state: effect_state(&r.state)?,
                 effect_phase: effect,
                 retained_paths: r.retained_paths,
@@ -291,5 +327,134 @@ pub(in crate::asset_session) fn outcome(
         Ok(Some(value))
     } else {
         Err(BridgeError::cleanup_unknown())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Only the actual protocol's inert Action/Review/Mutation fixtures. No
+    // Connection Pins, native receipt, Doc finish or service Ready is minted.
+    fn scope() -> (Arc<()>, requests::NativeScope) {
+        let doc = Arc::new(());
+        let a = push::new_branch::tests::action();
+        let r = push::new_branch::tests::review();
+        let action = serde_json::from_value(serde_json::to_value(a).unwrap()).unwrap();
+        let selected = remote::Selection::new(
+            action,
+            remote::Account {
+                account_id: r.account_id,
+                login: r.login,
+                repository_id: r.repository_id,
+                repository: r.repository,
+            },
+        )
+        .unwrap();
+        let scope = requests::NativeScope {
+            project_id: crate::service_protocol::Id::parse(&"a".repeat(32)).unwrap(),
+            runtime_id: "project-1".into(),
+            root: "/inert/new-branch".into(),
+            device: 1,
+            inode: 2,
+            registration: 1,
+            document_revision: 1,
+            input_revision: 1,
+            read_operation_id: Some("git-read-1".into()),
+            document: Arc::downgrade(&doc),
+            selection: selected.into(),
+            commit: None,
+            changes: tokio::sync::watch::channel(0).0,
+        };
+        (doc, scope)
+    }
+    #[test]
+    fn fixed_native_adapter_preserves_new_kind_and_exact_review_not_ordinary_push() {
+        let (_doc, scope) = scope();
+        let shared::Selected::Remote(s) = &scope.selection else {
+            panic!("Remote fixture")
+        };
+        let a = action(&s.action).unwrap();
+        assert!(matches!(&a, local::Action::Push(a) if *a == push::new_branch::tests::action()));
+        let original = local::Review::Push(push::new_branch::tests::review());
+        let projected = review(&scope, &original, "git-local-1-review".into(), 1, 1).unwrap();
+        assert!(
+            matches!(&projected.preview, remote::Preview::PushNewBranch {basis, expected_remote_oid, ..}
+            if basis == remote::NEW_BRANCH_BASIS && expected_remote_oid == remote::NEW_BRANCH_ZERO)
+        );
+        assert!(projected.matches(s));
+        assert!(review(
+            &scope,
+            &local::Review::Push(push::tests::review()),
+            "git-local-1-review".into(),
+            1,
+            1
+        )
+        .is_none());
+        let mut foreign = push::new_branch::tests::review();
+        foreign.account_id = "99".into();
+        assert!(foreign.valid());
+        assert!(review(
+            &scope,
+            &local::Review::Push(foreign),
+            "git-local-1-review".into(),
+            1,
+            1
+        )
+        .is_none());
+        assert!(review(&scope, &original, "git-local-1-review".into(), 2, 1).is_none());
+        for push in [false, true] {
+            let selected = remote::tests::selection(push).action;
+            let native = action(&selected).unwrap();
+            assert!(if push {
+                matches!(native, local::Action::Push(a) if a.kind == push::Kind::Push && a.remote.as_deref() == Some("origin"))
+            } else {
+                matches!(native, local::Action::Fetch(_))
+            });
+        }
+    }
+    #[test]
+    fn new_branch_effect_conversion_checks_original_kind_intent_and_id() {
+        let (_doc, scope) = scope();
+        let native = local::Action::Push(push::new_branch::tests::action());
+        let mutation = push::Mutation {
+            operation_id: "git-local-2".into(),
+            action: push::Kind::PushNewBranch,
+            state: "recovery-required".into(),
+            settlement: "settled".into(),
+            reason: Some("remote-rejected".into()),
+            observation: None,
+            intent: Some(push::new_branch::tests::intent()),
+            effect_phase: push::Effect::SendConsumed,
+            retained_paths: vec!["mrk-git-a/mrk-git-push-b".into()],
+        };
+        let view = local::Projection {
+            operation_id: "git-local-2".into(),
+            context: read::Context {
+                project_id: "project-1".into(),
+                generation: 1,
+                revision: "document-1".into(),
+            },
+            phase: local::Phase::Apply,
+            action: native.public(),
+            stage: read::Phase::Settled,
+            outcome: Some(read::Outcome::Ok),
+            reason: None,
+            result: serde_json::to_value(mutation).unwrap(),
+        };
+        let result = outcome(&scope, &view).unwrap().unwrap();
+        assert_eq!(result.action, remote::Kind::PushNewBranch);
+        assert_eq!(result.state, remote::EffectState::RecoveryRequired);
+        assert_eq!(result.effect_phase, remote::Effect::SendConsumed);
+        for which in 0..5 {
+            let mut bad = view.clone();
+            match which {
+                0 => bad.result["action"] = "push".into(),
+                1 => bad.result["intent"]["action"] = "push".into(),
+                2 => bad.result["intent"]["oldOid"] = "1".repeat(40).into(),
+                3 => bad.operation_id = "git-local-other".into(),
+                _ => bad.stage = read::Phase::CleanupUnknown,
+            }
+            assert!(outcome(&scope, &bad).is_err(), "{which}");
+        }
     }
 }

@@ -13,6 +13,13 @@ fn request(body: p::RequestBody) -> p::Request {
 
 #[test]
 fn actual_service_dispatch_requires_read_plus_remote_grant_and_preserves_original_on_reconnect() {
+    dispatch_reconnect(remote::tests::selection(false));
+}
+#[test]
+fn actual_service_new_branch_grant_reconnect_keeps_ids_kind_and_no_replay() {
+    dispatch_reconnect(remote::tests::new_branch_selection());
+}
+fn dispatch_reconnect(selected: remote::Selection) {
     let fixture = Fixture::new();
     let store = Arc::new(PrivateStateDirectory::open(&fixture.app).unwrap());
     let service = ApplicationService::open(store.clone()).unwrap();
@@ -34,7 +41,7 @@ fn actual_service_dispatch_requires_read_plus_remote_grant_and_preserves_origina
         input_revision: 1,
         read_operation_id: Some("git-read-1".into()),
         document: Arc::downgrade(&doc),
-        selection: remote::tests::selection(false).into(),
+        selection: selected.clone().into(),
         commit: None,
         changes: tokio::sync::watch::channel(0).0,
     });
@@ -81,6 +88,9 @@ fn actual_service_dispatch_requires_read_plus_remote_grant_and_preserves_origina
     );
     assert!(
         matches!(&first.response,p::ResponseBody::GitRemoteRequest(v) if v.progress.state==git::State::Queued && v.progress.review.is_none() && v.result.is_none())
+    );
+    assert!(
+        matches!(&first.response,p::ResponseBody::GitRemoteRequest(v) if v.progress.selection == selected)
     );
     p::encode_response(&first).unwrap();
     let newer = service.admit_client().unwrap();

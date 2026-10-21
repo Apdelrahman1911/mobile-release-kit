@@ -1,6 +1,7 @@
 //! Closed Remote comparison DATA for the existing Git inbox. The CLI receives
 //! neither a credential, a URL/command choice nor a native review capability.
-//! Fetch and ordinary Push still use the original selected Desktop Connection.
+//! Every kind uses the original selected Desktop Connection. Create-only
+//! publication is separate consent, never inferred from a zero old OID.
 use crate::{
     service_git_protocol as p,
     service_protocol::{Error, Id, OperationState, Settlement},
@@ -14,24 +15,29 @@ pub const ACCESS_LIMIT: usize = 8 * 1024;
 // in ONE existing row. The native full review is charged by GitLocal, not here.
 pub(crate) const ROW_HEAP: usize = 24 * 1024;
 pub(crate) const PINS_HEAP: usize = 4 * 1024;
+pub(crate) const NEW_BRANCH_ZERO: &str = "0000000000000000000000000000000000000000";
+pub(crate) const NEW_BRANCH_BASIS: &str = "first-publication-no-upstream";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     Fetch,
     Push,
+    PushNewBranch,
 }
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Fetch => "fetch",
             Self::Push => "push",
+            Self::PushNewBranch => "push-new-branch",
         }
     }
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::Fetch => "agent-git-fetch-once-v1",
             Self::Push => "agent-git-push-once-v1",
+            Self::PushNewBranch => "agent-git-push-new-branch-once-v1",
         }
     }
 }
@@ -125,12 +131,25 @@ pub enum Action {
         connection_session_id: String,
         expected_connection_revision: u32,
     },
+    PushNewBranch {
+        expected_revision: String,
+        expected_reference_revision: String,
+        #[serde(deserialize_with = "required_nullable")]
+        remote: Option<String>,
+        local_ref: String,
+        remote_ref: String,
+        old_oid: String,
+        new_oid: String,
+        connection_session_id: String,
+        expected_connection_revision: u32,
+    },
 }
 impl Action {
     pub fn kind(&self) -> Kind {
         match self {
             Self::Fetch { .. } => Kind::Fetch,
             Self::Push { .. } => Kind::Push,
+            Self::PushNewBranch { .. } => Kind::PushNewBranch,
         }
     }
     pub(crate) fn revisions(&self) -> (&str, &str) {
@@ -144,18 +163,24 @@ impl Action {
                 expected_revision,
                 expected_reference_revision,
                 ..
+            }
+            | Self::PushNewBranch {
+                expected_revision,
+                expected_reference_revision,
+                ..
             } => (expected_revision, expected_reference_revision),
         }
     }
-    pub fn remote(&self) -> &str {
+    pub fn remote(&self) -> Option<&str> {
         match self {
-            Self::Fetch { remote, .. } | Self::Push { remote, .. } => remote,
+            Self::Fetch { remote, .. } | Self::Push { remote, .. } => Some(remote),
+            Self::PushNewBranch { remote, .. } => remote.as_deref(),
         }
     }
     pub fn reference(&self) -> &str {
         match self {
             Self::Fetch { reference, .. } => reference,
-            Self::Push { remote_ref, .. } => remote_ref,
+            Self::Push { remote_ref, .. } | Self::PushNewBranch { remote_ref, .. } => remote_ref,
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
@@ -188,10 +213,28 @@ impl Action {
                     && oid(new_oid)
                     && old_oid != new_oid,
             ),
+            Self::PushNewBranch {
+                remote,
+                local_ref,
+                remote_ref,
+                old_oid,
+                new_oid,
+                connection_session_id,
+                expected_connection_revision,
+                ..
+            } => (
+                connection_session_id,
+                *expected_connection_revision,
+                remote.is_none()
+                    && reference(local_ref)
+                    && local_ref == remote_ref
+                    && old_oid == NEW_BRANCH_ZERO
+                    && oid(new_oid),
+            ),
         };
         if p::digest(revision)
             && p::digest(refs)
-            && remote(self.remote())
+            && self.remote().is_none_or(remote)
             && p::native_id(session)
             && session.len() <= 64
             && (1..u32::MAX).contains(&connection_revision)
@@ -240,12 +283,34 @@ impl Action {
                 connection_session_id: exact(connection_session_id),
                 expected_connection_revision,
             },
+            Self::PushNewBranch {
+                expected_revision,
+                expected_reference_revision,
+                remote,
+                local_ref,
+                remote_ref,
+                old_oid,
+                new_oid,
+                connection_session_id,
+                expected_connection_revision,
+            } => Self::PushNewBranch {
+                expected_revision: exact(expected_revision),
+                expected_reference_revision: exact(expected_reference_revision),
+                remote: remote.map(exact),
+                local_ref: exact(local_ref),
+                remote_ref: exact(remote_ref),
+                old_oid: exact(old_oid),
+                new_oid: exact(new_oid),
+                connection_session_id: exact(connection_session_id),
+                expected_connection_revision,
+            },
         }
     }
     pub(crate) fn history_action(&self) -> crate::service_protocol::Action {
         match self.kind() {
             Kind::Fetch => crate::service_protocol::Action::GitFetch,
             Kind::Push => crate::service_protocol::Action::GitPush,
+            Kind::PushNewBranch => crate::service_protocol::Action::GitPushNewBranch,
         }
     }
 }
@@ -406,6 +471,15 @@ pub enum Preview {
         commit_count: u32,
         commits_sha256: String,
     },
+    PushNewBranch {
+        branch: String,
+        target_ref: String,
+        expected_remote_oid: String,
+        head: String,
+        commit_count: u32,
+        commits_sha256: String,
+        basis: String,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -474,6 +548,33 @@ impl Review {
                     && (1..=64).contains(commit_count)
                     && p::digest(commits_sha256)
             }
+            (
+                Preview::PushNewBranch {
+                    branch,
+                    target_ref,
+                    expected_remote_oid,
+                    head,
+                    commit_count,
+                    commits_sha256,
+                    basis,
+                },
+                Action::PushNewBranch {
+                    local_ref,
+                    remote_ref,
+                    old_oid,
+                    new_oid,
+                    ..
+                },
+            ) => {
+                branch == local_ref
+                    && target_ref == remote_ref
+                    && expected_remote_oid == old_oid
+                    && expected_remote_oid == NEW_BRANCH_ZERO
+                    && head == new_oid
+                    && (1..=64).contains(commit_count)
+                    && p::digest(commits_sha256)
+                    && basis == NEW_BRANCH_BASIS
+            }
             _ => false,
         }
     }
@@ -484,7 +585,7 @@ impl Review {
                 candidate_ref_oid,
                 ..
             } => expected_target.as_ref() != Some(candidate_ref_oid),
-            Preview::Push { .. } => true,
+            Preview::Push { .. } | Preview::PushNewBranch { .. } => true,
         }
     }
 }
@@ -557,7 +658,7 @@ impl Outcome {
                             || self.effect_phase == Effect::RefPublished
                                 && self.retained_paths.is_empty())
                 }
-                Kind::Push => {
+                Kind::Push | Kind::PushNewBranch => {
                     matches!(
                         self.effect_phase,
                         Effect::NotSent
@@ -681,6 +782,212 @@ pub(crate) mod tests {
                 }
             },
         }
+    }
+    pub(crate) fn new_branch_selection() -> Selection {
+        Selection::new(
+            Action::PushNewBranch {
+                expected_revision: "a".repeat(64),
+                expected_reference_revision: "b".repeat(64),
+                remote: None,
+                local_ref: "refs/heads/main".into(),
+                remote_ref: "refs/heads/main".into(),
+                old_oid: NEW_BRANCH_ZERO.into(),
+                new_oid: "d".repeat(40),
+                connection_session_id: "connection-1".into(),
+                expected_connection_revision: 3,
+            },
+            selection(true).account,
+        )
+        .unwrap()
+    }
+    pub(crate) fn new_branch_review() -> Review {
+        Review {
+            preview: Preview::PushNewBranch {
+                branch: "refs/heads/main".into(),
+                target_ref: "refs/heads/main".into(),
+                expected_remote_oid: NEW_BRANCH_ZERO.into(),
+                head: "d".repeat(40),
+                commit_count: 64,
+                commits_sha256: "6".repeat(64),
+                basis: NEW_BRANCH_BASIS.into(),
+            },
+            ..review(true)
+        }
+    }
+    #[test]
+    fn new_branch_is_explicit_required_null_and_never_an_ordinary_grant() {
+        let s = new_branch_selection();
+        let value = serde_json::to_value(&s.action).unwrap();
+        assert!(value["remote"].is_null());
+        assert!(s.validate().is_ok());
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("remote");
+        assert!(serde_json::from_value::<Action>(missing).is_err());
+        for (key, bad) in [
+            ("remote", serde_json::json!("origin")),
+            ("kind", serde_json::json!("push")),
+            ("oldOid", serde_json::json!("c".repeat(40))),
+            ("newOid", serde_json::json!(NEW_BRANCH_ZERO)),
+            ("remoteRef", serde_json::json!("refs/heads/other")),
+            ("setUpstream", serde_json::json!(true)),
+            ("force", serde_json::json!(false)),
+            ("url", serde_json::json!("https://github.com/other/repo")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            assert!(
+                !serde_json::from_value::<Action>(changed).is_ok_and(|a| a.validate().is_ok()),
+                "{key}"
+            );
+        }
+        assert!(new_branch_review().matches(&s));
+        for old in [false, true] {
+            assert!(!review(old).matches(&s));
+            assert!(!new_branch_review().matches(&selection(old)));
+            assert_ne!(
+                s.action.kind().consent(),
+                selection(old).action.kind().consent()
+            );
+        }
+        assert_eq!(
+            s.action.history_action(),
+            crate::service_protocol::Action::GitPushNewBranch
+        );
+    }
+    #[test]
+    fn adding_new_kind_preserves_old_selection_bytes_and_digest_domain() {
+        for (push, digest) in [
+            (
+                false,
+                "d3ddd1568fdab2f9932981c73857d4ba8eddaeff26b3c6a9a65147455ddfddb1",
+            ),
+            (
+                true,
+                "b1bbd43fd23d6f961012f952a68b06bff5d9e178e8f831bfe51a25b270ecac3b",
+            ),
+        ] {
+            let old = selection(push);
+            assert_eq!(old.selection_sha256, digest);
+            assert_eq!(
+                serde_json::to_value(&old.action).unwrap()["remote"],
+                "origin"
+            );
+            assert_ne!(
+                new_branch_selection().selection_sha256,
+                old.selection_sha256
+            );
+        }
+    }
+    #[test]
+    fn create_only_review_and_result_cannot_launder_kind_basis_or_effect() {
+        let selected = new_branch_selection();
+        for which in 0..5 {
+            let mut r = new_branch_review();
+            if let Preview::PushNewBranch {
+                basis,
+                expected_remote_oid,
+                target_ref,
+                commit_count,
+                ..
+            } = &mut r.preview
+            {
+                match which {
+                    0 => *basis = "existing-configured-upstream".into(),
+                    1 => *expected_remote_oid = "c".repeat(40),
+                    2 => *target_ref = "refs/heads/other".into(),
+                    3 => *commit_count = 0,
+                    _ => *commit_count = 65,
+                }
+            }
+            assert!(!r.matches(&selected));
+        }
+        let id = Id::parse(&"a".repeat(32)).unwrap();
+        let mut status = Status {
+            progress: p::Status {
+                origin: Query {
+                    project_id: id.clone(),
+                    service_instance: id.clone(),
+                    request_id: id.clone(),
+                },
+                grant_id: id,
+                selection: selected,
+                revision: 3,
+                state: p::State::Finished,
+                prepare_operation_id: Some("git-local-1".into()),
+                apply_operation_id: Some("git-local-2".into()),
+                review: None,
+                outcome: Some(OperationState::RecoveryRequired),
+                settlement: Settlement::Settled,
+                reason: Some(p::Reason::RecoveryRequired),
+                history_available: false,
+                do_not_replay: true,
+            },
+            result: Some(Outcome {
+                operation_id: "git-local-2".into(),
+                action: Kind::PushNewBranch,
+                state: EffectState::RecoveryRequired,
+                effect_phase: Effect::SendConsumed,
+                retained_paths: vec!["mrk-git-x/mrk-git-push-y".into()],
+            }),
+        };
+        assert!(status.validate().is_ok());
+        status.result.as_mut().unwrap().action = Kind::Push;
+        assert!(status.validate().is_err());
+        status.result.as_mut().unwrap().action = Kind::PushNewBranch;
+        status.result.as_mut().unwrap().effect_phase = Effect::RefPublished;
+        assert!(status.validate().is_err());
+        status.result.as_mut().unwrap().effect_phase = Effect::SendConsumed;
+        status.progress.settlement = Settlement::Unknown;
+        assert!(status.validate().is_err());
+    }
+    #[test]
+    fn create_only_escaped_summary_keeps_existing_encoded_bound() {
+        let long = format!("refs/heads/{}", "\"".repeat(244));
+        let mut s = new_branch_selection();
+        if let Action::PushNewBranch {
+            local_ref,
+            remote_ref,
+            ..
+        } = &mut s.action
+        {
+            *local_ref = long.clone();
+            *remote_ref = long.clone();
+        }
+        s = Selection::new(s.action, s.account).unwrap();
+        let mut r = new_branch_review();
+        if let Preview::PushNewBranch {
+            branch, target_ref, ..
+        } = &mut r.preview
+        {
+            *branch = long.clone();
+            *target_ref = long;
+        }
+        assert!(r.matches(&s));
+        let id = Id::parse(&"a".repeat(32)).unwrap();
+        let value = Status {
+            progress: p::Status {
+                origin: Query {
+                    project_id: id.clone(),
+                    service_instance: id.clone(),
+                    request_id: id.clone(),
+                },
+                grant_id: id,
+                selection: s,
+                revision: 1,
+                state: p::State::Prepared,
+                prepare_operation_id: Some("git-local-1".into()),
+                apply_operation_id: None,
+                review: Some(r),
+                outcome: None,
+                settlement: Settlement::Pending,
+                reason: None,
+                history_available: false,
+                do_not_replay: true,
+            },
+            result: None,
+        };
+        assert!(value.validate().is_ok());
+        assert!(serde_json::to_vec(&value).unwrap().len() < p::STATUS_BYTES - 512);
     }
     #[test]
     fn fixed_actions_and_digest_refuse_authority_or_cross_family_additions() {

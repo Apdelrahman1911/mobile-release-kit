@@ -4,6 +4,7 @@ import { Permission, type PermissionApi, type PermissionContext } from './servic
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { isGitFetchAction, type GitFetchAction } from './gitFetchProtocol.ts';
 import { isGitPushAction, type GitPushAction } from './gitPushProtocol.ts';
+import { isGitPushNewBranchAction, gitPushNewBranchActionFor, type GitPushNewBranchAction } from './gitPushNewBranchProtocol.ts';
 import { gitFetchAccount, gitFetchDraftReady, gitFetchLocalSource } from './gitFetchSelection.ts';
 import { gitPushAccount, gitPushActionFor } from './gitPushSelection.ts';
 import { sameGitLocalData, gitLocalIssueHelp } from './gitLocalProtocol.ts';
@@ -11,9 +12,9 @@ import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
 import type { GitRepositoryController } from './gitRepositoryController.ts';
 import type { GitReadController } from './gitReadController.ts';
 import type { GitLocalController } from './gitLocalController.ts';
-export type GitRemoteAction = GitFetchAction | GitPushAction;
+export type GitRemoteAction = GitFetchAction | GitPushAction | GitPushNewBranchAction;
 export type GitRemoteKind = GitRemoteAction['kind'];
-export const GIT_REMOTE_CONSENT = Object.freeze({ fetch: 'agent-git-fetch-once-v1', push: 'agent-git-push-once-v1' });
+export const GIT_REMOTE_CONSENT = Object.freeze({ fetch: 'agent-git-fetch-once-v1', push: 'agent-git-push-once-v1', 'push-new-branch': 'agent-git-push-new-branch-once-v1' });
 export interface GitRemoteApproval { readonly projectId: string; readonly expectedDocumentRevision: number; readonly readOperationId: string; readonly action: GitRemoteAction }
 export interface GitRemoteAccount { readonly accountId: string; readonly login: string; readonly repositoryId: string; readonly repository: string }
 export interface GitRemoteAccess {
@@ -28,12 +29,15 @@ const hex = (v: unknown, n: number): v is string => typeof v === 'string' && v.l
 const numeric = (v: unknown): v is string => typeof v === 'string' && /^[1-9][0-9]{0,19}$(?![\s\S])/.test(v) && BigInt(v) <= 18446744073709551615n;
 const login = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$(?![\s\S])/.test(v);
 function action(v: unknown): GitRemoteAction | null {
-  // These existing action validators reject an absent/new-branch Push, force,
-  // URL or arbitrary argument. A later native feature needs its own approval.
+  // Each actual native action validator remains separate. A zero old OID or
+  // absent upstream never changes an ordinary Push into create-only consent.
   if (isGitFetchAction(v) && id(v.connectionSessionId, 64)) return Object.freeze({ kind: v.kind, expectedRevision: v.expectedRevision,
     expectedReferenceRevision: v.expectedReferenceRevision, remote: v.remote, reference: v.reference,
     connectionSessionId: v.connectionSessionId, expectedConnectionRevision: v.expectedConnectionRevision });
   if (isGitPushAction(v) && id(v.connectionSessionId, 64)) return Object.freeze({ kind: v.kind, expectedRevision: v.expectedRevision,
+    expectedReferenceRevision: v.expectedReferenceRevision, remote: v.remote, localRef: v.localRef, remoteRef: v.remoteRef,
+    oldOid: v.oldOid, newOid: v.newOid, connectionSessionId: v.connectionSessionId, expectedConnectionRevision: v.expectedConnectionRevision });
+  if (isGitPushNewBranchAction(v) && id(v.connectionSessionId, 64)) return Object.freeze({ kind: v.kind, expectedRevision: v.expectedRevision,
     expectedReferenceRevision: v.expectedReferenceRevision, remote: v.remote, localRef: v.localRef, remoteRef: v.remoteRef,
     oldOid: v.oldOid, newOid: v.newOid, connectionSessionId: v.connectionSessionId, expectedConnectionRevision: v.expectedConnectionRevision });
   return null;
@@ -113,10 +117,11 @@ export function gitRemotePermissionContext(kind: GitRemoteKind, source: GitRemot
     || original.context.projectId !== projectId || original.context.revision !== `document-${read.status.documentRevision}` || read.status.operation?.operationId !== original.operationId
     || !sameGitLocalData(original.result, current) || !sameGitLocalData(current.observation, r.observation)) return finish('Refresh this project’s changes first. Pending, historical or local-branch-list results cannot grant a remote action.');
   if (current.observation.restrictions.length) return finish(gitLocalIssueHelp(current.observation.restrictions[0]!));
-  const a = kind === 'push' ? gitPushAccount(connection, projectId) : gitFetchAccount(connection, projectId);
-  if (!a) return finish(kind === 'push' ? 'Connect the intended account/repository with reported Push access.' : 'Connect the intended GitHub account and repository first.');
+  const a = kind === 'fetch' ? gitFetchAccount(connection, projectId) : gitPushAccount(connection, projectId);
+  if (!a) return finish(kind === 'fetch' ? 'Connect the intended GitHub account and repository first.' : 'Connect the intended account/repository with reported Push access.');
   who = Object.freeze({ accountId: a.accountId, login: a.login, repositoryId: a.repositoryId, repository: a.repository });
-  const issue = kind === 'push' ? local.preparePushReason() : local.prepareFetchReason(); if (issue) return finish(gitLocalIssueHelp(issue));
+  const issue = kind === 'push-new-branch' ? local.preparePushNewBranchReason() : kind === 'push' ? local.preparePushReason() : local.prepareFetchReason(); if (issue) return finish(gitLocalIssueHelp(issue));
+  if (kind === 'push-new-branch') return finish(null, gitPushNewBranchActionFor(current, a));
   if (kind === 'push') return finish(null, gitPushActionFor(current, a));
   if (!gitFetchDraftReady(r.fetchDraft, current.observation.remotes)) return finish('Choose one observed remote and branch in Fetch above.');
   return finish(null, { kind: 'fetch', expectedRevision: current.observation.revision, expectedReferenceRevision: current.referenceRevision,
@@ -139,5 +144,5 @@ export class GitRemotePermission extends Permission<GitRemoteApproval, GitRemote
     }
     super.syncContext(); // Re-sample after synchronous listeners/ABA/revoke.
   }
-  chooseKind(kind: string): void { if ((kind !== 'fetch' && kind !== 'push') || kind === this.choice.kind) return; this.choice.kind = kind; this.acknowledge(false); this.syncContext(); }
+  chooseKind(kind: string): void { if ((kind !== 'fetch' && kind !== 'push' && kind !== 'push-new-branch') || kind === this.choice.kind) return; this.choice.kind = kind; this.acknowledge(false); this.syncContext(); }
 }

@@ -187,6 +187,10 @@ fn complete_capabilities_remain_bounded_and_discovery_includes_remote() {
         if json {
             let v: serde_json::Value = serde_json::from_str(&s).unwrap();
             assert_eq!(v["gitRemote"]["nativeAvailabilityChecked"], false);
+            assert_eq!(
+                v["gitRemote"]["actions"],
+                serde_json::json!(["fetch", "push", "push-new-branch"])
+            );
             assert!(v["requestDiscovery"]["families"]
                 .as_array()
                 .unwrap()
@@ -194,4 +198,109 @@ fn complete_capabilities_remain_bounded_and_discovery_includes_remote() {
                 .any(|v| v == "git-remote"));
         }
     }
+}
+#[test]
+fn new_branch_scope_uses_existing_id_only_commands_and_explains_no_upstream() {
+    let q = origin();
+    let scope = response(p::ResponseBody::GitRemoteScope(remote::Scope {
+        service_instance: q.service_instance.clone(),
+        project_id: q.project_id.clone(),
+        access: remote::Access {
+            enabled: true,
+            remaining_ms: 900000,
+            consumed: false,
+            project_id: Some(q.project_id.clone()),
+            grant_id: Some(id('d')),
+            selection: Some(remote::tests::new_branch_selection()),
+        },
+    }));
+    let (_, text) = output_for(&scope, &q.project_id, None, false, Family::Remote).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("push-new-branch") && text.contains("git-remote-prepare"));
+    assert!(
+        text.contains("target not advertised")
+            && text.contains("server create-only update must reject any existing target")
+            && text.contains("does not configure a remote or upstream")
+    );
+    assert!(!text.contains("prove the target absent"));
+    let (_, bytes) = output_for(&scope, &q.project_id, None, true, Family::Remote).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value["response"]["value"]["access"]["selection"]["action"]["kind"],
+        "push-new-branch"
+    );
+    assert!(value["response"]["value"]["access"]["selection"]["action"]["remote"].is_null());
+    let grant = id('d');
+    let args = super::super::collect_arguments(
+        [
+            "git-remote-prepare",
+            q.project_id.as_str(),
+            q.service_instance.as_str(),
+            grant.as_str(),
+            "push-new-branch",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    assert!(parse_for(&args, Family::Remote).is_err());
+}
+#[test]
+fn new_branch_ready_and_returned_failure_keep_exact_kind_without_retry_command() {
+    let q = origin();
+    let mut status = remote::Status {
+        progress: git::Status {
+            origin: q.clone(),
+            grant_id: id('d'),
+            selection: remote::tests::new_branch_selection(),
+            revision: 3,
+            state: git::State::Prepared,
+            prepare_operation_id: Some("git-local-1".into()),
+            apply_operation_id: None,
+            review: Some(remote::tests::new_branch_review()),
+            outcome: None,
+            settlement: p::Settlement::Pending,
+            reason: None,
+            history_available: false,
+            do_not_replay: true,
+        },
+        result: None,
+    };
+    let view = response(p::ResponseBody::GitRemoteRequest(status.clone()));
+    let (_, bytes) = output_for(&view, &q.project_id, Some(&q), false, Family::Remote).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains("Create-only Push")
+            && text.contains("64 reachable commits")
+            && text.contains("git-remote-start")
+    );
+    assert!(!text.contains("Normal Push"));
+    status.progress.state = git::State::Finished;
+    status.progress.review = None;
+    status.progress.apply_operation_id = Some("git-local-2".into());
+    status.progress.outcome = Some(p::OperationState::RecoveryRequired);
+    status.progress.settlement = p::Settlement::Settled;
+    status.progress.reason = Some(git::Reason::RecoveryRequired);
+    status.result = Some(remote::Outcome {
+        operation_id: "git-local-2".into(),
+        action: remote::Kind::PushNewBranch,
+        state: remote::EffectState::RecoveryRequired,
+        effect_phase: remote::Effect::SendConsumed,
+        retained_paths: vec!["mrk-git-original/mrk-git-push-original".into()],
+    });
+    let view = response(p::ResponseBody::GitRemoteRequest(status.clone()));
+    let (code, bytes) = output_for(&view, &q.project_id, Some(&q), false, Family::Remote).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert_eq!(code, 6);
+    assert!(
+        text.contains("push-new-branch")
+            && text.contains("git-remote-status")
+            && text.contains("git-remote-cancel")
+    );
+    assert!(!text.contains("git-remote-start") && !text.contains("git-remote-prepare"));
+    assert!(
+        text.contains("separate explicit Desktop Activity")
+            && text.contains("cannot settle or replay")
+    );
+    status.result.as_mut().unwrap().action = remote::Kind::Push;
+    assert!(p::encode_response(&response(p::ResponseBody::GitRemoteRequest(status))).is_err());
 }

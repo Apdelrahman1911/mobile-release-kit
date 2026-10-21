@@ -45,14 +45,16 @@ pub(super) fn selected(value: &read::Projection, action: &remote::Action) -> boo
     if o["revision"].as_str() != Some(revision)
         || value.result["referenceRevision"].as_str() != Some(refs)
         || !o["restrictions"].as_array().is_some_and(Vec::is_empty)
-        || !o["remotes"]
-            .as_array()
-            .is_some_and(|v| v.iter().any(|r| r.as_str() == Some(action.remote())))
     {
         return false;
     }
+    let observed_remote = |remote: &str| {
+        o["remotes"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|r| r.as_str() == Some(remote)))
+    };
     match action {
-        remote::Action::Fetch { .. } => true,
+        remote::Action::Fetch { remote, .. } => observed_remote(remote),
         remote::Action::Push {
             remote,
             local_ref,
@@ -62,7 +64,8 @@ pub(super) fn selected(value: &read::Projection, action: &remote::Action) -> boo
             ..
         } => {
             let t = &value.result["tracking"];
-            o["unborn"] == false
+            observed_remote(remote)
+                && o["unborn"] == false
                 && o["detached"] == false
                 && o["branch"].as_str() == Some(local_ref.as_str())
                 && o["head"].as_str() == Some(new_oid.as_str())
@@ -74,6 +77,22 @@ pub(super) fn selected(value: &read::Projection, action: &remote::Action) -> boo
                 && t["head"].as_str() == Some(old_oid.as_str())
                 && t["behind"].as_u64() == Some(0)
                 && t["ahead"].as_u64().is_some_and(|v| (1..=64).contains(&v))
+        }
+        remote::Action::PushNewBranch {
+            local_ref,
+            remote_ref,
+            new_oid,
+            ..
+        } => {
+            // This genuine Observe is eligibility, NOT proof of absent config
+            // or a remote branch. The same native Push owner rechecks BOTH
+            // branch keys, the fresh advertisement and the full history.
+            o["unborn"] == false
+                && o["detached"] == false
+                && o["branch"].as_str() == Some(local_ref.as_str())
+                && o["head"].as_str() == Some(new_oid.as_str())
+                && local_ref == remote_ref
+                && value.result["tracking"]["state"] == "not-configured"
         }
     }
 }
@@ -370,6 +389,75 @@ mod tests {
                 remote::Kind::Push.consent()
             }
             .into();
+            assert!(decode_remote_allow(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn first_publication_needs_current_born_attached_unconfigured_observe_not_an_alias() {
+        let mut good = observed();
+        good.result["observation"]["remotes"] = serde_json::json!([]);
+        good.result["tracking"] = serde_json::json!({"state":"not-configured", "remote":null,
+            "mergeRef":null,"localRef":null,"head":null,"ahead":null,"behind":null});
+        let new = remote::tests::new_branch_selection().action;
+        assert!(selected(&good, &new));
+        assert!(!selected(&good, &remote::tests::selection(true).action));
+        assert!(!selected(&good, &remote::tests::selection(false).action));
+        assert!(!selected(&observed(), &new));
+        // Another observed alias is not selected or implicitly configured by
+        // this action. Actual config and advertised absence remain native.
+        good.result["observation"]["remotes"] = serde_json::json!(["other"]);
+        assert!(selected(&good, &new));
+        for which in 0..9 {
+            let mut bad = good.clone();
+            match which {
+                0 => bad.action.kind = read::Kind::Branches,
+                1 => bad.phase = read::Phase::CleanupUnknown,
+                2 => bad.result["observation"]["restrictions"] = serde_json::json!(["unsupported"]),
+                3 => {
+                    bad.result["observation"]["unborn"] = true.into();
+                    bad.result["observation"]["head"] = serde_json::Value::Null;
+                    bad.result["tracking"]["state"] = "unborn".into();
+                }
+                4 => {
+                    bad.result["observation"]["detached"] = true.into();
+                    bad.result["observation"]["branch"] = serde_json::Value::Null;
+                    bad.result["tracking"]["state"] = "detached".into();
+                }
+                5 => bad.result["observation"]["head"] = "9".repeat(40).into(),
+                6 => bad.result["observation"]["branch"] = "refs/heads/other".into(),
+                7 => bad.result["referenceRevision"] = "9".repeat(64).into(),
+                _ => bad.result["tracking"]["remote"] = "origin".into(),
+            }
+            assert!(!selected(&bad, &new), "{which}");
+        }
+    }
+    #[test]
+    fn new_branch_allow_cannot_borrow_old_consent_or_missing_remote_field() {
+        let a = remote::tests::new_branch_selection().action;
+        let good = serde_json::json!({"projectId":"project-1","expectedDocumentRevision":1,
+            "readOperationId":"git-read-1","action":a,"consentVersion":a.kind().consent()});
+        assert!(decode_remote_allow(&serde_json::to_vec(&good).unwrap()).is_ok());
+        for old in [false, true] {
+            let old = remote::tests::selection(old).action;
+            let mut bad = good.clone();
+            bad["consentVersion"] = old.kind().consent().into();
+            assert!(decode_remote_allow(&serde_json::to_vec(&bad).unwrap()).is_err());
+            bad = good.clone();
+            bad["action"] = serde_json::to_value(&old).unwrap();
+            assert!(decode_remote_allow(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let mut missing = good.clone();
+        missing["action"].as_object_mut().unwrap().remove("remote");
+        assert!(decode_remote_allow(&serde_json::to_vec(&missing).unwrap()).is_err());
+        for field in [
+            "token",
+            "url",
+            "reviewId",
+            "setUpstream",
+            "absenceConfirmed",
+        ] {
+            let mut bad = good.clone();
+            bad[field] = true.into();
             assert!(decode_remote_allow(&serde_json::to_vec(&bad).unwrap()).is_err());
         }
     }

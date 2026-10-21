@@ -97,7 +97,7 @@ impl CredentialReference {
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
-    GitCommit, GitFetch, GitPush, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
+    GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
 }
 
 /// Future operation-specific adapters may compare this DATA with a genuine
