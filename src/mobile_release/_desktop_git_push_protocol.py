@@ -47,8 +47,8 @@ def valid_reason(value):
 class Action:
     expected_revision: str
     expected_reference_revision: str
-    remote: str
-    selected: packets.Selection
+    remote: str | None
+    selected: packets.Selection | packets.first.Selection
     connection_session_id: str
     expected_connection_revision: int
     kind: str = "push"
@@ -65,11 +65,12 @@ class Action:
 def action(value):
     row = fields._keys(value, ("kind", "expectedRevision", "expectedReferenceRevision", "remote", "localRef", "remoteRef",
                                "oldOid", "newOid", "connectionSessionId", "expectedConnectionRevision"))
-    require(row["kind"] == "push")
-    selected = packets.Selection(row["localRef"], row["remoteRef"], row["oldOid"], row["newOid"])
+    selected = packets.selection(row["kind"], row["localRef"], row["remoteRef"], row["oldOid"], row["newOid"])
+    remote = push.remote_name(row["remote"]) if row["kind"] == "push" else row["remote"]
+    require(row["kind"] == "push" or remote is None)
     return Action(fields._hex(row["expectedRevision"]), fields._hex(row["expectedReferenceRevision"]),
-        push.remote_name(row["remote"]), selected, fields._id(row["connectionSessionId"]),
-        fields._integer(row["expectedConnectionRevision"], 1, (1 << 32) - 2))
+        remote, selected, fields._id(row["connectionSessionId"]),
+        fields._integer(row["expectedConnectionRevision"], 1, (1 << 32) - 2), row["kind"])
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -155,10 +156,10 @@ def private_go(request, raw):
 
 
 def matches_review(request, review):
-    require(type(request) is Request and type(review) is push.PushReview and type(review.plan) is push.PushPlan
+    require(type(request) is Request and type(review) is push.PushReview and push._plan(review.plan)
             and review.digest == push._review_digest(review.plan))
     plan = review.plan
-    require(plan.remote == request.action.remote and plan.reference_revision == request.action.expected_reference_revision
+    require(plan.action == request.action.kind and plan.remote == request.action.remote and plan.reference_revision == request.action.expected_reference_revision
             and plan._snapshot.public.revision == request.action.expected_revision and plan.target == request.target)
     if request.phase == "apply":
         require(review.digest == request.review_digest)
@@ -174,7 +175,7 @@ class Candidate:
 
 def candidate(request, review, intent):
     matches_review(request, review)
-    require(request.phase == "apply" and type(intent) is push.PushIntent
+    require(request.phase == "apply" and push._intent(intent)
             and intent == push.PushIntent.from_plan(review.plan, review.digest))
     raw = _encode({"protocol": PROTOCOL, "kind": "candidate", "id": request.id, "digest": request.digest,
                    "reviewDigest": review.digest, "intent": intent.as_dict()}, CANDIDATE_LIMIT)
@@ -203,7 +204,7 @@ def transmission_data(request, value):
 
 def _matches_intent(request, intent):
     """Closed request comparisons; not another candidate or send permission."""
-    require(type(intent) is push.PushIntent)
+    require(push._intent(intent) and intent.action == request.action.kind)
     selected, target = request.action.selected, request.target
     require((intent.review_digest, intent.expected_revision, intent.expected_reference_revision,
              intent.remote, intent.repository, intent.account_id, intent.repository_id,
@@ -237,7 +238,7 @@ def terminal(request, status, *, reason, review=None, result=None, transmission=
             data = {"review": review.as_dict(), "diff": None}
         else:
             require(review is None and type(result) is core.MutationResult and result.operation_id == request.id
-                    and result.action == "push" and result.settlement == "settled" and result.observation is None
+                    and result.action == request.action.kind and result.settlement == "settled" and result.observation is None
                     and result.state in ("succeeded", "failed", "recovery-required") and effect_phase in EFFECTS
                     and type(retained_paths) is tuple and len(retained_paths) <= 1
                     and all(type(path) is str and re.fullmatch(r"(?:mrk-git-[a-z0-9_]{1,32}/)?mrk-git-push-[a-z0-9_]{1,32}", path) is not None
@@ -261,6 +262,6 @@ def terminal(request, status, *, reason, review=None, result=None, transmission=
                 and effect_phase == "not-sent" and not retained_paths
                 and (first_failure_ns is not None or status == "cleanup-unknown"))
     return _encode({"protocol": PROTOCOL, "kind": "terminal", "id": request.id, "digest": request.digest,
-        "phase": request.phase, "action": "push", "status": status, "reason": reason, "result": data,
+        "phase": request.phase, "action": request.action.kind, "status": status, "reason": reason, "result": data,
         "transmission": receipt, "firstFailureNs": first_failure_ns, "cleanupEndNs": cleanup_end_ns, "control": safe_control},
         RESPONSE_LIMIT - READY_LIMIT - CANDIDATE_LIMIT)

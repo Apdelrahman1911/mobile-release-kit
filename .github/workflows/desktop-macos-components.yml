@@ -624,7 +624,7 @@ jobs:
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
             grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             # Current Apple certificate/P12, shared CLI and Fetch/Push logic.
-            # Same library binary/cache: 132 new cases plus 24 affected cases.
+            # Same library binary/cache; only the selected affected contracts.
             # Cases with Store I/O use existing exclusive private fixtures and
             # synchronous close; none invokes Git, a provider or a system tool.
             # Prefix selectors intentionally omit --exact; the count prevents
@@ -689,6 +689,7 @@ jobs:
                 runtime::git_fetch::tests:: \
                 apple_provisioning_protocol::tests::closed_prepare_never_accepts_account_path_query_or_old_consent \
                 saved_command_owner::apple_provisioning::tests::apple_original_session_stop_tightens_audit_and_preserves_earliest_failure \
+                saved_command_owner::apple_provisioning::tests::apple_original_store_closure_keeps_mode_and_owner_gates \
                 saved_command_owner::apple_provisioning::tests::apple_projection_hides_child_data_until_original_terminal_complete \
                 asset_session::apple_key::tests::original_cleanup_guard_keeps_staged_data_and_stop_without_minting_no_generation \
                 apple_provisioning_journal::data::key::tests::certificate_sparse_receipt_and_sent_unknown_cannot_be_rewritten_or_rearmed \
@@ -751,9 +752,12 @@ jobs:
                 supervisor::git_local::push::tests::returned_push_only_compares_exact_original_request_and_never_local_publication \
                 supervisor::git_local::push::tests::original_known_receipt_and_joined_control_are_both_required_without_retaining_owner \
                 runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider \
+                git_push_protocol::new_branch::tests:: \
+                git_local_state::push_new_branch_tests:: \
+                git_local_protocol::push_worker::new_branch_tests:: \
                 "${remote_tool_tests[@]}" \
                 --test-threads=1 | tee "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
-              grep -Eq '^test result: ok\. 156 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
+              grep -Eq '^test result: ok\. 167 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-new-owner-contracts.log"
             )
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt

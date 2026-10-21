@@ -1,3 +1,4 @@
+import { GitPushNewBranch } from './components/GitPushNewBranch.tsx';
 import { GitPush } from './components/GitPush.tsx';
 import { LocalStoreReconcileController, localStoreReconcileOwnerReason } from './localStoreReconcile.ts';
 import { LocalStoreReconcile } from './components/LocalStoreReconcile.tsx';
@@ -2233,6 +2234,7 @@ export function App() {
               <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
               <GitFetch controller={gitLocal} repository={gitRepository} connection={connectionState} originalProjectName={gitLocalProjectName} />
               <GitPush controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
+              <GitPushNewBranch controller={gitLocal} repository={gitRepository} connection={connectionState} activity={githubActivity} originalProjectName={gitLocalProjectName} />
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />

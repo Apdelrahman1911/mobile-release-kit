@@ -413,8 +413,8 @@ impl DocumentBinding {
         self.passive_query_gate_locked(state,self.inner.bridge.as_ref())?;
         if pending(state)||!self.inner.bridge.supervisor.can_exit()||!self.inner.bridge.edits.can_exit()
             ||self.inner.bridge.edits.preflight_attention()||state.slot.as_ref().is_some_and(|s|s.phase!=Phase::Idle||!s.owner.resources_settled())
-            ||state.github.native_work_pending()||(!matches!(kind,wire::Kind::Fetch|wire::Kind::Push)&&state.github.registration().is_some()) {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
-        if !self.inner.bridge.supervisor.git_local_profile_available()||kind==wire::Kind::Fetch&&!self.inner.bridge.supervisor.git_fetch_profile_available()||kind==wire::Kind::Push&&!self.inner.bridge.supervisor.git_push_profile_available() {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
+            ||state.github.native_work_pending()||(!matches!(kind,wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch)&&state.github.registration().is_some()) {return Err(BridgeError::new("busy","Finish the original task before changing local Git state."))}
+        if !self.inner.bridge.supervisor.git_local_profile_available()||kind==wire::Kind::Fetch&&!self.inner.bridge.supervisor.git_fetch_profile_available()||kind.is_push()&&!self.inner.bridge.supervisor.git_push_profile_available_for(kind) {return Err(BridgeError::unavailable("The fixed local Git writer is unavailable."))}Ok(())
     }
     fn git_local_snapshot(&self,state:&DocumentState)->wire::Status {wire::Status {schema_version:1,document_revision:state.revision,
         available:self.inner.bridge.supervisor.git_local_profile_available()&&state.lifetime.original_bound()&&!state.lost_observed,

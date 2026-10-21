@@ -65,8 +65,7 @@ class Target:
         try:
             _coordinate(self.repository); _id(self.account_id); _id(self.repository_id)
             require(type(self.login) is str and _LOGIN.fullmatch(self.login) is not None)
-            require(type(self.selected) is wire.Selection)
-            wire.Selection(self.selected.local_ref, self.selected.remote_ref,
+            wire.selection(wire.selection_kind(self.selected), self.selected.local_ref, self.selected.remote_ref,
                            self.selected.old_oid, self.selected.new_oid)
         except ValueError:
             raise PushError() from None
@@ -142,7 +141,8 @@ class _Delivery:
 
     def __init__(self, role, mode, selected, offered, body, current, failure, *, _key):
         require(_key is _KEY and role in BINARY_ROLES and mode in {"before", "after", "reconcile", "send"}
-                and (role == SEND) == (mode == "send") and type(selected) is wire.Selection
+                and (role == SEND) == (mode == "send")
+                and wire.selection_kind(selected) in ("push", "push-new-branch")
                 and callable(current) and callable(failure))
         require((role == SEND and type(body) is bodies._PushBody and body.selected is selected
                  and body.offered is offered and body.io.current is current)

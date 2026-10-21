@@ -16,7 +16,7 @@ def main():
     if len(sys.argv) == 6 and sys.argv[3] == "push-helper":
         from mobile_release.desktop_git_push_helper import main as helper
         return helper(remote=sys.argv[4], url=sys.argv[5], runtime_dir=Path(sys.argv[2]), started=started)
-    if len(sys.argv) == 11 and sys.argv[3] == "push-hook":
+    if len(sys.argv) == 11 and sys.argv[3] in ("push-hook", "push-new-branch-hook"):
         from mobile_release._git_push_private_protocol import Clock
         from mobile_release.desktop_git_push_hook import main as hook
         for value in sys.argv[7:9]:
@@ -24,6 +24,7 @@ def main():
                 return 78
         return hook(mode=sys.argv[4], clock=Clock(sys.argv[5], int(sys.argv[7]), int(sys.argv[8])),
                     review_digest=sys.argv[6], remote=sys.argv[9], url=sys.argv[10],
+                    kind="push" if sys.argv[3] == "push-hook" else "push-new-branch",
                     runtime_dir=Path(sys.argv[2]), started=started)
     return 78
 

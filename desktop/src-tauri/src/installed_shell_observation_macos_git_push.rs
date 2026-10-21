@@ -794,7 +794,7 @@ impl Observation {
                                 .reference_revision
                                 .clone()
                                 .ok_or_else(invalid)?,
-                            remote: "origin".into(),
+                            remote: Some("origin".into()),
                             local_ref: "refs/heads/main".into(),
                             remote_ref: "refs/heads/main".into(),
                             old_oid: r
@@ -867,7 +867,7 @@ impl Observation {
                             || review.expected_remote_oid != f.base()
                             || review.branch != "refs/heads/main"
                             || review.upstream_ref != "refs/heads/main"
-                            || review.tracking_ref != "refs/remotes/origin/main"
+                            || review.tracking_ref.as_deref() != Some("refs/remotes/origin/main")
                             || review.commits != [f.target()]
                             || !review.valid()
                         {

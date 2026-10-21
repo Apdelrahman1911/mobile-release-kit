@@ -37,9 +37,9 @@ class _Entry(original._Entry):
     binding_type = private.Clock
     pipe_io_type = _PipeIO
 
-    def __init__(self, mode, clock, review_digest, remote, url, runtime_dir, started):
+    def __init__(self, mode, clock, review_digest, remote, url, runtime_dir, started, *, kind="push"):
         super().__init__(remote, url, runtime_dir, started)
-        self.mode, self.context, self.review_digest = mode, clock, review_digest
+        self.mode, self.context, self.review_digest, self.kind = mode, clock, review_digest, kind
         self.hook = None
         self.input_eof = self.reply_entered = self.reply_returned = False
 
@@ -57,7 +57,8 @@ class _Entry(original._Entry):
         self.entered = True
         transport.require(type(self.started) in (int, float) and math.isfinite(self.started)
                           and isinstance(self.runtime_dir, Path) and self.runtime_dir.is_absolute()
-                          and self.mode in ("review", "apply") and type(self.context) is private.Clock)
+                          and self.mode in ("review", "apply") and type(self.context) is private.Clock
+                          and self.kind in ("push", "push-new-branch"))
         private._hex(self.review_digest)
         self.current()
         self._bridge(self.context)  # Same native raw endpoints, not hook-launch +45/+55.
@@ -83,7 +84,7 @@ class _Entry(original._Entry):
             line.extend(block)
             transport.require(len(line) <= 1024 and line.count(b"\n") <= 1
                               and (b"\n" not in line or line.endswith(b"\n")), "response-limit")
-        self.hook = private.Hook(self.context, self.mode, self.review_digest, self.remote, self.url, bytes(line))
+        self.hook = private.Hook(self.context, self.mode, self.review_digest, self.remote, self.url, bytes(line), self.kind)
         self.current(); self.endpoint.check()
         self.reply_entered = True  # Before writing the request; never replay after a lost ACK.
         self._private_write(self.hook.request())
@@ -102,8 +103,8 @@ class _Entry(original._Entry):
                      and self.input_eof and self.reply_returned) else 74
 
 
-def main(*, mode, clock, review_digest, remote, url, runtime_dir, started):
-    entry = _Entry(mode, clock, review_digest, remote, url, runtime_dir, started)
+def main(*, mode, clock, review_digest, remote, url, runtime_dir, started, kind="push"):
+    entry = _Entry(mode, clock, review_digest, remote, url, runtime_dir, started, kind=kind)
     try:
         try:
             entry.acquire()

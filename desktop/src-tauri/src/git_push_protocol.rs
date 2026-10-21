@@ -110,7 +110,12 @@ pub(crate) fn tracking(remote: &str, upstream: &str) -> Option<String> {
 pub(crate) enum Kind {
     #[serde(rename = "push")]
     Push,
+    #[serde(rename = "push-new-branch")]
+    PushNewBranch,
 }
+
+#[path = "git_push_new_branch_protocol.rs"]
+pub(crate) mod new_branch;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -118,7 +123,8 @@ pub(crate) struct Action {
     pub(crate) kind: Kind,
     pub(crate) expected_revision: String,
     pub(crate) expected_reference_revision: String,
-    pub(crate) remote: String,
+    #[serde(deserialize_with = "new_branch::nullable")]
+    pub(crate) remote: Option<String>,
     pub(crate) local_ref: String,
     pub(crate) remote_ref: String,
     pub(crate) old_oid: String,
@@ -130,12 +136,8 @@ impl Action {
     pub(crate) fn valid(&self) -> bool {
         read::digest(&self.expected_revision)
             && read::digest(&self.expected_reference_revision)
-            && remote::remote(&self.remote)
-            && remote::reference(&self.local_ref)
-            && remote::reference(&self.remote_ref)
-            && remote::oid(&self.old_oid)
-            && remote::oid(&self.new_oid)
-            && self.old_oid != self.new_oid
+            && self.kind.source(self.remote.as_deref(), &self.local_ref,
+                &self.remote_ref, &self.old_oid, &self.new_oid)
             && valid_id(&self.connection_session_id)
             && (1..u32::MAX).contains(&self.expected_connection_revision)
     }
@@ -145,7 +147,8 @@ impl Action {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Review {
     pub(crate) action: Kind,
-    pub(crate) remote: String,
+    #[serde(deserialize_with = "new_branch::nullable")]
+    pub(crate) remote: Option<String>,
     pub(crate) repository: String,
     pub(crate) account_id: String,
     pub(crate) repository_id: String,
@@ -154,7 +157,8 @@ pub(crate) struct Review {
     pub(crate) head: String,
     pub(crate) upstream_ref: String,
     pub(crate) expected_remote_oid: String,
-    pub(crate) tracking_ref: String,
+    #[serde(deserialize_with = "new_branch::nullable")]
+    pub(crate) tracking_ref: Option<String>,
     pub(crate) commits: Vec<String>,
     pub(crate) expected_revision: String,
     pub(crate) expected_reference_revision: String,
@@ -165,14 +169,13 @@ pub(crate) struct Review {
 }
 impl Review {
     pub(crate) fn valid(&self) -> bool {
-        tracking(&self.remote, &self.upstream_ref).as_deref() == Some(self.tracking_ref.as_str())
+        self.action.review_source(self)
             && github::coordinate(&self.repository)
             && github::numeric_id(&self.account_id)
             && github::numeric_id(&self.repository_id)
             && remote::login(&self.login)
             && remote::reference(&self.branch)
             && remote::oid(&self.head)
-            && remote::oid(&self.expected_remote_oid)
             && self.head != self.expected_remote_oid
             && (1..=COMMIT_LIMIT).contains(&self.commits.len())
             && self.commits.last() == Some(&self.head)
@@ -183,12 +186,12 @@ impl Review {
             && read::digest(&self.expected_reference_revision)
             && read::digest(&self.expected_index)
             && read::digest(&self.review_digest)
-            && self.basis == "existing-configured-upstream"
             && self.withheld == ["messages", "authors", "emails", "signatures", "objects"]
     }
     pub(crate) fn matches(&self, action: &Action) -> bool {
         self.valid()
             && action.valid()
+            && self.action == action.kind
             && self.remote == action.remote
             && self.expected_revision == action.expected_revision
             && self.expected_reference_revision == action.expected_reference_revision
@@ -215,7 +218,8 @@ pub(crate) struct Intent {
     pub(crate) expected_revision: String,
     pub(crate) expected_reference_revision: String,
     pub(crate) expected_index: String,
-    pub(crate) remote: String,
+    #[serde(deserialize_with = "new_branch::nullable")]
+    pub(crate) remote: Option<String>,
     pub(crate) repository: String,
     pub(crate) account_id: String,
     pub(crate) repository_id: String,
@@ -232,19 +236,16 @@ impl Intent {
             && read::digest(&self.expected_reference_revision)
             && read::digest(&self.expected_index)
             && read::digest(&self.commits_sha256)
-            && remote::remote(&self.remote)
             && github::coordinate(&self.repository)
             && github::numeric_id(&self.account_id)
             && github::numeric_id(&self.repository_id)
-            && remote::reference(&self.local_ref)
-            && remote::reference(&self.remote_ref)
-            && remote::oid(&self.old_oid)
-            && remote::oid(&self.new_oid)
-            && self.old_oid != self.new_oid
+            && self.action.source(self.remote.as_deref(), &self.local_ref,
+                &self.remote_ref, &self.old_oid, &self.new_oid)
     }
     pub(crate) fn matches(&self, r: &Review) -> bool {
         self.valid()
             && r.valid()
+            && self.action == r.action
             && self.review_digest == r.review_digest
             && self.expected_revision == r.expected_revision
             && self.expected_reference_revision == r.expected_reference_revision
@@ -262,6 +263,7 @@ impl Intent {
     pub(crate) fn matches_action(&self, a: &Action) -> bool {
         self.valid()
             && a.valid()
+            && self.action == a.kind
             && self.expected_revision == a.expected_revision
             && self.expected_reference_revision == a.expected_reference_revision
             && self.remote == a.remote
@@ -319,6 +321,7 @@ impl Mutation {
         valid_id(id)
             && self.operation_id == id
             && action.valid()
+            && self.action == action.kind
             && self.observation.is_none()
             && self.settlement == "settled"
             && self

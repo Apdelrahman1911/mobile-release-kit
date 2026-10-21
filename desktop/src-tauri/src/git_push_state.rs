@@ -1,4 +1,4 @@
-//! Schema8 DATA within the original GitOperations row, not another journal.
+//! Schema8/9 closed-kind DATA within the original GitOperations row, not another journal.
 //! A decoded row cannot recover an old send permit, original Connection, or
 //! native join. Candidate/unknown remains a fence even after a matching GET.
 use crate::{error::BridgeError, git_local_protocol as local, git_push_protocol as push};
@@ -40,7 +40,7 @@ impl FinalData {
             serde_json::from_value(terminal.result.clone()).map_err(|_| BridgeError::protocol())?;
         if request.phase != local::Phase::Apply
             || terminal.phase != local::Phase::Apply
-            || terminal.action != local::Kind::Push
+            || terminal.action != request.action.kind()
             || terminal.status != crate::git_read_protocol::Outcome::Ok
             || !terminal.child_declared_settled()
             || terminal.push_transmission.as_ref() != Some(returned)

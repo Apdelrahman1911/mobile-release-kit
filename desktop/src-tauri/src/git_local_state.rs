@@ -45,15 +45,24 @@ pub(crate) struct Row {
     fetch:Option<fetch::Journal>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     push:Option<push::Journal>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    push_new_branch:Option<push::Journal>,
 }
 impl Row {
+    fn push_details(&self)->Option<&push::Journal> {
+        match self.action {wire::Kind::Push=>self.push.as_ref(),wire::Kind::PushNewBranch=>self.push_new_branch.as_ref(),_=>None}
+    }
+    fn push_details_mut(&mut self)->Option<&mut push::Journal> {
+        match self.action {wire::Kind::Push=>self.push.as_mut(),wire::Kind::PushNewBranch=>self.push_new_branch.as_mut(),_=>None}
+    }
     fn preparing(project:&ProjectBinding,id:&str,review:&wire::Review)->Result<Self> {
         need(project_id(project.project_id.as_str()) && project.device!=0 && project.inode!=0 && std::path::Path::new(&project.canonical_root).is_absolute()
             && valid_id(id) && review.valid())?;
         let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action(),
             review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
             expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().map(str::to_owned),candidate_index:None,candidate_commit:None,
-            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing),fast_forward:review.fast_forward_details().map(ff::Journal::preparing),initialization:review.init_details().map(init::Journal::preparing),fetch:review.fetch_details().map(fetch::Journal::preparing),push:review.push_details().map(push::Journal::preparing)};
+            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing),fast_forward:review.fast_forward_details().map(ff::Journal::preparing),initialization:review.init_details().map(init::Journal::preparing),fetch:review.fetch_details().map(fetch::Journal::preparing),push:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::Push).map(push::Journal::preparing),
+            push_new_branch:review.push_details().filter(|r|r.action.local_kind()==wire::Kind::PushNewBranch).map(push::Journal::preparing)};
         row.validate()?;Ok(row)
     }
     fn has_candidate(&self)->bool {
@@ -62,10 +71,10 @@ impl Row {
             ||self.rename.as_ref().is_some_and(|r|r.candidate.is_some())
             ||self.initialization.as_ref().is_some_and(|i|i.candidate.is_some())
             ||self.fetch.as_ref().is_some_and(|f|f.candidate.is_some())
-            ||self.push.as_ref().is_some_and(|p|p.candidate.is_some())
+            ||self.push_details().is_some_and(|p|p.candidate.is_some())
     }
     fn intent(&self)->Option<wire::Intent> {
-        if let Some(p)=&self.push {p.candidate.clone().map(wire::Intent::Push)}
+        if let Some(p)=self.push_details() {p.candidate.clone().map(wire::Intent::Push)}
         else if let Some(f)=&self.fetch {f.candidate.clone().map(wire::Intent::Fetch)}
         else if let Some(i)=&self.initialization {i.candidate.clone().map(wire::Intent::Initialize)}
         else if let Some(f)=&self.fast_forward {
@@ -99,10 +108,11 @@ impl Row {
             && (self.action==wire::Kind::Initialize || self.initialization.is_none())
             && (self.action==wire::Kind::Fetch || self.fetch.is_none())
             && (self.action==wire::Kind::Push || self.push.is_none())
+            && (self.action==wire::Kind::PushNewBranch || self.push_new_branch.is_none())
             && match self.action {
-                wire::Kind::Push=>self.initialization.is_none() && self.fetch.is_none() && self.fast_forward.is_none() && self.branch.is_none()
+                wire::Kind::Push|wire::Kind::PushNewBranch=>self.initialization.is_none() && self.fetch.is_none() && self.fast_forward.is_none() && self.branch.is_none()
                     && self.switch.is_none() && self.rename.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
-                    && self.push.as_ref().is_some_and(|p|self.expected_index.as_deref().is_some_and(|index|
+                    && self.push_details().is_some_and(|p|p.reviewed.action.local_kind()==self.action && self.expected_index.as_deref().is_some_and(|index|
                         p.valid(&self.expected_revision,self.expected_head.as_deref(),self.expected_ref.as_deref(),index,&self.review_digest))),
                 wire::Kind::Fetch=>self.initialization.is_none() && self.fast_forward.is_none() && self.branch.is_none()
                     && self.switch.is_none() && self.rename.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
@@ -144,12 +154,12 @@ impl Row {
                 Some(Completion::RecoveryRequired)=>d.valid(f.candidate.as_ref()),_=>false})))?;
         need(self.action!=wire::Kind::Fetch || self.outcome!=Some(Completion::Succeeded)
             || self.fetch.as_ref().is_some_and(|f|f.final_state.as_ref().is_some_and(|d|d.successful(f.candidate.as_ref()))))?;
-        need(self.push.as_ref().is_none_or(|p|p.final_state.as_ref().is_none_or(|d|
+        need(self.push_details().is_none_or(|p|p.final_state.as_ref().is_none_or(|d|
             self.phase==Phase::Finished && self.has_candidate()
             && match self.outcome {Some(Completion::Succeeded)=>d.successful(p.candidate.as_ref()),
                 Some(Completion::RecoveryRequired)=>d.valid(p.candidate.as_ref()),_=>false})))?;
-        need(self.action!=wire::Kind::Push || self.outcome!=Some(Completion::Succeeded)
-            || self.push.as_ref().is_some_and(|p|p.final_state.as_ref().is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
+        need(!self.action.is_push() || self.outcome!=Some(Completion::Succeeded)
+            || self.push_details().is_some_and(|p|p.final_state.as_ref().is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
         need(match self.phase {
             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
@@ -176,6 +186,8 @@ impl Row {
                 (Some(r),Some(o))=>r.same_original(o),(None,None)=>true,_=>false,
             } && match (&self.push,&original.push) {
                 (Some(p),Some(o))=>p.same_original(o),(None,None)=>true,_=>false,
+            } && match (&self.push_new_branch,&original.push_new_branch) {
+                (Some(p),Some(o))=>p.same_original(o),(None,None)=>true,_=>false,
             } && match (&self.fetch,&original.fetch) {
                 (Some(f),Some(o))=>f.same_original(o),(None,None)=>true,_=>false,
             } && match (&self.initialization,&original.initialization) {
@@ -186,7 +198,7 @@ impl Row {
         need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
             && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
             && self.expected_index.as_deref()==intent.expected_index())?;
-        if let Some(p)=&mut self.push {
+        if let Some(p)=self.push_details_mut() {
             let proposed=intent.push_details().ok_or_else(||StateError::from(Error::Conflict))?;
             need(p.accepts(proposed))?;p.candidate=Some(proposed.clone());
         } else if let Some(f)=&mut self.fetch {
@@ -249,11 +261,11 @@ impl Row {
             && self.fetch.as_ref().is_some_and(|f|f.final_state.is_none() && fetched.is_some_and(|d|d.valid(f.candidate.as_ref()))))?;
         need(self.action!=wire::Kind::Fetch || outcome!=Completion::Succeeded
             || self.fetch.as_ref().is_some_and(|f|fetched.is_some_and(|d|d.successful(f.candidate.as_ref()))))?;
-        need(pushed.is_none() || self.action==wire::Kind::Push && self.has_candidate()
+        need(pushed.is_none() || self.action.is_push() && self.has_candidate()
             && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
-            && self.push.as_ref().is_some_and(|p|p.final_state.is_none() && pushed.is_some_and(|d|d.valid(p.candidate.as_ref()))))?;
-        need(self.action!=wire::Kind::Push || outcome!=Completion::Succeeded
-            || self.push.as_ref().is_some_and(|p|pushed.is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
+            && self.push_details().is_some_and(|p|p.final_state.is_none() && pushed.is_some_and(|d|d.valid(p.candidate.as_ref()))))?;
+        need(!self.action.is_push() || outcome!=Completion::Succeeded
+            || self.push_details().is_some_and(|p|pushed.is_some_and(|d|d.successful(p.candidate.as_ref()))))?;
         // A persisted candidate makes a cancelled/refused child uncertain with
         // respect to publication. No negative result is upgraded to unsent.
         need(!matches!(outcome,Completion::Failed|Completion::Cancelled)||!self.has_candidate())?;
@@ -271,7 +283,7 @@ impl Row {
             self.fetch.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
         }
         if let Some(details)=pushed {
-            self.push.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
+            self.push_details_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
         }
         self.phase=Phase::Finished;self.outcome=Some(outcome);self.validate()
     }
@@ -282,7 +294,7 @@ struct State {schema_version:u8,protocol:String,rows:Vec<Row>}
 impl State {
     fn empty()->Self {Self {schema_version:1,protocol:PROTOCOL.into(),rows:vec![]}}
     fn bytes(&self)->Result<Vec<u8>> {
-        need((1..=8).contains(&self.schema_version) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
+        need((1..=9).contains(&self.schema_version) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
             && self.rows.windows(2).all(|p|p[0].project_id<p[1].project_id))?;
         // Supervisor text is process-local, not a global or durable operation
         // identity. Rows are partitioned by the service's stable project ID;
@@ -295,6 +307,7 @@ impl State {
             need(self.schema_version>=6 || row.fetch.is_none() && row.action!=wire::Kind::Fetch)?;
             need(self.schema_version>=7 || row.initialization.is_none() && row.action!=wire::Kind::Initialize)?;
             need(self.schema_version>=8 || row.push.is_none() && row.action!=wire::Kind::Push)?;
+            need(self.schema_version>=9 || row.push_new_branch.is_none() && row.action!=wire::Kind::PushNewBranch)?;
             row.validate()?;
         }
         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
@@ -313,7 +326,7 @@ impl State {
     }
     fn reserve(&mut self,row:Row)->Result<()> {
         need(row.phase==Phase::Preparing)?;
-        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
+        let schema = match row.action {wire::Kind::FastForward=>5,wire::Kind::Fetch=>6,wire::Kind::Initialize=>7,wire::Kind::Push=>8,wire::Kind::PushNewBranch=>9,wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
             self.rows[index]=row;
@@ -449,3 +462,7 @@ mod push_tests;
 #[cfg(test)]
 #[path="git_fetch_state_tests.rs"]
 mod fetch_tests;
+
+#[cfg(test)]
+#[path="git_push_new_branch_state_tests.rs"]
+mod push_new_branch_tests;

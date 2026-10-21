@@ -133,7 +133,7 @@ class _PushBody:
     There is intentionally no public issuer or open-by-path fallback here.
     """
     def __init__(self, io: _BodyIO, selected: wire.Selection, offered: wire.Advertisement):
-        wire._need(type(io) is _BodyIO and type(selected) is wire.Selection)
+        wire._need(type(io) is _BodyIO and wire.selection_kind(selected) in ("push", "push-new-branch"))
         wire._original(offered, selected)
         self.io, self.selected, self.offered = io, selected, offered
         self.request = self.stream = self.digest = self.sealed_stamp = None

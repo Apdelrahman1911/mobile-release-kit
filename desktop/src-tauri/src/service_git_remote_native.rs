@@ -135,7 +135,7 @@ pub(super) fn action(selected: &remote::Action) -> Result<local::Action, BridgeE
             kind: push::Kind::Push,
             expected_revision: expected_revision.clone(),
             expected_reference_revision: expected_reference_revision.clone(),
-            remote: remote.clone(),
+            remote: Some(remote.clone()),
             local_ref: local_ref.clone(),
             remote_ref: remote_ref.clone(),
             old_oid: old_oid.clone(),

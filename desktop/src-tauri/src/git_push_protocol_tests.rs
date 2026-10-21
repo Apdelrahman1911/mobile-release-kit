@@ -6,7 +6,7 @@ pub(crate) fn action() -> Action {
         kind: Kind::Push,
         expected_revision: "a".repeat(64),
         expected_reference_revision: "b".repeat(64),
-        remote: "origin".into(),
+        remote: Some("origin".into()),
         local_ref: "refs/heads/main".into(),
         remote_ref: "refs/heads/main".into(),
         old_oid: "1".repeat(40),
@@ -28,7 +28,7 @@ pub(crate) fn review() -> Review {
         head: a.new_oid.clone(),
         upstream_ref: a.remote_ref,
         expected_remote_oid: a.old_oid,
-        tracking_ref: "refs/remotes/origin/main".into(),
+        tracking_ref: Some("refs/remotes/origin/main".into()),
         commits: vec![a.new_oid],
         expected_revision: a.expected_revision,
         expected_reference_revision: a.expected_reference_revision,
@@ -100,7 +100,7 @@ fn review_binds_exact_upstream_oids_commit_set_and_no_message_author_payload() {
     bad.expected_remote_oid = bad.head.clone();
     assert!(!bad.valid());
     let mut bad = r.clone();
-    bad.tracking_ref = "refs/remotes/other/main".into();
+    bad.tracking_ref = Some("refs/remotes/other/main".into());
     assert!(!bad.valid());
     let mut bad = r.clone();
     bad.account_id = "99".into();

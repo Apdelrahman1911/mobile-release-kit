@@ -1,3 +1,4 @@
+import type { GitPushNewBranchReview } from './gitPushNewBranchProtocol.ts';
 // Later GET-only comparison through the EXISTING Activity owner. This object
 // owns no invocation, clock, grant, native proof or journal settlement.
 import type { GitLocalController, GitLocalBinding } from './gitLocalController.ts';
@@ -8,7 +9,7 @@ import type { GitHubActivityController } from './githubActivityController.ts';
 
 export interface GitPushReadbackSource {
   readonly operation: GitLocalOperation;
-  readonly review: GitPushReview;
+  readonly review: GitPushReview | GitPushNewBranchReview;
   readonly account: GitPushAccount;
   readonly binding: GitLocalBinding;
 }

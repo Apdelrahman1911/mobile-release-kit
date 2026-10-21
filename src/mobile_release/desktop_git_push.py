@@ -13,6 +13,7 @@ from . import _desktop_git_push_protocol as wire
 from . import _git_push_private_protocol as private
 from . import git_push_transaction as transaction
 from . import git_repository_push as push
+from . import git_repository_push_new_branch as first
 from . import git_service as core
 from ._desktop_git_push_control import GitPushInput
 from ._desktop_saved_command_engine import _Output
@@ -38,9 +39,11 @@ class GitPushOperation(original.GitRemoteOperation):
         source.bind_operation(self)
 
     def _session(self):
-        wire.require(type(self.repository) is push.GitPushRepository)
+        repository_type, session_type = ((push.GitPushRepository, push._Session) if self.request.action.kind == "push"
+                                        else (first.GitPushNewBranchRepository, first._Session))
+        wire.require(type(self.repository) is repository_type)
         sessions = self.repository._active_sessions
-        wire.require(len(sessions) == 1 and type(sessions[0]) is push._Session
+        wire.require(len(sessions) == 1 and type(sessions[0]) is session_type
                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
         return sessions[0]
 
@@ -66,21 +69,22 @@ class GitPushOperation(original.GitRemoteOperation):
     def check_current(self, root, action, expected_revision):
         wire.require(self.request.phase == "apply" and self.entered and not self.returned
                      and self.source.go_returned and self.review is not None and root == self.request.root
-                     and action == "push" and expected_revision == self.request.action.expected_revision)
+                     and action == self.request.action.kind and expected_revision == self.request.action.expected_revision)
         self.source_post(hash_files=False)
 
     def record_intent(self, intent):
-        self.check_current(self.request.root, "push", self.request.action.expected_revision)
+        self.check_current(self.request.root, self.request.action.kind, self.request.action.expected_revision)
         sent = wire.candidate(self.request, self.review, intent)
         self.source.handoff(sent)
-        self.check_current(self.request.root, "push", self.request.action.expected_revision)
+        self.check_current(self.request.root, self.request.action.kind, self.request.action.expected_revision)
 
     def run(self):
         self.source_post(hash_files=True)
         wire.require(self.source.go_returned and not self.entered)
         self.entered = True
         selected = self.request.action
-        self.repository = push.GitPushRepository(self.request.root, git_executable=wire.TOOL_PATH,
+        repository_type = push.GitPushRepository if selected.kind == "push" else first.GitPushNewBranchRepository
+        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
             work_end=self.source.work_end, launch=self.launch, cancellation=self.guard,
             _run=self.command, _remote=self.remote_command)
         try:

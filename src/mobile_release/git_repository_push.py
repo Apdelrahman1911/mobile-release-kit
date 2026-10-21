@@ -68,6 +68,18 @@ def _configuration(config, remote, target):
     exact = ("+" + selected.remote_ref + ":" + tracking_ref(remote, selected)).encode("ascii")
     require(config.get(prefix + "fetch") in ((wildcard,), (wildcard[1:],), (exact,), (exact[1:],)), "push-upstream")
     allowed = {prefix + "url", prefix + "fetch", prefix + "pushurl", prefix + "tagopt"}
+    _configuration_policy(config)
+    for key, values in config.items():
+        if key.startswith(prefix):
+            require(key in allowed)
+            if key == prefix + "pushurl":
+                require(values == (url,))
+            elif key == prefix + "tagopt":
+                require(values == (b"--no-tags",))
+
+
+def _configuration_policy(config):
+    # Same policy for both closed Push variants, never copied into the view.
     fixed = {"push.default": ((b"simple",), (b"upstream",), (b"current",)),
              "push.followtags": ((b"false",),), "push.gpgsign": ((b"false",),),
              "push.recursesubmodules": ((b"no",),), "push.negotiate": ((b"false",),),
@@ -78,12 +90,6 @@ def _configuration(config, remote, target):
         require(key not in ("core.gitproxy", "core.askpass", "core.alternaterefscommand"))
         if key.startswith("push."):
             require(key in fixed and values in fixed[key])
-        if key.startswith(prefix):
-            require(key in allowed)
-            if key == prefix + "pushurl":
-                require(values == (url,))
-            elif key == prefix + "tagopt":
-                require(values == (b"--no-tags",))
     require(config.get("extensions.objectformat", (b"sha1",)) == (b"sha1",)
             and config.get("core.repositoryformatversion", (b"0",)) == (b"0",))
 
@@ -117,8 +123,13 @@ class PushPlan:
                 "withheld": ["messages", "authors", "emails", "signatures", "objects"]}
 
 
+def _plan(plan):
+    from .git_repository_push_new_branch import PushNewBranchPlan
+    return type(plan) in (PushPlan, PushNewBranchPlan)
+
+
 def _review_digest(plan):
-    core._need(type(plan) is PushPlan, "invalid-input")
+    core._need(_plan(plan), "invalid-input")
     raw = json.dumps({"review": plan.public(), "trees": plan._trees, "hooks": plan._hooks},
                      sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(b"mrk-git-push-review/1\0" + raw).hexdigest()
@@ -157,7 +168,10 @@ class PushIntent:
 
     @classmethod
     def from_plan(cls, plan, digest):
-        core._need(type(plan) is PushPlan and digest == _review_digest(plan), "authorization")
+        core._need(_plan(plan) and digest == _review_digest(plan), "authorization")
+        from .git_repository_push_new_branch import PushNewBranchPlan, PushNewBranchIntent
+        if type(plan) is PushNewBranchPlan:
+            cls = PushNewBranchIntent
         selected, target = plan.target.selected, plan.target
         commits = b"".join((oid + "\n").encode("ascii") for oid in plan.commits)
         return cls(digest, plan._snapshot.public.revision, plan.reference_revision,
@@ -172,6 +186,11 @@ class PushIntent:
                 "accountId": self.account_id, "repositoryId": self.repository_id,
                 "localRef": self.local_ref, "remoteRef": self.remote_ref,
                 "oldOid": self.old_oid, "newOid": self.new_oid, "commitsSha256": self.commits_sha256}
+
+
+def _intent(intent):
+    from .git_repository_push_new_branch import PushNewBranchIntent
+    return type(intent) in (PushIntent, PushNewBranchIntent)
 
 
 class _Session(local._LocalSession):
@@ -226,6 +245,9 @@ class _Session(local._LocalSession):
                 and len(set(commits)) == len(commits) and commits[-1] == selected.new_oid
                 and selected.old_oid not in commits
                 and all(_OID.fullmatch(oid) is not None and oid != "0" * 40 for oid in commits), "push-history")
+        return commits, self._inspect_trees(commits)
+
+    def _inspect_trees(self, commits):
         trees, total = [], 0
         for oid in commits:
             self.push_tree = oid
@@ -250,7 +272,7 @@ class _Session(local._LocalSession):
             trees.append(hashlib.sha256(body).hexdigest())
         self.push_tree = None
         self.check_original(); self.guard_current()
-        return commits, tuple(trees)
+        return tuple(trees)
 
 
 class GitPushRepository(local.GitLocalRepository):
@@ -270,7 +292,7 @@ class GitPushRepository(local.GitLocalRepository):
         return session
 
     def _capture(self, session, target, revision, reference_revision):
-        core._need(type(target) is Target, "invalid-input")
+        core._need(type(target) is Target and type(target.selected) is Selection, "invalid-input")
         before = session.snapshot()
         self._expected(before, revision)
         core._need(session.reference_revision(before.public) == reference_revision, "stale-observation")
@@ -351,7 +373,7 @@ class GitPushRepository(local.GitLocalRepository):
     @core._session_boundary
     def apply_push(self, review, owner, *, expected_digest):
         from .git_push_transaction import PushTransaction
-        core._need(type(review) is PushReview and type(review.plan) is PushPlan and review.plan._key is self._key
+        core._need(type(review) is PushReview and _plan(review.plan) and review.plan._key is self._key
                    and not review.plan._used and not self._apply_entered and not self._retained, "already-used")
         core._need(review.digest == expected_digest == _review_digest(review.plan), "stale-observation")
         self._apply_entered = True
@@ -359,7 +381,7 @@ class GitPushRepository(local.GitLocalRepository):
         self._active_plan, self._active_owner = plan, owner
         state, settlement, reason, tx = "failed", "settled", None, None
         try:
-            owner.check_current(self.root, "push", plan._snapshot.public.revision)
+            owner.check_current(self.root, plan.action, plan._snapshot.public.revision)
             session = self._session()
             current = self._capture(session, plan.target, plan._snapshot.public.revision, plan.reference_revision)
             core._need(_review_digest(current) == review.digest, "stale-observation")
@@ -403,7 +425,7 @@ class GitPushRepository(local.GitLocalRepository):
         finally:
             if not self._unknown:
                 self._active_plan = self._active_owner = None
-        return core.MutationResult(core._text(owner.operation_id, 128), "push", state, settlement, reason, None,
+        return core.MutationResult(core._text(owner.operation_id, 128), plan.action, state, settlement, reason, None,
                                    None if tx is None else tx.intent)
 
     def _refuse_other_write(self, *args, **kwargs):

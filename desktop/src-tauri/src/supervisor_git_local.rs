@@ -70,7 +70,7 @@ impl GitLocalPublication {
         let bad=crate::asset_commands::Reason::SourceChanged;
         let intent=self.candidate.intent.push_details().ok_or(bad)?;
         let returned=self.push_returned.as_ref().ok_or(bad)?;
-        if self.request.action.kind()!=wire::Kind::Push || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+        if !self.request.action.kind().is_push() || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || self.request.initialization.is_some() || self.request.fetch_target.is_some()
             || self.fetch_keep.is_some() || self.fetch_returned.is_some()
             || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
@@ -101,7 +101,7 @@ impl GitLocalPublication {
 
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch) || self.request.id!=id || self.request.native.as_ref()!=Some(native)
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
@@ -209,13 +209,14 @@ impl GitLocalAdmission {
         {crate::installed_runtime::GitLocalRuntimeSlots::working_reservation_bytes()?
             .checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<Owner>()+std::mem::size_of::<Resources>())?
             .checked_add(if kind==wire::Kind::Initialize {crate::git_init_protocol::MANIFEST_BACKING}else{0})?
-            .checked_add(match kind {wire::Kind::Fetch=>wire::fetch_worker::REMOTE_BACKING,wire::Kind::Push=>wire::push_worker::REMOTE_BACKING,_=>0})}
+            .checked_add(match kind {wire::Kind::Fetch=>wire::fetch_worker::REMOTE_BACKING,wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::REMOTE_BACKING,_=>0})}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {let _=kind;None}
     }
 }
 impl Supervisor {
-    pub(crate) fn git_push_profile_available(&self)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_push_profile_available()}
+    pub(crate) fn git_push_profile_available(&self)->bool {self.git_push_profile_available_for(wire::Kind::Push)}
+    pub(crate) fn git_push_profile_available_for(&self,kind:wire::Kind)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_push_profile_available_for(kind)}
     pub(crate) fn git_fetch_profile_available(&self)->bool {selected(Profile::GitLocal)&&self.inner.runtime.git_fetch_profile_available()}
     pub(crate) fn git_local_profile_available(&self)->bool {
         selected(Profile::GitLocal)&&self.inner.runtime.git_local_profile_available()
@@ -223,7 +224,7 @@ impl Supervisor {
     pub(crate) fn start_git_local(&self,admission:GitLocalAdmission)->Result<GitLocalTicket,BridgeError> {
         if !self.git_local_profile_available()
             || admission.invocation.action.kind()==wire::Kind::Fetch && !self.inner.runtime.git_fetch_profile_available()
-            || admission.invocation.action.kind()==wire::Kind::Push && !self.inner.runtime.git_push_profile_available() {
+            || admission.invocation.action.kind().is_push() && !self.inner.runtime.git_push_profile_available_for(admission.invocation.action.kind()) {
             return Err(BridgeError::unavailable("The fixed local Git writer or selected remote runtime is unavailable."))}
         let receipt=admission.invocation.receipt.clone();
         let owner=self.admit(AdmissionRequest::GitLocal(admission),CompletionTarget::GitLocal)?;
@@ -282,7 +283,7 @@ impl Invocation {
             let Some(control)=control.filter(|v|v.valid()) else {*receipt=GitLocalReceipt::RetainedUnknown;return};
             if self.fetch_joined.set(fetch::joined_control(Instant::now(),control)).is_err() {*receipt=GitLocalReceipt::RetainedUnknown;return}
         }
-        if self.action.kind()==wire::Kind::Push {
+        if self.action.kind().is_push() {
             let control=reply.as_ref().and_then(|v|v.push_control.clone()).or_else(||
                 (!self.push_go_claimed.load(Ordering::SeqCst)).then_some(crate::github_connection_protocol::GitHubReadControl {
                     reason:crate::github_connection_protocol::Reason::None,credential_expires_at:None,cooldown_seconds:None,cooldown_blocked:false }));
@@ -310,7 +311,7 @@ impl Invocation {
         let root=self.gate.check_current(&owner.id)?;let stop=owner.stop.subscribe();
         let selected={let mut native=self.slots.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             if self.action.kind()==wire::Kind::Fetch {native.arm_fetch_once().map_err(|_|BridgeError::cleanup_unknown())?;}
-            if self.action.kind()==wire::Kind::Push {native.arm_push_once().map_err(|_|BridgeError::cleanup_unknown())?;}
+            if self.action.kind().is_push() {native.arm_push_once().map_err(|_|BridgeError::cleanup_unknown())?;}
             let armed=native.arm_acl_once(owner.endpoint(),&stop);owner.observe_native_failure(native.first_failure());
             armed.map_err(|_|BridgeError::cleanup_unknown())?;
             let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
@@ -358,7 +359,7 @@ impl Invocation {
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
         let request=Arc::new(if self.action.kind()==wire::Kind::Initialize {
             wire::Request::from_init_original(&owner.id,&self.action,&self.context,initialization.as_ref().ok_or_else(BridgeError::protocol)?,clock_data,binding)?
-        } else if self.action.kind()==wire::Kind::Push {
+        } else if self.action.kind().is_push() {
             wire::Request::from_push_original(&owner.id,&self.action,&self.context,snapshot.as_ref().ok_or_else(BridgeError::protocol)?,
                 clock_data,binding,self.gate.push_target(&owner.id)?)?
         } else if self.action.kind()==wire::Kind::Fetch {
@@ -528,7 +529,7 @@ pub(super) async fn candidate_returned(r:&mut Resources,inner:&Inner,owner:&Arc<
         invocation.gate.check_current(&owner.id)?;
         if owner.failed()||Instant::now()>=owner.endpoint() {return Err(BridgeError::timeout())}
         let request=invocation.request()?;
-        if invocation.action.kind()==wire::Kind::Push {
+        if invocation.action.kind().is_push() {
             request.push_ack(&candidate,ack.revision.0)
         } else if invocation.action.kind()==wire::Kind::Fetch {
             let keep=invocation.fetch_keep.lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -607,7 +608,7 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
                 None=>None,
             }
         } else {None};
-        let push_final=if invocation.action.kind()==wire::Kind::Push {
+        let push_final=if invocation.action.kind().is_push() {
             let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             match publication.as_ref() {
                 Some(p)=>Some(crate::git_push_state::FinalData::from_returned(&p.request,&p.candidate,
@@ -738,7 +739,7 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
     let posted=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=returned=>v};
     if !matches!(posted,Ok(Ok(()))) {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}}
     let Some(local)=owner.git_local.as_ref() else {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}};
-    let go=if request.action.kind()==wire::Kind::Push {
+    let go=if request.action.kind().is_push() {
         match local.gate.push_go(&owner.id,&request,|| {
             if local.push_go_claimed.swap(true,Ordering::SeqCst) {return false}
             claim_preflight_go(&inner,&owner,Profile::GitLocal)
@@ -771,7 +772,7 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
                     Err(_)=>{},
                     Ok(Err(error))=>{owner.fail(error);break None},
                     Ok(Ok(bytes))=>{
-                        if bytes.len()>match request.action.kind() {wire::Kind::Push=>wire::push_worker::ACK_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::ACK_LIMIT,_=>512}||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
+                        if bytes.len()>match request.action.kind() {wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::ACK_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::ACK_LIMIT,_=>512}||local.gate.check_current(&owner.id).is_err()||owner.failed()||Instant::now()>=owner.endpoint() {
                             owner.fail(BridgeError::cleanup_unknown());break None
                         }
                         let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&bytes)=>v.is_ok()};
@@ -805,7 +806,7 @@ pub(super) async fn read<T:AsyncRead+Unpin>(mut stdout:T,request:Arc<wire::Reque
             Ok(0)=>{eof=true;break},
             Ok(count)=>{
                 total=total.saturating_add(count);
-                let limit=match request.action.kind() {wire::Kind::Push=>wire::push_worker::OUTPUT_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::OUTPUT_LIMIT,_=>wire::RESPONSE_LIMIT};
+                let limit=match request.action.kind() {wire::Kind::Push|wire::Kind::PushNewBranch=>wire::push_worker::OUTPUT_LIMIT,wire::Kind::Fetch=>wire::fetch_worker::OUTPUT_LIMIT,_=>wire::RESPONSE_LIMIT};
                 if total>limit {overflow=true;let _=faults.try_send(BridgeError::protocol());continue}
                 bytes.extend_from_slice(&buffer[..count]);
                 if ready.is_some() {

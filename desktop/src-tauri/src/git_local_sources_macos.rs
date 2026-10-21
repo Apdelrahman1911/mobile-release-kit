@@ -369,7 +369,7 @@ impl GitLocalSources {
             if let Some(publication) = publication {
                 let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
                 let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
-                if review.action()==wire::Kind::Push {self.push_returned(publication,stop)?;return self.post_inner(stop)}
+                if review.action().is_push() {self.push_returned(publication,stop)?;return self.post_inner(stop)}
                 if review.action()==wire::Kind::Fetch {
                     self.fetch_returned(publication,stop)?;return self.post_inner(stop)
                 }
@@ -397,7 +397,7 @@ impl GitLocalSources {
                         (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
                             intent.candidate_index().ok_or(Reason::SourceChanged)?.to_owned(),wire::INDEX_LIMIT)
                     },
-                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push=>return Err(Reason::SourceChanged),
+                    wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward|wire::Kind::Initialize|wire::Kind::Fetch|wire::Kind::Push|wire::Kind::PushNewBranch=>return Err(Reason::SourceChanged),
                 };
                 let successor = self.file(parent,&name,uid,maximum,false,stop)?;
                 let successor_snapshot = self.snapshot(successor,maximum,stop)?;
@@ -517,7 +517,7 @@ impl GitLocalSources {
             }
             self.native = Some(native);
             if kind==wire::Kind::Fetch {self.capture_fetch(objects,stop)?;}
-            if kind==wire::Kind::Push {self.capture_push(stop)?;}
+            if kind.is_push() {self.capture_push(kind,stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::FastForward) {self.capture_fast_forward(project,stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::BranchRename) {self.capture_rename(stop)?;}
             if review.is_some_and(|v|v.action()==wire::Kind::BranchSwitch) {self.capture_switch(project,stop)?;}

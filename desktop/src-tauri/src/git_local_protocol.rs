@@ -61,7 +61,8 @@ fn frame(bytes: &[u8], limit: usize) -> Result<Value, BridgeError> {
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
-pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, Initialize }
+pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename, #[serde(rename="fast-forward")] FastForward, Fetch, Push, #[serde(rename="push-new-branch")] PushNewBranch, Initialize }
+impl Kind { pub(crate) fn is_push(self)->bool { matches!(self,Self::Push|Self::PushNewBranch) } }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
 pub(crate) enum Phase { Prepare, Apply }
@@ -98,7 +99,7 @@ impl Action {
         if matches!(kind, Kind::Stage | Kind::Unstage) && action.valid() { Ok(action) }
         else { Err(BridgeError::invalid()) }
     }
-    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push, Self::Initialize(_)=>Kind::Initialize } }
+    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename, Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.kind.local_kind(), Self::Initialize(_)=>Kind::Initialize } }
     pub(crate) fn expected_revision(&self) -> Option<&str> { match self { Self::Files(v)=>Some(&v.expected_revision), Self::Branch(v)=>Some(&v.expected_revision), Self::Switch(v)=>Some(&v.expected_revision), Self::FastForward(v)=>Some(&v.expected_revision), Self::Rename(v)=>Some(&v.expected_revision), Self::Fetch(v)=>Some(&v.expected_revision),Self::Push(v)=>Some(&v.expected_revision), Self::Initialize(_)=>None } }
     pub(crate) fn valid(&self) -> bool {
         match self {
@@ -108,7 +109,7 @@ impl Action {
                     && v.identity.as_ref().is_some_and(Identity::valid)
                     && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
                 Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
-                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize => false,
+                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize => false,
             },
         }
     }
@@ -149,7 +150,7 @@ pub(crate) fn decode_command(name: &str, raw: &[u8]) -> Result<Command, BridgeEr
     }
     need(match name {
         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
-            && if body["action"]["kind"]=="push" {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
+            && if matches!(body["action"]["kind"].as_str(),Some("push"|"push-new-branch")) {keys(&body["action"],push::ACTION_KEYS)} else if body["action"]["kind"]=="fetch" {keys(&body["action"],fetch::ACTION_KEYS)} else if body["action"]["kind"]=="initialize" {keys(&body["action"],&["kind"])} else if body["action"]["kind"]=="fast-forward" {keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","targetRef","targetOid"])} else if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
                 keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
             } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
@@ -179,7 +180,7 @@ pub(crate) struct FileReview {
     pub(crate) expected_index: String, pub(crate) review_digest: String,
 }
 impl Review {
-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push,Self::Initialize(_)=>Kind::Initialize} }
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
     pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
     pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head), Self::FastForward(v)=>Some(&v.head), Self::Rename(v)=>Some(&v.head),Self::Fetch(v)=>v.head.as_deref(),Self::Push(v)=>Some(&v.head),Self::Initialize(_)=>None} }
     pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch), Self::FastForward(v)=>Some(&v.branch), Self::Rename(v)=>Some(&v.branch),Self::Fetch(v)=>v.branch.as_deref(),Self::Push(v)=>Some(&v.branch),Self::Initialize(_)=>None} }
@@ -196,7 +197,7 @@ impl Review {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::FastForward(v)=>v.valid(), Self::Rename(v)=>v.valid(), Self::Fetch(v)=>v.valid(),Self::Push(v)=>v.valid(),Self::Initialize(v)=>v.valid(),
-            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize) && read::digest(&v.expected_revision)
+            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && read::digest(&v.expected_revision)
                 && read::digest(&v.expected_index) && read::digest(&v.review_digest)
                 && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
                 && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
@@ -218,7 +219,7 @@ impl Review {
         }
     }
     fn decode(value:&Value) -> Result<Self,BridgeError> {
-        need(if value["action"] == "push" {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
+        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::REVIEW_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::REVIEW_KEYS)} else if value["action"] == "initialize" {keys(value,init::REVIEW_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::REVIEW_KEYS)} else if value["action"] == "branch-switch" {
             keys(value,switch::REVIEW_KEYS)
         } else if value["action"] == "branch-rename" {
             keys(value,rename::REVIEW_KEYS)
@@ -239,7 +240,7 @@ pub(crate) struct FileIntent {
     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
 }
 impl Intent {
-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(_)=>Kind::Push,Self::Initialize(_)=>Kind::Initialize} }
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::FastForward(_)=>Kind::FastForward, Self::Rename(_)=>Kind::BranchRename,Self::Fetch(_)=>Kind::Fetch,Self::Push(v)=>v.action.local_kind(),Self::Initialize(_)=>Kind::Initialize} }
     pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::FastForward(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision,Self::Fetch(v)=>&v.expected_revision,Self::Push(v)=>&v.expected_revision,Self::Initialize(v)=>&v.expected_revision} }
     pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref),Self::FastForward(v)=>Some(&v.expected_ref), Self::Rename(v)=>Some(&v.expected_ref),Self::Fetch(v)=>v.expected_ref.as_deref(),Self::Push(v)=>Some(&v.local_ref),Self::Initialize(_)=>None} }
     pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head),Self::FastForward(v)=>Some(&v.expected_head), Self::Rename(v)=>Some(&v.expected_head),Self::Fetch(v)=>v.expected_head.as_deref(),Self::Push(v)=>Some(&v.new_oid),Self::Initialize(_)=>None} }
@@ -264,7 +265,7 @@ impl Intent {
                         && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
                             && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
                     Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
-                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize=>false,
+                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>false,
                 },
         }
     }
@@ -283,7 +284,7 @@ impl Intent {
         }
     }
     fn decode(value:&Value) -> Result<Self,BridgeError> {
-        need(if value["action"] == "push" {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
+        need(if matches!(value["action"].as_str(),Some("push"|"push-new-branch")) {keys(value,push::INTENT_KEYS)} else if value["action"] == "fetch" {keys(value,fetch::INTENT_KEYS)} else if value["action"] == "initialize" {keys(value,init::INTENT_KEYS)} else if value["action"] == "fast-forward" {keys(value,ff::INTENT_KEYS)} else if value["action"] == "branch-switch" {
             keys(value,switch::INTENT_KEYS)
         } else if value["action"] == "branch-rename" {
             keys(value,rename::INTENT_KEYS)
@@ -324,7 +325,7 @@ impl Request {
     fn from_sources(id:&str,action:&Action,context:&Context,native:&Native,
         clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>,rename_sources:Option<rename::Sources>,fast_forward_sources:Option<ff::Sources>)->Result<Self,BridgeError> {
         need(valid_id(id) && action.valid() && valid_id(&context.project_id) && valid_id(&context.revision)
-            && !matches!(action.kind(),Kind::Fetch|Kind::Push|Kind::Initialize) && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
+            && !matches!(action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
         let phase = if let Some(selected) = &binding {
             let index = native.files.index.as_ref().map(|v|v.sha256.clone()).unwrap_or_else(||hash(b"absent"));
@@ -373,7 +374,7 @@ impl Request {
         Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest:hash(&bytes),
             native:None,initialization:Some(native.clone()),switch_sources:None,rename_sources:None,fast_forward_sources:None,fetch_target:None,push_target:None,bytes})
     }
-    fn protocol(&self)->&str {if self.action.kind()==Kind::Push {push_worker::PROTOCOL} else if self.action.kind()==Kind::Fetch {fetch_worker::PROTOCOL} else {PROTOCOL}}
+    fn protocol(&self)->&str {if self.action.kind().is_push() {push_worker::PROTOCOL} else if self.action.kind()==Kind::Fetch {fetch_worker::PROTOCOL} else {PROTOCOL}}
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
     pub(crate) fn go(&self) -> Vec<u8> { format!("MRK-GIT-LOCAL-GO/1 {}\n",self.digest).into_bytes() }
     pub(crate) fn ready(&self, bytes:&[u8]) -> Result<(),BridgeError> {
@@ -394,12 +395,12 @@ impl Request {
     /// and rematched Doc/consent. The codec cannot confer that permission.
     pub(crate) fn ack(&self, candidate:&Candidate, revision:u64) -> Result<Vec<u8>,BridgeError> {
         let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
-        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
+        need(!matches!(self.action.kind(),Kind::Fetch|Kind::Push|Kind::PushNewBranch) && candidate.request_digest == self.digest && candidate.intent.matches(&binding.review)
             && revision == binding.journal_revision + 1)?;
         Ok(format!("MRK-GIT-LOCAL-ACK/1 {} {} {}\n",self.digest,candidate.digest,revision).into_bytes())
     }
     pub(crate) fn terminal(&self, bytes:&[u8], candidate:Option<&Candidate>) -> Result<Terminal,BridgeError> {
-        if self.action.kind()==Kind::Push {return self.push_terminal(bytes,candidate)}
+        if self.action.kind().is_push() {return self.push_terminal(bytes,candidate)}
         if self.action.kind()==Kind::Fetch {return self.fetch_terminal(bytes,candidate)}
         if let Some(candidate) = candidate {
             let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -423,7 +424,7 @@ impl Request {
             if self.phase == Phase::Prepare {
                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
                     && terminal.publication == Publication::NotReported
-                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize) {&["review"]} else {&["review","diff"]}))?;
+                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize) {&["review"]} else {&["review","diff"]}))?;
                 let review = Review::decode(&terminal.result["review"])?;
                 need(review.matches(&self.action))?;
                 if let Some(review) = review.file() {
@@ -462,7 +463,7 @@ impl Request {
             need(candidate.is_some() && terminal.publication == match self.action.kind() {
                 Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
                 Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
-                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::Initialize=>return Err(BridgeError::protocol()),
+                Kind::BranchSwitch|Kind::BranchRename|Kind::FastForward|Kind::Fetch|Kind::Push|Kind::PushNewBranch|Kind::Initialize=>return Err(BridgeError::protocol()),
             })?;
         }
         if state == "succeeded" {

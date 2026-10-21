@@ -41,7 +41,6 @@ impl Pins {
             &self.target.repository_id,
             &self.action.expected_revision,
             &self.action.expected_reference_revision,
-            &self.action.remote,
             &self.action.local_ref,
             &self.action.remote_ref,
             &self.action.old_oid,
@@ -50,7 +49,7 @@ impl Pins {
         ] {
             bytes = bytes.checked_add(text.capacity())?;
         }
-        Some(bytes)
+        bytes.checked_add(self.action.remote.as_ref().map_or(0, String::capacity))
     }
 }
 pub(super) struct Hold {
@@ -544,7 +543,7 @@ mod tests {
         // A changed upstream with the old tracking ref is not a valid review.
         assert!(!changed.valid());
         assert!(!changed.matches(&wrong));
-        changed.tracking_ref = push::tracking(&changed.remote, &changed.upstream_ref).unwrap();
+        changed.tracking_ref = changed.remote.as_deref().and_then(|alias| push::tracking(alias, &changed.upstream_ref));
         assert!(changed.valid());
         assert!(changed.matches(&wrong));
         assert!(s

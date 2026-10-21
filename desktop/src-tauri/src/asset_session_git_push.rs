@@ -38,7 +38,7 @@ pub(super) fn selected_review(
                 .git_push_review_current(pins, action, details, Instant::now(), work)?;
             Ok(Some(pins.clone()))
         }
-        (_, _, None) if review.action.kind() != wire::Kind::Push => Ok(None),
+        (_, _, None) if !review.action.kind().is_push() => Ok(None),
         _ => Err(changed()),
     }
 }
@@ -49,7 +49,7 @@ pub(super) fn review_current(state: &DocumentState, review: &ReadyReview) -> boo
                 .github
                 .git_push_prepared_current(pins, details, Instant::now())
         }
-        (_, None) => review.action.kind() != wire::Kind::Push,
+        (_, None) => !review.action.kind().is_push(),
         _ => false,
     }
 }

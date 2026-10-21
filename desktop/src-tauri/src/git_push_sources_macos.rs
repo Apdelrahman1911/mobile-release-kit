@@ -10,6 +10,7 @@ struct Edge {
     maximum: u64,
 }
 pub(super) struct State {
+    kind: wire::Kind,
     shell: (usize, wire::Snapshot),
     current: Option<Edge>,
     tracking: Option<Edge>,
@@ -17,16 +18,16 @@ pub(super) struct State {
 }
 impl State {
     pub(super) fn extra(kind: wire::Kind, review: Option<&wire::Review>) -> Option<usize> {
-        if kind != wire::Kind::Push {
+        if !kind.is_push() {
             return Some(0);
         }
         match review {
             None => Some(2), // protected /bin/sh, same Book root
-            Some(wire::Review::Push(r)) => r
+            Some(wire::Review::Push(r)) if r.action.local_kind() == kind && r.valid() => r
                 .branch
                 .split('/')
                 .count()
-                .checked_add(r.tracking_ref.split('/').count())?
+                .checked_add(r.tracking_ref.as_deref().map_or(0, |v| v.split('/').count()))?
                 .checked_add(8),
             _ => None,
         }
@@ -114,14 +115,14 @@ impl GitLocalSources {
             stop,
         )
     }
-    pub(super) fn capture_push(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
-        if self.push.is_some() {
+    pub(super) fn capture_push(&mut self, kind: wire::Kind, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        if self.push.is_some() || !kind.is_push() {
             return Err(Reason::SourceChanged);
         }
         let native = self.native.as_ref().ok_or(Reason::SourceChanged)?.clone();
-        let mut nominated=crate::runtime::git_push::matches_tool(&native.tool);
+        let mut nominated=crate::runtime::git_push::matches_tool_for(kind, &native.tool);
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        {if self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
+        {if kind==wire::Kind::Push && self.push_observation.is_some(){nominated=self.observed_push_tool(stop)?;}}
         if !nominated {
             return Err(Reason::SourceRefused);
         }
@@ -132,6 +133,7 @@ impl GitLocalSources {
         }
         let shell = self.file(bin, b"sh", 0, wire::TOOL_LIMIT, true, stop)?;
         self.push = Some(State {
+            kind,
             shell: (shell, self.snapshot(shell, wire::TOOL_LIMIT, stop)?),
             current: None,
             tracking: None,
@@ -145,7 +147,7 @@ impl GitLocalSources {
         else {
             return Ok(());
         };
-        if !review.valid()
+        if !review.valid() || review.action.local_kind() != kind
             || native.files.head.sha256 != hash(format!("ref: {}\n", review.branch).as_bytes())
         {
             return Err(Reason::SourceChanged);
@@ -153,10 +155,12 @@ impl GitLocalSources {
         let git = self.git.ok_or(Reason::SourceChanged)?;
         let packed = self.push_edge(git, b"packed-refs", native.uid, 65536, stop)?;
         self.push.as_mut().ok_or(Reason::SourceChanged)?.packed = Some(packed);
-        for (name, expected, is_current) in [
-            (&review.branch, &review.head, true),
-            (&review.tracking_ref, &review.expected_remote_oid, false),
-        ] {
+        // First publication has NO configured remote/tracking source. The
+        // same original current ref and packed/config/HEAD/index sources stay
+        // mandatory; no invented tracking path or expected-zero local file.
+        let references = [Some((review.branch.as_str(), &review.head, true)),
+            review.tracking_ref.as_deref().map(|name| (name, &review.expected_remote_oid, false))];
+        for (name, expected, is_current) in references.into_iter().flatten() {
             let edge = self.push_reference(name, native.uid, stop)?;
             if let Some((_, snapshot)) = &edge.original {
                 if snapshot.sha256 != hash(format!("{expected}\n").as_bytes()) {
@@ -227,7 +231,12 @@ impl GitLocalSources {
             native,
             review,
         )?;
-        if state.current.is_none() || state.tracking.is_none() || state.packed.is_none() {
+        if state.kind != review.action() || state.current.is_none() || state.packed.is_none()
+            || match state.kind {
+                wire::Kind::Push => state.tracking.is_none(),
+                wire::Kind::PushNewBranch => state.tracking.is_some(),
+                _ => true,
+            } {
             return Err(Reason::SourceChanged);
         }
         self.post_push(stop) // NO source successor exception or original write.

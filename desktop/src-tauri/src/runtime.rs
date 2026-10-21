@@ -437,10 +437,10 @@ impl GitLocalInstalledProfile {
             if let Some(c)=&self.observation{return fetch_observation::selection(c,false)}
             return git_fetch::selection();
         }
-        if self.kind==crate::git_local_protocol::Kind::Push {
+        if self.kind.is_push() {
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-            if let Some(c)=&self.push_observation{if self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
-            return git_push::selection();
+            if let Some(c)=&self.push_observation{if self.kind!=crate::git_local_protocol::Kind::Push||self.observation.is_some(){return Err(unavailable())}return push_observation::selection(c,false)}
+            return git_push::selection_for(self.kind);
         }
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
@@ -1947,10 +1947,13 @@ impl RuntimeConfig {
         self.resolve_git_local_installed_for(crate::git_local_protocol::Kind::Stage,originals,end,stop)
     }
     pub(crate) fn git_push_profile_available(&self)->bool {
+        self.git_push_profile_available_for(crate::git_local_protocol::Kind::Push)
+    }
+    pub(crate) fn git_push_profile_available_for(&self,kind:crate::git_local_protocol::Kind)->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        if self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
+        if kind==crate::git_local_protocol::Kind::Push && self.git_push_observation.get().is_some(){return self.push_observation().is_ok_and(|v|v.is_some())}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
-        {git_push::available()}
+        {git_push::available_for(kind)}
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         {false}
     }
@@ -1967,7 +1970,7 @@ impl RuntimeConfig {
         originals:&mut crate::installed_runtime::GitLocalRuntimeSlots,end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError> {
         if !self.git_local_profile_available()
             || kind==crate::git_local_protocol::Kind::Fetch&&!self.git_fetch_profile_available()
-            || kind==crate::git_local_protocol::Kind::Push&&!self.git_push_profile_available(){return Err(unavailable())}
+            || kind.is_push()&&!self.git_push_profile_available_for(kind){return Err(unavailable())}
         originals.inspect_once(GitLocalInstalledProfile {_private:(),kind, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] observation:self.fetch_observation()?, #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))] push_observation:self.push_observation()? },end,stop)
     }
     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {

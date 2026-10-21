@@ -1,3 +1,4 @@
+import type { GitPushNewBranchMutation } from '../gitPushNewBranchProtocol.ts';
 import { useState, useSyncExternalStore } from 'react';
 import type { GitLocalController } from '../gitLocalController.ts';
 import type { GitRepositoryController } from '../gitRepositoryController.ts';
@@ -81,7 +82,7 @@ export function GitPush({ controller, repository, connection, activity, original
     </details>
   </ProgressiveDisclosure>;
 }
-export function GitPushRecovery({ result }: { result: GitPushMutationResult }) {
+export function GitPushRecovery({ result }: { result: GitPushMutationResult | GitPushNewBranchMutation }) {
   if (result.state !== 'recovery-required') return null;
   return <div className="review-caution" role="status">
     <p>Last reported Push step: {GIT_PUSH_EFFECT_LABELS[result.effectPhase]}. GitHub may already have changed. Do not send again.</p>

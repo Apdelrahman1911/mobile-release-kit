@@ -115,7 +115,7 @@ fn wrong_schema_or_mixed_old_fields_never_become_an_empty_or_adopted_push() {
     let mut state = State::empty();
     state.reserve(row(1)).unwrap();
     let good: Value = serde_json::from_slice(&state.bytes().unwrap()).unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9, 255] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 10, 255] {
         let mut v = good.clone();
         v["schemaVersion"] = json!(version);
         assert!(State::decode(&raw(v)).is_err());

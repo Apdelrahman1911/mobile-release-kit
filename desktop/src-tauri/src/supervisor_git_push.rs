@@ -30,7 +30,7 @@ impl GitLocalTicket {
             .owner
             .git_local
             .as_ref()
-            .filter(|i| i.action.kind() == wire::Kind::Push)
+            .filter(|i| i.action.kind().is_push())
             .ok_or_else(BridgeError::cleanup_unknown)?;
         let ends = self
             .owner
@@ -49,7 +49,7 @@ impl GitLocalPushHold {
         self.owner.upgrade().is_some_and(|o| {
             o.id == id
                 && o.git_local.as_ref().is_some_and(|v| {
-                    v.action.kind() == wire::Kind::Push
+                    v.action.kind().is_push()
                         && v.gate.same_original(gate)
                         && Arc::ptr_eq(&v.receipt, &self.receipt)
                         && Arc::ptr_eq(&v.push_joined, &self.joined)

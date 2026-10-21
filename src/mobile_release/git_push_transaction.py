@@ -55,7 +55,7 @@ def url(plan):
 
 
 def hook_line(selected):
-    core._need(type(selected) is wire.Selection, "invalid-input")
+    core._need(wire.selection_kind(selected) in ("push", "push-new-branch"), "invalid-input")
     return (selected.local_ref + " " + selected.new_oid + " " + selected.remote_ref
             + " " + selected.old_oid + "\n").encode("ascii")
 
@@ -80,7 +80,7 @@ class Returned:
     after_sha256: str | None
 
     def __post_init__(self):
-        core._need(self.mode in ("review", "apply") and type(self.selected) is wire.Selection
+        core._need(self.mode in ("review", "apply") and wire.selection_kind(self.selected) in ("push", "push-new-branch")
                    and _digest_valid(self.advertisement_sha256), "response-invalid")
         if self.mode == "review":
             core._need(self.body is self.status is self.after_sha256 is None, "response-invalid")
@@ -131,7 +131,8 @@ class _View(core._FrozenGitDirectory):
         self.write("exec/git-remote-mrk", prefix + b' push-helper "$@"\n')
         hook_context = " ".join((self.tx.mode, launch.context.digest, self.tx.review_digest,
                                  str(launch.context.work_end_ns), str(launch.context.hard_end_ns)))
-        self.write("hooks/pre-push", prefix + b" push-hook " + hook_context.encode("ascii") + b' "$@"\n')
+        hook_role = b"push-hook" if plan.action == "push" else b"push-new-branch-hook"
+        self.write("hooks/pre-push", prefix + b" " + hook_role + b" " + hook_context.encode("ascii") + b' "$@"\n')
         for name in ("exec/git", "exec/git-remote-mrk", "hooks/pre-push"):
             path = self.root / name
             os.chmod(path, 0o700)
@@ -220,7 +221,7 @@ class _View(core._FrozenGitDirectory):
 
 class PushTransaction(local._LocalTransaction):
     def __init__(self, session, original, plan, owner, review_digest, mode):
-        core._need(mode in ("review", "apply") and type(plan) is push.PushPlan
+        core._need(mode in ("review", "apply") and push._plan(plan)
                    and (owner is None) == (mode == "review"), "invalid-input")
         super().__init__(session, original, plan, owner)
         self.mode, self.review_digest = mode, review_digest

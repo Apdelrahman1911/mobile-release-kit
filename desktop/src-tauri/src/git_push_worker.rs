@@ -134,8 +134,8 @@ impl Request {
                 && clock.hard_end_ns <= i64::MAX as u64
                 && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000),
         )?;
-        // Attached born HEAD is mandatory even in Review; no initial/new ref
-        // or detached fallback. Selected OIDs remain DATA, checked by Git too.
+        // Attached born HEAD is mandatory in both closed Push kinds; no
+        // detached or unborn fallback. Selected OIDs remain DATA, checked by Git too.
         need(
             native.files.head.sha256 == hash(format!("ref: {}\n", selected.local_ref).as_bytes()),
         )?;
@@ -191,7 +191,7 @@ impl Request {
     /// claim. No token clone, JSON Value, debug representation or renderer path.
     pub(crate) fn push_go(&self, token: &str) -> Result<Zeroizing<Vec<u8>>, BridgeError> {
         need(
-            self.action.kind() == Kind::Push
+            self.action.kind().is_push()
                 && self.push_target.as_ref().is_some_and(Target::valid)
                 && !token.is_empty()
                 && token.len() <= 4096
@@ -241,7 +241,7 @@ impl Request {
     ) -> Result<Vec<u8>, BridgeError> {
         let binding = self.binding.as_ref().ok_or_else(BridgeError::protocol)?;
         need(
-            self.action.kind() == Kind::Push
+            self.action.kind().is_push()
                 && matches!(candidate.intent, Intent::Push(_))
                 && candidate.request_digest == self.digest
                 && candidate.intent.matches(&binding.review)
@@ -330,7 +330,7 @@ impl Request {
         terminal.push_control = Some(control);
         need(
             terminal.phase == self.phase
-                && terminal.action == Kind::Push
+                && terminal.action == self.action.kind()
                 && terminal.cleanup_end_ns > 0
                 && terminal.cleanup_end_ns <= self.clock.hard_end_ns,
         )?;
@@ -421,3 +421,7 @@ impl Request {
 #[cfg(test)]
 #[path = "git_push_worker_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path="git_push_new_branch_worker_tests.rs"]
+mod new_branch_tests;

@@ -12,6 +12,7 @@ import hashlib
 import hmac
 
 from . import git_remote_wire as framing
+from . import git_push_new_branch as first
 from .git_repository_read import _full_ref
 from .git_service import _ref
 
@@ -49,6 +50,18 @@ class Selection:
     def __post_init__(self):
         _need(_branch(self.local_ref) and _branch(self.remote_ref) and _oid(self.old_oid)
               and _oid(self.new_oid) and self.old_oid != self.new_oid)
+
+
+def selection_kind(selected):
+    _need(type(selected) in (Selection, first.Selection))
+    return "push" if type(selected) is Selection else first.KIND
+
+
+def selection(kind, local_ref, remote_ref, old_oid, new_oid):
+    """Closed variant decoder; zero never selects an action implicitly."""
+    _need(kind in ("push", first.KIND))
+    constructor = Selection if kind == "push" else first.Selection
+    return constructor(local_ref, remote_ref, old_oid, new_oid)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -96,7 +109,7 @@ def _capabilities(raw: bytes) -> tuple[bytes, ...]:
     return values
 
 
-def _advertisement(raw: bytes) -> Advertisement:
+def _advertisement(raw: bytes, selected=None) -> Advertisement:
     rows = _packets(raw, MAX_METADATA, MAX_REFS + 3)
     _need(len(rows) >= 4 and rows[0] == _SERVICE and rows[1] == 0 and rows[-1] == 0
           and all(type(row) is bytes for row in rows[2:-1]), "unsupported-protocol")
@@ -112,7 +125,10 @@ def _advertisement(raw: bytes) -> Advertisement:
         else:
             _need(b"\0" not in row)
         fields = framing._line(row, 2048).split(b" ")
-        _need(len(fields) == 2 and framing._oid(fields[0]), "unsupported-protocol")
+        _need(len(fields) == 2, "unsupported-protocol")
+        if type(selected) is first.Selection and first.empty_row(fields, index, len(rows) - 3):
+            continue
+        _need(framing._oid(fields[0]), "unsupported-protocol")
         reference = fields[1].decode("ascii")
         # No empty-repository capabilities^{}, .have, pseudo-ref, peel or
         # symbolic fallback can establish this existing-branch update.
@@ -124,15 +140,20 @@ def _advertisement(raw: bytes) -> Advertisement:
 
 
 def advertisement(raw: bytes, selected: Selection) -> Advertisement:
-    _need(type(selected) is Selection)
-    value = _advertisement(raw)
-    _need(dict(value.refs).get(selected.remote_ref) == selected.old_oid, "target-changed")
+    kind = selection_kind(selected)
+    value = _advertisement(raw, selected)
+    if kind == first.KIND:
+        # Even already-NEW refuses before Git can skip its pre-push hook.
+        # Unadvertised is not absence; the server must still compare ZERO.
+        _need(selected.remote_ref not in dict(value.refs), "target-changed")
+    else:
+        _need(dict(value.refs).get(selected.remote_ref) == selected.old_oid, "target-changed")
     return value
 
 
 def after_advertisement(raw: bytes, selected: Selection) -> Advertisement:
-    _need(type(selected) is Selection)
-    value = _advertisement(raw)
+    selection_kind(selected)
+    value = _advertisement(raw, selected)
     _need(dict(value.refs).get(selected.remote_ref) == selected.new_oid, "target-changed")
     return value
 
@@ -146,8 +167,8 @@ class Reconciliation:
 
 def reconcile_advertisement(raw: bytes, selected: Selection) -> Reconciliation:
     """Historical GET comparison only; absence/another tip never grants retry."""
-    _need(type(selected) is Selection)
-    value = _advertisement(raw)
+    selection_kind(selected)
+    value = _advertisement(raw, selected)
     oid = dict(value.refs).get(selected.remote_ref)
     state = ("matches-intended" if oid == selected.new_oid else "still-old" if oid == selected.old_oid
              else "not-returned" if oid is None else "other")
@@ -166,7 +187,7 @@ class Command:
 
 
 def command(raw: bytes, selected: Selection, offered: Advertisement) -> Command:
-    _need(type(selected) is Selection)
+    selection_kind(selected)
     _original(offered, selected)
     rows = _packets(raw, MAX_COMMAND, 2)
     _need(len(rows) == 2 and type(rows[0]) is bytes and rows[1] == 0)

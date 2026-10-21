@@ -39,27 +39,34 @@ from test_git_push_wire import packet, pack
 
 
 @contextmanager
-def original(*, phase="apply"):
+def original(*, phase="apply", first_publication=False):
     world = existing.GitPushRepositoryTests("test_review_then_one_apply_keeps_every_original_dirty_index_ref_and_config_byte")
     world.setUp()
     op = None
     try:
         root, fake = world.root, world.fake
+        repository_type, target, selected = push.GitPushRepository, existing.TARGET, existing.SELECTED
+        if first_publication:
+            from mobile_release import git_repository_push_new_branch as first
+            import test_git_repository_push_new_branch as first_fixture
+            world.fake = fake = first_fixture.FakeFirst(root)
+            repository_type, target, selected = first.GitPushNewBranchRepository, first_fixture.TARGET, first_fixture.SELECTED
         observer = read.GitReadRepository(root, git_executable=wire.TOOL_PATH,
             work_end=time.monotonic() + 45, _run=fake)
         observed = observer.observe()
-        seed = push.GitPushRepository(root, git_executable=wire.TOOL_PATH, work_end=time.monotonic() + 45,
+        seed = repository_type(root, git_executable=wire.TOOL_PATH, work_end=time.monotonic() + 45,
             launch=existing.LAUNCH, _run=fake, _remote=world.remote)
         world.repositories.append(seed)
         # Local-only DATA digest preparation; not a native Prepare/consent.
         session = seed._session()
-        plan = seed._capture(session, existing.TARGET, observed.observation.revision, observed.reference_revision)
+        plan = seed._capture(session, target, observed.observation.revision, observed.reference_revision)
         reviewed = push.PushReview(plan, push._review_digest(plan))
         assert seed._finish_sessions(False)
         row = fixture(phase=phase)
         row["action"].update(expectedRevision=observed.observation.revision,
             expectedReferenceRevision=observed.reference_revision,
-            localRef=existing.BRANCH, remoteRef=existing.BRANCH, oldOid=existing.OLD, newOid=existing.HEAD)
+            localRef=selected.local_ref, remoteRef=selected.remote_ref, oldOid=selected.old_oid, newOid=selected.new_oid,
+            kind=packets.selection_kind(selected), remote=None if first_publication else "origin")
         if phase == "apply":
             row["reviewDigest"] = reviewed.digest
         inert_tool = world.base / "inert-tool"
@@ -137,11 +144,11 @@ def original(*, phase="apply"):
                     if phase == "apply":
                         assert source.candidate_returned and tx.acknowledged and not op.remote_returned
                         offered = packets.advertisement(packet(b"# service=git-receive-pack\n") + b"0000"
-                            + packet((existing.OLD + " " + existing.BRANCH).encode() + b"\0report-status\n") + b"0000",
-                            existing.SELECTED)
-                        update = packets.command(packet((existing.OLD + " " + existing.HEAD + " " + existing.BRANCH).encode()
-                            + b"\0 report-status") + b"0000", existing.SELECTED, offered)
-                        stream = packets.PackStream(update, existing.SELECTED, offered)
+                            + packet((selected.old_oid + " " + ("capabilities^{}" if first_publication else selected.remote_ref)).encode()
+                                     + b"\0report-status\n") + b"0000", selected)
+                        update = packets.command(packet((selected.old_oid + " " + selected.new_oid + " " + selected.remote_ref).encode()
+                            + b"\0 report-status") + b"0000", selected, offered)
+                        stream = packets.PackStream(update, selected, offered)
                         body = pack(); stream.feed(body); digest = stream.finish()
                         path = tx.view.root / bodies.NAME
                         path.write_bytes(update.raw + body)  # Test-owned simulated helper, no pack-objects.
@@ -151,7 +158,7 @@ def original(*, phase="apply"):
                         if mode.after_send is not None:
                             mode.after_send(tx, channel)
                         response = packets.status_response(packet(b"unpack ok\n")
-                            + packet(("ok " + existing.BRANCH + "\n").encode()) + b"0000", existing.SELECTED, offered, update)
+                            + packet(("ok " + selected.remote_ref + "\n").encode()) + b"0000", selected, offered, update)
                     else:
                         response = None
                         assert not source.candidate_claimed and tx.intent is None and tx.view.body_initial is None

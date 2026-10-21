@@ -53,7 +53,7 @@ export function sameGitPushAccount(a: GitPushAccount, view: GitHubConnectionView
   return !!b && a.sessionId === b.sessionId && a.revision === b.revision && a.accountId === b.accountId && a.login === b.login &&
     a.repositoryId === b.repositoryId && a.repository === b.repository;
 }
-export function pushReviewMatchesAccount(review: GitPushReview, a: GitPushAccount): boolean {
+export function pushReviewMatchesAccount(review: Pick<GitPushReview, 'accountId' | 'login' | 'repositoryId' | 'repository'>, a: GitPushAccount): boolean {
   return review.accountId === a.accountId && review.login === a.login && review.repositoryId === a.repositoryId && review.repository === a.repository;
 }
 export function gitPushLocalSource(read: GitReadView | null | undefined, files: GitRepositoryView, projectId: string): GitReadObservation | null {

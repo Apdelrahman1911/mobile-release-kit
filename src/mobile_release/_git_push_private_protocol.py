@@ -112,9 +112,11 @@ class Hook:
     remote: str
     url: str
     line: bytes
+    kind: str = "push"
 
     def __post_init__(self):
-        require(type(self.clock) is Clock and self.mode in ("review", "apply"))
+        require(type(self.clock) is Clock and self.mode in ("review", "apply")
+                and self.kind in ("push", "push-new-branch"))
         _hex(self.review_digest)
         require(type(self.remote) is type(self.url) is str and self.remote == self.url
                 and self.url.startswith("mrk::https://github.com/") and self.url.endswith(".git")
@@ -125,7 +127,8 @@ class Hook:
     def request(self):
         return _encode({"protocol": PROTOCOL, "phase": "hook", "digest": self.clock.digest,
             "nonce": self.clock.nonce.hex(), "review": self.review_digest, "mode": self.mode,
-            "remote": self.remote, "url": self.url, "line": self.line.decode("ascii")})
+            "remote": self.remote, "url": self.url, "line": self.line.decode("ascii"),
+            **({"kind": self.kind} if self.kind == "push-new-branch" else {})})
 
     def reply(self):
         return _encode({"protocol": PROTOCOL, "phase": "compared" if self.mode == "review" else "armed",
@@ -171,7 +174,7 @@ class Binding:
     clock: Clock
     mode: str
     review_digest: str
-    remote: str
+    remote: str | None
     target: transport.Target
     identity: tuple[int, int, int]
     path: Path
@@ -182,8 +185,10 @@ class Binding:
         try:
             fields._id(self.operation_id)
             require(type(self.clock) is Clock and self.mode in ("review", "apply")
-                    and type(self.target) is transport.Target and type(self.remote) is str
-                    and base._REMOTE.fullmatch(self.remote) is not None)
+                    and type(self.target) is transport.Target)
+            kind = wire.selection_kind(self.target.selected)
+            require((kind == "push" and type(self.remote) is str and base._REMOTE.fullmatch(self.remote) is not None)
+                    or (kind == "push-new-branch" and self.remote is None))
             _hex(self.review_digest)
             require(type(self.identity) is tuple and len(self.identity) == 3)
             for item, maximum in zip(self.identity, ((1 << 32) - 1, (1 << 64) - 1, (1 << 64) - 1)):
@@ -219,7 +224,8 @@ class Binding:
             remote=self.remote, target={"repository": target.repository, "login": target.login,
                 "accountId": target.account_id, "repositoryId": target.repository_id,
                 "localRef": selected.local_ref, "remoteRef": selected.remote_ref,
-                "oldOid": selected.old_oid, "newOid": selected.new_oid},
+                "oldOid": selected.old_oid, "newOid": selected.new_oid,
+                **({"kind": "push-new-branch"} if wire.selection_kind(selected) == "push-new-branch" else {})},
             clock={"workEndNs": self.work_end_ns, "hardEndNs": self.hard_end_ns}, socket=list(self.identity),
             path=str(self.path), parent=list(self.parent_stamp), body=None if self.body_stamp is None else list(self.body_stamp)))
 
@@ -238,7 +244,7 @@ class Binding:
         selected = self.target.selected
         url = "mrk::https://github.com/" + self.target.repository + ".git"
         line = (selected.local_ref + " " + selected.new_oid + " " + selected.remote_ref + " " + selected.old_oid + "\n").encode("ascii")
-        return Hook(self.clock, self.mode, self.review_digest, url, url, line)
+        return Hook(self.clock, self.mode, self.review_digest, url, url, line, wire.selection_kind(selected))
 
     def send(self, value, stamp):
         require(self.mode == "apply")
@@ -308,9 +314,13 @@ def challenge(raw):
         row = _keys(_decode(raw), ("protocol", "phase", "digest", "nonce", "id", "mode", "review", "remote",
                                   "target", "clock", "socket", "path", "parent", "body"))
         clock = _keys(row["clock"], ("workEndNs", "hardEndNs"))
+        require(type(row["target"]) is dict)
+        kind = row["target"].get("kind", "push")
+        require(kind in ("push", "push-new-branch"))
         target = _keys(row["target"], ("repository", "login", "accountId", "repositoryId",
-                                       "localRef", "remoteRef", "oldOid", "newOid"))
-        selected = wire.Selection(target["localRef"], target["remoteRef"], target["oldOid"], target["newOid"])
+                                       "localRef", "remoteRef", "oldOid", "newOid")
+                       + (("kind",) if kind == "push-new-branch" else ()))
+        selected = wire.selection(kind, target["localRef"], target["remoteRef"], target["oldOid"], target["newOid"])
         target = transport.Target(target["repository"], target["login"], target["accountId"], target["repositoryId"], selected)
         require(type(row["path"]) is str and type(row["socket"]) is list)
         result = Binding(row["id"], Clock(row["digest"], clock["workEndNs"], clock["hardEndNs"]),
