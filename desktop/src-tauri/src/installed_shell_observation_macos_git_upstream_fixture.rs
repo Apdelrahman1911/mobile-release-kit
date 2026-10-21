@@ -65,7 +65,7 @@ pub(super) const CREATED: [&str; 4] = [
 ];
 
 #[derive(Clone)]
-pub(super) struct Fixture {
+pub(in super::super) struct Fixture {
     files: [FileFact; 6],
     dirs: [[u64; 9]; 3],
     originals: [FileFact; 5],
@@ -168,7 +168,7 @@ pub(super) fn fixture_config(raw: &[u8]) -> bool {
     sections == 3 && seen & 63 == 63
 }
 impl Fixture {
-    pub(super) fn capture(root: &Path, uid: u32) -> Result<Self, ()> {
+    pub(in super::super) fn capture(root: &Path, uid: u32) -> Result<Self, ()> {
         if uid == 0 {
             return Err(());
         }
@@ -224,19 +224,19 @@ impl Fixture {
     pub(super) fn target(&self) -> &str {
         &self.target
     }
-    pub(super) fn root_identity(&self) -> [u64; 6] {
+    pub(in super::super) fn root_identity(&self) -> [u64; 6] {
         self.dirs[0][..6].try_into().expect("fixed six")
     }
-    pub(super) fn app(&self) -> [u64; 6] {
+    pub(in super::super) fn app(&self) -> [u64; 6] {
         self.dirs[1][..6].try_into().expect("fixed six")
     }
-    pub(super) fn release(&self) -> [u64; 6] {
+    pub(in super::super) fn release(&self) -> [u64; 6] {
         self.dirs[2][..6].try_into().expect("fixed six")
     }
-    pub(super) fn ignore(&self) -> FileFact {
+    pub(in super::super) fn ignore(&self) -> FileFact {
         self.files[4].clone()
     }
-    pub(super) fn config(&self) -> FileFact {
+    pub(in super::super) fn config(&self) -> FileFact {
         self.files[1].clone()
     }
     pub(super) fn original_config_hash(&self) -> &str {
