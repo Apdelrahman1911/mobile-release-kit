@@ -329,7 +329,7 @@ class _Journal(state._AllocationTransitions):
     def choose(self, make_request):
         """Find immutable source key first; only a genuinely absent key mints."""
         self._usable()
-        need(self.play_query is None, "play-pending")
+        need(self.play_query is None or self.remote.source.enabled == ("ios",), "play-pending")
         source = self.remote.source.binding
         matches = [row for row in self._state.candidates
                    if (row.request.source.ref, row.request.source.commit) == (source.ref, source.commit)]
@@ -338,6 +338,7 @@ class _Journal(state._AllocationTransitions):
             selected = matches[0]
             request = make_request(selected.request.candidate_id)
             need(selected.request == request, "candidate")
+            self._keep_play_for_ios(request, selected.local_project_id, self._state)
             self._local_project_id, self._bound_request = selected.local_project_id, request
             self.admit_request(self.settings.authority, request)
             return request
@@ -352,6 +353,34 @@ class _Journal(state._AllocationTransitions):
         after = state.AllocationState(self._state.authorities, enrollments, self._state.candidates)
         self._store(after.selecting(state.SelectedCandidate(self._local_project_id, request)))
         return request
+
+    def _keep_play_for_ios(self, request, local_project_id, after):
+        if self.play_query is None:
+            return
+        source = self.remote.source
+        need(self._schema_version == 2 and type(request) is a.AllocationRequest
+             and request.version_policy.schema_version == 2
+             and request.enabled_platforms == source.enabled == ("ios",)
+             and request.source == source.binding and request.identity_revision == source.identity
+             and request.base_version == source.base
+             and request.project_id == self.settings.authority.project_id, "play-pending")
+        self.play_query.require_state(self._state)
+        original = next(row for row in self._state.candidates
+                        if row.request.candidate_id == self.play_query.candidate_id)
+        enrollment = next(row for row in self._state.enrollments
+                          if row.local_project_id == original.local_project_id)
+        candidate = after.candidate(local_project_id)
+        # iOS progress cannot reinterpret, replace, resolve or unenroll the
+        # original Play candidate. Its full reservation is protected too, not
+        # merely the request hash stored in PlayQuery.
+        need(local_project_id != original.local_project_id
+             and request.candidate_id != original.request.candidate_id
+             and candidate is not None and candidate.request == request
+             and after.candidate(original.local_project_id) == original
+             and enrollment in after.enrollments, "play-pending")
+        for value in (self._state, after):
+            pending = value.selected(self.settings.authority).pending
+            need(pending is None or pending.reservation.request == request, "play-pending")
 
     def begin_play(self, request):
         self.admit_request(self.settings.authority, request)
@@ -377,7 +406,7 @@ class _Journal(state._AllocationTransitions):
         self._usable()
         need(self.revision < state.MAX_REVISION and self.writes < MAX_WRITES, "journal")
         if play_query is _KEEP:
-            need(self.play_query is None, "play-pending")
+            self._keep_play_for_ios(self._bound_request, self._local_project_id, after)
         else:
             need(after is self._state and self._play_original is not None
                  and ((self.play_query is None and play_query is self._play_original)

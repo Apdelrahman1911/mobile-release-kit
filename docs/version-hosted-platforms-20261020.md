@@ -100,8 +100,13 @@ Every write uses the existing blob CAS and exact commit-pinned readback.
    full candidate, current inventories and journal ancestry are checked again.
    Edit cleanup is not floor/source authority.
 
-An unresolved Play slot fences later hosted requests: no TTL, expiry, reset,
-reinsert, eviction or caller-supplied result can clear it. Lost clear ACK leaves
+An unresolved Play slot fences later Android or shared-platform hosted requests:
+no TTL, expiry, reset, reinsert, eviction or caller-supplied result can clear it.
+A separate, genuinely iOS-only schema-v2 request may progress only when its
+captured source and full request match and every write preserves the exact Play
+slot, original Android candidate/reservation and enrollment. A foreign pending
+allocation still blocks progress. This exception does not clean up the edit or
+permit changing an Android candidate into an iOS candidate. Lost clear ACK leaves
 that original unusable; a later runner trusts only verified remote state.
 A fresh explicit inventory after confirmed cleanup is a new query, **not a new
 version candidate**. Full-request drift or a consumed number refuses; retries

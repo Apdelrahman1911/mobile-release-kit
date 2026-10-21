@@ -64,6 +64,7 @@ class Case:
         self.settings = ci.Settings(self.fixture.authority, h.a.Checkpoint(0, self.repo.ledger.head_sha256, self.repo.head))
         self.policy = self.fixture.request.version_policy
         self.events, self.provider_calls, self.source = [], [], None
+        self.retained_play = None
         self.failure = self.after_write = None
         self.after_child = None
         self.play_build = 13
@@ -181,7 +182,7 @@ class Case:
             self.test.assertNotIn(store._GAC, env)
             self.test.assertEqual(env[store._P8], os.environ[store._P8])
             value = self.ios_frame(env["MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT"])
-            self.test.assertIsNone(h.Envelope.parse(self.repo.journal).play_query)
+            self.test.assertEqual(h.Envelope.parse(self.repo.journal).play_query, self.retained_play)
             self.clock += 4
         else:
             self.test.assertFalse(set(store._IOS) & env.keys())
@@ -212,6 +213,27 @@ class Case:
             store_context_revision=self.material.context(self.source)))
         return journal, request
 
+    def retain_play(self, *, same_source=False, ledger_pending=False):
+        # A prior synthetic runner durably entered the existing Play fence and
+        # was lost. No cleanup return or provider operation is invented here.
+        root = self.root / "prior-play"; root.mkdir()
+        fixture = Fixture(root, 3)
+        source = SourceData(fixture)
+        source.binding = (self.source.binding if same_source else
+                          replace(source.binding, commit="d" * 40))
+        journal = h._Journal(h._Remote(fixture.authority, source, self.repo.send), self.settings)
+        journal.load()
+        request = journal.choose(lambda candidate: replace(fixture.request,
+            candidate_id=candidate, source=source.binding))
+        if ledger_pending:
+            observation = android.CurrentInventory(request.identity_revision, request.store_context_revision,
+                "a" * 64, NOW, 7, (0, 0, 0, 0, 1))
+            reservation = self.repo.ledger.append(request, (observation,), now=NOW).reservations[-1]
+            journal.record_pending(h.a.PendingAllocation(fixture.authority, journal.checkpoint(fixture.authority),
+                h.a.blob_sha(self.repo.ledger.to_bytes()), reservation))
+        self.retained_play = journal.begin_play(request)
+        return h.Envelope.parse(self.repo.journal)
+
     def restart(self):
         # A genuinely separate synthetic runner reads the same remote bytes.
         # No old Material/currentness/ACK object is adopted by this attempt.
@@ -226,6 +248,23 @@ class Case:
 
 
 class HostedPlatformTests(unittest.TestCase):
+    def preserve_play(self, case, original):
+        protected = next(row for row in original.state.candidates
+                         if row.request.candidate_id == original.play_query.candidate_id)
+        enrollment = next(row for row in original.state.enrollments
+                          if row.local_project_id == protected.local_project_id)
+        writes = []
+        def inspect(role, request):
+            if role == h.JOURNAL_WRITE:
+                proposed = h.Envelope.parse(base64.b64decode(json.loads(request.body)["content"], validate=True))
+                self.assertEqual(proposed.schema_version, 2)
+                self.assertEqual(proposed.play_query, original.play_query)
+                self.assertEqual(proposed.state.candidate(protected.local_project_id), protected)
+                self.assertIn(enrollment, proposed.state.enrollments)
+                writes.append(proposed)
+        case.repo.before = inspect
+        return writes
+
     @contextmanager
     def case(self, schema=3):
         with TemporaryDirectory() as temporary, ExitStack() as stack:
@@ -287,6 +326,188 @@ class HostedPlatformTests(unittest.TestCase):
             self.assertEqual(final.schema_version, 1)
             self.assertEqual(c.repo.journal, h.p.canonical({"revision": final.revision, "state": final.state.value()}) + b"\n")
             self.assertEqual(sum(e[0] == "git" for e in c.events[:c.events.index(("journal", 1, False))]), 10)
+
+    def test_ios_progress_and_retry_preserve_prior_play_candidate_on_every_cas(self):
+        with self.case(2) as c:
+            retained = c.retain_play()
+            writes = self.preserve_play(c, retained)
+            first = c.reserve()
+            self.assertEqual((c.provider_calls, c.repo.ledger_puts), (["ios"], 1))
+            self.assertEqual(len(writes), 5)
+            self.assertEqual(c.source.git_calls, 12)
+            self.assertLessEqual(c.remote.calls, h.MAX_REQUESTS)
+            final = h.Envelope.parse(c.repo.journal)
+            selected = next(row for row in final.state.candidates
+                            if row.request.candidate_id == first["candidateId"])
+            self.assertEqual(selected.request.source, c.source.binding)
+            self.assertEqual(selected.reservation, c.repo.ledger.reservations[0])
+            self.assertEqual(len(final.state.candidates), 2)
+            c.restart()
+            repeated = c.reserve()
+            self.assertEqual((repeated["candidateId"], repeated["rowSha256"], repeated["version"]),
+                             (first["candidateId"], first["rowSha256"], first["version"]))
+            self.assertEqual((c.provider_calls, c.repo.ledger_puts), (["ios", "ios"], 1))
+            self.assertGreater(len(writes), 5)  # Reuse still acknowledges a real revision CAS.
+            self.assertEqual(h.Envelope.parse(c.repo.journal).state.candidates, final.state.candidates)
+            self.assertIsNone(h.Envelope.parse(c.repo.journal).state.selected(c.settings.authority).pending)
+
+    def test_play_exception_requires_actual_ios_schema_and_full_captured_source(self):
+        for schema in (3, 4):
+            with self.subTest(schema=schema), self.case(schema) as c:
+                c.retain_play(); before = c.repo.journal
+                with self.assertRaises(h.Refused) as error: c.reserve()
+                self.assertEqual(error.exception.reason, "play-pending")
+                self.assertEqual((c.provider_calls, c.repo.ledger_puts, c.repo.journal), ([], 0, before))
+        with self.case(2) as c:
+            c.retain_play(); before = c.repo.journal
+            request = replace(c.fixture.request, source=c.source.binding, identity_revision=c.source.identity,
+                              store_context_revision=c.material.context(c.source))
+            variants = (
+                replace(request, version_policy=h.p.VersionPolicy("automatic", c.policy.rules), store_context_revision=None),
+                replace(request, identity_revision="e" * 64),
+                replace(request, base_version=h.ReleaseVersion("1.2.3", 8)),
+                replace(request, source=replace(request.source, tree="e" * 40)),
+                replace(request, source=replace(request.source, configuration_sha256="e" * 64)),
+                replace(request, source=replace(request.source, version_sha256="e" * 64)),
+            )
+            for changed in variants:
+                with self.subTest(request=changed):
+                    journal = h._Journal(h._Remote(c.fixture.authority, c.source, c.send), c.settings); journal.load()
+                    with self.assertRaises(h.Refused) as error:
+                        journal.choose(lambda candidate: replace(changed, candidate_id=candidate))
+                    self.assertEqual(error.exception.reason, "play-pending")
+                    self.assertEqual((c.repo.journal, c.repo.ledger_puts, c.provider_calls), (before, 0, []))
+
+    def test_play_source_cannot_be_reinterpreted_and_existing_ios_request_stays_exact(self):
+        with self.case(2) as c:
+            c.retain_play(same_source=True); before = c.repo.journal
+            with patch.object(h, "uuid4", side_effect=AssertionError("existing source must not remint")):
+                with self.assertRaises(h.Refused) as error: c.reserve()
+            self.assertEqual(error.exception.reason, "candidate")
+            self.assertEqual((c.repo.journal, c.provider_calls), (before, []))
+        with self.case(2) as c:
+            c.retain_play(); c.select(); before = c.repo.journal
+            c.policy = replace(c.policy, rules=(h.p.RefRule(c.source.binding.ref, "minor"),))
+            with patch.object(h, "uuid4", side_effect=AssertionError("existing source must not remint")):
+                with self.assertRaises(h.Refused) as error: c.reserve()
+            self.assertEqual(error.exception.reason, "candidate")
+            self.assertEqual((c.repo.journal, c.provider_calls), (before, []))
+
+    def test_every_ios_store_rejects_play_local_identity_or_reservation_changes_before_put(self):
+        with self.case(2) as c:
+            retained = c.retain_play(); journal, _ = c.select()
+            original = next(row for row in retained.state.candidates
+                            if row.request.candidate_id == retained.play_query.candidate_id)
+            local = "e" * 32
+            moved = replace(journal._state,
+                enrollments=tuple(sorted((replace(row, local_project_id=local)
+                    if row.local_project_id == original.local_project_id else row
+                    for row in journal._state.enrollments), key=lambda row: row.local_project_id)),
+                candidates=tuple(sorted((replace(row, local_project_id=local)
+                    if row == original else row for row in journal._state.candidates), key=lambda row: row.local_project_id)))
+            request = original.request
+            observation = android.CurrentInventory(request.identity_revision, request.store_context_revision,
+                "a" * 64, NOW, 7, (0, 0, 0, 0, 1))
+            ledger = c.repo.ledger.append(request, (observation,), now=NOW)
+            selected = journal._state.selected(c.fixture.authority)
+            resolved = journal._state.replacing(replace(selected,
+                checkpoint=h.a.Checkpoint(1, ledger.head_sha256, c.repo.head))).selecting(
+                    replace(original, reservation=ledger.reservations[0]))
+            before, writes = c.repo.journal, c.repo.journal_puts
+            for changed in (moved, resolved):
+                # Both still satisfy PlayQuery's request-hash check and the
+                # existing codec. Only the full original row guard rejects them.
+                retained.play_query.require_state(changed)
+                h.Envelope(journal.revision + 1, changed, retained.play_query, 2).to_bytes()
+                with self.assertRaises(h.Refused) as error: journal._store(changed)
+                self.assertEqual(error.exception.reason, "play-pending")
+                self.assertEqual((c.repo.journal, c.repo.journal_puts), (before, writes))
+            self.assertEqual((c.provider_calls, c.repo.ledger_puts), ([], 0))
+
+    def test_ios_cas_losers_and_identical_reuse_do_not_replace_retained_play(self):
+        with self.case(2) as c:
+            retained = c.retain_play(); writes = self.preserve_play(c, retained)
+            journals = [h._Journal(h._Remote(c.fixture.authority, c.source, c.send), c.settings) for _ in range(2)]
+            for journal in journals: journal.load()
+            request = replace(c.fixture.request, source=c.source.binding, identity_revision=c.source.identity,
+                              store_context_revision=c.material.context(c.source))
+            winner = journals[0].choose(lambda candidate: replace(request, candidate_id=candidate))
+            with self.assertRaises(h.Refused): journals[1].choose(lambda candidate: replace(request, candidate_id=candidate))
+            self.assertTrue(journals[1]._poisoned)
+            before = len(c.repo.calls)
+            with self.assertRaises(h.a.VersionAllocationError): journals[1].choose(lambda _: winner)
+            self.assertEqual(len(c.repo.calls), before)
+            self.assertEqual((len(writes), c.provider_calls, c.repo.ledger_puts), (2, [], 0))
+            result = c.reserve()
+            self.assertEqual(result["candidateId"], winner.candidate_id)
+            journals = [h._Journal(h._Remote(c.fixture.authority, c.source, c.send), c.settings) for _ in range(2)]
+            for journal in journals:
+                journal.load(); journal.choose(lambda _: winner)
+            original = h.Envelope.parse(c.repo.journal)
+            row = c.repo.ledger.reservations[0]
+            journals[0].record_reused(c.fixture.authority, row, journals[0].checkpoint(c.fixture.authority))
+            advanced = h.Envelope.parse(c.repo.journal)
+            self.assertEqual(advanced.state, original.state)
+            self.assertEqual(advanced.revision, original.revision + 1)
+            self.assertNotEqual(journals[0].blob, journals[1].blob)
+            with self.assertRaises(h.Refused):
+                journals[1].record_reused(c.fixture.authority, row, journals[1].checkpoint(c.fixture.authority))
+            self.assertTrue(journals[1]._poisoned)
+            self.assertEqual(h.Envelope.parse(c.repo.journal), advanced)
+            self.assertEqual((c.provider_calls, c.repo.ledger_puts), (["ios"], 1))
+
+    def test_ios_lost_journal_ack_keeps_play_and_exact_candidate_without_resend(self):
+        for at in (1, 3, 5):
+            with self.subTest(write=at), self.case(2) as c:
+                retained = c.retain_play(); self.preserve_play(c, retained)
+                c.after_write = c.repo.journal_puts + at
+                with self.assertRaises(h.Refused): c.reserve()
+                unknown = h.Envelope.parse(c.repo.journal)
+                request = next(row.request for row in unknown.state.candidates if row.request.enabled_platforms == ("ios",))
+                self.assertEqual(c.provider_calls, [] if at == 1 else ["ios"])
+                self.assertTrue(c.remote.stopped)
+                before = len(c.repo.calls)
+                with self.assertRaises(h.Refused): c.reserve()
+                self.assertEqual(len(c.repo.calls), before)
+                c.after_write = None; c.restart()
+                if at == 3:  # Pending was durable, but no ledger PUT was released.
+                    with self.assertRaises(h.Refused): c.reserve()
+                    self.assertEqual(c.repo.ledger_puts, 0)
+                    self.assertEqual(h.Envelope.parse(c.repo.journal).state.selected(c.fixture.authority).pending,
+                                     unknown.state.selected(c.fixture.authority).pending)
+                else:
+                    result = c.reserve()
+                    self.assertEqual(result["candidateId"], request.candidate_id)
+                    self.assertEqual(c.repo.ledger_puts, 1)
+                self.assertNotIn("android", c.provider_calls)
+
+    def test_ios_pending_ledger_reconciles_but_never_resends_under_play_fence(self):
+        for fault in ("ledger-before", "ledger-after"):
+            with self.subTest(fault=fault), self.case(2) as c:
+                retained = c.retain_play(); self.preserve_play(c, retained)
+                c.repo.fault = fault
+                with self.assertRaises(h.Refused): c.reserve()
+                pending = h.Envelope.parse(c.repo.journal).state.selected(c.fixture.authority).pending
+                self.assertIsNotNone(pending)
+                c.repo.fault = None; c.restart()
+                if fault == "ledger-before":
+                    with self.assertRaises(h.Refused): c.reserve()
+                    self.assertEqual(h.Envelope.parse(c.repo.journal).state.selected(c.fixture.authority).pending, pending)
+                else:
+                    result = c.reserve()
+                    self.assertEqual(result["candidateId"], pending.reservation.request.candidate_id)
+                    self.assertEqual(result["rowSha256"], pending.reservation.sha256)
+                    self.assertIsNone(h.Envelope.parse(c.repo.journal).state.selected(c.fixture.authority).pending)
+                self.assertEqual((c.provider_calls, c.repo.ledger_puts), (["ios", "ios"], 1))
+
+    def test_foreign_ledger_pending_still_blocks_new_or_existing_ios_candidate(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing), self.case(2) as c:
+                if existing: c.select()
+                retained = c.retain_play(ledger_pending=True); self.preserve_play(c, retained)
+                before = c.repo.journal
+                with self.assertRaises(h.Refused): c.reserve()
+                self.assertEqual((c.repo.journal, c.provider_calls, c.repo.ledger_puts), (before, [], 0))
 
     def test_first_ios_failure_has_zero_play_pending_or_child_and_no_fallback(self):
         with self.case(4) as c:
