@@ -7,7 +7,6 @@ use crate::{
     },
     credential_setup::KeyReference,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -161,13 +160,10 @@ pub(super) fn key_recovery_input(
             && !value.public_key_spki_der.is_empty()
             && value.public_key_spki_der.len() <= 4 * 1024_usize.div_ceil(3),
     )?;
-    let spki = STANDARD
-        .decode(value.public_key_spki_der.as_bytes())
-        .map_err(|_| invalid())?;
+    let spki = profile::unbase64(&value.public_key_spki_der, 1024)?;
     need(
         !spki.is_empty()
             && spki.len() <= 1024
-            && STANDARD.encode(&spki) == value.public_key_spki_der
             && value.output.public_key_sha256 == hex(&Sha256::digest(&spki)),
     )?;
     Ok(KeyRecoveryInput {

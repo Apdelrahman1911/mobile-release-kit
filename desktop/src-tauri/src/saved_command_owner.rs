@@ -2410,7 +2410,7 @@ impl SavedCommandOwner {
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
         let android_selection = r.android_catalog.selection().cloned();
         r.prepared = Some(Prepared { agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
-        if r.prepared.as_ref().is_some_and(|p| p.tools.is_some()) { r.tool_acquisition.completed_sources = None; }
+        if r.prepared.as_ref().is_some_and(|p| p.tools.is_some()) { r.tool_acquisition.clear_completed_sources(); }
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.

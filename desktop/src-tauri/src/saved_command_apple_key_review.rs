@@ -132,7 +132,8 @@ pub(super) fn publish_review(
         .scope
         .key
         .as_ref()
-        .is_none_or(|key| key.vault_inventory.keys != 0)
+        .and_then(|key| key.vault_inventory.as_ref())
+        .is_none_or(|inventory| inventory.keys != 0)
     {
         return;
     }

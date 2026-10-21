@@ -238,6 +238,11 @@ pub(super) struct Registry {
     // locations. Discovery never supplies a cache-producer or source role.
     completed_sources: Option<Arc<sources::CompletedSources>>,
 }
+impl Registry {
+    pub(super) fn clear_completed_sources(&mut self) {
+        self.completed_sources = None;
+    }
+}
 pub(super) struct State {
     intent: Option<Arc<Intent>>,
     expected: Mutex<Option<Expected>>,
