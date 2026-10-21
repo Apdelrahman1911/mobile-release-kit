@@ -204,6 +204,13 @@ impl AppleProvisioningJournal {
     }
 }
 
+// Keep production migration authority private while allowing the sibling
+// recovery regressions to call this exact implementation.
+#[cfg(test)]
+pub(super) fn p12_v4_for_test(state: &mut State) -> Result<()> {
+    state.p12_v4()
+}
+
 #[cfg(test)]
 #[path = "apple_provisioning_p12_journal_tests.rs"]
 mod tests;

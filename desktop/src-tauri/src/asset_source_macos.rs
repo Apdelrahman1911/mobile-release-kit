@@ -105,6 +105,12 @@ impl SourceBook {
         Some(bytes)
     }
     #[cfg(test)]
+    pub(crate) fn unstarted_backing_data() -> Self {
+        // Model the capacity retained if a later reservation refuses.
+        // No original descriptor, native call or settlement is fabricated.
+        let mut book = Self::new(); book.slots.try_reserve_exact(4).unwrap(); book
+    }
+    #[cfg(test)]
     pub(crate) fn catalogue_folder_allocation_data(path:&Path)->Self{
         let components=parts(path).expect("bounded never-opened folder DATA");
         // The actual Android folder route has no origins/vault: precisely

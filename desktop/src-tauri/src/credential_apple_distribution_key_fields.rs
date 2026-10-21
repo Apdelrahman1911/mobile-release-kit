@@ -472,18 +472,18 @@ mod tests {
     fn recovery_frame_comparison_includes_private_scalar_not_only_csr_and_spki() {
         let original = frame(&[0x30, 0], &[0x30, 0]);
         let digest = crate::service_protocol::hex(&Sha256::digest(&original));
-        let fields = stored_fields(&storage()).unwrap();
+        let fields = stored_fields(&storage()).unwrap_or_else(|_| panic!("fixed fields"));
         assert!(frame_matches(&fields, original.len() as u32, &digest));
         assert!(!frame_matches(&fields, original.len() as u32 + 1, &digest));
         assert!(!frame_matches(&fields, original.len() as u32, &"f".repeat(64)));
         let mut different = storage(); different["privateKeyPkcs8Base64"] = json!("MAE=");
-        let changed = stored_fields(&different).unwrap();
+        let changed = stored_fields(&different).unwrap_or_else(|_| panic!("fixed fields"));
         assert!(public_parts_match(&changed, REQUEST.as_bytes(), &[0x30, 0]));
         assert!(!frame_matches(&changed, original.len() as u32, &digest));
         let mut different = storage(); different["csrPem"] = json!(REQUEST.replace("MAA=", "MAE="));
-        assert!(!frame_matches(&stored_fields(&different).unwrap(), original.len() as u32, &digest));
+        assert!(!frame_matches(&stored_fields(&different).unwrap_or_else(|_| panic!("fixed fields")), original.len() as u32, &digest));
         let mut different = storage(); different["publicKeySpkiBase64"] = json!("MAE=");
-        assert!(!frame_matches(&stored_fields(&different).unwrap(), original.len() as u32, &digest));
+        assert!(!frame_matches(&stored_fields(&different).unwrap_or_else(|_| panic!("fixed fields")), original.len() as u32, &digest));
         // These are fixed codec scalars, not keys. The separate shipped
         // verifier/native loan is still required for cryptographic validity.
         assert_eq!(original, frame(&[0x30, 0], &[0x30, 0]));

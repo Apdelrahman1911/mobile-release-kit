@@ -16,7 +16,7 @@ mod tests {
 
     fn state() -> State {
         let mut state = State::empty();
-        state.key_v3().unwrap();
+        super::super::key::key_v3_for_test(&mut state).unwrap();
         state.key_rows.as_mut().unwrap().push(old_row());
         state.validate().unwrap();
         state
@@ -28,7 +28,7 @@ mod tests {
         // Schema3 and schema4 canonical reads remain byte-identical.
         for revision in 3..=4 {
             if revision == 4 {
-                state.p12_v4().unwrap();
+                super::super::p12::p12_v4_for_test(&mut state).unwrap();
             }
             let bytes = state.bytes().unwrap();
             let decoded = State::decode(&Snapshot {
@@ -47,8 +47,8 @@ mod tests {
         let recovered_bytes = state.bytes().unwrap();
         // Later ordinary key/P12 reserve helpers must not downgrade or drop
         // the explicit schema5 relation. Their original methods are reused.
-        state.key_v3().unwrap();
-        state.p12_v4().unwrap();
+        super::super::key::key_v3_for_test(&mut state).unwrap();
+        super::super::p12::p12_v4_for_test(&mut state).unwrap();
         assert_eq!(state.bytes().unwrap(), recovered_bytes);
         assert!(!state.unresolved(&row.intent.context.account_ref));
         assert!(state.key_rows.as_ref().unwrap()[0].unresolved());

@@ -364,6 +364,13 @@ impl AppleProvisioningJournal {
     }
 }
 
+// Sibling recovery tests exercise the real migration without exposing it
+// outside its owning module in production builds.
+#[cfg(test)]
+pub(super) fn key_v3_for_test(state: &mut State) -> Result<()> {
+    state.key_v3()
+}
+
 #[cfg(test)]
 #[path = "apple_provisioning_key_journal_tests.rs"]
 mod tests;
