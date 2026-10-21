@@ -14,6 +14,13 @@ use std::sync::atomic::AtomicU64;
 #[path = "asset_session_agent_upload_key_relay.rs"]
 mod relay;
 pub(crate) use relay::UploadKeyRelay;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "asset_session_agent_upload_key_reuse.rs"]
+mod reuse;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(super) use reuse::{attach_prepared, prepare_completion, prepared_reply};
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(
@@ -337,8 +344,10 @@ pub(super) fn before_install(
     }
 }
 
-/// Minted only at the actual original Asset retirement below. It is neither
-/// Deserialize nor constructible by the service request/CLI protocol.
+/// Minted only at the actual original native result cut below. PrepareExisting
+/// means joined Load/assessment with its normal live Preview, NOT private
+/// payload retirement. All other actions still require their original final
+/// publication/retirement. Never constructed from service/CLI DATA.
 pub(crate) struct UploadKeyAgentRetired {
     entry: Weak<requests::Entry>,
     id: u32,
@@ -404,9 +413,13 @@ impl DocumentBinding {
             return Err(BridgeError::invalid());
         }
         let s = service(&self.lock()).map_err(public)?;
-        s.map_or(Ok(p::Access::empty()), |s| {
+        let value = s.map_or(Ok(p::Access::empty()), |s| {
             s.upload_key_requests().access(None).map_err(public)
-        })
+        })?;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let value = reuse::access(self, value);
+        Ok(value)
     }
     pub(crate) fn revoke_agent_upload_key(
         &self,
@@ -606,9 +619,9 @@ impl DocumentBinding {
         }
         Ok(claim)
     }
-    pub(super) fn run_agent_upload_key(&self, claim: requests::Claim, #[cfg(feature = "desktop-shell")] app: tauri::AppHandle) {
+    pub(super) fn run_agent_upload_key(&self, claim: &requests::Claim, #[cfg(feature = "desktop-shell")] app: tauri::AppHandle) -> Result<Option<u32>, Error> {
         let link = claim.link().clone();
-        let result = (|| {
+        (|| {
             let grant = self
                 .lock()
                 .agent_upload_key
@@ -643,8 +656,7 @@ impl DocumentBinding {
             {
                 Err(Error::Unavailable)
             }
-        })();
-        claim.returned(result);
+        })()
     }
     pub(super) fn agent_upload_key_tick(&self) {
         self.reconcile();
@@ -723,6 +735,10 @@ mod tests {
     #[test]
     fn main_requests_are_small_explicit_action_and_consent_pairs_not_status_authority() {
         for (selection, consent) in [
+            (
+                serde_json::json!({"kind":"prepare-existing","recordId":"c".repeat(32),"expectedRevision":1}),
+                p::Kind::PrepareExisting.consent(),
+            ),
             (
                 serde_json::json!({"kind":"generate-new","declaration":p::DECLARATION}),
                 p::Kind::GenerateNew.consent(),

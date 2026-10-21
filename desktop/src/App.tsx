@@ -810,7 +810,7 @@ export function App() {
     return { port: service.api?.mode === 'native' ? service.api.agentUploadKeyAccess ?? null : null,
       nativeSession: service.api?.mode === 'native' ? service : null, projectId: project ? selected : null, project, assets,
       generateReady: assetSession.canConfirmUploadKey(assets), blockedReason: savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) };
-  } }));
+  }, prepareExisting: (record) => assetSession.prepareExistingForCli(record) }));
   useSyncExternalStore(agentUploadKey.subscribe, agentUploadKey.getSnapshot, agentUploadKey.getSnapshot);
   useEffect(() => { agentUploadKey.syncContext(); });
   // Evidence selection has deliberately no source-project or draft callback.

@@ -3,6 +3,8 @@
 use super::*;
 use crate::{service_upload_key_protocol as agent, service_upload_key_requests as requests};
 use crate::asset_session::vault::backup_delegation;
+#[path = "credential_upload_key_reuse.rs"]
+mod reuse;
 
 pub(in crate::asset_session) struct Proof {
     context: Weak<NativeContext>,
@@ -11,6 +13,7 @@ pub(in crate::asset_session) struct Proof {
     action: Selected,
 }
 enum Selected {
+    Prepare(reuse::Selection),
     Generate(Weak<PreparedSetup>),
     Bind {
         owner: Weak<OriginalWork>,
@@ -30,6 +33,7 @@ impl Proof {
             + std::mem::size_of::<Mutex<store::StoreBook>>()
             + std::mem::size_of::<crypto::VaultKey>()
             + match &self.action {
+                Selected::Prepare(selected) => selected.extra_bytes(),
                 Selected::Generate(_) => 2 * std::mem::size_of::<usize>() + std::mem::size_of::<PreparedSetup>(),
                 Selected::Bind { token, .. } => {
                     2 * std::mem::size_of::<usize>() + std::mem::size_of::<OriginalWork>() + token.capacity()
@@ -40,6 +44,7 @@ impl Proof {
     pub(in crate::asset_session) fn end(&self, now: Instant) -> Instant {
         let cap = now + Duration::from_secs(agent::ALLOW_SECONDS);
         match &self.action {
+            Selected::Prepare(_) => cap,
             Selected::Generate(_) => cap,
             Selected::Bind { end, .. } => cap.min(*end),
             Selected::Backup(_) => cap,
@@ -47,12 +52,13 @@ impl Proof {
     }
     pub(in crate::asset_session) fn kind(&self) -> agent::Kind {
         match self.action {
+            Selected::Prepare(_) => agent::Kind::PrepareExisting,
             Selected::Generate(_) => agent::Kind::GenerateNew,
             Selected::Bind { .. } => agent::Kind::BindReviewed,
             Selected::Backup(ref selected) => selected.kind(),
         }
     }
-    pub(in crate::asset_session) fn current(
+    fn source_current(
         &self,
         document: &DocumentBinding,
         state: &DocumentState,
@@ -81,7 +87,13 @@ impl Proof {
         {
             return Err(AssetError::new(Reason::ContextStale));
         }
+        Ok(())
+    }
+    pub(in crate::asset_session) fn current(&self, document: &DocumentBinding, state: &DocumentState) -> Result<(), AssetError> {
+        self.source_current(document, state)?;
+        let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         match &self.action {
+            Selected::Prepare(selected) => selected.current(state)?,
             Selected::Generate(ready) => {
                 let ready = ready
                     .upgrade()
@@ -139,6 +151,19 @@ impl Proof {
         }
         Ok(())
     }
+    pub(in crate::asset_session) fn attach_prepare(&self, slot: &Slot, link: &Arc<requests::NativeLink>) -> Result<(), AssetError> {
+        match &self.action { Selected::Prepare(s) => s.attach(slot, link), _ => Err(AssetError::invalid()) }
+    }
+    pub(in crate::asset_session) fn prepared_returned(&self, document: &DocumentBinding, state: &DocumentState,
+        link: &Arc<requests::NativeLink>) -> Result<(), AssetError> {
+        self.source_current(document, state)?;
+        match &self.action { Selected::Prepare(s) => s.returned(state, link), _ => Err(AssetError::invalid()) }
+    }
+    pub(in crate::asset_session) fn prepared_view(&self, document: &DocumentBinding, state: &DocumentState,
+        link: &Arc<requests::NativeLink>) -> Option<agent::Prepared> {
+        self.source_current(document, state).ok()?;
+        match &self.action { Selected::Prepare(s) => s.view(state, link), _ => None }
+    }
     #[cfg(all(
         feature = "desktop-shell",
         target_os = "macos",
@@ -151,8 +176,9 @@ impl Proof {
         document: &DocumentBinding,
         link: Arc<requests::NativeLink>,
         app: tauri::AppHandle,
-    ) -> Result<(), AssetError> {
+    ) -> Result<Option<u32>, AssetError> {
         match &self.action {
+            Selected::Prepare(selected) => selected.run(document, link).map(Some),
             Selected::Generate(_) => {
                 let (revision, context_revision) = {
                     let state = document.lock();
@@ -174,12 +200,12 @@ impl Proof {
                         },
                         link,
                     )
-                    .map(|_| ())
+                    .map(|_| None)
             }
             Selected::Bind { token, .. } => {
-                document.bind_vault_delegated(token, Some(link)).map(|_| ())
+                document.bind_vault_delegated(token, Some(link)).map(|_| None)
             }
-            Selected::Backup(selected) => selected.run(document, app, link),
+            Selected::Backup(selected) => selected.run(document, app, link).map(|_| None),
         }
     }
     #[cfg(not(all(
@@ -194,7 +220,7 @@ impl Proof {
         _document: &DocumentBinding,
         _link: Arc<requests::NativeLink>,
         #[cfg(feature = "desktop-shell")] _app: tauri::AppHandle,
-    ) -> Result<(), AssetError> {
+    ) -> Result<Option<u32>, AssetError> {
         Err(AssetError::new(Reason::Unqualified))
     }
 }
@@ -219,6 +245,8 @@ pub(in crate::asset_session) fn capture(
         .ok_or_else(|| AssetError::new(Reason::ContextStale))?;
     let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
     let action = match selected {
+        agent::Selection::PrepareExisting { record_id, expected_revision } =>
+            Selected::Prepare(reuse::Selection::capture(state, record_id, *expected_revision)?),
         agent::Selection::GenerateNew { .. } => Selected::Generate(Arc::downgrade(
             session
                 .upload_key_setup
@@ -267,6 +295,9 @@ pub(in crate::asset_session) fn completion(
     state: &DocumentState,
     slot: &Slot,
 ) -> Option<(agent::State, agent::Reason, Option<agent::KeyReference>)> {
+    if slot.operation == Operation::Prepare {
+        return crate::asset_session::agent_upload_key::prepare_completion(document, state, slot);
+    }
     if !matches!(
         slot.operation,
         Operation::GenerateUploadKey | Operation::Bind | Operation::PrepareBackupExport | Operation::ImportBackup

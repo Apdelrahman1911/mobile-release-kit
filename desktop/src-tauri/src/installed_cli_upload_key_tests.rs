@@ -288,6 +288,7 @@ fn scope_and_existing_request_catalogue_expose_only_bounded_original_addresses()
             .contains("No upload-key consent")
     );
     let a = key::Access {
+        prepared: None,
         schema_version: 1,
         service_instance: Some(id('b')),
         project_id: Some(id('a')),
@@ -335,4 +336,25 @@ fn scope_and_existing_request_catalogue_expose_only_bounded_original_addresses()
     let copy = catalogue.additional_requests.as_ref().unwrap()[0].clone();
     catalogue.additional_requests.as_mut().unwrap().push(copy);
     assert!(catalogue.validate().is_err());
+}
+
+#[test]
+fn existing_prepare_output_is_review_only_and_has_no_cli_record_selector() {
+    let mut value = row();
+    value.kind = key::Kind::PrepareExisting; value.state = key::State::ReviewReady;
+    value.settlement = p::Settlement::Settled; value.asset_operation_id = Some(7);
+    let view = response(p::ResponseBody::UploadKeyRequest(value));
+    let (code, bytes) = output(&view, &origin(), None, false).unwrap();
+    assert_eq!(code, 0);
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("not assignment, a save, or private cleanup"));
+    assert!(text.contains("separately review and allow Bind"));
+    let (_, bytes) = output(&view, &origin(), None, true).unwrap();
+    let raw = String::from_utf8(bytes).unwrap();
+    assert!(!raw.contains("previewToken")); assert!(!raw.contains("prepared"));
+    for word in ["--prepare-existing", "--record-id", "--auto-bind", "--password"] {
+        let args: Vec<OsString> = [COMMANDS[1], origin().project_id.as_str(), origin().service_instance.as_str(),
+            id('d').as_str(), "--reviewed", word].into_iter().map(OsString::from).collect();
+        assert!(parse(&args).is_err());
+    }
 }

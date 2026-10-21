@@ -91,6 +91,8 @@ const MAIN: &str = "main";
 const WORK: Duration = Duration::from_secs(10);
 const CLEANUP: Duration = Duration::from_secs(2);
 const REVIEW: Duration = Duration::from_secs(300);
+#[path = "asset_session_prepared_reply.rs"]
+mod prepared_reply;
 const RECORD_LIMIT: usize = 32;
 const SESSION_BYTES: usize = 64 * 1024 * 1024;
 // Conservative per-record backing charge: bounded parser projection, native
@@ -6412,21 +6414,8 @@ impl DocumentBinding {
     /// No original resource/handle or secret-bearing result is removed into this
     /// waiter. Abandonment is just loss of an observer, including during R1 IO.
     pub(crate) async fn prepared(&self, id: u32) -> Result<AssetStatus, CommandError> {
-        loop {
-            self.reconcile();
-            {
-                let state = self.lock();
-                let slot = state.slot.as_ref().filter(|slot| slot.owner.id == id).ok_or_else(|| AssetError::new(Reason::ContextStale))?;
-                if state.unknown || slot.settlement == Settlement::Unknown || slot.settlement == Settlement::LateKnown { return Err(AssetError::new(Reason::CleanupUnknown).into()); }
-                if slot.owner.resources_settled() && matches!(slot.phase, Phase::Selected | Phase::Preview | Phase::Idle) {
-                    if slot.reason == Reason::ContextStale { return Err(AssetError::new(Reason::ContextStale).into()); }
-                    if let Some(error) = &slot.error { return Err(error.clone()); }
-                    if slot.reason != Reason::None { return Err(AssetError::new(slot.reason).into()); }
-                    return Ok(self.snapshot(&state));
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        prepared_reply::PreparedReply::ordinary(self.clone(), id).await?
+            .ok_or_else(|| AssetError::new(Reason::ContextStale).into())
     }
 }
 

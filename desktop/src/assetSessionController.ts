@@ -6,6 +6,8 @@ import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOpe
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
 import { CredentialUploadKeyController } from './credentialUploadKeyController.ts';
 import { parseUploadKeyStatus, UPLOAD_KEY_OPERATION, RECOVER_UPLOAD_KEY_OPERATION, type UploadKeyRecoveryAction } from './credentialUploadKey.ts';
+import { agentUploadKeyReuseSelection, agentUploadKeyPreparedMatches, parseAgentUploadKeyPrepared, sameAgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
+import type { AgentUploadKeyPreparation, AgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
 import { BACKUP_EXPORT_OPERATION, BACKUP_IMPORT_OPERATION, credentialBackupExportRequest, credentialBackupImportRequest } from './credentialBackup.ts';
 
 function freeze<T>(value: T): T {
@@ -139,6 +141,7 @@ export class AssetSessionController {
   private reviewCeiling: number | null = null;
   private cancelling: number | null = null;
   private intentPhase: IntentPhase | null = null;
+  private delegatedPreparation: object | null = null;
   private selectedProject: () => ProjectSession | null;
   private now: () => number;
   private otherOperationReason: () => string | null;
@@ -536,6 +539,87 @@ export class AssetSessionController {
     const request: CredentialPrepareRequest = { contextRevision: this.state.status!.context!.revision, source: { type: 'record', ...record } };
     this.reviewCeiling = null;
     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase(intent, 'prepare', 'bind'));
+  }
+  // Predeclared only by this page's explicit Prepare-existing permission.
+  // This creates no operation, visible intent, native request or join fact.
+  prepareExistingForCli(record: AssetRecordRef): AgentUploadKeyPreparation | null {
+    if (!this.contextReady() || !this.idle() || !agentUploadKeyReuseSelection(this.state, record) || !this.api || !this.unlisten) return null;
+    const api = this.api, project = this.selectedProject(), local = this.localRevision, failure = this.failureRevision;
+    const entry = this.state.entryGeneration, acknowledged = this.contextAcknowledged, prior = this.intentPhase;
+    const intent = this.recordIntent(record, 'assign');
+    if (!intent || intent.kind !== 'android-keystore') return null;
+    const phase = this.phase(intent, 'prepare', 'bind'), token = {};
+    let end = this.now() + 300_000, stopped = false, adopted = false, reading = false, readEntered = false;
+    let pinned: AgentUploadKeyPrepared | null = null;
+    // As for ordinary prepareRecord, this explicit idle-only new attempt must
+    // not inherit a discarded prior review's ceiling. Its own end remains fixed.
+    this.reviewCeiling = null;
+    this.delegatedPreparation = token;
+    const valid = (expected = prior): boolean => {
+      const peer = this.otherOperationReason(), active = this.current(), selected = this.selectedProject(), now = this.now();
+      return !peer && active && !stopped && !this.disposed && this.delegatedPreparation === token && this.api === api &&
+        selected === project && this.localRevision === local && this.failureRevision === failure && this.state.entryGeneration === entry &&
+        this.contextAcknowledged === acknowledged && this.intentPhase === expected && !this.state.busy && !this.state.updatingContext &&
+        !this.state.blocked && !this.state.observationFailed && this.state.contextCurrent && Number.isFinite(end) && now < end;
+    };
+    const invalidate = () => {
+      stopped = true;
+      if (this.delegatedPreparation === token) this.delegatedPreparation = null;
+      // Withdrawing permission after a genuinely correlated review leaves that
+      // ordinary review intact. It still needs separate actual Bind consent.
+      if (!adopted && this.intentPhase === phase) {
+        this.intentPhase = null;
+        this.update({ intent: null, reviewReady: false, originPending: false });
+      }
+    };
+    return Object.freeze({ current: () => valid(adopted ? phase : prior), invalidate,
+      observe: async (value: AgentUploadKeyPrepared, current: () => boolean, reviewEnd: number | null): Promise<boolean> => {
+        const ready = (expected = prior) => current() && valid(expected);
+        const stamp = parseAgentUploadKeyPrepared(value);
+        if (!stamp || reviewEnd === null || !Number.isFinite(reviewEnd) || !ready(adopted ? phase : prior) || stamp.contextRevision !== phase.contextRevision ||
+            stamp.recordId !== record.recordId || stamp.expectedRevision !== record.expectedRevision ||
+            stamp.statusRevision <= phase.afterStatusRevision || phase.previousOperationId !== null && stamp.assetOperationId <= phase.previousOperationId ||
+            pinned && !sameAgentUploadKeyPrepared(pinned, stamp)) { invalidate(); return false; }
+        pinned = stamp;
+        end = Math.min(end, reviewEnd);
+        if (!ready(adopted ? phase : prior)) { invalidate(); return false; }
+        if (adopted) return ready(phase) && !!this.state.status && agentUploadKeyPreparedMatches(this.state.status, stamp) && this.state.reviewReady;
+        if (reading || readEntered) return false;
+        reading = true;
+        try {
+          // checkStatus coalesces. Its pre-stamp read is an original we must
+          // join, never the post-stamp evidence required by this handoff.
+          const old = this.reading;
+          if (old) await old;
+          if (this.reading || !ready()) return false;
+          readEntered = true;
+          let matched = false;
+          const work = Promise.resolve().then(async () => {
+            if (!ready()) return;
+            const raw = await api.assetStatus();
+            if (!ready()) return;
+            const status = this.receive(raw); // Existing monotonic/parser path and subscribers.
+            if (!status || !ready() || status.statusRevision < (this.state.status?.statusRevision ?? 0) ||
+                !agentUploadKeyPreparedMatches(status, stamp) || !this.state.status || !agentUploadKeyPreparedMatches(this.state.status, stamp)) return;
+            phase.operationId = stamp.assetOperationId;
+            phase.reviewBinding = JSON.stringify([stamp.previewToken, 'bind', 'android-keystore', 'assign', stamp.recordId, stamp.expectedRevision]);
+            this.intentPhase = phase;
+            this.reviewCeiling = Math.min(end, this.state.previewDeadline ?? Infinity, this.now() + status.operation!.preview!.expiresInMs);
+            this.update({ intent: phase.intent, originPending: false, previewDeadline: this.reviewCeiling,
+              reviewReady: this.reviewMatches(this.state.status) });
+            matched = ready(phase) && this.state.reviewReady;
+          });
+          this.reading = work;
+          this.update({ observing: true });
+          try { await work; }
+          catch (error) { this.fail(error); }
+          finally { if (this.reading === work) this.reading = null; this.update({ observing: false }); }
+          if (!matched || !ready(phase) || !this.state.reviewReady) { invalidate(); return false; }
+          adopted = true;
+          return true;
+        } finally { reading = false; }
+      },
+    });
   }
   prepareDelete(record: AssetRecordRef): boolean {
     if (!this.api || assetSessionReason(this.state) || !assetStorageWritable(this.state.status) || !this.idle()) return false;

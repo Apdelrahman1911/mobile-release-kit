@@ -320,7 +320,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
                 "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
-            "androidUploadKey": {"actions":["generate-new","bind-reviewed","backup-encrypted","restore-encrypted"],"defaultEnabled":false,"oneUse":true,
+            "androidUploadKey": {"actions":["prepare-existing","generate-new","bind-reviewed","backup-encrypted","restore-encrypted"],"defaultEnabled":false,"oneUse":true,
                 "maxAllowSeconds":crate::service_upload_key_protocol::ALLOW_SECONDS,"maxRetainedRequests":crate::service_upload_key_protocol::REQUEST_LIMIT,
                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
                 "privateArguments":false,"backup":true,"restore":true,"backupRequiresNativePickers":true,

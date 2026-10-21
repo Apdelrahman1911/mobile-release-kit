@@ -255,6 +255,7 @@ impl Inbox {
             .clone();
         let enabled = !b.closed && request.is_none() && lease.stop(now, false)?.is_none();
         let access = p::Access {
+            prepared: None, // Compact native reply is MAIN-only, never manufactured by Inbox DATA.
             schema_version: 1,
             service_instance: Some(self.instance.clone()),
             project_id: Some(lease.scope.project_id.clone()),
@@ -433,6 +434,9 @@ impl Entry {
     }
     pub(crate) fn grant_id(&self) -> &Id {
         &self.input.grant_id
+    }
+    pub(crate) fn origin(&self) -> &p::Query {
+        &self.input.origin
     }
     pub(crate) fn pending(&self) -> bool {
         self.failed.load(Ordering::Acquire)

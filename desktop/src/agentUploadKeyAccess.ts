@@ -3,14 +3,16 @@ import { reserveId, reserveProject } from './versionReserve.ts';
 import type { AssetDisplayState, AssetRecordRef } from './assetSessionTypes.ts';
 import { AGENT_UPLOAD_KEY_RESTORE_DECLARATION, agentUploadKeyBackupSelection } from './agentUploadKeyBackup.ts';
 import type { AgentUploadKeyBackupKind, AgentUploadKeyBackupSelection } from './agentUploadKeyBackup.ts';
+import { agentUploadKeyReuseSelection, parseAgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
+import type { AgentUploadKeyPrepared, AgentUploadKeyReuseSelection } from './agentUploadKeyReuse.ts';
 
 // Permission and comparison DATA only. No private input or native credential
 // capability is transported by this panel or by the installed CLI.
-export type AgentUploadKeyKind = 'generate-new' | 'bind-reviewed' | AgentUploadKeyBackupKind;
+export type AgentUploadKeyKind = 'prepare-existing' | 'generate-new' | 'bind-reviewed' | AgentUploadKeyBackupKind;
 export type AgentUploadKeySelection =
   | { readonly kind: 'generate-new'; readonly declaration: 'new-application-no-existing-upload-key' }
   | { readonly kind: 'bind-reviewed'; readonly previewOperationId: number; readonly previewToken: string }
-  | AgentUploadKeyBackupSelection;
+  | AgentUploadKeyBackupSelection | AgentUploadKeyReuseSelection;
 export interface AgentUploadKeyAccess {
   readonly schemaVersion: 1;
   readonly serviceInstance: string | null;
@@ -21,6 +23,7 @@ export interface AgentUploadKeyAccess {
   readonly enabled: boolean;
   readonly remainingMs: number;
   readonly consumed: boolean;
+  readonly prepared?: AgentUploadKeyPrepared;
 }
 export interface AgentUploadKeyAllow {
   readonly projectId: string;
@@ -38,6 +41,7 @@ export const AGENT_UPLOAD_KEY_MAX_MS = 300_000;
 export const AGENT_UPLOAD_KEY_DECLARATION = 'new-application-no-existing-upload-key' as const;
 export function agentUploadKeyConsent(kind: AgentUploadKeyKind): string {
   switch (kind) {
+    case 'prepare-existing': return 'agent-android-upload-key-prepare-once-v1';
     case 'generate-new': return 'agent-android-upload-key-generate-once-v1';
     case 'bind-reviewed': return 'agent-android-upload-key-bind-once-v1';
     case 'backup-encrypted': return 'agent-android-upload-key-backup-once-v1';
@@ -47,13 +51,17 @@ export function agentUploadKeyConsent(kind: AgentUploadKeyKind): string {
 const fields = ['schemaVersion', 'serviceInstance', 'projectId', 'grantId', 'kind', 'requestId', 'enabled', 'remainingMs', 'consumed'];
 const integer = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0) && v >= 0 && v <= max;
 export const uploadKeyRevision = (v: unknown): v is number => integer(v, 0xffff_fffe) && v > 0;
-const kind = (v: unknown): v is AgentUploadKeyKind => v === 'generate-new' || v === 'bind-reviewed' || v === 'backup-encrypted' || v === 'restore-encrypted';
+const kind = (v: unknown): v is AgentUploadKeyKind => v === 'prepare-existing' || v === 'generate-new' || v === 'bind-reviewed' || v === 'backup-encrypted' || v === 'restore-encrypted';
 
 export function parseAgentUploadKeyAccess(raw: unknown): AgentUploadKeyAccess | null {
   try {
-    const v = copyBoundedComparisonData(raw, 4096, 32);
-    if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== fields.length || !fields.every((k) => Object.hasOwn(v, k))) return null;
+    // Nine ordinary fields (19 nodes), plus the one fixed seven-field stamp
+    // (16 nodes). No other extension or free nested value is admitted below.
+    const v = copyBoundedComparisonData(raw, 4096, 19 + 16);
+    if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== fields.length + Number(Object.hasOwn(v, 'prepared')) || !fields.every((k) => Object.hasOwn(v, k))) return null;
     const d = v as Record<string, unknown>;
+    const prepared = Object.hasOwn(d, 'prepared') ? parseAgentUploadKeyPrepared(d.prepared) : undefined;
+    if (prepared === null || prepared && (d.kind !== 'prepare-existing' || d.enabled !== false || d.consumed !== true)) return null;
     if (d.schemaVersion !== 1 || typeof d.enabled !== 'boolean' || typeof d.consumed !== 'boolean' ||
         !integer(d.remainingMs, AGENT_UPLOAD_KEY_MAX_MS) || !(d.requestId === null || reserveId(d.requestId)) ||
         d.consumed !== (d.requestId !== null) || d.enabled && (d.consumed || d.remainingMs === 0) || !d.enabled && d.remainingMs !== 0) return null;
@@ -64,7 +72,7 @@ export function parseAgentUploadKeyAccess(raw: unknown): AgentUploadKeyAccess | 
     }
     if (!reserveId(d.serviceInstance) || !reserveId(d.projectId) || !reserveId(d.grantId) || !kind(d.kind)) return null;
     return Object.freeze({ schemaVersion: 1, serviceInstance: d.serviceInstance, projectId: d.projectId, grantId: d.grantId,
-      kind: d.kind, requestId: d.requestId, enabled: d.enabled, remainingMs: d.remainingMs, consumed: d.consumed });
+      kind: d.kind, requestId: d.requestId, enabled: d.enabled, remainingMs: d.remainingMs, consumed: d.consumed, ...(prepared ? { prepared } : {}) });
   } catch { return null; }
 }
 export function parseAgentUploadKeySelection(raw: unknown): AgentUploadKeySelection | null {
@@ -78,6 +86,8 @@ export function parseAgentUploadKeySelection(raw: unknown): AgentUploadKeySelect
       return Object.freeze({ kind: 'bind-reviewed', previewOperationId: d.previewOperationId, previewToken: d.previewToken });
     if (keys.length === 3 && d.kind === 'backup-encrypted' && reserveId(d.recordId) && uploadKeyRevision(d.expectedRevision))
       return Object.freeze({ kind: 'backup-encrypted', recordId: d.recordId, expectedRevision: d.expectedRevision });
+    if (keys.length === 3 && d.kind === 'prepare-existing' && reserveId(d.recordId) && uploadKeyRevision(d.expectedRevision))
+      return Object.freeze({ kind: 'prepare-existing', recordId: d.recordId, expectedRevision: d.expectedRevision });
     if (keys.length === 2 && d.kind === 'restore-encrypted' && d.declaration === AGENT_UPLOAD_KEY_RESTORE_DECLARATION)
       return Object.freeze({ kind: 'restore-encrypted', declaration: AGENT_UPLOAD_KEY_RESTORE_DECLARATION });
     return null;
@@ -114,6 +124,7 @@ export function agentUploadKeySelection(assets: AssetDisplayState, selected: Age
       s.persistence?.state !== 'unlocked' || s.persistence.keyAccess !== 'read-write' || c?.platform !== 'android' || c.executionMode !== 'local' ||
       !uploadKeyRevision(c.revision) || !uploadKeyRevision(s.statusRevision)) return null;
   const o = s.operation;
+  if (selected === 'prepare-existing') return agentUploadKeyReuseSelection(assets, backupRecord);
   if (selected === 'generate-new') return generateReady && (!o || o.phase === 'idle' && o.settlement === 'known') &&
     !s.records.some((r) => r.kind === 'android-keystore') ? Object.freeze({ kind: selected, declaration: AGENT_UPLOAD_KEY_DECLARATION }) : null;
   if (selected === 'backup-encrypted' || selected === 'restore-encrypted') return agentUploadKeyBackupSelection(assets, selected, backupRecord);

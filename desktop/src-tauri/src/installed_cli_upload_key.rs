@@ -114,6 +114,9 @@ fn output(
             receipt(q)
         );
         out.push_str(match row.state {
+            key::State::ReviewReady => {
+                "The original existing-key Load and assessment returned. This is not assignment, a save, or private cleanup. In the same Desktop view, Check original permission for the current review, withdraw this permission, then separately review and allow Bind.\n"
+            }
             key::State::SavedUnassigned => {
                 "Encrypted key saved, not assigned. Review and assign in Desktop before use.\n"
             }
@@ -171,7 +174,7 @@ fn scope_output(response: &p::Response, project: &Id, json: bool) -> Result<(u8,
         } else {
             out.push_str("No upload-key consent is retained. Prepare or review the existing key in Desktop, then explicitly allow one action.\n");
         }
-        out.push_str("Never generate a replacement for an existing/reserved/unknown key. Encrypted backup/restore require separate exact Desktop consent and both genuine native dialogs; no CLI path, key, password or recovery code is accepted. Restore is NEW and unassigned, not a Bind or recovery acknowledgment. Native qualification is still required.\n");
+        out.push_str("Desktop may separately allow loading one selected existing encrypted Android key; review-ready is not Bind, and no record selector is accepted in CLI arguments. Never generate a replacement for an existing/reserved/unknown key. Encrypted backup/restore require separate exact Desktop consent and both genuine native dialogs; no CLI path, key, password or recovery code is accepted. Restore is NEW and unassigned, not a Bind or recovery acknowledgment. Native qualification is still required.\n");
         Ok((0, out.into_bytes()))
     }
 }

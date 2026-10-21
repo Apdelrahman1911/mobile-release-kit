@@ -9,6 +9,7 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot), id = useId();
   const access = state.access, remaining = controller.remainingSeconds();
   const backupOptions = state.kind === 'backup-encrypted' ? controller.backupOptions() : [];
+  const prepareOptions = state.kind === 'prepare-existing' ? controller.prepareOptions() : [];
   const commands = access && (access.consumed || !state.stale && !state.unknown) ? agentUploadKeyCommands(access) : [];
   const status = state.unknown ? 'Permission is unconfirmed — do not repeat this action' : state.revoking ? 'Withdrawing the original permission…' :
     state.pending === 'allow' ? 'Allowing this one action…' : state.pending === 'status' ? 'Checking the original permission…' :
@@ -19,15 +20,25 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
     needsAttention={controller.ownerReason() !== null || state.issue !== null}>
     <section className="credential-guidance" aria-labelledby={`${id}-title`}>
       <h4 id={`${id}-title`}>Android upload key · one-use local permission</h4>
-      <p>Prefer the key your app already uses. Delegate one completed new-app setup, the exact existing-key Assign review, or an encrypted backup/restore with Desktop’s ordinary file dialogs. This panel cannot choose files or tools, replace a key, or bypass an uncertain earlier action.</p>
+      <p>Prefer the key your app already uses. A tool can load and assess your selected existing key, but assigning it always needs a separate review and permission. New-app generation and encrypted backup/restore remain separate actions. This panel cannot choose files or tools, replace a key, or bypass an uncertain earlier action.</p>
       <label htmlFor={`${id}-kind`}>One action to allow in Desktop</label>
       <select id={`${id}-kind`} value={state.kind} disabled={controller.ownerReason() !== null}
         onChange={(e) => controller.setKind(e.target.value as AgentUploadKeyKind)}>
+        <option value="prepare-existing">Load and assess a selected existing Android key</option>
         <option value="bind-reviewed">Assign the reviewed existing Android key</option>
         <option value="generate-new">Generate and save one key for a new app</option>
         <option value="backup-encrypted">Back up a selected encrypted Android key</option>
         <option value="restore-encrypted">Restore an encrypted Android key as a new record</option>
       </select>
+      {state.kind === 'prepare-existing' && <>
+        <label htmlFor={`${id}-prepare-record`}>Existing encrypted Android key</label>
+        <select id={`${id}-prepare-record`} value={state.prepareRecord?.recordId ?? ''} disabled={controller.ownerReason() !== null}
+          onChange={(e) => { const row = prepareOptions.find(r => r.recordId === e.target.value); controller.setPrepareRecord(row ?? null); }}>
+          <option value="">Select the key to load and assess</option>
+          {prepareOptions.map(r => <option key={r.recordId} value={r.recordId}>{r.label} · {r.recordId} · revision {r.expectedRevision}</option>)}
+        </select>
+        <p>Submit only loads and checks this existing encrypted record. When the original command reports review-ready, Check original permission here to read its current review. Then withdraw this permission, inspect the ordinary Assign review, and separately allow assignment. No key is generated, replaced or automatically assigned.</p>
+      </>}
       {state.kind === 'backup-encrypted' && <>
         <label htmlFor={`${id}-record`}>Existing encrypted Android key</label>
         <select id={`${id}-record`} value={state.backupRecord?.recordId ?? ''} disabled={controller.ownerReason() !== null}

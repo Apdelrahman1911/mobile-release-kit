@@ -18,7 +18,8 @@ struct Book {
 struct Call {
     original: DocumentBinding,
     claim: Option<requests::Claim>,
-    go: oneshot::Receiver<()>,
+    go: Option<oneshot::Receiver<()>>,
+    prepared: Option<prepared_reply::PreparedReply>,
     // SAME start_relay handle, never a fabricated window/picker. Its fixed
     // layout is included in TASK_STAGE below; shared runtime is not copied.
     #[cfg(feature = "desktop-shell")]
@@ -28,15 +29,50 @@ impl Future for Call {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let call = self.get_mut();
-        let result = match Pin::new(&mut call.go).poll(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(v) => v,
-        };
-        if let Some(claim) = call.claim.take() {
-            if result.is_ok() {
-                call.original.run_agent_upload_key(claim, #[cfg(feature = "desktop-shell")] call.app.clone());
-            } else {
-                claim.returned(Err(Error::Conflict));
+        if let Some(go) = &mut call.go {
+            let result = match Pin::new(go).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(v) => v,
+            };
+            call.go = None;
+            if let Some(claim) = &call.claim {
+                let result = if result.is_ok() {
+                    call.original.run_agent_upload_key(claim,
+                        #[cfg(feature = "desktop-shell")] call.app.clone())
+                } else { Err(Error::Conflict) };
+                match result {
+                    Ok(Some(id)) => {
+                        // This SAME caller now waits for its own Load. It does
+                        // not return merely because an original was installed.
+                        call.prepared = Some(prepared_reply::PreparedReply::upload_key(
+                            call.original.clone(), id, claim.link().clone()));
+                    }
+                    result => {
+                        if let Some(claim) = call.claim.take() { claim.returned(result.map(|_| ())); }
+                        return Poll::Ready(());
+                    }
+                }
+            }
+        }
+        if let Some(prepared) = &mut call.prepared {
+            let result = match Pin::new(prepared).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(v) => v,
+            };
+            call.prepared = None;
+            if let Some(claim) = call.claim.take() {
+                let result = match result {
+                    Ok(None) => Ok(()),
+                    _ => {
+                        // Failed/mismatched returned Prepare is not a usable
+                        // preview. Keep the same native original for STOP and
+                        // actual retirement; no retry or new native call.
+                        claim.link().entry().cancel(p::Reason::ContextChanged, Instant::now());
+                        Err(Error::Conflict)
+                    }
+                };
+                call.original.agent_upload_key_tick();
+                claim.returned(result);
             }
         }
         Poll::Ready(())
@@ -68,7 +104,8 @@ const TASK_CELL: usize =
 const ONESHOT_CELL: usize =
     ARC_HEADER + WORD + size_of::<Option<()>>() + 2 * size_of::<Waker>() + WORD;
 pub(super) const BACKING: usize =
-    size_of::<UploadKeyRelay>() + ARC_HEADER + TASK_CELL + ONESHOT_CELL;
+    size_of::<UploadKeyRelay>() + ARC_HEADER + TASK_CELL + ONESHOT_CELL
+        + prepared_reply::HEAP_BYTES + prepared_reply::RETURN_BYTES;
 pub(crate) struct UploadKeyRelay {
     book: AsyncMutex<Book>,
     closed: AtomicBool,
@@ -150,7 +187,8 @@ impl UploadKeyRelay {
         b.handle = Some(tokio::spawn(Call {
             original,
             claim: Some(claim),
-            go,
+            go: Some(go),
+            prepared: None,
             #[cfg(feature = "desktop-shell")]
             app: app.clone(),
         }));

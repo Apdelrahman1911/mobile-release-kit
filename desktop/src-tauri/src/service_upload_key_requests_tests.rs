@@ -3,6 +3,8 @@
 use super::*;
 #[path = "service_upload_key_backup_tests.rs"]
 mod backup;
+#[path = "service_upload_key_reuse_tests.rs"]
+mod reuse;
 fn id(n: u32) -> Id {
     Id::parse(&format!("{n:032x}")).unwrap()
 }

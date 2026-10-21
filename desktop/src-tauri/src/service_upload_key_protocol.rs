@@ -2,6 +2,9 @@
 //! assessment, tool or credential authority crosses the installed IPC.
 use crate::service_protocol::{Error, Id, Settlement};
 use serde::{Deserialize, Deserializer, Serialize};
+#[path = "service_upload_key_preparation_protocol.rs"]
+mod preparation;
+pub use preparation::Prepared;
 
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const CONSENT_LIMIT: usize = 32;
@@ -18,6 +21,7 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Opti
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
+    PrepareExisting,
     GenerateNew,
     BindReviewed,
     BackupEncrypted,
@@ -26,6 +30,7 @@ pub enum Kind {
 impl Kind {
     pub(crate) fn consent(self) -> &'static str {
         match self {
+            Self::PrepareExisting => "agent-android-upload-key-prepare-once-v1",
             Self::GenerateNew => "agent-android-upload-key-generate-once-v1",
             Self::BindReviewed => "agent-android-upload-key-bind-once-v1",
             Self::BackupEncrypted => "agent-android-upload-key-backup-once-v1",
@@ -43,6 +48,10 @@ impl Kind {
     deny_unknown_fields
 )]
 pub(crate) enum Selection {
+    PrepareExisting {
+        record_id: Id,
+        expected_revision: u32,
+    },
     GenerateNew {
         declaration: String,
     },
@@ -61,6 +70,7 @@ pub(crate) enum Selection {
 impl Selection {
     pub(crate) fn kind(&self) -> Kind {
         match self {
+            Self::PrepareExisting { .. } => Kind::PrepareExisting,
             Self::GenerateNew { .. } => Kind::GenerateNew,
             Self::BindReviewed { .. } => Kind::BindReviewed,
             Self::BackupEncrypted { .. } => Kind::BackupEncrypted,
@@ -69,6 +79,7 @@ impl Selection {
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
+            Self::PrepareExisting { expected_revision, .. } => (1..u32::MAX).contains(expected_revision),
             Self::GenerateNew { declaration } => declaration == DECLARATION,
             Self::BindReviewed {
                 preview_operation_id,
@@ -140,6 +151,8 @@ pub struct Access {
     pub enabled: bool,
     pub remaining_ms: u64,
     pub consumed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "preparation::present")]
+    pub prepared: Option<Prepared>,
 }
 impl Access {
     pub(crate) fn empty() -> Self {
@@ -153,6 +166,7 @@ impl Access {
             enabled: false,
             remaining_ms: 0,
             consumed: false,
+            prepared: None,
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
@@ -169,6 +183,8 @@ impl Access {
             || self.remaining_ms > ALLOW_SECONDS * 1000
             || self.request_id.is_some() != self.consumed
             || self.consumed && !fields[0]
+            || self.prepared.as_ref().is_some_and(|p| !p.valid() || self.kind != Some(Kind::PrepareExisting)
+                || !self.consumed || self.enabled)
         {
             Err(Error::InvalidRequest)
         } else {
@@ -183,6 +199,7 @@ pub enum State {
     Queued,
     Running,
     StopRequested,
+    ReviewReady,
     SavedUnassigned,
     Assigned,
     BackupDelivered,
@@ -195,7 +212,7 @@ pub enum State {
 }
 impl State {
     pub(crate) fn success(self) -> bool {
-        matches!(self, Self::SavedUnassigned | Self::Assigned | Self::BackupDelivered | Self::RestoredUnassigned)
+        matches!(self, Self::ReviewReady | Self::SavedUnassigned | Self::Assigned | Self::BackupDelivered | Self::RestoredUnassigned)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +249,7 @@ impl Status {
         use State::*;
         let settled = matches!(
             self.state,
-            SavedUnassigned | Assigned | BackupDelivered | RestoredUnassigned | Refused | Cancelled | Failed
+            ReviewReady | SavedUnassigned | Assigned | BackupDelivered | RestoredUnassigned | Refused | Cancelled | Failed
         );
         if self.schema_version != 1
             || !self.do_not_replay
@@ -248,6 +265,7 @@ impl Status {
             || self.state == RecoveryRequired
                 && !matches!(self.settlement, Settlement::Settled | Settlement::Unknown)
             || self.state == SavedUnassigned && self.kind != Kind::GenerateNew
+            || self.state == ReviewReady && self.kind != Kind::PrepareExisting
             || self.state == Assigned && self.kind != Kind::BindReviewed
             || self.state == BackupDelivered && self.kind != Kind::BackupEncrypted
             || self.state == RestoredUnassigned && self.kind != Kind::RestoreEncrypted

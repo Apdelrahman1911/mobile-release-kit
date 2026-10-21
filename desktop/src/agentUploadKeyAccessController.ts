@@ -3,6 +3,8 @@ import type { AgentUploadKeyAccess, AgentUploadKeyAccessPort, AgentUploadKeyKind
 import type { AssetDisplayState, AssetRecordRef } from './assetSessionTypes.ts';
 import { agentUploadKeyBackupOptions, agentUploadKeyBackupReason } from './agentUploadKeyBackup.ts';
 import type { AgentUploadKeyBackupOption } from './agentUploadKeyBackup.ts';
+import { agentUploadKeyReuseOptions, agentUploadKeyReuseReason, sameAgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
+import type { AgentUploadKeyPreparation, AgentUploadKeyReuseOption } from './agentUploadKeyReuse.ts';
 import { reserveId, reserveProject } from './versionReserve.ts';
 
 export interface AgentUploadKeyContext {
@@ -13,6 +15,7 @@ export interface AgentUploadKeyAccessView {
   readonly kind: AgentUploadKeyKind; readonly access: AgentUploadKeyAccess | null;
   readonly acknowledged: boolean; readonly newApplication: boolean;
   readonly backupRecord: Readonly<AssetRecordRef> | null;
+  readonly prepareRecord: Readonly<AssetRecordRef> | null;
   readonly stale: boolean; readonly unknown: boolean; readonly issue: string | null;
   readonly pending: 'status' | 'allow' | null; readonly revoking: boolean;
 }
@@ -22,6 +25,8 @@ interface Address { context: AgentUploadKeyContext; id: string; kind: AgentUploa
 interface Work { kind: 'status' | 'allow' | 'revoke'; context: AgentUploadKeyContext; generation: object;
   address: Address | null; witness: Witness | null; sent: boolean; startedAt: number | null;
   original: Promise<unknown> | null; completion: Promise<void>; finish(): void }
+interface Source { current(): AgentUploadKeyContext; now?(): number; nonce?(): string;
+  prepareExisting?(record: Readonly<AssetRecordRef>): AgentUploadKeyPreparation | null }
 const absent = (): AgentUploadKeyContext => ({ port: null, nativeSession: null, projectId: null, project: null,
   assets: null, generateReady: false, blockedReason: 'Open the native app and select your Android project.' });
 const uncertain = 'CLI permission is unconfirmed. Keep the original request; check it or withdraw this exact permission. Do not repeat generation, assignment, backup or restore.';
@@ -36,7 +41,7 @@ const sameGrant = (a: AgentUploadKeyAccess, b: AgentUploadKeyAccess) => a.grantI
 // Permission only. Native keeps the actual PreparedSetup/Bind preview and all
 // original caller/Asset retirement facts; Access never establishes completion.
 export class AgentUploadKeyAccessController {
-  private readonly source: { current(): AgentUploadKeyContext; now?(): number; nonce?(): string };
+  private readonly source: Source;
   private context = absent();
   private version: object = {};
   private generation: object = {};
@@ -48,11 +53,12 @@ export class AgentUploadKeyAccessController {
   private attempted = new Set<string>();
   private nonces = new Set<string>();
   private permissionEnd: number | null = null;
+  private preparation: { address: Address; attempt: AgentUploadKeyPreparation; allowJoined: boolean } | null = null;
   private disposed = false;
   private listeners = new Set<() => void>();
   private state: AgentUploadKeyAccessView = Object.freeze({ kind: 'bind-reviewed', access: null, acknowledged: false,
-    newApplication: false, backupRecord: null, stale: true, unknown: false, issue: null, pending: null, revoking: false });
-  constructor(source: { current(): AgentUploadKeyContext; now?(): number; nonce?(): string }) { this.source = source; this.syncContext(); }
+    newApplication: false, backupRecord: null, prepareRecord: null, stale: true, unknown: false, issue: null, pending: null, revoking: false });
+  constructor(source: Source) { this.source = source; this.syncContext(); }
   getSnapshot = (): AgentUploadKeyAccessView => this.state;
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   whenSettled = (): Promise<void> => Promise.all([this.normal?.completion, this.revocation?.completion]).then(() => undefined);
@@ -83,18 +89,25 @@ export class AgentUploadKeyAccessController {
     if (this.disposed) return;
     const c = this.read(), changed = !sameContext(c, this.context), display = c.blockedReason !== this.context.blockedReason || c.generateReady !== this.context.generateReady;
     this.context = c;
+    const preparation = this.preparation, origin = preparation?.address.context;
+    // Native Load progress may change the displayed status revision without
+    // replacing this original. Host/project/entry or peer drift must instead
+    // invalidate it immediately, including a later return to the old values.
+    if (preparation && origin && (!sameHost(c, origin) || c.project !== origin.project || c.projectId !== origin.projectId ||
+        c.assets?.entryGeneration !== origin.assets?.entryGeneration || c.blockedReason)) preparation.attempt.invalidate();
     if (changed || display) {
       this.version = {}; this.consent = null;
-      this.patch({ acknowledged: false, newApplication: false, ...(changed ? { stale: true, backupRecord: null } : {}) });
+      this.patch({ acknowledged: false, newApplication: false, ...(changed ? { stale: true, backupRecord: null, prepareRecord: null } : {}) });
     }
   }
   private witness(c: AgentUploadKeyContext): Witness | null {
     const now = this.now(), a = c.assets;
     if (!a || !c.projectId || !c.project || hostReason(c) || c.blockedReason || now === null || a.status?.context?.projectId !== c.projectId) return null;
-    const selection = agentUploadKeySelection(a, this.state.kind, c.generateReady, now, this.state.backupRecord), status = a.status;
+    const selection = agentUploadKeySelection(a, this.state.kind, c.generateReady, now,
+      this.state.kind === 'prepare-existing' ? this.state.prepareRecord : this.state.backupRecord), status = a.status;
     if (!selection || !status?.context) return null;
     const key = selection.kind === 'bind-reviewed' ? `bind:${c.projectId}:${status.context.revision}:${selection.previewOperationId}:${selection.previewToken}` :
-      selection.kind === 'backup-encrypted' ? `backup:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}:${selection.recordId}:${selection.expectedRevision}` :
+      selection.kind === 'backup-encrypted' || selection.kind === 'prepare-existing' ? `${selection.kind === 'backup-encrypted' ? 'backup' : 'prepare'}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}:${selection.recordId}:${selection.expectedRevision}` :
       `${selection.kind === 'generate-new' ? 'generate' : 'restore'}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}`;
     return { context: c, revision: status.statusRevision, contextRevision: status.context.revision, entry: a.entryGeneration, selection,
       end: selection.kind === 'bind-reviewed' ? Math.min(now + AGENT_UPLOAD_KEY_MAX_MS, a.previewDeadline!) : now + AGENT_UPLOAD_KEY_MAX_MS,
@@ -107,7 +120,9 @@ export class AgentUploadKeyAccessController {
   selectionReason(): string | null {
     const c = this.read(), w = this.witness(c);
     return this.disposed ? 'This permission controller is retired.' : this.ownerReason() ?? hostReason(c) ?? c.blockedReason ??
+      (this.state.kind === 'prepare-existing' && !this.source.prepareExisting ? 'Use the original Desktop credential controller to prepare an existing key.' : null) ??
       (!w ? this.state.kind === 'generate-new' ? 'Finish the ordinary new-app signing setup and tool checks in Desktop first. Any existing or uncertain key prevents generation.' :
+        this.state.kind === 'prepare-existing' ? agentUploadKeyReuseReason(c.assets) ?? 'Explicitly select the encrypted Android key to load and assess; assignment is a separate review.' :
         this.state.kind === 'backup-encrypted' || this.state.kind === 'restore-encrypted' ? agentUploadKeyBackupReason(c.assets) ?? 'Explicitly select the encrypted Android key to back up.' :
         'Select and assess an existing encrypted Android key in Desktop first, leaving its current Assign review open.' :
         this.attempted.has(w.key) ? 'This exact review was already delegated. Check its original request; it is not renewed by a refresh.' :
@@ -118,8 +133,19 @@ export class AgentUploadKeyAccessController {
       this.state.kind === 'generate-new' && !this.state.newApplication ? 'Confirm the separate permission for this exact action.' : null);
   }
   setKind(value: AgentUploadKeyKind): boolean {
-    if (this.disposed || !['generate-new', 'bind-reviewed', 'backup-encrypted', 'restore-encrypted'].includes(value) || this.ownerReason()) return false;
-    if (value !== this.state.kind) { this.version = {}; this.consent = null; this.patch({ kind: value, acknowledged: false, newApplication: false, backupRecord: null, stale: true }); }
+    if (this.disposed || !['prepare-existing', 'generate-new', 'bind-reviewed', 'backup-encrypted', 'restore-encrypted'].includes(value) || this.ownerReason()) return false;
+    if (value !== this.state.kind) { this.version = {}; this.consent = null; this.patch({ kind: value, acknowledged: false, newApplication: false, backupRecord: null, prepareRecord: null, stale: true }); }
+    return true;
+  }
+  prepareOptions(): readonly AgentUploadKeyReuseOption[] { return agentUploadKeyReuseOptions(this.read().assets); }
+  setPrepareRecord(value: Readonly<AssetRecordRef> | null): boolean {
+    this.syncContext();
+    if (this.disposed || this.ownerReason() || this.state.kind !== 'prepare-existing') return false;
+    const exact = value === null ? null : this.prepareOptions().find(r => r.recordId === value.recordId && r.expectedRevision === value.expectedRevision);
+    if (value !== null && !exact) return false;
+    this.version = {}; this.consent = null;
+    this.patch({ prepareRecord: exact ? Object.freeze({ recordId: exact.recordId, expectedRevision: exact.expectedRevision }) : null,
+      acknowledged: false, newApplication: false, stale: true });
     return true;
   }
   backupOptions(): readonly AgentUploadKeyBackupOption[] { return agentUploadKeyBackupOptions(this.read().assets); }
@@ -153,9 +179,9 @@ export class AgentUploadKeyAccessController {
     const now = this.now();
     return this.state.stale || !this.state.access?.enabled || this.permissionEnd === null || now === null ? null : Math.max(0, Math.ceil((this.permissionEnd - now) / 1000));
   }
-  private unknown(): void { this.consent = null; this.patch({ unknown: true, stale: true, acknowledged: false, newApplication: false, issue: uncertain }); }
+  private unknown(): void { this.consent = null; this.preparation?.attempt.invalidate(); this.patch({ unknown: true, stale: true, acknowledged: false, newApplication: false, issue: uncertain }); }
   private begin(kind: Work['kind'], c: AgentUploadKeyContext, address: Address | null, witness: Witness | null): Work {
-    if (kind === 'revoke') this.generation = {}; // Fence Allow BEFORE notifying a subscriber.
+    if (kind === 'revoke') { this.generation = {}; this.preparation?.attempt.invalidate(); } // Fence Allow BEFORE notifying a subscriber.
     this.consent = null;
     let finish!: () => void; const completion = new Promise<void>((resolve) => { finish = resolve; });
     const w: Work = { kind, context: c, address, witness, generation: this.generation, sent: false, startedAt: this.now(), original: null, completion, finish };
@@ -168,16 +194,20 @@ export class AgentUploadKeyAccessController {
     if (this.normal === w) this.normal = null; if (this.revocation === w) this.revocation = null;
     this.patch(); w.finish();
   }
-  private accept(w: Work, raw: unknown): void {
-    if (!this.delivered(w)) return;
-    const a = parseAgentUploadKeyAccess(raw);
-    if (!this.delivered(w)) return;
+  private accept(w: Work, raw: unknown): AgentUploadKeyAccess | null {
+    if (!this.delivered(w)) return null;
+    let a = parseAgentUploadKeyAccess(raw);
+    if (!this.delivered(w)) return null;
     if (!a || w.kind === 'allow' && (!w.address || a.grantId !== w.address.id || a.kind !== w.address.kind) ||
         w.address && a.grantId !== null && (a.grantId !== w.address.id || a.kind !== w.address.kind) ||
-        w.kind === 'revoke' && a.enabled || w.kind === 'status' && w.address && a.grantId === null) { this.unknown(); return; }
+        w.kind === 'revoke' && a.enabled || w.kind === 'status' && w.address && a.grantId === null) { this.unknown(); return null; }
     const old = this.state.access;
     if (old?.grantId && old.grantId === a.grantId && (!sameGrant(old, a) || old.consumed && (!a.consumed || old.requestId !== a.requestId) ||
-        !old.enabled && a.enabled)) { this.unknown(); return; }
+        !old.enabled && a.enabled)) { this.unknown(); return null; }
+    if (old?.prepared && a.prepared && old.grantId === a.grantId) {
+      if (!sameAgentUploadKeyPrepared(old.prepared, a.prepared)) { this.unknown(); return null; }
+      a = Object.freeze({ ...a, prepared: Object.freeze({ ...a.prepared, remainingMs: Math.min(old.prepared.remainingMs, a.prepared.remainingMs) }) });
+    }
     if (a.grantId && !this.address && a.kind) this.address = { context: w.context, id: a.grantId, kind: a.kind }; // Stop address only, never consent.
     // Consumed Access and a zero countdown cannot retire the current native
     // lease. Only this original exact Revoke's actual returned acknowledgment
@@ -189,6 +219,23 @@ export class AgentUploadKeyAccessController {
     } else this.permissionEnd = null;
     const current = sameContext(w.context, this.read()) && (w.witness === null || this.current(w.witness));
     this.patch({ access: a, stale: !current || this.state.unknown, ...(this.state.unknown ? {} : { issue: null }) });
+    return a;
+  }
+  private async correlate(w: Work, a: AgentUploadKeyAccess | null): Promise<void> {
+    const original = this.preparation;
+    if (!original || !original.allowJoined || !a?.prepared || a.kind !== 'prepare-existing') return;
+    const current = () => {
+      const c = this.read(), latest = this.state.access;
+      return this.preparation === original && this.delivered(w) && !this.revocation && !this.state.unknown &&
+        this.address === original.address && this.withdrawn !== original.address && sameHost(c, original.address.context) &&
+        c.project === original.address.context.project && c.projectId === original.address.context.projectId && !c.blockedReason &&
+        latest?.grantId === original.address.id && latest.requestId === a.requestId && !!latest.prepared &&
+        sameAgentUploadKeyPrepared(latest.prepared, a.prepared!);
+    };
+    // Anchor this returned countdown to its SAME Allow/Check call, not its
+    // receipt or a later Asset callback. This is comparison only, not a lease.
+    const reviewEnd = w.startedAt === null ? null : w.startedAt + a.prepared.remainingMs;
+    if (current()) await original.attempt.observe(a.prepared, current, reviewEnd);
   }
   private nonce(): string | null {
     try {
@@ -201,17 +248,28 @@ export class AgentUploadKeyAccessController {
     const witness = this.consent!, id = this.nonce();
     if (!id || !this.current(witness)) return false;
     const c = witness.context, address: Address = { context: c, id, kind: witness.selection.kind };
+    let attempt: AgentUploadKeyPreparation | null = null;
+    if (witness.selection.kind === 'prepare-existing') {
+      try { attempt = this.source.prepareExisting?.({ recordId: witness.selection.recordId, expectedRevision: witness.selection.expectedRevision }) ?? null; }
+      catch { return false; }
+      if (!attempt || !attempt.current() || !this.current(witness)) { attempt?.invalidate(); return false; }
+    }
+    this.preparation?.attempt.invalidate();
+    this.preparation = attempt ? { address, attempt, allowJoined: false } : null;
     this.address = address; this.withdrawn = null; this.nonces.add(id); // Retain before any notification/native handoff, including lost Allow.
     const w = this.begin('allow', c, address, witness);
     try {
-      if (!this.delivered(w) || this.revocation || !this.current(witness) || !c.port || !c.projectId) return false;
+      if (!this.delivered(w) || this.revocation || !this.current(witness) || attempt && !attempt.current() || !c.port || !c.projectId) return false;
       w.sent = true; this.attempted.add(witness.key);
       w.original = c.port.allow({ projectId: c.projectId, consentId: id, contextRevision: witness.contextRevision,
         expectedStatusRevision: witness.revision, selection: witness.selection });
       if (!w.original || typeof w.original.then !== 'function') { this.unknown(); return true; }
-      this.accept(w, await w.original);
+      const raw = await w.original; // Actual original Allow return, not an event/Access bit.
+      const a = this.accept(w, raw);
+      if (a && this.delivered(w) && !this.state.unknown && this.preparation?.address === address) this.preparation.allowJoined = true;
+      await this.correlate(w, a);
     } catch { if (this.delivered(w)) this.unknown(); }
-    finally { this.finish(w); }
+    finally { if (!w.sent) attempt?.invalidate(); this.finish(w); }
     return w.sent;
   }
   async check(): Promise<boolean> {
@@ -221,7 +279,7 @@ export class AgentUploadKeyAccessController {
       if (!this.delivered(w) || this.revocation || !c.port) return false;
       w.sent = true; w.original = c.port.status();
       if (!w.original || typeof w.original.then !== 'function') { this.unknown(); return true; }
-      this.accept(w, await w.original);
+      await this.correlate(w, this.accept(w, await w.original));
     } catch { if (this.delivered(w)) this.unknown(); }
     finally { this.finish(w); }
     return w.sent;
@@ -238,5 +296,5 @@ export class AgentUploadKeyAccessController {
     finally { this.finish(w); }
     return w.sent;
   }
-  dispose(): void { this.disposed = true; this.generation = {}; this.consent = null; this.listeners.clear(); }
+  dispose(): void { this.disposed = true; this.generation = {}; this.consent = null; this.preparation?.attempt.invalidate(); this.listeners.clear(); }
 }

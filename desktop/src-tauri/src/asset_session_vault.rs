@@ -2397,7 +2397,12 @@ impl DocumentBinding {
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(super) fn prepare_stored_vault(&self, state: &mut DocumentState, key: RecordKey, context: Arc<NativeContext>) -> Result<(u32, oneshot::Sender<()>), AssetError> {
+        self.prepare_stored_vault_agent(state, key, context, None)
+    }
+    pub(super) fn prepare_stored_vault_agent(&self, state: &mut DocumentState, key: RecordKey, context: Arc<NativeContext>,
+        agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<(u32, oneshot::Sender<()>), AssetError> {
         self.durable_gate(state, true)?; idle(state)?;
+        if let Some(link) = &agent { agent_upload_key::consume(self, state, link, crate::service_upload_key_protocol::Kind::PrepareExisting)?; }
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
@@ -2408,6 +2413,11 @@ impl DocumentBinding {
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
         let mut slot = self.vault_owner(state, Operation::Prepare, Some(context.clone()), Some(key), Some(Instant::now() + REVIEW), true)?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference); slot.vault.generation = Some(roster.generation);
+        if let Some(link) = &agent {
+            if kind != Kind::AndroidKeystore { return Err(AssetError::new(Reason::SourceRefused)); }
+            slot.review_end = slot.review_end.map(|end| end.min(link.entry().scope().end));
+            agent_upload_key::attach_prepared(state, &slot, link)?;
+        }
         let id = slot.owner.id;
         let available = pending_allowance(state, &slot).map_err(AssetError::new)?;
         let start = self.install(state, slot, super::Job::Vault(Job::Load { reference, roster, context, allowance: available }))?;
