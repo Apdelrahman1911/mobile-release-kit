@@ -305,6 +305,7 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
         p::ResponseBody::LocalHistoryPreparation(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+        p::ResponseBody::MetadataImagesPreparation(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
         p::ResponseBody::MetadataImagesAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
         p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,

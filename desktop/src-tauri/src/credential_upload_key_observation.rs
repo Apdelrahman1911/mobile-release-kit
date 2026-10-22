@@ -15,7 +15,7 @@ pub(crate) use cold_restart::ColdState;
 pub(super) use cancelled::cancelled_disposed;
 use crate::shell::installed_observation::vault::{
     upload_key::{Action, Case, Selection},
-    Control,
+    Case as VaultCase, Control,
 };
 
 #[derive(Clone, Copy, Default, Serialize)]

@@ -7,6 +7,7 @@ use crate::shell::installed_observation::vault::{
     Case as VaultCase, Control,
 };
 use crate::{service_upload_key_protocol as p, service_upload_key_requests::NativeLink};
+use std::sync::OnceLock;
 
 pub(in crate::asset_session) struct Admission {
     control: Weak<Control>,

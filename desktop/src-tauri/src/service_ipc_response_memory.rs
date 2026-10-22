@@ -138,6 +138,7 @@ fn quote_with(c: Cells) -> Option<Quote> {
         crate::service_version_edit_prepare_requests::IPC_WORKER_BACKING,
         crate::service_configuration_requests::IPC_WORKER_BACKING,
         crate::service_metadata_images_requests::IPC_WORKER_BACKING,
+        crate::service_metadata_images_prepare_requests::IPC_WORKER_BACKING,
         crate::service_store_requests::history::IPC_WORKER_BACKING,
         crate::service_tool_setup_requests::IPC_WORKER_BACKING,
         crate::service_apple_provisioning_protocol::IPC_WORKER_BACKING,

@@ -192,7 +192,7 @@ export function metadataImagesRequestFits(command: MetadataImagesCommand, value:
       case 'metadata_images_choose':
         return keys(value, ['projectId', 'platform', 'locale', 'assetType']) && projectId(value.projectId) && platform(value.platform) && locale(value.locale) && assetType(value.assetType);
       case 'metadata_images_selection_cancel': return keys(value, ['operationId']) && token(value.operationId);
-      case 'metadata_images_edit_open': return keys(value, ['projectId', 'selectionToken']) && projectId(value.projectId) && token(value.selectionToken);
+      case 'metadata_images_edit_open': return (keys(value, ['projectId', 'selectionToken']) || keys(value, ['projectId', 'selectionToken', 'cliPreparation']) && typeof value.cliPreparation === 'boolean') && projectId(value.projectId) && token(value.selectionToken);
       case 'metadata_images_recovery_open': return keys(value, ['projectId']) && projectId(value.projectId);
       case 'metadata_images_edit_close': return keys(value, ['sessionId']) && token(value.sessionId);
       case 'metadata_images_edit_apply': return keys(value, ['sessionId', 'planToken']) && token(value.sessionId) && token(value.planToken);

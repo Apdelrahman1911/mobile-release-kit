@@ -190,3 +190,31 @@ fn strict_response_domain_session_sequence_and_unknown_fields_are_not_accepted()
     }
     let mut bad = body; bad["result"]["raw"] = json!("must-not-be-retained"); assert!(decode(&frame_exact(&bad,RESPONSE_LIMIT).unwrap(),SESSION).is_err());
 }
+
+#[test]
+fn immutable_cli_import_profile_accepts_ten_real_files_and_keeps_ordinary_decoder_limits() {
+    let mut opened_view=import_fixture(true,false,false);
+    let folder=format!("public/{}/android/en-US/images/phoneScreenshots","assets".repeat(20));
+    let mut files=Vec::new();let mut existing=Vec::new();let mut order=Vec::new();
+    for n in 0..10 {
+        let name=format!("{n:02}{}.png","a".repeat(220));let path=format!("{folder}/{name}");
+        let mut f=opened_view["files"][0].clone();f["itemId"]=json!(format!("{:032x}",n+1));f["displayName"]=json!(name);f["path"]=json!(path);
+        existing.push(json!({"path":path,"summary":f["before"]}));order.push(path);files.push(f);
+    }
+    opened_view["metadataRoot"]=json!(format!("public/{}","assets".repeat(20)));opened_view["folder"]=json!(folder);
+    opened_view["files"]=json!(files);opened_view["existing"]=json!(existing);opened_view["finalOrder"]=json!(order);
+    let opened=json!({"protocol":PROTOCOL,"session":SESSION,"seq":0,"kind":"opened","result":{"intent":"import","revision":REVISION,"baseline":baseline(),"view":opened_view,"scopeResources":"settled"}});
+    let raw=frame_exact(&opened,RESPONSE_LIMIT).unwrap();assert!(raw.len()<crate::service_metadata_images_prepare_protocol::FRAME_BYTES);
+    assert!(matches!(decode_cli_import(&raw,SESSION),Ok(ChildFrame::MetadataImagesOpened(_))));
+    let mut prepared_view=opened_view.clone();for f in prepared_view["files"].as_array_mut().unwrap(){f["action"]=json!("replace");f["after"]=f["selected"].clone();}
+    let prepared=json!({"protocol":PROTOCOL,"session":SESSION,"seq":1,"kind":"prepared","result":{"revision":REVISION,"planToken":PLAN,"view":prepared_view,"scopeResources":"settled"}});
+    let raw=frame_exact(&prepared,RESPONSE_LIMIT).unwrap();assert!(matches!(decode_cli_import(&raw,SESSION),Ok(ChildFrame::MetadataImagesPrepared(_))));
+    // Same parser, stricter immutable profile; no fallback/truncation. A valid
+    // ordinary recovery remains a different original construction path.
+    let recovery=json!({"protocol":PROTOCOL,"session":SESSION,"seq":0,"kind":"opened","result":{"intent":"recover","revision":REVISION,"baseline":baseline(),"view":recovery_fixture("rollback"),"scopeResources":"settled"}});
+    let raw=frame_exact(&recovery,RESPONSE_LIMIT).unwrap();assert!(decode(&raw,SESSION).is_ok());assert!(decode_cli_import(&raw,SESSION).is_err());
+    let mut raw=frame_exact(&opened,RESPONSE_LIMIT).unwrap();raw.resize(crate::service_metadata_images_prepare_protocol::FRAME_BYTES+1,b' ');assert!(decode_cli_import(&raw,SESSION).is_err());
+    let too_many=json!({"many":vec![0;crate::service_metadata_images_prepare_protocol::FRAME_NODES]});
+    let bytes=serde_json::to_vec(&too_many).unwrap();assert!(crate::protocol::strict_json(&bytes).is_ok());
+    assert!(crate::protocol::strict_json_with_limits(&bytes,crate::service_metadata_images_prepare_protocol::FRAME_NODES,crate::service_metadata_images_prepare_protocol::FRAME_DEPTH).is_err());
+}

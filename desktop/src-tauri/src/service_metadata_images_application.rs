@@ -42,6 +42,11 @@ impl ApplicationService {
         let s = self.lock()?;
         self.authorize_build_client(&s, client, &q.project_id)?;
         Self::identity_point(&s, &q.project_id)?;
+        if self.configuration_requests.images_preparation_kind(q)? {
+            let e=self.configuration_requests.images_preparation_entry(q)?;
+            if cancel {e.cancel(at)?;}
+            return e.status().map(p::ResponseBody::MetadataImagesPreparation);
+        }
         let e = self.configuration_requests.images_entry(q)?;
         if cancel {
             e.cancel(at)?;

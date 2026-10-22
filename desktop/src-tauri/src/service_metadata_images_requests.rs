@@ -58,6 +58,7 @@ pub(crate) struct Entry {
     pub nonce: Id,
     pub grant: Option<Grant>,
     input: OnceLock<p::Submit>,
+    preparation: OnceLock<Weak<crate::service_metadata_images_prepare_requests::Entry>>,
     state: Mutex<State>,
     failed: Arc<AtomicBool>,
     changes: watch::Sender<u32>,
@@ -89,6 +90,7 @@ impl Entry {
             nonce,
             grant,
             input: OnceLock::new(),
+            preparation: OnceLock::new(),
             state: Mutex::new(State {
                 revision: 1,
                 revoked: tombstone.then(Instant::now),
@@ -107,6 +109,15 @@ impl Entry {
             failed,
             changes,
         }))
+    }
+    pub(crate) fn associate_preparation(&self,p:&Arc<crate::service_metadata_images_prepare_requests::Entry>)->Result<(),Error>{
+        let g=self.grant.as_ref().ok_or(Error::Conflict)?;
+        if !p.associates(&g.review,&g.scope.read){return Err(Error::Conflict)}
+        self.preparation.set(Arc::downgrade(p)).map_err(|_|Error::Conflict)
+    }
+    pub(crate) fn same_preparation(&self,p:&Arc<crate::service_metadata_images_prepare_requests::Entry>)->bool{
+        self.preparation.get().is_some_and(|w|w.as_ptr()==Arc::as_ptr(p)&&w.strong_count()>0)
+            &&self.grant.as_ref().is_some_and(|g|p.associates(&g.review,&g.scope.read))
     }
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> {
         self.state.lock().map_err(|_| {

@@ -9,6 +9,8 @@ use std::{ffi::OsString, io::Write, path::PathBuf};
 mod identity;
 #[path="installed_cli_configuration.rs"]
 mod configuration;
+#[path="installed_cli_metadata_images_prepare.rs"]
+mod metadata_images_prepare;
 #[path="installed_cli_metadata_images.rs"]
 mod metadata_images;
 #[path="installed_cli_local_history.rs"]
@@ -71,6 +73,8 @@ Usage:\n\
   mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
   mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk metadata-images-read PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk metadata-images-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID --stdin [--json]\n\
   mrk metadata-images-scope PROJECT_ID [--json]\n\
   mrk metadata-images-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
   mrk metadata-images-status|metadata-images-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
@@ -319,7 +323,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
                 "commands": IDENTITY_ACTION_COMMANDS,
             },
-            "metadataImages":{"commands":["metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":false,"recovery":false,"storeUpload":false,"headless":false},
+            "metadataImages":{"commands":["metadata-images-read","metadata-images-prepare","metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":false,"nativeOpenedCliProfileOnly":true,"read":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":true,"recovery":false,"storeUpload":false,"headless":false},
             "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
             "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
@@ -416,7 +420,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -522,6 +526,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
         p::ResponseBody::AppleProvisioningRequest(_)|p::ResponseBody::AppleProvisioningPreparation(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
+        p::ResponseBody::MetadataImagesPreparation(s)=>metadata_images_prepare::human(s),
         p::ResponseBody::MetadataImagesRequest(s)=>metadata_images::human(s),
         p::ResponseBody::MetadataImagesAccess(_)=>"Prepared image-copy permission DATA; review the full preview in Desktop. No Store upload.\n".into(),
         p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
@@ -570,6 +575,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
     if configuration::recognizes(&args){return configuration::run(args);}
+    if metadata_images_prepare::recognizes(&args){return metadata_images_prepare::run(args);}
     if metadata_images::recognizes(&args){return metadata_images::run(args);}
     if metadata_text::recognizes(&args){return metadata_text::run(args);}
     if identity::recognizes(&args) { return identity::run(args); }

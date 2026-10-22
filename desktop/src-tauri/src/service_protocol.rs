@@ -231,6 +231,8 @@ pub enum RequestBody {
     #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
     #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
     #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
+    #[serde(rename="metadata-images.read")] MetadataImagesRead(crate::service_metadata_images_prepare_protocol::Read),
+    #[serde(rename="metadata-images.prepare")] MetadataImagesPrepare(crate::service_metadata_images_prepare_protocol::Prepare),
     #[serde(rename="metadata-images.scope")] MetadataImagesScope(crate::service_metadata_images_protocol::Scope),
     #[serde(rename="metadata-images.submit")] MetadataImagesSubmit(crate::service_metadata_images_protocol::Submit),
     #[serde(rename="metadata-images.status")] MetadataImagesStatus(crate::service_metadata_images_protocol::Query),
@@ -339,6 +341,7 @@ pub enum ResponseBody {
     LocalHistoryAccess(Box<crate::service_local_history_protocol::Access>),
     LocalHistoryRequest(Box<crate::service_local_history_protocol::Status>),
     GitHubActionRequest(crate::service_github_action_protocol::Status),
+    MetadataImagesPreparation(crate::service_metadata_images_prepare_protocol::Status),
     MetadataImagesAccess(crate::service_metadata_images_protocol::Access),
     MetadataImagesRequest(crate::service_metadata_images_protocol::Status),
     MetadataTextRequest(crate::service_metadata_text_protocol::Status),
@@ -441,6 +444,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
+    if let RequestBody::MetadataImagesPrepare(input)=&request.request{input.validate()?;}
     if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
@@ -522,6 +526,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             if row.origin.service_instance!=response.service_instance {return Err(Error::InvalidRequest);}
             crate::service_metadata_text_protocol::bounded(response,row.limit())?;
         },
+        ResponseBody::MetadataImagesPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_metadata_images_prepare_protocol::bounded(response,crate::service_metadata_images_prepare_protocol::STATUS_BYTES)?;}
         ResponseBody::MetadataImagesAccess(row)=>{
             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
             crate::service_metadata_images_protocol::bounded(response,crate::service_metadata_images_protocol::STATUS_BYTES)?;

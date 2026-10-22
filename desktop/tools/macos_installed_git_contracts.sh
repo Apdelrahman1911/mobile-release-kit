@@ -567,8 +567,26 @@ selected_tests=(
   vault_store::macos::bound_read_tests::read_refusal_and_stop_never_erase_already_known_new_effect
   vault_store::macos::bound_read_tests::stored_record_read_checks_original_witness_and_allowance_before_body
   vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation
+  # Image Read/Prepare: fifteen new + two affected; nine affected already above.
+  service_metadata_images_prepare_protocol::tests::inspection_and_complete_choices_are_bounded_data_not_paths_or_baselines
+  service_metadata_images_prepare_protocol::tests::ten_long_safe_names_fit_compact_reply_and_eleventh_never_truncates
+  service_metadata_images_prepare_requests::tests::inspection_is_not_cancellation_authority_and_prepare_requires_original_return
+  service_metadata_images_prepare_requests::tests::exact_duplicate_prepare_observes_and_changed_input_or_lost_caller_cannot_rearm
+  service_metadata_images_prepare_requests::tests::transfer_disarms_only_predecessor_and_retirement_is_not_the_prepare_reply
+  service_metadata_images_prepare_requests::tests::earlier_stop_then_original_read_poison_is_absorbing_through_both_returns
+  service_metadata_images_prepare_requests::tests::old_read_keeps_earliest_stop_and_row_capacity_overflow_never_reuses_permission
+  service_configuration_requests::images_prepare::tests::inspection_and_apply_use_two_original_config_slots_and_both_occupancy_cuts
+  service_configuration_requests::images_prepare::tests::full_shared32_refuses_allow_without_discarding_or_transferring_original
+  asset_session::agent_metadata_images_prepare::tests::original_main_inspection_and_prepare_cannot_supply_full_image_source_or_apply
+  installed_cli::metadata_images_prepare::tests::fixed_read_prepare_collectors_require_original_ids_and_bounded_stdin_choices
+  installed_cli::metadata_images_prepare::tests::actual_response_variant_keeps_preparation_separate_from_apply_permission
+  metadata_images_edit_protocol::tests::immutable_cli_import_profile_accepts_ten_real_files_and_keeps_ordinary_decoder_limits
+  edit_owner::agent_configuration::memory::images::tests::immutable_editing_quote_retains_five_bounded_frames_and_foreign_last_capacity
+  service_metadata_images_prepare_requests::tests::repeated_unknown_and_stop_samples_do_not_self_wake_the_original_waiter
+  metadata_images_commands::tests::picker_and_import_renderer_arguments_cannot_supply_paths_or_bodies
+  metadata_images_edit_protocol::tests::checkout_binds_original_selection_and_prepared_preserve_is_not_the_selected_image
 )
-[[ "${#selected_tests[@]}" == 539 ]] || exit 1
+[[ "${#selected_tests[@]}" == 556 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -578,12 +596,12 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '539 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '556 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 539 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 556 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

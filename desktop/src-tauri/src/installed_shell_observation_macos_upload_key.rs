@@ -288,11 +288,11 @@ pub(in super::super) enum Step {
     MissingLocked,
 }
 #[derive(Default)]
-pub(super) struct Record {
+pub(in super::super) struct Record {
     pub(super) sample: Option<InstalledUploadSample>,
     cold: restart::Record,
     backup: backup::Record,
-    pub(super) cli: Option<cli::Record>,
+    pub(in super::super) cli: Option<cli::Record>,
     repeated_refused: bool,
     readback: bool,
     acknowledged: bool,

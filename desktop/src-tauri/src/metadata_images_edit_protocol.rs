@@ -189,12 +189,16 @@ impl Details {
     pub(crate) fn recovery() -> Self { Self { intent: Intent::Recover, checkout: None, prepared: None,
         context: None, selected: Vec::new(), submission: None } }
     pub(crate) fn opened_matches(&self, opened: &Opened) -> bool {
-        if self.intent != opened.intent || !view_valid(&opened.view, false) { return false; }
-        if self.intent == Intent::Recover { return opened.view["kind"] == "recover" && self.context.is_none() && self.selected.is_empty(); }
+        if self.intent != opened.intent { return false; }
+        self.opened_view_matches(&opened.view)
+    }
+    pub(crate) fn opened_view_matches(&self, view: &Value) -> bool {
+        if !view_valid(view, false) { return false; }
+        if self.intent == Intent::Recover { return view["kind"] == "recover" && self.context.is_none() && self.selected.is_empty(); }
         let Some(context) = &self.context else { return false; };
-        let Some(files) = opened.view["files"].as_array() else { return false; };
-        opened.view["kind"] == "import" && opened.view["platform"] == json!(context.platform)
-            && opened.view["locale"] == context.locale && opened.view["assetType"] == context.asset_type
+        let Some(files) = view["files"].as_array() else { return false; };
+        view["kind"] == "import" && view["platform"] == json!(context.platform)
+            && view["locale"] == context.locale && view["assetType"] == context.asset_type
             && files.len() == self.selected.len() && files.iter().zip(&self.selected).all(|(file, selected)|
                 file["itemId"] == selected.item_id && file["displayName"] == selected.display_name
                 && file["selected"]["byteLength"] == selected.byte_length && file["selected"]["sha256"] == selected.sha256
@@ -451,10 +455,19 @@ impl TerminalReply { pub(crate) fn outcome(&self) -> CoreEditOutcome {
 } }
 
 pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+    decode_profile(bytes, session, false)
+}
+pub(crate) fn decode_cli_import(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
+    if bytes.len() > crate::service_metadata_images_prepare_protocol::FRAME_BYTES { return Err(BridgeError::protocol()); }
+    decode_profile(bytes, session, true)
+}
+fn decode_profile(bytes: &[u8], session: &str, small: bool) -> Result<ChildFrame, BridgeError> {
     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
-    let value = strict_json(body)?;
+    let value = if small { crate::protocol::strict_json_with_limits(body,
+        crate::service_metadata_images_prepare_protocol::FRAME_NODES,
+        crate::service_metadata_images_prepare_protocol::FRAME_DEPTH)? } else { strict_json(body)? };
     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session { return Err(BridgeError::protocol()); }
     let seq = value["seq"].as_u64().filter(|seq| *seq <= 2).ok_or_else(BridgeError::protocol)? as u32;
     let raw = &value["result"];
@@ -462,13 +475,13 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
         Some("opened") if seq == 0 && keys(raw, &["intent", "revision", "baseline", "view", "scopeResources"]) => {
             let result = Opened::deserialize(raw).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !result.baseline.valid() || !view_valid(&result.view, false)
-                || result.scope_resources != ResourceState::Settled || result.view["kind"] != json!(result.intent) { return Err(BridgeError::protocol()); }
+                || result.scope_resources != ResourceState::Settled || result.view["kind"] != json!(result.intent) || small && result.intent != Intent::Import { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::MetadataImagesOpened(result))
         },
         Some("prepared") if seq == 1 && keys(raw, &["revision", "planToken", "view", "scopeResources"]) => {
             let result = PreparedReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
             if !token(&result.revision) || !token(&result.plan_token) || result.revision == result.plan_token
-                || result.scope_resources != ResourceState::Settled || !view_valid(&result.view, true) { return Err(BridgeError::protocol()); }
+                || result.scope_resources != ResourceState::Settled || !view_valid(&result.view, true) || small && result.view["kind"] != "import" { return Err(BridgeError::protocol()); }
             Ok(ChildFrame::MetadataImagesPrepared(result))
         },
         Some("terminal") if bytes.len() <= edit::TERMINAL_LIMIT && keys(raw, &["kind", "planToken", "effect", "journal", "resources", "reason"]) => {

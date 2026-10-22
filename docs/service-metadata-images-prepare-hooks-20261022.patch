@@ -1,0 +1,1516 @@
+diff --git a/desktop/package.json b/desktop/package.json
+index 6cff7fc1..4f5534b8 100644
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -15,7 +15,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/service-metadata-images-prepare.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs"
+   },
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+index 98d594c7..eed34c46 100644
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -290,6 +290,7 @@ fn main() {
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
+     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
++    "agent_metadata_images_prepare_status", "agent_metadata_images_inspect", "agent_metadata_images_prepare_cancel",
+     "agent_metadata_images_status", "allow_agent_metadata_images_apply", "revoke_agent_metadata_images",
+     "agent_metadata_text_status", "allow_agent_metadata_text_apply", "revoke_agent_metadata_text",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve", "agent_version_reserve_review_status", "cancel_agent_version_reserve_review",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+index 73f5da70..136ce136 100644
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -9,6 +9,7 @@
+     "allow-allow-agent-version-edit-apply",
+     "allow-revoke-agent-version-edit",
+     "allow-agent-configuration-status", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
++    "allow-agent-metadata-images-prepare-status", "allow-agent-metadata-images-inspect", "allow-agent-metadata-images-prepare-cancel",
+     "allow-agent-metadata-images-status", "allow-allow-agent-metadata-images-apply", "allow-revoke-agent-metadata-images",
+     "allow-agent-metadata-text-status", "allow-allow-agent-metadata-text-apply", "allow-revoke-agent-metadata-text",
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+index 13e80a5f..9171b386 100644
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -103,6 +103,8 @@ mod git_index;
+ mod agent_configuration;
+ #[path="service_metadata_images_application.rs"]
+ mod agent_metadata_images;
++#[path="service_metadata_images_prepare_application.rs"]
++mod agent_metadata_images_prepare;
+ #[path="service_metadata_text_application.rs"]
+ mod agent_metadata_text;
+ #[path="service_version_reserve_application.rs"]
+@@ -532,6 +534,8 @@ impl ApplicationService {
+                 p::RequestBody::IdentityStart(s) => return self.identity_action_request(client, &s.origin, Some(crate::agent_identity_requests::actions::Kind::Start), Some(s), false),
+                 p::RequestBody::IdentityActionStatus(q) => return self.identity_action_request(client, q, None, None, false),
+                 p::RequestBody::IdentityCancel(q) => return self.identity_action_request(client, q, None, None, true),
++                p::RequestBody::MetadataImagesRead(v)=>return self.metadata_images_read(client,v.clone()),
++                p::RequestBody::MetadataImagesPrepare(v)=>return self.metadata_images_prepare(client,v.clone()),
+                 p::RequestBody::MetadataImagesScope(v)=>return self.metadata_images_scope(client,v),
+                 p::RequestBody::MetadataImagesSubmit(v)=>return self.metadata_images_submit(client,v.clone()),
+                 p::RequestBody::MetadataImagesStatus(q)=>return self.metadata_images_query(client,q,false),
+@@ -557,7 +561,7 @@ impl ApplicationService {
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+-                p::RequestBody::MetadataImagesScope(_)|p::RequestBody::MetadataImagesSubmit(_)|p::RequestBody::MetadataImagesStatus(_)|p::RequestBody::MetadataImagesCancel(_)|
++                p::RequestBody::MetadataImagesRead(_)|p::RequestBody::MetadataImagesPrepare(_)|p::RequestBody::MetadataImagesScope(_)|p::RequestBody::MetadataImagesSubmit(_)|p::RequestBody::MetadataImagesStatus(_)|p::RequestBody::MetadataImagesCancel(_)|
+                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+index 28452a3c..2f9d6018 100644
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1193,6 +1193,9 @@ pub(crate) use agent_configuration::ConfigurationAgentGate;
+ #[path="asset_session_service_metadata_images.rs"]
+ pub(crate) mod agent_metadata_images;
+ #[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_service_metadata_images_prepare.rs"]
++pub(crate) mod agent_metadata_images_prepare;
++#[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use agent_metadata_images::MetadataImagesAgentGate;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="asset_session_service_metadata_text.rs"]
+diff --git a/desktop/src-tauri/src/asset_session_service_metadata_images.rs b/desktop/src-tauri/src/asset_session_service_metadata_images.rs
+index 28755a6d..c4fc26e6 100644
+--- a/desktop/src-tauri/src/asset_session_service_metadata_images.rs
++++ b/desktop/src-tauri/src/asset_session_service_metadata_images.rs
+@@ -83,7 +83,7 @@ pub(crate) fn apply_request(v: Value) -> Result<p::Query, BridgeError> {
+     Ok(a.origin)
+ }
+ pub(crate) struct MetadataImagesAgentGate {
+-    document: Weak<Inner>,
++    pub(super) document: Weak<Inner>,
+ }
+ impl MetadataImagesAgentGate {
+     pub(crate) fn same_publisher(&self, p: &RegistrationPublisher) -> bool {
+@@ -100,7 +100,7 @@ impl MetadataImagesAgentGate {
+     }
+ }
+ impl DocumentBinding {
+-    fn images_agent_service(&self) -> Result<Arc<ApplicationService>, BridgeError> {
++    pub(super) fn images_agent_service(&self) -> Result<Arc<ApplicationService>, BridgeError> {
+         self.inner
+             .bridge
+             .application_service
+@@ -168,6 +168,10 @@ impl DocumentBinding {
+         Ok(())
+     }
+     fn images_agent_peers(&self, state: &DocumentState) -> Result<(), BridgeError> {
++        self.images_agent_peer_gates(state)?;
++        self.images_agent_memory(state)
++    }
++    pub(super) fn images_agent_peer_gates(&self, state: &DocumentState) -> Result<(), BridgeError> {
+         self.service_document_gate(state)?;
+         self.passive_query_gate_locked(state, &self.inner.bridge)?;
+         state.github.setup_ensure_idle()?;
+@@ -185,9 +189,9 @@ impl DocumentBinding {
+         {
+             return Err(refused());
+         }
+-        self.images_agent_memory(state)
++        Ok(())
+     }
+-    fn images_agent_same(
++    pub(super) fn images_agent_same(
+         &self,
+         state: &DocumentState,
+         old: &NativeProject,
+@@ -417,6 +421,7 @@ mod tests {
+         // Actual complete Document and Edit quotes, not a fabricated D. This
+         // default census is not a native active image Session or availability.
+         assert!(document.images_agent_memory(&state).is_ok());
++        assert!(document.images_preparation_memory(&state).is_ok());
+         assert!(bridge
+             .edits
+             .images_prepared("main", &original(), 0)
+@@ -427,6 +432,7 @@ mod tests {
+         let capacity = state.records.capacity();
+         assert!(state.records.is_empty());
+         assert!(document.images_agent_memory(&state).is_err());
++        assert!(document.images_preparation_memory(&state).is_err());
+         assert_eq!(state.records.capacity(), capacity);
+         assert!(state.records.is_empty());
+     }
+diff --git a/desktop/src-tauri/src/bridge.rs b/desktop/src-tauri/src/bridge.rs
+index 29f416e7..f01edfc4 100644
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -669,7 +669,7 @@ impl DesktopBridge {
+         args: crate::metadata_images_commands::Open) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+         // Keep entropy outside the document mutex, but a matching selection
+         // must still be retired when ticket/admission preparation fails.
+-        let ticket = self.edits.metadata_images_open_ticket(window);
++        let ticket = self.edits.metadata_images_cli_open_ticket(window,args.cli_preparation);
+         let selected = args.project_id.clone();
+         document.metadata_images_import_admit_published(&selected, &args.selection_token, |bridge, registration, data, claimed, publisher|
+             bridge.edits.open_metadata_images_published(publisher, window, args.project_id, data, registration, ticket?, claimed))
+@@ -689,13 +689,24 @@ impl DesktopBridge {
+     pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+         let session = args.session_id.clone();
+-        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration, publisher|
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.edits.images_prepare_origin(window,&session,None)?;
++        document.metadata_images_edit_admit_published(|bridge| {
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            bridge.edits.images_prepare_origin(window,&session,None)?;
++            bridge.edits.metadata_images_project(window, &session)
++        }, |bridge, registration, publisher|
+             bridge.edits.prepare_metadata_images_published(publisher, window, args, registration))
+     }
+     pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+-        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
+-            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration))
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let claim=self.edits.images_prepare_gui_apply(window,session,plan)?;
++        let result=document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
++            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration));
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        if result.is_err(){if let Some(claim)=&claim{self.edits.images_prepare_gui_failed(claim);}}
++        result
+     }
+     /// Only called while the real DocumentBinding admission lock is held. No
+     /// project method calls back into that lock. These are private native hints.
+diff --git a/desktop/src-tauri/src/edit_owner.rs b/desktop/src-tauri/src/edit_owner.rs
+index 0665ad76..ae33102a 100644
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -62,6 +62,9 @@ pub(crate) use agent_version_prepare::{Link as VersionPrepareLink,Step as Versio
+ #[path="edit_owner_service_metadata_images.rs"]
+ mod agent_metadata_images;
+ #[cfg(any(target_os="linux",target_os="macos"))]
++#[path="edit_owner_service_metadata_images_prepare.rs"]
++mod agent_metadata_images_prepare;
++#[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use agent_metadata_images::{Claim as MetadataImagesClaim,Decision as MetadataImagesDecision,Step as MetadataImagesStep};
+ #[cfg(not(any(target_os="linux",target_os="macos")))]
+ pub(crate) struct MetadataImagesClaim;
+@@ -668,7 +671,7 @@ pub(crate) struct RegisteredEditRoot {
+ // Keep existing workflow callers/fixtures bound to their original API. The
+ // shared root proof is not a domain permit; admission and tickets remain tagged.
+ pub(crate) type WorkflowRegistration = RegisteredEditRoot;
+-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
++pub(crate) struct RegisteredOpenTicket { image_prepare_profile: bool, owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_identity: Option<Arc<agent_identity::Link>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -1018,6 +1021,10 @@ struct Session {
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_metadata_images:std::sync::OnceLock<Arc<agent_metadata_images::Link>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_metadata_images_prepare:std::sync::OnceLock<Arc<agent_metadata_images_prepare::Link>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    image_identity:Option<Arc<()>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_metadata_text: Option<Arc<MetadataTextAgentLink>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_version_prepare: Option<Arc<VersionPrepareLink>>,
+@@ -1034,6 +1041,7 @@ struct Session {
+     // Buffer custody only. Written by the SAME original writer after its
+     // consecutive returned write future and owned command Vec have dropped.
+     // Neither child DATA nor this counter is a close/join/native receipt.
++    image_prepare_profile: bool,
+     image_written: std::sync::atomic::AtomicUsize,
+     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
+     stop: watch::Sender<bool>, wake: Arc<Notify>, force_due: AtomicBool, driver_done: AtomicBool,
+@@ -1679,7 +1687,7 @@ impl Inner {
+                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             installed_macos_observation::retire(&a.session);
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+-            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_metadata_images::unknown(&a.session); }
++            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_metadata_images::unknown(&a.session); agent_metadata_images_prepare::unknown(&a.session); }
+             a.unknown = true;
+             a.projection.phase = Phase::Unknown;
+             a.projection.native_finality = NativeFinality::Unknown;
+@@ -1733,7 +1741,7 @@ impl Inner {
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+-            agent_version_edit::cancellation_at(&a.session,now).or_else(||agent_metadata_images::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
++            agent_version_edit::cancellation_at(&a.session,now).or_else(||agent_metadata_images::cancellation_at(&a.session,now)).or_else(||agent_metadata_images_prepare::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+             self.trigger_locked(publication,r,id,reason,at);
+         }
+         // Evaluate the original phase endpoint before a new native F can clear
+@@ -2164,6 +2172,10 @@ impl EditOwner {
+     pub(crate) fn metadata_images_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
+         self.registered_open_ticket(window, EditDomain::MetadataImages)
+     }
++    pub(crate) fn metadata_images_cli_open_ticket(&self, window: &str, enabled: bool) -> Result<RegisteredOpenTicket, BridgeError> {
++        let mut ticket = self.metadata_images_open_ticket(window)?;
++        ticket.image_prepare_profile = enabled; Ok(ticket)
++    }
+     fn registered_open_ticket(&self, window: &str, domain: EditDomain) -> Result<RegisteredOpenTicket, BridgeError> {
+         if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages | EditDomain::ProjectInitialization | EditDomain::ProjectIdentity) { return Err(invalid_owner()); }
+         self.registered_open_ticket_for_intent(window, domain, false)
+@@ -2174,7 +2186,7 @@ impl EditOwner {
+         // Entropy is obtained before the real document/selection mutex. This
+         // private ticket performs no observation, registration, claim or spawn.
+         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
++        Ok(RegisteredOpenTicket { image_prepare_profile: false, owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             reserved_version:None,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -2332,6 +2344,8 @@ impl EditOwner {
+             if ticket.as_ref().is_some_and(|t|t.agent_version_prepare.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner())}
+             ticket.as_mut().and_then(|t|t.agent_version_prepare.take())
+         };
++        let image_prepare_profile = ticket.as_ref().is_some_and(|t| t.image_prepare_profile);
++        if image_prepare_profile && (domain != EditDomain::MetadataImages || !matches!(images.as_ref(), Some(ImageOpen::Import(_)))) { return Err(invalid_owner()); }
+         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
+             (EditDomain::Configuration, None) => {
+                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+@@ -2388,7 +2402,7 @@ impl EditOwner {
+         let (stop, _) = watch::channel(false);
+         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
+         let (frames, frame_rx) = mpsc::channel(3);
+-        let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, image_written: std::sync::atomic::AtomicUsize::new(0), id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
++        let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, image_prepare_profile, image_written: std::sync::atomic::AtomicUsize::new(0), id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2400,6 +2414,10 @@ impl EditOwner {
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_metadata_images:std::sync::OnceLock::new(),
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_metadata_images_prepare:std::sync::OnceLock::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            image_identity:(domain==EditDomain::MetadataImages).then(||Arc::new(())),
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_metadata_text,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_version_prepare,
+@@ -2605,6 +2623,16 @@ impl EditOwner {
+         counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
+         agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
+         agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        self.prepare_domain_images(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,agent_config,agent_metadata,agent_version,None)
++    }
++    fn prepare_domain_images(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,revision:&str,
++        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
++        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
++        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>,
++        agent_images:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_images.is_some()&&domain!=EditDomain::MetadataImages{return Err(invalid_owner())}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_metadata_images_prepare::preclaim(&self.inner,session_id,agent_images)?;
+         if agent_version.is_some()&&domain!=EditDomain::ReleaseVersion{return Err(invalid_owner())}
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_version_prepare::preclaim(&self.inner,session_id,agent_version)?;
+@@ -2699,6 +2727,8 @@ impl EditOwner {
+             if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_version_prepare::consume(a,agent_version,&mut publication)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_metadata_images_prepare::consume(a,agent_images,&mut publication)?;
+             a.prepare_counters = Some(counters);
+             a.claimed_seq = 1;
+             a.phase_end = Some(phase_end);
+@@ -2854,7 +2884,7 @@ impl EditOwner {
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
+             #[cfg(any(target_os="linux",target_os="macos"))]
+-            if !agent_metadata_images::consume(a,agent_images,&mut publication){return Err(invalid_owner());}
++            if !agent_metadata_images_prepare::apply_allowed(a)||!agent_metadata_images::consume(a,agent_images,&mut publication){return Err(invalid_owner());}
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+             a.claimed_seq = 2;
+@@ -3208,12 +3238,12 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
+                             #[cfg(not(any(target_os="linux",target_os="macos")))]
+                             {version_wire::RESPONSE_LIMIT}
+                         },
+-                        EditDomain::MetadataImages => images_wire::RESPONSE_LIMIT,
++                        EditDomain::MetadataImages => if owner.image_prepare_profile { crate::service_metadata_images_prepare_protocol::FRAME_BYTES } else { images_wire::RESPONSE_LIMIT },
+                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
+                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
+                     };
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+-                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()) && frame.len() >= response_limit {
++                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.image_prepare_profile) && frame.len() >= response_limit {
+                         discard=true;failed=true;frame.clear();
+                         inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
+                         continue;
+@@ -3246,7 +3276,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
+                                     #[cfg(not(any(target_os="linux",target_os="macos")))]
+                                     {version_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
+                                 },
+-                                EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
++                                EditDomain::MetadataImages => if owner.image_prepare_profile { images_wire::decode_cli_import(&frame, &owner.id) } else { images_wire::decode(&frame, &owner.id) },
+                                 EditDomain::ProjectInitialization => initialization_wire::decode(&frame, &owner.id),
+                                 EditDomain::ProjectIdentity => identity_wire::decode(&frame, &owner.id),
+                             }
+@@ -3355,7 +3385,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
+     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
+-      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
++      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()||agent_metadata_images_prepare::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
+     let mut terminal = false;
+     let mut uncertain = false;
+     if !invalid {
+@@ -3696,7 +3726,7 @@ fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
+ }
+ fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+     end
+ }
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+@@ -3722,7 +3752,7 @@ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+                 _=>end,
+             };
+             #[cfg(any(target_os="linux",target_os="macos"))]
+-            let end=if owner.agent_metadata_images.get().is_some()&&!unknown{end.map(|end|end.min(now+Duration::from_millis(100)))}else{end};
++            let end=if (owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some())&&!unknown{end.map(|end|end.min(now+Duration::from_millis(100)))}else{end};
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             let end=match &owner.agent_version_prepare {Some(link) if !unknown=>end.map(|end|link.cleanup_poll_end(end,now)),_=>end};
+             end
+@@ -4757,7 +4787,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
+           agent_version_edit::retired(&r,&a.session,a.unknown);
+           agent_metadata_text::retired(&r,&a.session,a.unknown,metadata_chain_current);
+           agent_version_prepare::retired(&r,&a.session,a.unknown,version_prepare_current);
+-          agent_metadata_images::retired(&r,&a.session,a.unknown,images_chain_current); }
++          agent_metadata_images::retired(&r,&a.session,a.unknown,images_chain_current); agent_metadata_images_prepare::retired(&r,&a.session,a.unknown); }
+     }
+     guard.completed = true;
+     })();
+diff --git a/desktop/src-tauri/src/edit_owner_service_metadata_images.rs b/desktop/src-tauri/src/edit_owner_service_metadata_images.rs
+index 57b4d0b2..3de08b15 100644
+--- a/desktop/src-tauri/src/edit_owner_service_metadata_images.rs
++++ b/desktop/src-tauri/src/edit_owner_service_metadata_images.rs
+@@ -79,7 +79,7 @@ impl std::io::Write for Hasher {
+         Ok(())
+     }
+ }
+-fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
++pub(super) fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
+     if a.session.domain != EditDomain::MetadataImages
+         || a.projection.phase != Phase::Reviewing
+         || a.projection.native_reason != Reason::None
+@@ -270,6 +270,7 @@ impl EditOwner {
+         window(&r, w)?;
+         let a = r.active.as_ref().ok_or_else(invalid_owner)?;
+         let current = review(a, r.revision)?;
++        if a.session.agent_metadata_images_prepare.get().is_some_and(|l|!l.entry.reviewing(&current)){return Err(invalid_owner());}
+         if current.original != *expected
+             || revision != r.revision
+             || a.session.agent_metadata_images.get().is_some()
+@@ -303,9 +304,13 @@ impl EditOwner {
+             review: original.review.clone(),
+             wake: Arc::downgrade(&original.session.wake),
+         };
++        let preparation={
++            let r=self.inner.lock();let a=r.active.as_ref().filter(|a|Arc::ptr_eq(&a.session,&original.session)).ok_or_else(invalid_owner)?;
++            a.session.agent_metadata_images_prepare.get().map(|l|l.entry.clone())
++        };
+         service
+             .configuration_requests()
+-            .images_install(nonce, grant, |entry| {
++            .images_install_with_preparation(nonce, grant, preparation.as_ref(), |entry| {
+                 let r = self.inner.lock();
+                 window(&r, w).map_err(|_| crate::service_protocol::Error::Conflict)?;
+                 let a = r
+@@ -391,10 +396,19 @@ impl EditOwner {
+         } else {
+             link.entry.gui_claim().map_err(public)?;
+         }
+-        Ok(Decision::Apply(Claim {
+-            session: a.session.clone(),
+-            entry: entry.cloned(),
+-        }))
++        let claim = Claim { session: a.session.clone(), entry: entry.cloned() };
++        if let Some(p)=a.session.agent_metadata_images_prepare.get(){
++            // Both real rows already exist. Under this SAME Registry cut the
++            // predecessor retires only its control; the successor keeps READ.
++            // A cancellation/overflow at transfer after the real winning
++            // preclaim must STOP that original, never orphan/rearm its claim.
++            if let Err(error) = p.entry.transfer(entry,&g.review) {
++                drop(r);
++                self.images_claim_failed(&claim);
++                return Err(public(error));
++            }
++        }
++        Ok(Decision::Apply(claim))
+     }
+     pub(crate) fn apply_images_claimed(
+         &self,
+diff --git a/desktop/src-tauri/src/edit_owner_service_metadata_images_memory.rs b/desktop/src-tauri/src/edit_owner_service_metadata_images_memory.rs
+index 97598d16..da5c64ba 100644
+--- a/desktop/src-tauri/src/edit_owner_service_metadata_images_memory.rs
++++ b/desktop/src-tauri/src/edit_owner_service_metadata_images_memory.rs
+@@ -1,6 +1,7 @@
+-//! Image Apply-only continuation of the ORIGINAL borrowed Edit census. This
+-//! quote starts only after its own Open and Prepare write buffers have returned
+-//! and dropped. It grants no child/IO/runtime completion or new payload credit.
++//! Image continuations of the ORIGINAL borrowed Edit census. Ordinary Apply
++//! requires returned Open+Prepare buffers; immutable-profile preparation starts
++//! after Open alone and retains its remaining frame/Prepare debt. Buffer return
++//! grants no child/IO/runtime completion or new payload credit.
+ use super::*;
+ 
+ // A malformed THIRD frame still reaches the SAME bounded Seed before sequence
+@@ -18,8 +19,29 @@ const IMAGE_FUTURE: usize = 2 * crate::protocol::NODE_LIMIT * 512
+     + 2 * size_of::<crate::service_metadata_images_requests::Call>()
+     + 4 * (size_of::<crate::application_service_host::NativeProject>() + 4096 + 128);
+ 
++// Immutable CLI Import profile, installed BEFORE the first reader byte.
++// Five representations cover queued/current future Prepared, Seed+typed decode
++// and two Status copies. Current/last private trees remain independently charged.
++const PREPARE_FUTURE: usize = 5 * crate::service_metadata_images_prepare_protocol::FRAME_NODES * 512
++    + 10 * crate::service_metadata_images_prepare_protocol::FRAME_BYTES
++    + 2 * i::SMALL_REQUEST_LIMIT + 2 * i::STATUS_LIMIT + 1024 * 1024
++    + size_of::<Session>() + size_of::<Resources>() + size_of::<ActiveOwner>()
++    + size_of::<agent_metadata_images::Link>() + size_of::<agent_metadata_images_prepare::Link>()
++    + 2 * size_of::<agent_metadata_images::PreparedOriginal>()
++    + 2 * size_of::<agent_metadata_images::Claim>() + 2 * size_of::<agent_metadata_images_prepare::Claim>()
++    + 2 * size_of::<agent_metadata_images_prepare::GuiClaim>()
++    + 2 * size_of::<crate::service_metadata_images_requests::Call>()
++    + 2 * size_of::<crate::service_metadata_images_prepare_requests::Call>()
++    + 4 * (size_of::<crate::application_service_host::NativeProject>() + 4096 + 128);
++
+ impl EditOwner {
+     pub(crate) fn images_agent_edit_backing(&self) -> Result<usize, BridgeError> {
++        self.images_agent_backing(false)
++    }
++    pub(crate) fn images_agent_prepare_backing(&self) -> Result<usize, BridgeError> {
++        self.images_agent_backing(true)
++    }
++    fn images_agent_backing(&self, preparing: bool) -> Result<usize, BridgeError> {
+         let r = self
+             .inner
+             .registry
+@@ -70,13 +92,14 @@ impl EditOwner {
+         }
+         if let Some(a) = &r.active {
+             if a.session.domain != EditDomain::MetadataImages
+-                || a.projection.phase != Phase::Reviewing
+-                || a.claimed_seq != 1
++                || preparing && !a.session.image_prepare_profile
++                || a.projection.phase != if preparing { Phase::Editing } else { Phase::Reviewing }
++                || a.claimed_seq != if preparing { 0 } else { 1 }
+                 || !a.opened
+-                || !a.prepared
++                || a.prepared == preparing
+                 || a.unknown
+                 || a.cleanup_start.is_some()
+-                || a.session.image_written.load(Ordering::Acquire) != 2
++                || a.session.image_written.load(Ordering::Acquire) != if preparing { 1 } else { 2 }
+                 || a.projection
+                     .metadata_images
+                     .as_ref()
+@@ -91,6 +114,12 @@ impl EditOwner {
+                 n.add(link.project.canonical_root.capacity())?;
+                 link.project.runtime_id.heap(&mut n)?;
+             }
++            if let Some(link) = a.session.agent_metadata_images_prepare.get() {
++                n.add(size_of::<agent_metadata_images_prepare::Link>() + 64)?;
++                n.add(link.project.canonical_root.capacity())?;
++                link.project.runtime_id.heap(&mut n)?;
++            }
++            if a.session.image_identity.is_some() { n.add(64)?; }
+             // Do not pretend a live native runtime has zero retained source/ACL
+             // backing. Borrow its own existing census; try-lock/opaque refuses.
+             #[cfg(all(
+@@ -124,7 +153,7 @@ impl EditOwner {
+         }
+         // The absent-active form is only a census for default/overbound tests.
+         // images_prepared independently demands the real active native original.
+-        n.add(IMAGE_FUTURE)?;
++        n.add(if preparing || r.active.as_ref().is_some_and(|a| a.session.image_prepare_profile) { PREPARE_FUTURE } else { IMAGE_FUTURE })?;
+         Ok(n.bytes)
+     }
+ }
+@@ -157,6 +186,16 @@ mod tests {
+         }
+     }
+     #[test]
++    fn immutable_editing_quote_retains_five_bounded_frames_and_foreign_last_capacity() {
++        let fixed=5*4096*512+10*128*1024+2*i::SMALL_REQUEST_LIMIT+2*i::STATUS_LIMIT+1024*1024;
++        assert_eq!(fixed,17_170_432);assert!(PREPARE_FUTURE>fixed);
++        let owner=EditOwner::new(RuntimeConfig::packaged(PathBuf::from("/never-opened-images-preparation-census")));
++        let original=owner.images_agent_prepare_backing().unwrap();assert!(original>PREPARE_FUTURE);
++        let mut last=data();last.project_id=String::with_capacity(1024*1024);let cap=last.project_id.capacity();let ptr=last.project_id.as_ptr();owner.inner.lock().last=Some(last);
++        assert!(owner.images_agent_prepare_backing().unwrap()>=original+cap);assert_eq!(owner.inner.lock().last.as_ref().unwrap().project_id.as_ptr(),ptr);
++        owner.inner.lock().exhausted=true;assert!(owner.images_agent_prepare_backing().is_err());
++    }
++    #[test]
+     fn retained_image_private_view_capacity_and_foreign_last_are_not_buffer_credit() {
+         let owner = EditOwner::new(RuntimeConfig::packaged(PathBuf::from(
+             "/never-opened-images-census",
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+index babcab9f..7ebcac14 100644
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -9,6 +9,8 @@ use std::{ffi::OsString, io::Write, path::PathBuf};
+ mod identity;
+ #[path="installed_cli_configuration.rs"]
+ mod configuration;
++#[path="installed_cli_metadata_images_prepare.rs"]
++mod metadata_images_prepare;
+ #[path="installed_cli_metadata_images.rs"]
+ mod metadata_images;
+ #[path="installed_cli_local_history.rs"]
+@@ -71,6 +73,8 @@ Usage:\n\
+   mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
+   mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk metadata-images-read PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk metadata-images-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID --stdin [--json]\n\
+   mrk metadata-images-scope PROJECT_ID [--json]\n\
+   mrk metadata-images-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
+   mrk metadata-images-status|metadata-images-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -318,7 +322,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
+                 "commands": IDENTITY_ACTION_COMMANDS,
+             },
+-            "metadataImages":{"commands":["metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":false,"recovery":false,"storeUpload":false,"headless":false},
++            "metadataImages":{"commands":["metadata-images-read","metadata-images-prepare","metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":false,"nativeOpenedCliProfileOnly":true,"read":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":true,"recovery":false,"storeUpload":false,"headless":false},
+             "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
+             "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
+                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
+@@ -415,7 +419,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -521,6 +525,7 @@ fn human(response: &p::ResponseBody) -> String {
+         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+         p::ResponseBody::AppleProvisioningRequest(_)|p::ResponseBody::AppleProvisioningPreparation(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
++        p::ResponseBody::MetadataImagesPreparation(s)=>metadata_images_prepare::human(s),
+         p::ResponseBody::MetadataImagesRequest(s)=>metadata_images::human(s),
+         p::ResponseBody::MetadataImagesAccess(_)=>"Prepared image-copy permission DATA; review the full preview in Desktop. No Store upload.\n".into(),
+         p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
+@@ -568,6 +573,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
+     let args = collect_arguments(args);
+     let json = args.iter().any(|a| a == "--json");
+     if configuration::recognizes(&args){return configuration::run(args);}
++    if metadata_images_prepare::recognizes(&args){return metadata_images_prepare::run(args);}
+     if metadata_images::recognizes(&args){return metadata_images::run(args);}
+     if metadata_text::recognizes(&args){return metadata_text::run(args);}
+     if identity::recognizes(&args) { return identity::run(args); }
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+index f2ad473e..e3711b69 100644
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -304,6 +304,7 @@ async fn serve_exchange<'a>(stream: &mut UnixStream, service: &ApplicationServic
+         p::ResponseBody::IosArchiveRequest(view) => service.android_tools_client_current(&client, &view.origin().project_id)?,
+         p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
++        p::ResponseBody::MetadataImagesPreparation(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::MetadataImagesAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+         p::ResponseBody::MetadataTextRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+index a92b71a4..5a99ea14 100644
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -17,6 +17,8 @@ mod service_configuration_protocol;
+ mod bounded_json_seed;
+ mod service_metadata_images_protocol;
+ mod service_metadata_images_requests;
++mod service_metadata_images_prepare_protocol;
++mod service_metadata_images_prepare_requests;
+ mod service_metadata_text_protocol;
+ mod service_metadata_text_requests;
+ mod service_configuration_requests;
+diff --git a/desktop/src-tauri/src/installed_cli_metadata_images.rs b/desktop/src-tauri/src/installed_cli_metadata_images.rs
+index ea4c9eb5..513314d6 100644
+--- a/desktop/src-tauri/src/installed_cli_metadata_images.rs
++++ b/desktop/src-tauri/src/installed_cli_metadata_images.rs
+@@ -94,6 +94,9 @@ fn output(
+     if let p::ResponseBody::Error(e) = r.response {
+         return Err(e);
+     }
++    if grant.is_none() && matches!(&r.response,p::ResponseBody::MetadataImagesPreparation(_)) {
++        return super::metadata_images_prepare::output(r,origin.ok_or(Error::StateUnknown)?,json);
++    }
+     let (code, text) = match (&r.response, origin) {
+         (p::ResponseBody::MetadataImagesAccess(a), None) => {
+             a.validate()?;
+@@ -312,7 +315,7 @@ mod tests {
+         assert!(bytes.len() <= super::super::CAPABILITIES_BYTES);
+         let caps: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+         let images = &caps["metadataImages"];
+-        assert_eq!(images["commands"].as_array().unwrap().len(), 4);
++        assert_eq!(images["commands"].as_array().unwrap().len(), 6);
+         assert!(caps["requestDiscovery"]["families"]
+             .as_array()
+             .unwrap()
+@@ -327,7 +330,9 @@ mod tests {
+             crate::service_request_catalogue::LIMIT
+         );
+         for key in [
+-            "desktopPreparedImportOnly",
++            "nativeOpenedCliProfileOnly",
++            "read",
++            "prepare",
+             "scalarIdsOnly",
+             "oneUseSeparateApproval",
+         ] {
+@@ -336,7 +341,6 @@ mod tests {
+         for key in [
+             "nativeAvailabilityChecked",
+             "chooseFiles",
+-            "prepare",
+             "recovery",
+             "storeUpload",
+             "headless",
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+index cc0e26d0..7fcb7d6b 100644
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -133,6 +133,8 @@ mod service_configuration_protocol;
+ mod bounded_json_seed;
+ mod service_metadata_images_protocol;
+ mod service_metadata_images_requests;
++mod service_metadata_images_prepare_protocol;
++mod service_metadata_images_prepare_requests;
+ mod service_metadata_text_protocol;
+ mod service_metadata_text_requests;
+ mod service_configuration_requests;
+diff --git a/desktop/src-tauri/src/metadata_images_commands.rs b/desktop/src-tauri/src/metadata_images_commands.rs
+index 66255ca2..0389efaa 100644
+--- a/desktop/src-tauri/src/metadata_images_commands.rs
++++ b/desktop/src-tauri/src/metadata_images_commands.rs
+@@ -16,7 +16,7 @@ impl SelectionStart { pub(crate) fn context(&self) -> Context {
+ pub(crate) struct SelectionCancel { pub operation_id: String }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+-pub(crate) struct Open { pub project_id: String, pub selection_token: String }
++pub(crate) struct Open { pub project_id: String, pub selection_token: String, #[serde(default)] pub cli_preparation: bool }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct RecoveryOpen { pub project_id: String }
+@@ -80,7 +80,10 @@ mod tests {
+             let mut bad = value.clone(); bad[key] = Value::Null; assert!(choose(&bad).is_err());
+         }
+         let value = json!({"projectId":"project-1","selectionToken":"a".repeat(32)});
+-        assert!(open(&value).is_ok());
++        assert!(!open(&value).unwrap().cli_preparation);
++        let mut profiled=value.clone();profiled["cliPreparation"]=json!(true);assert!(open(&profiled).unwrap().cli_preparation);
++        for invalid in [Value::Null,json!(1),json!("true")] {profiled["cliPreparation"]=invalid;assert!(open(&profiled).is_err());}
++        assert!(recovery_open(&json!({"projectId":"project-1","cliPreparation":true})).is_err());
+         for key in ["platform", "locale", "assetType", "paths", "images", "expectedBaseline"] {
+             let mut bad = value.clone(); bad[key] = Value::Null; assert!(open(&bad).is_err());
+         }
+diff --git a/desktop/src-tauri/src/metadata_images_edit_protocol.rs b/desktop/src-tauri/src/metadata_images_edit_protocol.rs
+index 9542bc73..881a73fa 100644
+--- a/desktop/src-tauri/src/metadata_images_edit_protocol.rs
++++ b/desktop/src-tauri/src/metadata_images_edit_protocol.rs
+@@ -189,12 +189,16 @@ impl Details {
+     pub(crate) fn recovery() -> Self { Self { intent: Intent::Recover, checkout: None, prepared: None,
+         context: None, selected: Vec::new(), submission: None } }
+     pub(crate) fn opened_matches(&self, opened: &Opened) -> bool {
+-        if self.intent != opened.intent || !view_valid(&opened.view, false) { return false; }
+-        if self.intent == Intent::Recover { return opened.view["kind"] == "recover" && self.context.is_none() && self.selected.is_empty(); }
++        if self.intent != opened.intent { return false; }
++        self.opened_view_matches(&opened.view)
++    }
++    pub(crate) fn opened_view_matches(&self, view: &Value) -> bool {
++        if !view_valid(view, false) { return false; }
++        if self.intent == Intent::Recover { return view["kind"] == "recover" && self.context.is_none() && self.selected.is_empty(); }
+         let Some(context) = &self.context else { return false; };
+-        let Some(files) = opened.view["files"].as_array() else { return false; };
+-        opened.view["kind"] == "import" && opened.view["platform"] == json!(context.platform)
+-            && opened.view["locale"] == context.locale && opened.view["assetType"] == context.asset_type
++        let Some(files) = view["files"].as_array() else { return false; };
++        view["kind"] == "import" && view["platform"] == json!(context.platform)
++            && view["locale"] == context.locale && view["assetType"] == context.asset_type
+             && files.len() == self.selected.len() && files.iter().zip(&self.selected).all(|(file, selected)|
+                 file["itemId"] == selected.item_id && file["displayName"] == selected.display_name
+                 && file["selected"]["byteLength"] == selected.byte_length && file["selected"]["sha256"] == selected.sha256
+@@ -451,10 +455,19 @@ impl TerminalReply { pub(crate) fn outcome(&self) -> CoreEditOutcome {
+ } }
+ 
+ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
++    decode_profile(bytes, session, false)
++}
++pub(crate) fn decode_cli_import(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
++    if bytes.len() > crate::service_metadata_images_prepare_protocol::FRAME_BYTES { return Err(BridgeError::protocol()); }
++    decode_profile(bytes, session, true)
++}
++fn decode_profile(bytes: &[u8], session: &str, small: bool) -> Result<ChildFrame, BridgeError> {
+     if !token(session) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+     let body = &bytes[..bytes.len() - 1];
+     if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
+-    let value = strict_json(body)?;
++    let value = if small { crate::protocol::strict_json_with_limits(body,
++        crate::service_metadata_images_prepare_protocol::FRAME_NODES,
++        crate::service_metadata_images_prepare_protocol::FRAME_DEPTH)? } else { strict_json(body)? };
+     if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session { return Err(BridgeError::protocol()); }
+     let seq = value["seq"].as_u64().filter(|seq| *seq <= 2).ok_or_else(BridgeError::protocol)? as u32;
+     let raw = &value["result"];
+@@ -462,13 +475,13 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
+         Some("opened") if seq == 0 && keys(raw, &["intent", "revision", "baseline", "view", "scopeResources"]) => {
+             let result = Opened::deserialize(raw).map_err(|_| BridgeError::protocol())?;
+             if !token(&result.revision) || !result.baseline.valid() || !view_valid(&result.view, false)
+-                || result.scope_resources != ResourceState::Settled || result.view["kind"] != json!(result.intent) { return Err(BridgeError::protocol()); }
++                || result.scope_resources != ResourceState::Settled || result.view["kind"] != json!(result.intent) || small && result.intent != Intent::Import { return Err(BridgeError::protocol()); }
+             Ok(ChildFrame::MetadataImagesOpened(result))
+         },
+         Some("prepared") if seq == 1 && keys(raw, &["revision", "planToken", "view", "scopeResources"]) => {
+             let result = PreparedReply::deserialize(raw).map_err(|_| BridgeError::protocol())?;
+             if !token(&result.revision) || !token(&result.plan_token) || result.revision == result.plan_token
+-                || result.scope_resources != ResourceState::Settled || !view_valid(&result.view, true) { return Err(BridgeError::protocol()); }
++                || result.scope_resources != ResourceState::Settled || !view_valid(&result.view, true) || small && result.view["kind"] != "import" { return Err(BridgeError::protocol()); }
+             Ok(ChildFrame::MetadataImagesPrepared(result))
+         },
+         Some("terminal") if bytes.len() <= edit::TERMINAL_LIMIT && keys(raw, &["kind", "planToken", "effect", "journal", "resources", "reason"]) => {
+diff --git a/desktop/src-tauri/src/metadata_images_edit_protocol_tests.rs b/desktop/src-tauri/src/metadata_images_edit_protocol_tests.rs
+index 7ee45622..443f9ecb 100644
+--- a/desktop/src-tauri/src/metadata_images_edit_protocol_tests.rs
++++ b/desktop/src-tauri/src/metadata_images_edit_protocol_tests.rs
+@@ -190,3 +190,31 @@ fn strict_response_domain_session_sequence_and_unknown_fields_are_not_accepted()
+     }
+     let mut bad = body; bad["result"]["raw"] = json!("must-not-be-retained"); assert!(decode(&frame_exact(&bad,RESPONSE_LIMIT).unwrap(),SESSION).is_err());
+ }
++
++#[test]
++fn immutable_cli_import_profile_accepts_ten_real_files_and_keeps_ordinary_decoder_limits() {
++    let mut opened_view=import_fixture(true,false,false);
++    let folder=format!("public/{}/android/en-US/images/phoneScreenshots","assets".repeat(20));
++    let mut files=Vec::new();let mut existing=Vec::new();let mut order=Vec::new();
++    for n in 0..10 {
++        let name=format!("{n:02}{}.png","a".repeat(220));let path=format!("{folder}/{name}");
++        let mut f=opened_view["files"][0].clone();f["itemId"]=json!(format!("{:032x}",n+1));f["displayName"]=json!(name);f["path"]=json!(path);
++        existing.push(json!({"path":path,"summary":f["before"]}));order.push(path);files.push(f);
++    }
++    opened_view["metadataRoot"]=json!(format!("public/{}","assets".repeat(20)));opened_view["folder"]=json!(folder);
++    opened_view["files"]=json!(files);opened_view["existing"]=json!(existing);opened_view["finalOrder"]=json!(order);
++    let opened=json!({"protocol":PROTOCOL,"session":SESSION,"seq":0,"kind":"opened","result":{"intent":"import","revision":REVISION,"baseline":baseline(),"view":opened_view,"scopeResources":"settled"}});
++    let raw=frame_exact(&opened,RESPONSE_LIMIT).unwrap();assert!(raw.len()<crate::service_metadata_images_prepare_protocol::FRAME_BYTES);
++    assert!(matches!(decode_cli_import(&raw,SESSION),Ok(ChildFrame::MetadataImagesOpened(_))));
++    let mut prepared_view=opened_view.clone();for f in prepared_view["files"].as_array_mut().unwrap(){f["action"]=json!("replace");f["after"]=f["selected"].clone();}
++    let prepared=json!({"protocol":PROTOCOL,"session":SESSION,"seq":1,"kind":"prepared","result":{"revision":REVISION,"planToken":PLAN,"view":prepared_view,"scopeResources":"settled"}});
++    let raw=frame_exact(&prepared,RESPONSE_LIMIT).unwrap();assert!(matches!(decode_cli_import(&raw,SESSION),Ok(ChildFrame::MetadataImagesPrepared(_))));
++    // Same parser, stricter immutable profile; no fallback/truncation. A valid
++    // ordinary recovery remains a different original construction path.
++    let recovery=json!({"protocol":PROTOCOL,"session":SESSION,"seq":0,"kind":"opened","result":{"intent":"recover","revision":REVISION,"baseline":baseline(),"view":recovery_fixture("rollback"),"scopeResources":"settled"}});
++    let raw=frame_exact(&recovery,RESPONSE_LIMIT).unwrap();assert!(decode(&raw,SESSION).is_ok());assert!(decode_cli_import(&raw,SESSION).is_err());
++    let mut raw=frame_exact(&opened,RESPONSE_LIMIT).unwrap();raw.resize(crate::service_metadata_images_prepare_protocol::FRAME_BYTES+1,b' ');assert!(decode_cli_import(&raw,SESSION).is_err());
++    let too_many=json!({"many":vec![0;crate::service_metadata_images_prepare_protocol::FRAME_NODES]});
++    let bytes=serde_json::to_vec(&too_many).unwrap();assert!(crate::protocol::strict_json(&bytes).is_ok());
++    assert!(crate::protocol::strict_json_with_limits(&bytes,crate::service_metadata_images_prepare_protocol::FRAME_NODES,crate::service_metadata_images_prepare_protocol::FRAME_DEPTH).is_err());
++}
+diff --git a/desktop/src-tauri/src/service_configuration_requests.rs b/desktop/src-tauri/src/service_configuration_requests.rs
+index 9ebf6252..31065e49 100644
+--- a/desktop/src-tauri/src/service_configuration_requests.rs
++++ b/desktop/src-tauri/src/service_configuration_requests.rs
+@@ -500,11 +500,12 @@ impl Entry {
+     }
+ }
+ // One Book/mutex/32-row budget for all three fixed editor families.
+-enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>) }
++enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>), MetadataImagesPrepare(Arc<crate::service_metadata_images_prepare_requests::Entry>) }
+ impl SharedRow {
+-    fn origin(&self)->Option<&p::Query> {match self{Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin()}}
+-    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied()}}
+-    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at)}}
++    fn origin(&self)->Option<&p::Query> {match self{Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin(),Self::MetadataImagesPrepare(e)=>Some(&e.input.origin)}}
++    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied(),Self::MetadataImagesPrepare(e)=>e.occupied()}}
++    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at),Self::MetadataImagesPrepare(e)=>e.cancel(at)}}
++    fn image_preparation(&self)->Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>{match self{Self::MetadataImagesPrepare(e)=>Some(e),_=>None}}
+     fn images(&self)->Option<&Arc<crate::service_metadata_images_requests::Entry>>{match self{Self::MetadataImages(e)=>Some(e),_=>None}}
+     fn configuration(&self)->Option<&Arc<Entry>>{match self{Self::Configuration(e)=>Some(e),_=>None}}
+     fn metadata(&self)->Option<&Arc<crate::service_metadata_text_requests::Entry>>{match self{Self::MetadataText(e)=>Some(e),_=>None}}
+@@ -712,7 +713,7 @@ impl Inbox {
+             .rows
+             .iter()
+             .filter_map(|r|r.origin().filter(|q|&q.project_id==project).map(|q|AdditionalRequest {
+-                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)=>AdditionalFamily::MetadataImages},
++                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)|SharedRow::MetadataImagesPrepare(_)=>AdditionalFamily::MetadataImages},
+                 request_id:q.request_id.clone(),
+             }))
+             .collect())
+@@ -725,3 +726,7 @@ mod tests;
+ 
+ #[path="service_metadata_images_book.rs"]
+ mod images;
++
++#[path="service_metadata_images_prepare_book.rs"]
++mod images_prepare;
++const _: () = assert!(crate::service_metadata_images_prepare_requests::ROW_BYTES <= p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>());
+diff --git a/desktop/src-tauri/src/service_ipc_response_memory.rs b/desktop/src-tauri/src/service_ipc_response_memory.rs
+index 567e4c7b..b7329b7c 100644
+--- a/desktop/src-tauri/src/service_ipc_response_memory.rs
++++ b/desktop/src-tauri/src/service_ipc_response_memory.rs
+@@ -138,6 +138,7 @@ fn quote_with(c: Cells) -> Option<Quote> {
+         crate::service_version_edit_prepare_requests::IPC_WORKER_BACKING,
+         crate::service_configuration_requests::IPC_WORKER_BACKING,
+         crate::service_metadata_images_requests::IPC_WORKER_BACKING,
++        crate::service_metadata_images_prepare_requests::IPC_WORKER_BACKING,
+         crate::service_store_requests::history::IPC_WORKER_BACKING,
+         crate::service_tool_setup_requests::IPC_WORKER_BACKING,
+         crate::service_apple_provisioning_protocol::IPC_WORKER_BACKING,
+diff --git a/desktop/src-tauri/src/service_metadata_images_application.rs b/desktop/src-tauri/src/service_metadata_images_application.rs
+index b13efbde..f40b57e8 100644
+--- a/desktop/src-tauri/src/service_metadata_images_application.rs
++++ b/desktop/src-tauri/src/service_metadata_images_application.rs
+@@ -42,6 +42,11 @@ impl ApplicationService {
+         let s = self.lock()?;
+         self.authorize_build_client(&s, client, &q.project_id)?;
+         Self::identity_point(&s, &q.project_id)?;
++        if self.configuration_requests.images_preparation_kind(q)? {
++            let e=self.configuration_requests.images_preparation_entry(q)?;
++            if cancel {e.cancel(at)?;}
++            return e.status().map(p::ResponseBody::MetadataImagesPreparation);
++        }
+         let e = self.configuration_requests.images_entry(q)?;
+         if cancel {
+             e.cancel(at)?;
+diff --git a/desktop/src-tauri/src/service_metadata_images_book.rs b/desktop/src-tauri/src/service_metadata_images_book.rs
+index 08fdb3df..da9f960c 100644
+--- a/desktop/src-tauri/src/service_metadata_images_book.rs
++++ b/desktop/src-tauri/src/service_metadata_images_book.rs
+@@ -12,6 +12,12 @@ impl Inbox {
+         grant: image_rows::Grant,
+         install: impl FnOnce(&Arc<image_rows::Entry>) -> Result<(), Error>,
+     ) -> Result<(), Error> {
++        self.images_install_with_preparation(nonce,grant,None,install)
++    }
++    pub(crate) fn images_install_with_preparation(
++        &self,nonce:Id,grant:image_rows::Grant,preparation:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>,
++        install:impl FnOnce(&Arc<image_rows::Entry>)->Result<(),Error>,
++    )->Result<(),Error>{
+         let mut book = self.lock()?;
+         if book.closed || self.failed.load(Ordering::Acquire) {
+             return Err(Error::Unavailable);
+@@ -25,6 +31,7 @@ impl Inbox {
+             return Err(Error::Conflict);
+         }
+         for r in &book.rows {
++            if preparation.is_some_and(|p|r.image_preparation().is_some_and(|e|Arc::ptr_eq(e,p))&&p.associates(&grant.review,&grant.scope.read)){continue;}
+             if r.occupied()? {
+                 return Err(Error::Busy);
+             }
+@@ -41,11 +48,12 @@ impl Inbox {
+             self.failed.clone(),
+             self.changes.clone(),
+         )?;
++        if let Some(p)=preparation{entry.associate_preparation(p)?;}
+         install(&entry)?;
+         book.rows.push(SharedRow::MetadataImages(entry));
+         self.images_changed()
+     }
+-    fn images_changed(&self) -> Result<(), Error> {
++    pub(super) fn images_changed(&self) -> Result<(), Error> {
+         let mut good = true;
+         self.changes.send_modify(|n| {
+             if let Some(next) = n.checked_add(1).filter(|n| *n < u32::MAX) {
+@@ -125,6 +133,7 @@ impl Inbox {
+             .find(|e| e.grant.as_ref().is_some_and(|g| g.id == input.grant_id))
+             .ok_or(Error::AccessDenied)?;
+         for row in &book.rows {
++            if row.image_preparation().is_some_and(|p|entry.same_preparation(p)){continue;}
+             if !row.images().is_some_and(|e| Arc::ptr_eq(e, entry)) && row.occupied()? {
+                 return Err(Error::Busy);
+             }
+diff --git a/desktop/src-tauri/src/service_metadata_images_requests.rs b/desktop/src-tauri/src/service_metadata_images_requests.rs
+index 9540f6e0..a518334c 100644
+--- a/desktop/src-tauri/src/service_metadata_images_requests.rs
++++ b/desktop/src-tauri/src/service_metadata_images_requests.rs
+@@ -58,6 +58,7 @@ pub(crate) struct Entry {
+     pub nonce: Id,
+     pub grant: Option<Grant>,
+     input: OnceLock<p::Submit>,
++    preparation: OnceLock<Weak<crate::service_metadata_images_prepare_requests::Entry>>,
+     state: Mutex<State>,
+     failed: Arc<AtomicBool>,
+     changes: watch::Sender<u32>,
+@@ -89,6 +90,7 @@ impl Entry {
+             nonce,
+             grant,
+             input: OnceLock::new(),
++            preparation: OnceLock::new(),
+             state: Mutex::new(State {
+                 revision: 1,
+                 revoked: tombstone.then(Instant::now),
+@@ -108,6 +110,15 @@ impl Entry {
+             changes,
+         }))
+     }
++    pub(crate) fn associate_preparation(&self,p:&Arc<crate::service_metadata_images_prepare_requests::Entry>)->Result<(),Error>{
++        let g=self.grant.as_ref().ok_or(Error::Conflict)?;
++        if !p.associates(&g.review,&g.scope.read){return Err(Error::Conflict)}
++        self.preparation.set(Arc::downgrade(p)).map_err(|_|Error::Conflict)
++    }
++    pub(crate) fn same_preparation(&self,p:&Arc<crate::service_metadata_images_prepare_requests::Entry>)->bool{
++        self.preparation.get().is_some_and(|w|w.as_ptr()==Arc::as_ptr(p)&&w.strong_count()>0)
++            &&self.grant.as_ref().is_some_and(|g|p.associates(&g.review,&g.scope.read))
++    }
+     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> {
+         self.state.lock().map_err(|_| {
+             self.failed.store(true, Ordering::Release);
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+index 0bb3cdc1..8e646efe 100644
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -217,6 +217,8 @@ pub enum RequestBody {
+     #[serde(rename="github.submit")] GitHubActionSubmit(crate::service_github_action_protocol::Submit),
+     #[serde(rename="github.status")] GitHubActionStatus(crate::service_github_action_protocol::Query),
+     #[serde(rename="github.cancel")] GitHubActionCancel(crate::service_github_action_protocol::Query),
++    #[serde(rename="metadata-images.read")] MetadataImagesRead(crate::service_metadata_images_prepare_protocol::Read),
++    #[serde(rename="metadata-images.prepare")] MetadataImagesPrepare(crate::service_metadata_images_prepare_protocol::Prepare),
+     #[serde(rename="metadata-images.scope")] MetadataImagesScope(crate::service_metadata_images_protocol::Scope),
+     #[serde(rename="metadata-images.submit")] MetadataImagesSubmit(crate::service_metadata_images_protocol::Submit),
+     #[serde(rename="metadata-images.status")] MetadataImagesStatus(crate::service_metadata_images_protocol::Query),
+@@ -324,6 +326,7 @@ pub enum ResponseBody {
+     LocalHistoryAccess(Box<crate::service_local_history_protocol::Access>),
+     LocalHistoryRequest(Box<crate::service_local_history_protocol::Status>),
+     GitHubActionRequest(crate::service_github_action_protocol::Status),
++    MetadataImagesPreparation(crate::service_metadata_images_prepare_protocol::Status),
+     MetadataImagesAccess(crate::service_metadata_images_protocol::Access),
+     MetadataImagesRequest(crate::service_metadata_images_protocol::Status),
+     MetadataTextRequest(crate::service_metadata_text_protocol::Status),
+@@ -425,6 +428,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
+     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
+     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
+     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
++    if let RequestBody::MetadataImagesPrepare(input)=&request.request{input.validate()?;}
+     if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
+@@ -506,6 +510,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
+             if row.origin.service_instance!=response.service_instance {return Err(Error::InvalidRequest);}
+             crate::service_metadata_text_protocol::bounded(response,row.limit())?;
+         },
++        ResponseBody::MetadataImagesPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_metadata_images_prepare_protocol::bounded(response,crate::service_metadata_images_prepare_protocol::STATUS_BYTES)?;}
+         ResponseBody::MetadataImagesAccess(row)=>{
+             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+             crate::service_metadata_images_protocol::bounded(response,crate::service_metadata_images_protocol::STATUS_BYTES)?;
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+index 7cfece84..2280dda9 100644
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1579,6 +1579,14 @@ async fn metadata_images_recovery_open(webview: Webview, request: tauri::ipc::Re
+ async fn metadata_images_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
++        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
++        if value.get("intent").is_some(){
++            let q=crate::asset_session::agent_metadata_images_prepare::prepare_request(value)?;
++            not_closing(&state)?;return state.document.prepare_agent_metadata_images(window,&q);
++        }
++    }
+     let args = metadata_images_commands::prepare(request_body(&request)?)?;
+     not_closing(&state)?;
+     state.bridge.prepare_metadata_images_edit(&state.document, window, args)
+@@ -1757,6 +1765,52 @@ async fn revoke_agent_configuration(webview:Webview,request:tauri::ipc::Request<
+     {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
+ }
+ 
++
++#[tauri::command]
++async fn agent_metadata_images_prepare_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
++        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
++        let _=window;let q=crate::asset_session::agent_metadata_images::status_request(value)?;
++        serde_json::to_value(state.document.agent_metadata_images_prepare_status(q.as_ref())?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
++}
++
++#[tauri::command]
++async fn agent_metadata_images_inspect(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
++        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
++        not_closing(&state)?;let args=crate::asset_session::agent_metadata_images_prepare::inspect_request(value)?;
++        serde_json::to_value(state.document.inspect_agent_metadata_images(window,args)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
++}
++
++#[tauri::command]
++async fn agent_metadata_images_prepare_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {
++        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
++        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
++        let _=window;let q=crate::asset_session::agent_metadata_images::status_request(value)?.ok_or_else(BridgeError::invalid)?;
++        serde_json::to_value(state.document.cancel_agent_metadata_images_preparation(&q)?).map_err(|_|BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
++}
++
+ #[tauri::command]
+ async fn agent_metadata_images_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image delegation has no fixture admission."));
+@@ -3983,6 +4037,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+         let mut metadata_text_revision=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut metadata_images_agent_snapshot=None;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut metadata_images_prepare_key=None;
+         let mut ios_archive_guard = ios_archive_guard;
+         if enter.await.is_err() { return; }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -4080,6 +4136,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
+                     metadata_images_agent_snapshot=Some(comparison);
+                 }
+             }
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(Some(status))=document.agent_metadata_images_prepare_status(None){
++                let key=(status.origin.clone(),status.revision);
++                if metadata_images_prepare_key.as_ref()!=Some(&key){
++                    let _=app.emit_to(MAIN_WINDOW,crate::service_metadata_images_prepare_protocol::EVENT,&status);
++                    metadata_images_prepare_key=Some(key);
++                }
++            }
+             // Fixed DATA tap in this SAME retained relay; no new task, Git
+             // command, status IPC, Store write or native read is introduced.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -6046,6 +6110,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
+             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
++            agent_metadata_images_prepare_status, agent_metadata_images_inspect, agent_metadata_images_prepare_cancel,
+             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
+             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
+             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve, agent_version_reserve_review_status, cancel_agent_version_reserve_review,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+index 9c3950af..ac0bc5ae 100644
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -49,6 +49,10 @@ mod bounded_json_seed;
+ mod service_metadata_images_protocol;
+ #[path="../src/service_metadata_images_requests.rs"]
+ mod service_metadata_images_requests;
++#[path="../src/service_metadata_images_prepare_protocol.rs"]
++mod service_metadata_images_prepare_protocol;
++#[path="../src/service_metadata_images_prepare_requests.rs"]
++mod service_metadata_images_prepare_requests;
+ #[path="../src/service_metadata_text_protocol.rs"]
+ mod service_metadata_text_protocol;
+ #[path="../src/service_metadata_text_requests.rs"]
+diff --git a/desktop/src/components/AgentMetadataImagesAccess.tsx b/desktop/src/components/AgentMetadataImagesAccess.tsx
+index 906d2a2c..206fd4c6 100644
+--- a/desktop/src/components/AgentMetadataImagesAccess.tsx
++++ b/desktop/src/components/AgentMetadataImagesAccess.tsx
+@@ -15,7 +15,7 @@ export function AgentMetadataImagesAccess({ controller }: { controller: ServiceM
+       {' '}Nothing is uploaded to a Store. Stop cannot undo a copy.</p>}
+     <details className="advanced-settings"><summary>Advanced: let the installed CLI apply this image review</summary>
+       <p>First review every destination and replacement above. This allowance permits one local copy of that same batch only.
+-        The CLI cannot choose files, prepare another batch, recover a journal or upload images.</p>
++        The CLI cannot choose files, replace the captured batch, recover a journal or upload images. Preparing an untouched selection is a separate Advanced option.</p>
+       <label><input type="checkbox" checked={key !== null && reviewed === key} disabled={!controller.canAllow()}
+         onChange={e => setReviewed(e.target.checked ? key : null)} /> I reviewed the complete local-copy preview and allow the CLI to apply it once.</label>
+       <div className="button-row"><button type="button" disabled={key === null || reviewed !== key || !controller.canAllow()}
+diff --git a/desktop/src/components/MetadataImagesEditor.tsx b/desktop/src/components/MetadataImagesEditor.tsx
+index 4cdfe62b..f8a11173 100644
+--- a/desktop/src/components/MetadataImagesEditor.tsx
++++ b/desktop/src/components/MetadataImagesEditor.tsx
+@@ -1,3 +1,4 @@
++import { AgentMetadataImagesPreparation } from './AgentMetadataImagesPreparation.tsx';
+ import { AgentMetadataImagesAccess } from './AgentMetadataImagesAccess.tsx';
+ import { useEffect, useId, useState } from 'react';
+ import type { HelpContent } from '../types.ts';
+@@ -229,6 +230,7 @@ export function MetadataImagesEditor({ state, controller, session, onShowProject
+       {!state.catalog && <div className="button-row"><button type="button" className="button small secondary" disabled={state.mode !== 'native' || state.catalogPending}
+         onClick={() => void controller.loadCatalog()}>{state.catalogPending ? 'Loading shared image guide…' : 'Reload shared image guide'}</button>
+         <span>Catalogue DATA does not qualify the native picker or writer.</span></div>}
++      <AgentMetadataImagesPreparation controller={controller} state={state} />
+       <div className="image-picker-grid">
+         <div><label htmlFor={platformId}>Listing platform <FieldHelp state={state} id="platform" onHelp={onHelp} /></label>
+           <select id={platformId} value={selected?.platform ?? ''} disabled={!platforms.length || state.mode !== 'native'}
+diff --git a/desktop/src/metadataImages.ts b/desktop/src/metadataImages.ts
+index 73386bb6..284f6027 100644
+--- a/desktop/src/metadataImages.ts
++++ b/desktop/src/metadataImages.ts
+@@ -1,3 +1,4 @@
++import type { MetadataImagesPrepareApi } from './serviceMetadataImagesPrepareProtocol.ts';
+ // Bounded, public image-summary DATA. Tokens correlate an original native owner;
+ // none of these types authorizes a renderer path, byte buffer or transaction.
+ import type { BridgeMode, CoreEditOutcome, EditAvailability, HelpContent, NativeEditReason } from './types.ts';
+@@ -136,12 +137,13 @@ export type MetadataImagesCommand = 'metadata_images_catalog' | 'metadata_images
+   'metadata_images_edit_apply' | 'metadata_images_edit_close' | 'metadata_images_edit_status';
+ export interface MetadataImagesApi {
+   mode: BridgeMode;
++  preparation?: MetadataImagesPrepareApi;
+   agent?: MetadataImagesAgentApi;
+   metadataImagesCatalog(): Promise<MetadataImagesCatalog>;
+   chooseMetadataImages(input: ChooseMetadataImagesRequest): Promise<MetadataImagesSelectionStatus>;
+   metadataImagesSelectionStatus(): Promise<MetadataImagesSelectionStatus>;
+   cancelMetadataImagesSelection(operationId: string): Promise<MetadataImagesSelectionStatus>;
+-  openMetadataImagesEdit(input: { projectId: string; selectionToken: string }): Promise<MetadataImagesEditStatus>;
++  openMetadataImagesEdit(input: { projectId: string; selectionToken: string; cliPreparation?: boolean }): Promise<MetadataImagesEditStatus>;
+   openMetadataImagesRecovery(projectId: string): Promise<MetadataImagesEditStatus>;
+   prepareMetadataImagesEdit(input: PrepareMetadataImagesRequest): Promise<MetadataImagesEditStatus>;
+   applyMetadataImagesEdit(sessionId: string, planToken: string): Promise<MetadataImagesEditStatus>;
+diff --git a/desktop/src/metadataImagesBridge.ts b/desktop/src/metadataImagesBridge.ts
+index 078fb96f..cf61cae4 100644
+--- a/desktop/src/metadataImagesBridge.ts
++++ b/desktop/src/metadataImagesBridge.ts
+@@ -1,3 +1,4 @@
++import { createImagesPrepareApi, IMAGES_PREPARE_EVENT } from './serviceMetadataImagesPrepareProtocol.ts';
+ import { createMetadataImagesAgentApi, METADATA_IMAGES_AGENT_EVENT } from './serviceMetadataImagesProtocol.ts';
+ // The same Tauri invoke/listen seam as the other edit domains, with a closed
+ // image-only DTO. This adapter never accepts browser Files, paths or image bytes.
+@@ -7,7 +8,7 @@ import { metadataImagesError, metadataImagesRequestFits, parseMetadataImagesCata
+   parseMetadataImagesSelectionStatus, METADATA_IMAGES_EDIT_EVENT, METADATA_IMAGES_SELECTION_EVENT } from './metadataImagesProtocol.ts';
+ 
+ export type MetadataImagesInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type MetadataImagesListen = (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT,
++export type MetadataImagesListen = (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT | typeof IMAGES_PREPARE_EVENT,
+   onStatus: (status: unknown) => void) => Promise<() => void>;
+ 
+ export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImagesInvoke, listen?: MetadataImagesListen): MetadataImagesApi {
+@@ -25,7 +26,7 @@ export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImages
+     call(command, input, parseMetadataImagesSelectionStatus);
+   const edit = (command: MetadataImagesCommand, input: unknown): Promise<MetadataImagesEditStatus> =>
+     call(command, input, parseMetadataImagesEditStatus);
+-  const subscribe = async (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT,
++  const subscribe = async (event: typeof METADATA_IMAGES_EDIT_EVENT | typeof METADATA_IMAGES_SELECTION_EVENT | typeof METADATA_IMAGES_AGENT_EVENT | typeof IMAGES_PREPARE_EVENT,
+     receive: (value: unknown) => void): Promise<() => void> => {
+     try {
+       if (mode !== 'native' || !listen) throw { code: 'metadata_images_unavailable' };
+@@ -36,6 +37,7 @@ export function createMetadataImagesApi(mode: BridgeMode, invoke: MetadataImages
+   return {
+     mode,
+     agent: createMetadataImagesAgentApi(mode,invoke,listen),
++    preparation: createImagesPrepareApi(mode,invoke,listen),
+     metadataImagesCatalog: () => call('metadata_images_catalog', {}, parseMetadataImagesCatalog),
+     chooseMetadataImages: (input) => selection('metadata_images_choose', input),
+     metadataImagesSelectionStatus: () => selection('metadata_images_selection_status', {}),
+diff --git a/desktop/src/metadataImagesController.ts b/desktop/src/metadataImagesController.ts
+index 8b54dd56..56ab2b1f 100644
+--- a/desktop/src/metadataImagesController.ts
++++ b/desktop/src/metadataImagesController.ts
+@@ -1,3 +1,6 @@
++import { ServiceMetadataImagesPrepareController } from './serviceMetadataImagesPrepareController.ts';
++import type { ImagePreparationCandidate } from './serviceMetadataImagesPrepareController.ts';
++import type { ImagesReadObservation } from './serviceMetadataImagesPrepareProtocol.ts';
+ // One app-retained image selection/review. This orchestrates existing native
+ // owners; it never creates a transaction, owns source bytes or retries a write.
+ import { ServiceMetadataImagesController } from './serviceMetadataImagesController.ts';
+@@ -19,6 +22,7 @@ import { imageCatalogTypes, imageSelectionSettled, imagePreparedMatches, metadat
+ 
+ interface ImageAttemptBinding extends ImageProjectBinding {
+   serial: number;
++  cliPreparation: boolean;
+   projectName: string;
+   intent: 'import' | 'recover';
+   context: ImageConfiguredContext | null;
+@@ -58,6 +62,7 @@ export interface MetadataImagesApplyBinding {
+ }
+ export interface MetadataImagesState {
+   mode: BridgeMode;
++  cliPreparation: boolean;
+   projectId: string | null;
+   choices: MetadataConfiguredContext[];
+   selectedKey: string | null;
+@@ -180,7 +185,7 @@ export function retainedMetadataImagesOperation(state: MetadataImagesState): {
+ 
+ export class MetadataImagesController {
+   private state: MetadataImagesState = freeze<MetadataImagesState>({
+-    mode: 'unavailable', projectId: null, choices: [], selectedKey: null, selectedType: null,
++    mode: 'unavailable', cliPreparation: false, projectId: null, choices: [], selectedKey: null, selectedType: null,
+     contextGeneration: 0, serviceGeneration: 0, visible: false, selectionPending: false,
+     catalog: null, catalogPending: false, catalogError: null,
+     selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
+@@ -189,6 +194,7 @@ export class MetadataImagesController {
+     unknownSelection: null, unknownEdit: null, recoveryProjects: [], attempt: null, acknowledged: null, error: null,
+   });
+   readonly agent: ServiceMetadataImagesController;
++  readonly preparation: ServiceMetadataImagesPrepareController;
+   private pendingCalls = 0;
+   private readonly context: Context;
+   private api: MetadataImagesApi | null = null;
+@@ -209,12 +215,14 @@ export class MetadataImagesController {
+ 
+   constructor(context: Context) {
+     this.context = context;
++    this.preparation = new ServiceMetadataImagesPrepareController(() => this.preparationCandidate(), () => this.now());
+     this.agent = new ServiceMetadataImagesController(() => this.agentCandidate(), () => this.now());
+-    this.agent.subscribe(() => {
+-      const retained = this.agent.retains();
++    const delegatedChange = () => {
++      const retained = this.agent.retains() || this.preparation.retains();
+       if (!this.disposed && this.state.delegationRetained !== retained) this.publish({...this.state,delegationRetained:retained});
+       if (this.disposed) this.retireListeners();
+-    });
++    };
++    this.agent.subscribe(delegatedChange); this.preparation.subscribe(delegatedChange);
+   }
+   getSnapshot = (): MetadataImagesState => this.state;
+   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+@@ -222,7 +230,7 @@ export class MetadataImagesController {
+     if (this.disposed) return;
+     this.state = freeze(next);
+     for (const listener of this.listeners) listener();
+-    this.agent.sourceChanged();
++    this.agent.sourceChanged(); this.preparation.sourceChanged();
+   }
+   private attempt(patch: Partial<MetadataImagesAttempt>): void {
+     if (this.state.attempt) {
+@@ -321,7 +329,7 @@ export class MetadataImagesController {
+   async connect(api: MetadataImagesApi): Promise<void> {
+     if (this.disposed) return;
+     if (this.api === api) return this.checkStatus();
+-    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead)) {
++    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.pendingCalls || this.agent.retains() || this.preparation.retains() || this.reading || this.catalogRead)) {
+       this.publish({ ...this.state, generationLost: true, acknowledged: null, error: metadataImagesError({ code: 'metadata_images_context_changed' }) });
+       this.retire(); this.process(); return;
+     }
+@@ -332,7 +340,7 @@ export class MetadataImagesController {
+       catalog: null, catalogError: null, selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
+       selectionBuffered: null, editBuffered: null, acknowledged: null });
+     this.syncProject();
+-    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus(), this.agent.connect(api.agent)]);
++    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus(), this.agent.connect(api.agent), this.preparation.connect(api.preparation)]);
+   }
+   async loadCatalog(): Promise<void> {
+     if (this.disposed || this.api?.mode !== 'native') return;
+@@ -363,7 +371,7 @@ export class MetadataImagesController {
+   syncAssetSession = (): void => { this.process(); };
+ 
+   passiveBusyReason(): string | null {
+-    return this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead ? 'An original image call, permission, status or catalogue query is still pending.' : null;
++    return this.pendingCalls || this.agent.retains() || this.preparation.retains() || this.reading || this.catalogRead ? 'An original image call, permission, status or catalogue query is still pending.' : null;
+   }
+   async checkStatus(): Promise<void> {
+     if (this.disposed || this.api?.mode !== 'native') return;
+@@ -444,7 +452,7 @@ export class MetadataImagesController {
+     nextState.error = reconciledObservationError(nextState);
+     this.publish(nextState); this.process();
+   }
+-  private receiveEdit(value: unknown, source: 'event' | 'read' | 'reply'): void {
++  private receiveEdit(value: unknown, source: 'event' | 'read' | 'reply', originalStart?: number): void {
+     if (this.disposed) return;
+     const parsed = parseMetadataImagesEditStatus(value);
+     if (!parsed) { this.fail('edit', true); return; }
+@@ -478,8 +486,10 @@ export class MetadataImagesController {
+           status.statusRevision > retained.binding.editStartRevision && row.sessionId !== retained.binding.previousSessionId));
+       if (owner) {
+         attempt = { ...attempt, projection: owner };
+-        if (owner.details?.prepared) {
+-          const at = this.now() + owner.reviewRemainingMs;
++        if (owner.details?.prepared || retained.binding.cliPreparation && owner.details?.checkout && originalStart !== undefined) {
++          // The CLI-profile Editing end is anchored to THAT actual Open call,
++          // not a subsequent status/event receipt. Ordinary GUI is unchanged.
++          const at = (originalStart ?? this.now()) + owner.reviewRemainingMs;
+           this.deadline = { sessionId: owner.sessionId, at: this.deadline?.sessionId === owner.sessionId ? Math.min(this.deadline.at, at) : at };
+         }
+       }
+@@ -504,7 +514,7 @@ export class MetadataImagesController {
+     const project = this.context.selectedProject();
+     if (!project) return 'Choose the registered project whose local image files you want to inspect.';
+     const other = this.context.otherOperationReason(); if (other) return other;
+-    if (this.pendingCalls || this.agent.retains() || heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
++    if (this.pendingCalls || this.agent.retains() || this.preparation.retains() || heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
+       return 'Finish or cancel the original image operation and wait for its settlement before starting another.';
+     const caps = [this.state.selectionStatus!.capability, this.state.editStatus!.capability];
+     if (caps.some((cap) => !cap.available))
+@@ -525,7 +535,7 @@ export class MetadataImagesController {
+     const project = this.context.selectedProject(); const binding = imageProjectBinding(project);
+     if (!project || !binding || this.sequence >= U32_MAX || !this.state.selectionStatus || !this.state.editStatus) return null;
+     const serial = ++this.sequence;
+-    return freeze({ binding: { ...binding, serial, projectName: project.project.name, intent,
++    return freeze({ binding: { ...binding, serial, cliPreparation: intent === 'import' && this.state.cliPreparation, projectName: project.project.name, intent,
+       context: intent === 'import' ? this.selectedContext() : null, contextGeneration: this.state.contextGeneration,
+       serviceGeneration: this.state.serviceGeneration, windowGeneration: this.state.editStatus.windowGeneration,
+       selectionStartRevision: this.state.selectionStatus.statusRevision, editStartRevision: this.state.editStatus.statusRevision,
+@@ -534,10 +544,15 @@ export class MetadataImagesController {
+       prepareClaimed: false, applyClaimed: false, submittedPlanToken: null, cancelRequested: false, cancelClaimed: false,
+       closeRequested: false, closeClaimed: false, invalidated: false });
+   }
++  setCliPreparation(enabled: boolean): boolean {
++    if (this.disposed || this.pendingCalls || this.state.editStatus?.active || heldSelection(this.state) ||
++        !imageAttemptFinished(this.state.attempt) || this.preparation.retains() || this.agent.retains()) return false;
++    this.publish({...this.state,cliPreparation:enabled}); return true;
++  }
+   choose(): boolean {
+     this.syncProject();
+     if (this.disposed || !this.api || this.startReason() !== null) return false;
+-    if (!this.agent.newOriginal()) return false;
++    if (!this.agent.newOriginal() || !this.preparation.newOriginal()) return false;
+     const attempt = this.newAttempt('import'); const selected = attempt?.binding.context;
+     if (!attempt || !selected) return false;
+     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
+@@ -552,7 +567,7 @@ export class MetadataImagesController {
+   inspectRecovery(): boolean {
+     this.syncProject();
+     if (this.disposed || !this.api || this.startReason('recover') !== null) return false;
+-    if (!this.agent.newOriginal()) return false;
++    if (!this.agent.newOriginal() || !this.preparation.newOriginal()) return false;
+     const attempt = this.newAttempt('recover'); if (!attempt) return false;
+     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
+     if (this.state.attempt?.binding.serial !== attempt.binding.serial || this.state.attempt.invalidated) {
+@@ -606,7 +621,7 @@ export class MetadataImagesController {
+     this.publish({ ...this.state, acknowledged: checked && this.canAcknowledge(binding) ? binding : null });
+   }
+   canApply(binding = currentMetadataImagesApplyBinding(this.state)): boolean {
+-    return Boolean(binding && this.agent.guiAllowed() && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
++    return Boolean(binding && this.preparation.approvalReady() && this.agent.guiAllowed() && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
+   }
+   apply(binding: MetadataImagesApplyBinding): boolean {
+     if (this.disposed || !this.api || !this.canApply(binding)) return false;
+@@ -690,15 +705,47 @@ export class MetadataImagesController {
+         if (attempt.binding.intent === 'import' && !attempt.openClaimed && !attempt.cancelRequested && !attempt.invalidated &&
+             selection?.phase === 'selected' && imageSelectionSettled(selection) && selection.selectionToken && this.usable() &&
+             this.state.editStatus?.capability.available && this.matches(attempt) && !this.context.otherOperationReason('open-held-selection')) {
+-          const serial = attempt.binding.serial; const selectionToken = selection.selectionToken; const projectId = attempt.binding.projectId;
++          const serial = attempt.binding.serial; const selectionToken = selection.selectionToken; const projectId = attempt.binding.projectId; const cliPreparation = attempt.binding.cliPreparation;
+           this.attempt({ openClaimed: true });
+           if (this.state.attempt?.binding.serial === serial && !this.state.attempt.closeRequested)
+-            void this.command('open', serial, (api) => api.openMetadataImagesEdit({ projectId, selectionToken }));
++            void this.command('open', serial, (api) => api.openMetadataImagesEdit({ projectId, selectionToken, ...(cliPreparation ? {cliPreparation:true} : {}) }));
+           else { this.attempt({ openClaimed: false, cancelRequested: true }); this.processAgain = true; }
+         }
+       } while (this.processAgain);
+     } finally { this.processing = false; }
+   }
++  private preparationCandidate(): ImagePreparationCandidate | null {
++    const api=this.api,port=api?.preparation,a=this.state.attempt,project=this.context.selectedProject(),catalog=this.state.catalog;
++    const owner=a?.projection,opened=owner?.details?.checkout,choices=a?.choices;
++    if(!api||!port||!a||!a.binding.cliPreparation||!owner||!opened||opened.view.kind!=='import'||!choices||!project||
++       a.binding.intent!=='import'||a.draftRevision!==0||a.prepareClaimed||choices.some(c=>c.replaceExisting)||!this.state.editStatus)return null;
++    const original={sessionId:owner.sessionId,ownerGeneration:owner.ownerGeneration,revision:opened.revision,
++      nativeStatusRevision:this.state.editStatus.statusRevision,baselineGeneration:a.binding.serial};
++    const sameOriginal=()=>{const next=this.state.attempt;return !this.disposed&&this.api===api&&this.context.selectedProject()===project&&this.state.catalog===catalog&&
++      next?.binding===a.binding&&this.matches(next)&&!next.invalidated&&!next.closeRequested&&!next.cancelRequested&&
++      !this.state.integrityFailed&&!this.state.generationLost&&!this.state.nativeBlocked&&!this.state.editIssue&&!this.state.selectionIssue&&
++      next.projection?.sessionId===owner.sessionId&&next.projection.ownerGeneration===owner.ownerGeneration;};
++    const pristine=()=>sameOriginal()&&!this.pendingCalls&&!this.reading&&!this.catalogRead&&this.state.attempt?.choices===choices&&
++      this.state.attempt.draftRevision===0&&!this.state.attempt.prepareClaimed&&this.prepareReason()===null&&
++      this.state.editStatus?.statusRevision===original.nativeStatusRevision&&opened.view.valid;
++    const matches=(o:ImagesReadObservation)=>opened.view.kind==='import'&&o.platform===opened.view.platform&&o.locale===opened.view.locale&&o.assetType===opened.view.assetType&&
++      o.items.length===opened.view.files.length&&o.items.every((x,i)=>{if(opened.view.kind!=='import')return false;const row=opened.view.files[i];return !!row&&x.itemId===row.itemId&&x.displayName===row.displayName&&
++        x.selectedBytes===row.selected.byteLength&&x.selectedSha256===row.selected.sha256&&x.beforeSha256===(row.before?.sha256??null)&&x.canReplace===row.canReplace;});
++    return {api:port,projectId:a.binding.projectId,original,remainingMs:this.remainingReviewMs(),same:sameOriginal,pristine,matches,
++      nativeFinal:()=>{const next=this.state.attempt;return next?.binding===a.binding&&terminal(next.projection);},
++      nativeReady:(s)=>{const n=this.state.attempt?.binding===a.binding?this.state.attempt:null;const p=n?.projection?.details?.prepared;return !!s.review&&!!n&&!!p&&
++        n.projection?.phase==='reviewing'&&p.planToken===s.review.original.planToken&&p.draftRevision===1&&p.baselineGeneration===a.binding.serial&&
++        !!n.prepareRequest&&imagePreparedMatches(n.projection,n.prepareRequest);},
++      prepare:async(q,proposed)=>{
++        if(!pristine()||proposed.length!==choices.length||!proposed.every((c,i)=>c.itemId===choices[i]?.itemId))return false;
++        const request:PrepareMetadataImagesRequest={sessionId:owner.sessionId,revision:opened.revision,draftRevision:1,baselineGeneration:a.binding.serial,
++          expectedBaseline:structuredClone(opened.baseline),choices:proposed.map(c=>({...c}))};
++        if(!metadataImagesRequestFits('metadata_images_edit_prepare',request))return false;
++        this.publish({...this.state,acknowledged:null,attempt:{...a,draftRevision:1,choices:request.choices,prepareClaimed:true,prepareRequest:request}});
++        if(!sameOriginal()||this.state.attempt?.prepareRequest!==request||this.state.attempt.choices!==request.choices||this.pendingCalls||this.context.otherOperationReason())return false;
++        return this.command('prepare',a.binding.serial,()=>port.prepare(q));
++      }};
++  }
+   private agentCandidate(): ImagesAgentCandidate | null {
+     const api = this.api, port = api?.agent, a = this.state.attempt, project = this.context.selectedProject();
+     const owner = a?.projection, prepared = owner?.details?.prepared;
+@@ -719,7 +766,7 @@ export class MetadataImagesController {
+         next.projection?.sessionId === owner.sessionId && next.projection.ownerGeneration === owner.ownerGeneration &&
+         same(next.projection.details?.prepared,prepared);
+     };
+-    const ready = () => sameOriginal() && !this.pendingCalls && this.usable() && this.state.visible && this.remainingReviewMs()>0 &&
++    const ready = () => sameOriginal() && this.preparation.approvalReady() && !this.pendingCalls && this.usable() && this.state.visible && this.remainingReviewMs()>0 &&
+       this.state.editStatus?.statusRevision === summary.nativeStatusRevision && !!this.state.editStatus?.capability.available &&
+       !this.context.otherOperationReason() && !!currentMetadataImagesApplyBinding(this.state);
+     const candidate: ImagesAgentCandidate = {projectId:a.binding.projectId,api:port,summary,remainingMs:this.remainingReviewMs(),same:sameOriginal,ready,
+@@ -770,6 +817,7 @@ export class MetadataImagesController {
+     call: (api: MetadataImagesApi) => Promise<MetadataImagesSelectionStatus | MetadataImagesEditStatus>): Promise<boolean> {
+     const api = this.api;
+     if (!api || this.pendingCalls >= 32) { this.fail('edit',true); return false; }
++    const originalStart=this.now();
+     this.pendingCalls += 1;
+     if (this.pendingCalls === 1) this.publish({...this.state,callerPending:true});
+     try {
+@@ -789,7 +837,7 @@ export class MetadataImagesController {
+       }
+       const status = await call(api);
+       if (this.disposed || this.api !== api) return false;
+-      if (kind === 'choose' || kind === 'cancel') this.receiveSelection(status, 'reply'); else this.receiveEdit(status, 'reply');
++      if (kind === 'choose' || kind === 'cancel') this.receiveSelection(status, 'reply'); else this.receiveEdit(status, 'reply', kind==='open'?originalStart:undefined);
+       return !this.state.integrityFailed && !this.state.generationLost;
+     } catch (error) {
+       if (this.disposed || this.api !== api) return false;
+@@ -813,7 +861,7 @@ export class MetadataImagesController {
+     }
+   }
+   private retireListeners(): void {
+-    if (!this.disposed || this.pendingCalls || this.reading || this.catalogRead || this.agent.hasPendingCalls()) return;
++    if (!this.disposed || this.pendingCalls || this.reading || this.catalogRead || this.agent.hasPendingCalls() || this.preparation.hasPendingCalls()) return;
+     try { this.unlistenSelection?.(); } catch { /* Not native settlement. */ }
+     try { this.unlistenEdit?.(); } catch { /* Not native settlement. */ }
+     this.unlistenSelection = null; this.unlistenEdit = null;
+@@ -821,7 +869,7 @@ export class MetadataImagesController {
+   dispose(): void {
+     if (this.disposed) return;
+     // At most the one original STOP. Disposing listeners is not undo/finality.
+-    this.requestStop(); this.agent.dispose(); this.disposed = true;
++    this.requestStop(); this.agent.dispose(); this.preparation.dispose(); this.disposed = true;
+     this.retireListeners(); this.listeners.clear();
+   }
+ }
+diff --git a/desktop/src/metadataImagesProtocol.ts b/desktop/src/metadataImagesProtocol.ts
+index 87ed157f..7a4a5e6b 100644
+--- a/desktop/src/metadataImagesProtocol.ts
++++ b/desktop/src/metadataImagesProtocol.ts
+@@ -192,7 +192,7 @@ export function metadataImagesRequestFits(command: MetadataImagesCommand, value:
+       case 'metadata_images_choose':
+         return keys(value, ['projectId', 'platform', 'locale', 'assetType']) && projectId(value.projectId) && platform(value.platform) && locale(value.locale) && assetType(value.assetType);
+       case 'metadata_images_selection_cancel': return keys(value, ['operationId']) && token(value.operationId);
+-      case 'metadata_images_edit_open': return keys(value, ['projectId', 'selectionToken']) && projectId(value.projectId) && token(value.selectionToken);
++      case 'metadata_images_edit_open': return (keys(value, ['projectId', 'selectionToken']) || keys(value, ['projectId', 'selectionToken', 'cliPreparation']) && typeof value.cliPreparation === 'boolean') && projectId(value.projectId) && token(value.selectionToken);
+       case 'metadata_images_recovery_open': return keys(value, ['projectId']) && projectId(value.projectId);
+       case 'metadata_images_edit_close': return keys(value, ['sessionId']) && token(value.sessionId);
+       case 'metadata_images_edit_apply': return keys(value, ['sessionId', 'planToken']) && token(value.sessionId) && token(value.planToken);
+diff --git a/desktop/src/serviceMetadataImagesProtocol.ts b/desktop/src/serviceMetadataImagesProtocol.ts
+index eca087c0..47aed9a0 100644
+--- a/desktop/src/serviceMetadataImagesProtocol.ts
++++ b/desktop/src/serviceMetadataImagesProtocol.ts
+@@ -69,7 +69,7 @@ function original(v: unknown): v is ImagesAgentOriginal {
+     [v.sessionId,v.ownerGeneration,v.revision,v.planToken].every(id) && v.revision !== v.planToken &&
+     uint(v.draftRevision) && uint(v.baselineGeneration);
+ }
+-function review(v: unknown): v is ImagesAgentReview {
++export function isImagesAgentReview(v: unknown): v is ImagesAgentReview {
+   return keys(v, ['original','nativeStatusRevision','platform','locale','assetType','fileCount','createCount','replaceCount','preserveCount','selectedBytes','preparedSha256']) &&
+     original(v.original) && uint(v.nativeStatusRevision) && (v.platform === 'android' || v.platform === 'ios') &&
+     typeof v.locale === 'string' && /^[A-Za-z0-9-]{2,12}(?![\s\S])/.test(v.locale) &&
+@@ -79,7 +79,7 @@ function review(v: unknown): v is ImagesAgentReview {
+ }
+ function request(v: unknown): v is ImagesAgentRequest {
+   if (!keys(v, ['schemaVersion','origin','grantId','revision','phase','settlement','review','cancelRequested','result','doNotReplay']) ||
+-    v.schemaVersion !== 1 || !origin(v.origin) || !id(v.grantId) || !uint(v.revision,0xfffffffe,1) || !review(v.review) ||
++    v.schemaVersion !== 1 || !origin(v.origin) || !id(v.grantId) || !uint(v.revision,0xfffffffe,1) || !isImagesAgentReview(v.review) ||
+     !['queued','admitting','applying','stopping','final','unknown'].includes(String(v.phase)) ||
+     !['pending','settled','unknown'].includes(String(v.settlement)) || (v.phase === 'unknown') !== (v.settlement === 'unknown') ||
+     (v.phase === 'final') !== (v.settlement === 'settled') || (v.phase === 'final') !== (v.result !== null) ||
+@@ -99,7 +99,7 @@ function request(v: unknown): v is ImagesAgentRequest {
+ function access(v: unknown): v is ImagesAgentAccess {
+   if (!keys(v, ['schemaVersion','serviceInstance','projectId','grantId','nonce','review','live','remainingMs','request']) ||
+     v.schemaVersion !== 1 || !id(v.serviceInstance) || !nullable(v.projectId,id) || !nullable(v.grantId,id) || !nullable(v.nonce,id) ||
+-    !nullable(v.review,review) || !nullable(v.request,request) || typeof v.live !== 'boolean' || !uint(v.remainingMs,900000) ||
++    !nullable(v.review,isImagesAgentReview) || !nullable(v.request,request) || typeof v.live !== 'boolean' || !uint(v.remainingMs,900000) ||
+     v.live !== (v.remainingMs > 0)) return false;
+   const group = [v.projectId,v.grantId,v.nonce,v.review];
+   if (!group.every(x => x === null) && !group.every(x => x !== null) || v.live && (!v.review || v.request) || !v.review && v.request) return false;

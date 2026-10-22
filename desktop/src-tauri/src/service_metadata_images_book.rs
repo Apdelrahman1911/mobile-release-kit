@@ -12,6 +12,12 @@ impl Inbox {
         grant: image_rows::Grant,
         install: impl FnOnce(&Arc<image_rows::Entry>) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        self.images_install_with_preparation(nonce,grant,None,install)
+    }
+    pub(crate) fn images_install_with_preparation(
+        &self,nonce:Id,grant:image_rows::Grant,preparation:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>,
+        install:impl FnOnce(&Arc<image_rows::Entry>)->Result<(),Error>,
+    )->Result<(),Error>{
         let mut book = self.lock()?;
         if book.closed || self.failed.load(Ordering::Acquire) {
             return Err(Error::Unavailable);
@@ -25,6 +31,7 @@ impl Inbox {
             return Err(Error::Conflict);
         }
         for r in &book.rows {
+            if preparation.is_some_and(|p|r.image_preparation().is_some_and(|e|Arc::ptr_eq(e,p))&&p.associates(&grant.review,&grant.scope.read)){continue;}
             if r.occupied()? {
                 return Err(Error::Busy);
             }
@@ -41,11 +48,12 @@ impl Inbox {
             self.failed.clone(),
             self.changes.clone(),
         )?;
+        if let Some(p)=preparation{entry.associate_preparation(p)?;}
         install(&entry)?;
         book.rows.push(SharedRow::MetadataImages(entry));
         self.images_changed()
     }
-    fn images_changed(&self) -> Result<(), Error> {
+    pub(super) fn images_changed(&self) -> Result<(), Error> {
         let mut good = true;
         self.changes.send_modify(|n| {
             if let Some(next) = n.checked_add(1).filter(|n| *n < u32::MAX) {
@@ -125,6 +133,7 @@ impl Inbox {
             .find(|e| e.grant.as_ref().is_some_and(|g| g.id == input.grant_id))
             .ok_or(Error::AccessDenied)?;
         for row in &book.rows {
+            if row.image_preparation().is_some_and(|p|entry.same_preparation(p)){continue;}
             if !row.images().is_some_and(|e| Arc::ptr_eq(e, entry)) && row.occupied()? {
                 return Err(Error::Busy);
             }

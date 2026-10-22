@@ -1,3 +1,4 @@
+import { AgentMetadataImagesPreparation } from './AgentMetadataImagesPreparation.tsx';
 import { AgentMetadataImagesAccess } from './AgentMetadataImagesAccess.tsx';
 import { useEffect, useId, useState } from 'react';
 import type { HelpContent } from '../types.ts';
@@ -229,6 +230,7 @@ export function MetadataImagesEditor({ state, controller, session, onShowProject
       {!state.catalog && <div className="button-row"><button type="button" className="button small secondary" disabled={state.mode !== 'native' || state.catalogPending}
         onClick={() => void controller.loadCatalog()}>{state.catalogPending ? 'Loading shared image guide…' : 'Reload shared image guide'}</button>
         <span>Catalogue DATA does not qualify the native picker or writer.</span></div>}
+      <AgentMetadataImagesPreparation controller={controller} state={state} />
       <div className="image-picker-grid">
         <div><label htmlFor={platformId}>Listing platform <FieldHelp state={state} id="platform" onHelp={onHelp} /></label>
           <select id={platformId} value={selected?.platform ?? ''} disabled={!platforms.length || state.mode !== 'native'}

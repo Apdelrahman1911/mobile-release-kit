@@ -1579,6 +1579,14 @@ async fn metadata_images_recovery_open(webview: Webview, request: tauri::ipc::Re
 async fn metadata_images_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
+        if value.get("intent").is_some(){
+            let q=crate::asset_session::agent_metadata_images_prepare::prepare_request(value)?;
+            not_closing(&state)?;return state.document.prepare_agent_metadata_images(window,&q);
+        }
+    }
     let args = metadata_images_commands::prepare(request_body(&request)?)?;
     not_closing(&state)?;
     state.bridge.prepare_metadata_images_edit(&state.document, window, args)
@@ -1755,6 +1763,52 @@ async fn revoke_agent_configuration(webview:Webview,request:tauri::ipc::Request<
     {let args=edit_commands::agent_configuration_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_configuration(window,args)?).map_err(|_|BridgeError::protocol())}
     #[cfg(not(any(target_os="linux",target_os="macos")))]
     {let _=(window,request,state);Err(BridgeError::unavailable("Configuration delegation is unavailable on this platform."))}
+}
+
+
+#[tauri::command]
+async fn agent_metadata_images_prepare_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
+        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
+        let _=window;let q=crate::asset_session::agent_metadata_images::status_request(value)?;
+        serde_json::to_value(state.document.agent_metadata_images_prepare_status(q.as_ref())?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
+}
+
+#[tauri::command]
+async fn agent_metadata_images_inspect(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
+        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
+        not_closing(&state)?;let args=crate::asset_session::agent_metadata_images_prepare::inspect_request(value)?;
+        serde_json::to_value(state.document.inspect_agent_metadata_images(window,args)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
+}
+
+#[tauri::command]
+async fn agent_metadata_images_prepare_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Image preparation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let tauri::ipc::InvokeBody::Raw(bytes)=request.body()else{return Err(BridgeError::invalid())};
+        let value=crate::asset_session::agent_metadata_images::raw_request(bytes)?;
+        let _=window;let q=crate::asset_session::agent_metadata_images::status_request(value)?.ok_or_else(BridgeError::invalid)?;
+        serde_json::to_value(state.document.cancel_agent_metadata_images_preparation(&q)?).map_err(|_|BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Image preparation is unavailable on this platform."))}
 }
 
 #[tauri::command]
@@ -3983,6 +4037,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut metadata_text_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_images_agent_snapshot=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut metadata_images_prepare_key=None;
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4078,6 +4134,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 if metadata_images_agent_snapshot.as_ref()!=Some(&comparison){
                     let _=app.emit_to(MAIN_WINDOW,crate::service_metadata_images_protocol::EVENT,&status);
                     metadata_images_agent_snapshot=Some(comparison);
+                }
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(Some(status))=document.agent_metadata_images_prepare_status(None){
+                let key=(status.origin.clone(),status.revision);
+                if metadata_images_prepare_key.as_ref()!=Some(&key){
+                    let _=app.emit_to(MAIN_WINDOW,crate::service_metadata_images_prepare_protocol::EVENT,&status);
+                    metadata_images_prepare_key=Some(key);
                 }
             }
             // Fixed DATA tap in this SAME retained relay; no new task, Git
@@ -6046,6 +6110,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+            agent_metadata_images_prepare_status, agent_metadata_images_inspect, agent_metadata_images_prepare_cancel,
             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
             agent_version_reserve_access, allow_agent_version_reserve, revoke_agent_version_reserve, agent_version_reserve_review_status, cancel_agent_version_reserve_review,

@@ -83,7 +83,7 @@ pub(crate) fn apply_request(v: Value) -> Result<p::Query, BridgeError> {
     Ok(a.origin)
 }
 pub(crate) struct MetadataImagesAgentGate {
-    document: Weak<Inner>,
+    pub(super) document: Weak<Inner>,
 }
 impl MetadataImagesAgentGate {
     pub(crate) fn same_publisher(&self, p: &RegistrationPublisher) -> bool {
@@ -100,7 +100,7 @@ impl MetadataImagesAgentGate {
     }
 }
 impl DocumentBinding {
-    fn images_agent_service(&self) -> Result<Arc<ApplicationService>, BridgeError> {
+    pub(super) fn images_agent_service(&self) -> Result<Arc<ApplicationService>, BridgeError> {
         self.inner
             .bridge
             .application_service
@@ -168,6 +168,10 @@ impl DocumentBinding {
         Ok(())
     }
     fn images_agent_peers(&self, state: &DocumentState) -> Result<(), BridgeError> {
+        self.images_agent_peer_gates(state)?;
+        self.images_agent_memory(state)
+    }
+    pub(super) fn images_agent_peer_gates(&self, state: &DocumentState) -> Result<(), BridgeError> {
         self.service_document_gate(state)?;
         self.passive_query_gate_locked(state, &self.inner.bridge)?;
         state.github.setup_ensure_idle()?;
@@ -185,9 +189,9 @@ impl DocumentBinding {
         {
             return Err(refused());
         }
-        self.images_agent_memory(state)
+        Ok(())
     }
-    fn images_agent_same(
+    pub(super) fn images_agent_same(
         &self,
         state: &DocumentState,
         old: &NativeProject,
@@ -417,6 +421,7 @@ mod tests {
         // Actual complete Document and Edit quotes, not a fabricated D. This
         // default census is not a native active image Session or availability.
         assert!(document.images_agent_memory(&state).is_ok());
+        assert!(document.images_preparation_memory(&state).is_ok());
         assert!(bridge
             .edits
             .images_prepared("main", &original(), 0)
@@ -427,6 +432,7 @@ mod tests {
         let capacity = state.records.capacity();
         assert!(state.records.is_empty());
         assert!(document.images_agent_memory(&state).is_err());
+        assert!(document.images_preparation_memory(&state).is_err());
         assert_eq!(state.records.capacity(), capacity);
         assert!(state.records.is_empty());
     }

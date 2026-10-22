@@ -669,7 +669,7 @@ impl DesktopBridge {
         args: crate::metadata_images_commands::Open) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
         // Keep entropy outside the document mutex, but a matching selection
         // must still be retired when ticket/admission preparation fails.
-        let ticket = self.edits.metadata_images_open_ticket(window);
+        let ticket = self.edits.metadata_images_cli_open_ticket(window,args.cli_preparation);
         let selected = args.project_id.clone();
         document.metadata_images_import_admit_published(&selected, &args.selection_token, |bridge, registration, data, claimed, publisher|
             bridge.edits.open_metadata_images_published(publisher, window, args.project_id, data, registration, ticket?, claimed))
@@ -689,13 +689,24 @@ impl DesktopBridge {
     pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
         let session = args.session_id.clone();
-        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration, publisher|
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.edits.images_prepare_origin(window,&session,None)?;
+        document.metadata_images_edit_admit_published(|bridge| {
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            bridge.edits.images_prepare_origin(window,&session,None)?;
+            bridge.edits.metadata_images_project(window, &session)
+        }, |bridge, registration, publisher|
             bridge.edits.prepare_metadata_images_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
-        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
-            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration))
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let claim=self.edits.images_prepare_gui_apply(window,session,plan)?;
+        let result=document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration));
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if result.is_err(){if let Some(claim)=&claim{self.edits.images_prepare_gui_failed(claim);}}
+        result
     }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.

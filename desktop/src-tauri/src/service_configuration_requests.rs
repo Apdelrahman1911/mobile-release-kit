@@ -500,11 +500,12 @@ impl Entry {
     }
 }
 // One Book/mutex/32-row budget for all three fixed editor families.
-enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>) }
+enum SharedRow { Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>), MetadataImagesPrepare(Arc<crate::service_metadata_images_prepare_requests::Entry>) }
 impl SharedRow {
-    fn origin(&self)->Option<&p::Query> {match self{Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin()}}
-    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied()}}
-    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at)}}
+    fn origin(&self)->Option<&p::Query> {match self{Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin(),Self::MetadataImagesPrepare(e)=>Some(&e.input.origin)}}
+    fn occupied(&self)->Result<bool,Error>{match self{Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied(),Self::MetadataImagesPrepare(e)=>e.occupied()}}
+    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at),Self::MetadataImagesPrepare(e)=>e.cancel(at)}}
+    fn image_preparation(&self)->Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>{match self{Self::MetadataImagesPrepare(e)=>Some(e),_=>None}}
     fn images(&self)->Option<&Arc<crate::service_metadata_images_requests::Entry>>{match self{Self::MetadataImages(e)=>Some(e),_=>None}}
     fn configuration(&self)->Option<&Arc<Entry>>{match self{Self::Configuration(e)=>Some(e),_=>None}}
     fn metadata(&self)->Option<&Arc<crate::service_metadata_text_requests::Entry>>{match self{Self::MetadataText(e)=>Some(e),_=>None}}
@@ -712,7 +713,7 @@ impl Inbox {
             .rows
             .iter()
             .filter_map(|r|r.origin().filter(|q|&q.project_id==project).map(|q|AdditionalRequest {
-                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)=>AdditionalFamily::MetadataImages},
+                family: match r {SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)|SharedRow::MetadataImagesPrepare(_)=>AdditionalFamily::MetadataImages},
                 request_id:q.request_id.clone(),
             }))
             .collect())
@@ -725,3 +726,7 @@ mod tests;
 
 #[path="service_metadata_images_book.rs"]
 mod images;
+
+#[path="service_metadata_images_prepare_book.rs"]
+mod images_prepare;
+const _: () = assert!(crate::service_metadata_images_prepare_requests::ROW_BYTES <= p::STATUS_BYTES + 8192 + std::mem::size_of::<Entry>());

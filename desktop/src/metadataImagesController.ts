@@ -1,3 +1,6 @@
+import { ServiceMetadataImagesPrepareController } from './serviceMetadataImagesPrepareController.ts';
+import type { ImagePreparationCandidate } from './serviceMetadataImagesPrepareController.ts';
+import type { ImagesReadObservation } from './serviceMetadataImagesPrepareProtocol.ts';
 // One app-retained image selection/review. This orchestrates existing native
 // owners; it never creates a transaction, owns source bytes or retries a write.
 import { ServiceMetadataImagesController } from './serviceMetadataImagesController.ts';
@@ -19,6 +22,7 @@ import { imageCatalogTypes, imageSelectionSettled, imagePreparedMatches, metadat
 
 interface ImageAttemptBinding extends ImageProjectBinding {
   serial: number;
+  cliPreparation: boolean;
   projectName: string;
   intent: 'import' | 'recover';
   context: ImageConfiguredContext | null;
@@ -58,6 +62,7 @@ export interface MetadataImagesApplyBinding {
 }
 export interface MetadataImagesState {
   mode: BridgeMode;
+  cliPreparation: boolean;
   projectId: string | null;
   choices: MetadataConfiguredContext[];
   selectedKey: string | null;
@@ -180,7 +185,7 @@ export function retainedMetadataImagesOperation(state: MetadataImagesState): {
 
 export class MetadataImagesController {
   private state: MetadataImagesState = freeze<MetadataImagesState>({
-    mode: 'unavailable', projectId: null, choices: [], selectedKey: null, selectedType: null,
+    mode: 'unavailable', cliPreparation: false, projectId: null, choices: [], selectedKey: null, selectedType: null,
     contextGeneration: 0, serviceGeneration: 0, visible: false, selectionPending: false,
     catalog: null, catalogPending: false, catalogError: null,
     selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
@@ -189,6 +194,7 @@ export class MetadataImagesController {
     unknownSelection: null, unknownEdit: null, recoveryProjects: [], attempt: null, acknowledged: null, error: null,
   });
   readonly agent: ServiceMetadataImagesController;
+  readonly preparation: ServiceMetadataImagesPrepareController;
   private pendingCalls = 0;
   private readonly context: Context;
   private api: MetadataImagesApi | null = null;
@@ -209,12 +215,14 @@ export class MetadataImagesController {
 
   constructor(context: Context) {
     this.context = context;
+    this.preparation = new ServiceMetadataImagesPrepareController(() => this.preparationCandidate(), () => this.now());
     this.agent = new ServiceMetadataImagesController(() => this.agentCandidate(), () => this.now());
-    this.agent.subscribe(() => {
-      const retained = this.agent.retains();
+    const delegatedChange = () => {
+      const retained = this.agent.retains() || this.preparation.retains();
       if (!this.disposed && this.state.delegationRetained !== retained) this.publish({...this.state,delegationRetained:retained});
       if (this.disposed) this.retireListeners();
-    });
+    };
+    this.agent.subscribe(delegatedChange); this.preparation.subscribe(delegatedChange);
   }
   getSnapshot = (): MetadataImagesState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -222,7 +230,7 @@ export class MetadataImagesController {
     if (this.disposed) return;
     this.state = freeze(next);
     for (const listener of this.listeners) listener();
-    this.agent.sourceChanged();
+    this.agent.sourceChanged(); this.preparation.sourceChanged();
   }
   private attempt(patch: Partial<MetadataImagesAttempt>): void {
     if (this.state.attempt) {
@@ -321,7 +329,7 @@ export class MetadataImagesController {
   async connect(api: MetadataImagesApi): Promise<void> {
     if (this.disposed) return;
     if (this.api === api) return this.checkStatus();
-    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead)) {
+    if (this.api && (metadataImagesOwnerReason(this.state) !== null || this.pendingCalls || this.agent.retains() || this.preparation.retains() || this.reading || this.catalogRead)) {
       this.publish({ ...this.state, generationLost: true, acknowledged: null, error: metadataImagesError({ code: 'metadata_images_context_changed' }) });
       this.retire(); this.process(); return;
     }
@@ -332,7 +340,7 @@ export class MetadataImagesController {
       catalog: null, catalogError: null, selectionListening: false, editListening: false, selectionInitialized: false, editInitialized: false,
       selectionBuffered: null, editBuffered: null, acknowledged: null });
     this.syncProject();
-    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus(), this.agent.connect(api.agent)]);
+    if (api.mode === 'native') await Promise.all([this.loadCatalog(), this.checkStatus(), this.agent.connect(api.agent), this.preparation.connect(api.preparation)]);
   }
   async loadCatalog(): Promise<void> {
     if (this.disposed || this.api?.mode !== 'native') return;
@@ -363,7 +371,7 @@ export class MetadataImagesController {
   syncAssetSession = (): void => { this.process(); };
 
   passiveBusyReason(): string | null {
-    return this.pendingCalls || this.agent.retains() || this.reading || this.catalogRead ? 'An original image call, permission, status or catalogue query is still pending.' : null;
+    return this.pendingCalls || this.agent.retains() || this.preparation.retains() || this.reading || this.catalogRead ? 'An original image call, permission, status or catalogue query is still pending.' : null;
   }
   async checkStatus(): Promise<void> {
     if (this.disposed || this.api?.mode !== 'native') return;
@@ -444,7 +452,7 @@ export class MetadataImagesController {
     nextState.error = reconciledObservationError(nextState);
     this.publish(nextState); this.process();
   }
-  private receiveEdit(value: unknown, source: 'event' | 'read' | 'reply'): void {
+  private receiveEdit(value: unknown, source: 'event' | 'read' | 'reply', originalStart?: number): void {
     if (this.disposed) return;
     const parsed = parseMetadataImagesEditStatus(value);
     if (!parsed) { this.fail('edit', true); return; }
@@ -478,8 +486,10 @@ export class MetadataImagesController {
           status.statusRevision > retained.binding.editStartRevision && row.sessionId !== retained.binding.previousSessionId));
       if (owner) {
         attempt = { ...attempt, projection: owner };
-        if (owner.details?.prepared) {
-          const at = this.now() + owner.reviewRemainingMs;
+        if (owner.details?.prepared || retained.binding.cliPreparation && owner.details?.checkout && originalStart !== undefined) {
+          // The CLI-profile Editing end is anchored to THAT actual Open call,
+          // not a subsequent status/event receipt. Ordinary GUI is unchanged.
+          const at = (originalStart ?? this.now()) + owner.reviewRemainingMs;
           this.deadline = { sessionId: owner.sessionId, at: this.deadline?.sessionId === owner.sessionId ? Math.min(this.deadline.at, at) : at };
         }
       }
@@ -504,7 +514,7 @@ export class MetadataImagesController {
     const project = this.context.selectedProject();
     if (!project) return 'Choose the registered project whose local image files you want to inspect.';
     const other = this.context.otherOperationReason(); if (other) return other;
-    if (this.pendingCalls || this.agent.retains() || heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
+    if (this.pendingCalls || this.agent.retains() || this.preparation.retains() || heldSelection(this.state) || this.state.editStatus?.active || !imageAttemptFinished(this.state.attempt))
       return 'Finish or cancel the original image operation and wait for its settlement before starting another.';
     const caps = [this.state.selectionStatus!.capability, this.state.editStatus!.capability];
     if (caps.some((cap) => !cap.available))
@@ -525,7 +535,7 @@ export class MetadataImagesController {
     const project = this.context.selectedProject(); const binding = imageProjectBinding(project);
     if (!project || !binding || this.sequence >= U32_MAX || !this.state.selectionStatus || !this.state.editStatus) return null;
     const serial = ++this.sequence;
-    return freeze({ binding: { ...binding, serial, projectName: project.project.name, intent,
+    return freeze({ binding: { ...binding, serial, cliPreparation: intent === 'import' && this.state.cliPreparation, projectName: project.project.name, intent,
       context: intent === 'import' ? this.selectedContext() : null, contextGeneration: this.state.contextGeneration,
       serviceGeneration: this.state.serviceGeneration, windowGeneration: this.state.editStatus.windowGeneration,
       selectionStartRevision: this.state.selectionStatus.statusRevision, editStartRevision: this.state.editStatus.statusRevision,
@@ -534,10 +544,15 @@ export class MetadataImagesController {
       prepareClaimed: false, applyClaimed: false, submittedPlanToken: null, cancelRequested: false, cancelClaimed: false,
       closeRequested: false, closeClaimed: false, invalidated: false });
   }
+  setCliPreparation(enabled: boolean): boolean {
+    if (this.disposed || this.pendingCalls || this.state.editStatus?.active || heldSelection(this.state) ||
+        !imageAttemptFinished(this.state.attempt) || this.preparation.retains() || this.agent.retains()) return false;
+    this.publish({...this.state,cliPreparation:enabled}); return true;
+  }
   choose(): boolean {
     this.syncProject();
     if (this.disposed || !this.api || this.startReason() !== null) return false;
-    if (!this.agent.newOriginal()) return false;
+    if (!this.agent.newOriginal() || !this.preparation.newOriginal()) return false;
     const attempt = this.newAttempt('import'); const selected = attempt?.binding.context;
     if (!attempt || !selected) return false;
     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
@@ -552,7 +567,7 @@ export class MetadataImagesController {
   inspectRecovery(): boolean {
     this.syncProject();
     if (this.disposed || !this.api || this.startReason('recover') !== null) return false;
-    if (!this.agent.newOriginal()) return false;
+    if (!this.agent.newOriginal() || !this.preparation.newOriginal()) return false;
     const attempt = this.newAttempt('recover'); if (!attempt) return false;
     this.deadline = null; this.publish({ ...this.state, attempt, acknowledged: null, error: null });
     if (this.state.attempt?.binding.serial !== attempt.binding.serial || this.state.attempt.invalidated) {
@@ -606,7 +621,7 @@ export class MetadataImagesController {
     this.publish({ ...this.state, acknowledged: checked && this.canAcknowledge(binding) ? binding : null });
   }
   canApply(binding = currentMetadataImagesApplyBinding(this.state)): boolean {
-    return Boolean(binding && this.agent.guiAllowed() && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
+    return Boolean(binding && this.preparation.approvalReady() && this.agent.guiAllowed() && this.canAcknowledge(binding) && same(binding, this.state.acknowledged));
   }
   apply(binding: MetadataImagesApplyBinding): boolean {
     if (this.disposed || !this.api || !this.canApply(binding)) return false;
@@ -690,14 +705,46 @@ export class MetadataImagesController {
         if (attempt.binding.intent === 'import' && !attempt.openClaimed && !attempt.cancelRequested && !attempt.invalidated &&
             selection?.phase === 'selected' && imageSelectionSettled(selection) && selection.selectionToken && this.usable() &&
             this.state.editStatus?.capability.available && this.matches(attempt) && !this.context.otherOperationReason('open-held-selection')) {
-          const serial = attempt.binding.serial; const selectionToken = selection.selectionToken; const projectId = attempt.binding.projectId;
+          const serial = attempt.binding.serial; const selectionToken = selection.selectionToken; const projectId = attempt.binding.projectId; const cliPreparation = attempt.binding.cliPreparation;
           this.attempt({ openClaimed: true });
           if (this.state.attempt?.binding.serial === serial && !this.state.attempt.closeRequested)
-            void this.command('open', serial, (api) => api.openMetadataImagesEdit({ projectId, selectionToken }));
+            void this.command('open', serial, (api) => api.openMetadataImagesEdit({ projectId, selectionToken, ...(cliPreparation ? {cliPreparation:true} : {}) }));
           else { this.attempt({ openClaimed: false, cancelRequested: true }); this.processAgain = true; }
         }
       } while (this.processAgain);
     } finally { this.processing = false; }
+  }
+  private preparationCandidate(): ImagePreparationCandidate | null {
+    const api=this.api,port=api?.preparation,a=this.state.attempt,project=this.context.selectedProject(),catalog=this.state.catalog;
+    const owner=a?.projection,opened=owner?.details?.checkout,choices=a?.choices;
+    if(!api||!port||!a||!a.binding.cliPreparation||!owner||!opened||opened.view.kind!=='import'||!choices||!project||
+       a.binding.intent!=='import'||a.draftRevision!==0||a.prepareClaimed||choices.some(c=>c.replaceExisting)||!this.state.editStatus)return null;
+    const original={sessionId:owner.sessionId,ownerGeneration:owner.ownerGeneration,revision:opened.revision,
+      nativeStatusRevision:this.state.editStatus.statusRevision,baselineGeneration:a.binding.serial};
+    const sameOriginal=()=>{const next=this.state.attempt;return !this.disposed&&this.api===api&&this.context.selectedProject()===project&&this.state.catalog===catalog&&
+      next?.binding===a.binding&&this.matches(next)&&!next.invalidated&&!next.closeRequested&&!next.cancelRequested&&
+      !this.state.integrityFailed&&!this.state.generationLost&&!this.state.nativeBlocked&&!this.state.editIssue&&!this.state.selectionIssue&&
+      next.projection?.sessionId===owner.sessionId&&next.projection.ownerGeneration===owner.ownerGeneration;};
+    const pristine=()=>sameOriginal()&&!this.pendingCalls&&!this.reading&&!this.catalogRead&&this.state.attempt?.choices===choices&&
+      this.state.attempt.draftRevision===0&&!this.state.attempt.prepareClaimed&&this.prepareReason()===null&&
+      this.state.editStatus?.statusRevision===original.nativeStatusRevision&&opened.view.valid;
+    const matches=(o:ImagesReadObservation)=>opened.view.kind==='import'&&o.platform===opened.view.platform&&o.locale===opened.view.locale&&o.assetType===opened.view.assetType&&
+      o.items.length===opened.view.files.length&&o.items.every((x,i)=>{if(opened.view.kind!=='import')return false;const row=opened.view.files[i];return !!row&&x.itemId===row.itemId&&x.displayName===row.displayName&&
+        x.selectedBytes===row.selected.byteLength&&x.selectedSha256===row.selected.sha256&&x.beforeSha256===(row.before?.sha256??null)&&x.canReplace===row.canReplace;});
+    return {api:port,projectId:a.binding.projectId,original,remainingMs:this.remainingReviewMs(),same:sameOriginal,pristine,matches,
+      nativeFinal:()=>{const next=this.state.attempt;return next?.binding===a.binding&&terminal(next.projection);},
+      nativeReady:(s)=>{const n=this.state.attempt?.binding===a.binding?this.state.attempt:null;const p=n?.projection?.details?.prepared;return !!s.review&&!!n&&!!p&&
+        n.projection?.phase==='reviewing'&&p.planToken===s.review.original.planToken&&p.draftRevision===1&&p.baselineGeneration===a.binding.serial&&
+        !!n.prepareRequest&&imagePreparedMatches(n.projection,n.prepareRequest);},
+      prepare:async(q,proposed)=>{
+        if(!pristine()||proposed.length!==choices.length||!proposed.every((c,i)=>c.itemId===choices[i]?.itemId))return false;
+        const request:PrepareMetadataImagesRequest={sessionId:owner.sessionId,revision:opened.revision,draftRevision:1,baselineGeneration:a.binding.serial,
+          expectedBaseline:structuredClone(opened.baseline),choices:proposed.map(c=>({...c}))};
+        if(!metadataImagesRequestFits('metadata_images_edit_prepare',request))return false;
+        this.publish({...this.state,acknowledged:null,attempt:{...a,draftRevision:1,choices:request.choices,prepareClaimed:true,prepareRequest:request}});
+        if(!sameOriginal()||this.state.attempt?.prepareRequest!==request||this.state.attempt.choices!==request.choices||this.pendingCalls||this.context.otherOperationReason())return false;
+        return this.command('prepare',a.binding.serial,()=>port.prepare(q));
+      }};
   }
   private agentCandidate(): ImagesAgentCandidate | null {
     const api = this.api, port = api?.agent, a = this.state.attempt, project = this.context.selectedProject();
@@ -719,7 +766,7 @@ export class MetadataImagesController {
         next.projection?.sessionId === owner.sessionId && next.projection.ownerGeneration === owner.ownerGeneration &&
         same(next.projection.details?.prepared,prepared);
     };
-    const ready = () => sameOriginal() && !this.pendingCalls && this.usable() && this.state.visible && this.remainingReviewMs()>0 &&
+    const ready = () => sameOriginal() && this.preparation.approvalReady() && !this.pendingCalls && this.usable() && this.state.visible && this.remainingReviewMs()>0 &&
       this.state.editStatus?.statusRevision === summary.nativeStatusRevision && !!this.state.editStatus?.capability.available &&
       !this.context.otherOperationReason() && !!currentMetadataImagesApplyBinding(this.state);
     const candidate: ImagesAgentCandidate = {projectId:a.binding.projectId,api:port,summary,remainingMs:this.remainingReviewMs(),same:sameOriginal,ready,
@@ -770,6 +817,7 @@ export class MetadataImagesController {
     call: (api: MetadataImagesApi) => Promise<MetadataImagesSelectionStatus | MetadataImagesEditStatus>): Promise<boolean> {
     const api = this.api;
     if (!api || this.pendingCalls >= 32) { this.fail('edit',true); return false; }
+    const originalStart=this.now();
     this.pendingCalls += 1;
     if (this.pendingCalls === 1) this.publish({...this.state,callerPending:true});
     try {
@@ -789,7 +837,7 @@ export class MetadataImagesController {
       }
       const status = await call(api);
       if (this.disposed || this.api !== api) return false;
-      if (kind === 'choose' || kind === 'cancel') this.receiveSelection(status, 'reply'); else this.receiveEdit(status, 'reply');
+      if (kind === 'choose' || kind === 'cancel') this.receiveSelection(status, 'reply'); else this.receiveEdit(status, 'reply', kind==='open'?originalStart:undefined);
       return !this.state.integrityFailed && !this.state.generationLost;
     } catch (error) {
       if (this.disposed || this.api !== api) return false;
@@ -813,7 +861,7 @@ export class MetadataImagesController {
     }
   }
   private retireListeners(): void {
-    if (!this.disposed || this.pendingCalls || this.reading || this.catalogRead || this.agent.hasPendingCalls()) return;
+    if (!this.disposed || this.pendingCalls || this.reading || this.catalogRead || this.agent.hasPendingCalls() || this.preparation.hasPendingCalls()) return;
     try { this.unlistenSelection?.(); } catch { /* Not native settlement. */ }
     try { this.unlistenEdit?.(); } catch { /* Not native settlement. */ }
     this.unlistenSelection = null; this.unlistenEdit = null;
@@ -821,7 +869,7 @@ export class MetadataImagesController {
   dispose(): void {
     if (this.disposed) return;
     // At most the one original STOP. Disposing listeners is not undo/finality.
-    this.requestStop(); this.agent.dispose(); this.disposed = true;
+    this.requestStop(); this.agent.dispose(); this.preparation.dispose(); this.disposed = true;
     this.retireListeners(); this.listeners.clear();
   }
 }

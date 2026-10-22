@@ -290,6 +290,7 @@ fn main() {
     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
     "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
     "agent_configuration_status", "allow_agent_configuration_apply", "revoke_agent_configuration",
+    "agent_metadata_images_prepare_status", "agent_metadata_images_inspect", "agent_metadata_images_prepare_cancel",
     "agent_metadata_images_status", "allow_agent_metadata_images_apply", "revoke_agent_metadata_images",
     "agent_metadata_text_status", "allow_agent_metadata_text_apply", "revoke_agent_metadata_text",
     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve", "agent_version_reserve_review_status", "cancel_agent_version_reserve_review",

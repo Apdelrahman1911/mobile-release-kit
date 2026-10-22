@@ -62,6 +62,9 @@ pub(crate) use agent_version_prepare::{Link as VersionPrepareLink,Step as Versio
 #[path="edit_owner_service_metadata_images.rs"]
 mod agent_metadata_images;
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="edit_owner_service_metadata_images_prepare.rs"]
+mod agent_metadata_images_prepare;
+#[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_metadata_images::{Claim as MetadataImagesClaim,Decision as MetadataImagesDecision,Step as MetadataImagesStep};
 #[cfg(not(any(target_os="linux",target_os="macos")))]
 pub(crate) struct MetadataImagesClaim;
@@ -668,7 +671,7 @@ pub(crate) struct RegisteredEditRoot {
 // Keep existing workflow callers/fixtures bound to their original API. The
 // shared root proof is not a domain permit; admission and tickets remain tagged.
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
+pub(crate) struct RegisteredOpenTicket { image_prepare_profile: bool, owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_identity: Option<Arc<agent_identity::Link>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1018,6 +1021,10 @@ struct Session {
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_metadata_images:std::sync::OnceLock<Arc<agent_metadata_images::Link>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_metadata_images_prepare:std::sync::OnceLock<Arc<agent_metadata_images_prepare::Link>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    image_identity:Option<Arc<()>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
     agent_metadata_text: Option<Arc<MetadataTextAgentLink>>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     agent_version_prepare: Option<Arc<VersionPrepareLink>>,
@@ -1034,6 +1041,7 @@ struct Session {
     // Buffer custody only. Written by the SAME original writer after its
     // consecutive returned write future and owned command Vec have dropped.
     // Neither child DATA nor this counter is a close/join/native receipt.
+    image_prepare_profile: bool,
     image_written: std::sync::atomic::AtomicUsize,
     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
     stop: watch::Sender<bool>, wake: Arc<Notify>, force_due: AtomicBool, driver_done: AtomicBool,
@@ -1679,7 +1687,7 @@ impl Inner {
                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&a.session);
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_metadata_images::unknown(&a.session); }
+            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_metadata_images::unknown(&a.session); agent_metadata_images_prepare::unknown(&a.session); }
             a.unknown = true;
             a.projection.phase = Phase::Unknown;
             a.projection.native_finality = NativeFinality::Unknown;
@@ -1733,7 +1741,7 @@ impl Inner {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
-            agent_version_edit::cancellation_at(&a.session,now).or_else(||agent_metadata_images::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+            agent_version_edit::cancellation_at(&a.session,now).or_else(||agent_metadata_images::cancellation_at(&a.session,now)).or_else(||agent_metadata_images_prepare::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
             self.trigger_locked(publication,r,id,reason,at);
         }
         // Evaluate the original phase endpoint before a new native F can clear
@@ -2164,6 +2172,10 @@ impl EditOwner {
     pub(crate) fn metadata_images_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::MetadataImages)
     }
+    pub(crate) fn metadata_images_cli_open_ticket(&self, window: &str, enabled: bool) -> Result<RegisteredOpenTicket, BridgeError> {
+        let mut ticket = self.metadata_images_open_ticket(window)?;
+        ticket.image_prepare_profile = enabled; Ok(ticket)
+    }
     fn registered_open_ticket(&self, window: &str, domain: EditDomain) -> Result<RegisteredOpenTicket, BridgeError> {
         if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages | EditDomain::ProjectInitialization | EditDomain::ProjectIdentity) { return Err(invalid_owner()); }
         self.registered_open_ticket_for_intent(window, domain, false)
@@ -2174,7 +2186,7 @@ impl EditOwner {
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
+        Ok(RegisteredOpenTicket { image_prepare_profile: false, owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             reserved_version:None,
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2332,6 +2344,8 @@ impl EditOwner {
             if ticket.as_ref().is_some_and(|t|t.agent_version_prepare.is_some()&&(domain!=EditDomain::ReleaseVersion||t.saved_text_recovery||t.configuration_recovery)){return Err(invalid_owner())}
             ticket.as_mut().and_then(|t|t.agent_version_prepare.take())
         };
+        let image_prepare_profile = ticket.as_ref().is_some_and(|t| t.image_prepare_profile);
+        if image_prepare_profile && (domain != EditDomain::MetadataImages || !matches!(images.as_ref(), Some(ImageOpen::Import(_)))) { return Err(invalid_owner()); }
         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
@@ -2388,7 +2402,7 @@ impl EditOwner {
         let (stop, _) = watch::channel(false);
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
-        let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, image_written: std::sync::atomic::AtomicUsize::new(0), id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+        let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, image_prepare_profile, image_written: std::sync::atomic::AtomicUsize::new(0), id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_identity,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2399,6 +2413,10 @@ impl EditOwner {
             agent_version_edit:std::sync::OnceLock::new(),
             #[cfg(any(target_os="linux",target_os="macos"))]
             agent_metadata_images:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_metadata_images_prepare:std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            image_identity:(domain==EditDomain::MetadataImages).then(||Arc::new(())),
             #[cfg(any(target_os="linux",target_os="macos"))]
             agent_metadata_text,
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -2605,6 +2623,16 @@ impl EditOwner {
         counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
         agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
         agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        self.prepare_domain_images(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,agent_config,agent_metadata,agent_version,None)
+    }
+    fn prepare_domain_images(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,revision:&str,
+        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
+        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
+        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>,
+        agent_images:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>)->Result<DomainStatus,BridgeError>{
+        if agent_images.is_some()&&domain!=EditDomain::MetadataImages{return Err(invalid_owner())}
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        agent_metadata_images_prepare::preclaim(&self.inner,session_id,agent_images)?;
         if agent_version.is_some()&&domain!=EditDomain::ReleaseVersion{return Err(invalid_owner())}
         #[cfg(any(target_os="linux",target_os="macos"))]
         agent_version_prepare::preclaim(&self.inner,session_id,agent_version)?;
@@ -2699,6 +2727,8 @@ impl EditOwner {
             if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
             #[cfg(any(target_os="linux",target_os="macos"))]
             agent_version_prepare::consume(a,agent_version,&mut publication)?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_metadata_images_prepare::consume(a,agent_images,&mut publication)?;
             a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
             a.phase_end = Some(phase_end);
@@ -2854,7 +2884,7 @@ impl EditOwner {
             #[cfg(any(target_os="linux",target_os="macos"))]
             if !agent_metadata_text::consume(a,agent_metadata,crate::service_metadata_text_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
             #[cfg(any(target_os="linux",target_os="macos"))]
-            if !agent_metadata_images::consume(a,agent_images,&mut publication){return Err(invalid_owner());}
+            if !agent_metadata_images_prepare::apply_allowed(a)||!agent_metadata_images::consume(a,agent_images,&mut publication){return Err(invalid_owner());}
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -3208,12 +3238,12 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                             #[cfg(not(any(target_os="linux",target_os="macos")))]
                             {version_wire::RESPONSE_LIMIT}
                         },
-                        EditDomain::MetadataImages => images_wire::RESPONSE_LIMIT,
+                        EditDomain::MetadataImages => if owner.image_prepare_profile { crate::service_metadata_images_prepare_protocol::FRAME_BYTES } else { images_wire::RESPONSE_LIMIT },
                         EditDomain::ProjectInitialization => initialization_wire::RESPONSE_LIMIT,
                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
                     };
                     #[cfg(any(target_os="linux",target_os="macos"))]
-                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()) && frame.len() >= response_limit {
+                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.image_prepare_profile) && frame.len() >= response_limit {
                         discard=true;failed=true;frame.clear();
                         inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
                         continue;
@@ -3246,7 +3276,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                                     #[cfg(not(any(target_os="linux",target_os="macos")))]
                                     {version_wire::decode_with_intent(&frame,&owner.id,owner.saved_text_recovery)}
                                 },
-                                EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
+                                EditDomain::MetadataImages => if owner.image_prepare_profile { images_wire::decode_cli_import(&frame, &owner.id) } else { images_wire::decode(&frame, &owner.id) },
                                 EditDomain::ProjectInitialization => initialization_wire::decode(&frame, &owner.id),
                                 EditDomain::ProjectIdentity => identity_wire::decode(&frame, &owner.id),
                             }
@@ -3355,7 +3385,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
-      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
+      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()||agent_metadata_images_prepare::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
     let mut terminal = false;
     let mut uncertain = false;
     if !invalid {
@@ -3696,7 +3726,7 @@ fn reserved_cleanup_end(owner:&Session,end:Instant)->Instant {
 }
 fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
     end
 }
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
@@ -3722,7 +3752,7 @@ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
                 _=>end,
             };
             #[cfg(any(target_os="linux",target_os="macos"))]
-            let end=if owner.agent_metadata_images.get().is_some()&&!unknown{end.map(|end|end.min(now+Duration::from_millis(100)))}else{end};
+            let end=if (owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some())&&!unknown{end.map(|end|end.min(now+Duration::from_millis(100)))}else{end};
             #[cfg(any(target_os="linux",target_os="macos"))]
             let end=match &owner.agent_version_prepare {Some(link) if !unknown=>end.map(|end|link.cleanup_poll_end(end,now)),_=>end};
             end
@@ -4757,7 +4787,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
           agent_version_edit::retired(&r,&a.session,a.unknown);
           agent_metadata_text::retired(&r,&a.session,a.unknown,metadata_chain_current);
           agent_version_prepare::retired(&r,&a.session,a.unknown,version_prepare_current);
-          agent_metadata_images::retired(&r,&a.session,a.unknown,images_chain_current); }
+          agent_metadata_images::retired(&r,&a.session,a.unknown,images_chain_current); agent_metadata_images_prepare::retired(&r,&a.session,a.unknown); }
     }
     guard.completed = true;
     })();

@@ -10,6 +10,8 @@
 //! Neither input is adopted for deletion. In particular the recovery-code read
 //! buffer, its partial bytes and EOF sentinel are zeroizing from allocation.
 use super::*;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+use crate::asset_session::OriginalWork;
 use crate::{credential_format, vault_crypto as crypto, vault_format as format};
 use crypto::backup;
 use zeroize::{Zeroize, Zeroizing};

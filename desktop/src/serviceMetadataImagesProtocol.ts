@@ -69,7 +69,7 @@ function original(v: unknown): v is ImagesAgentOriginal {
     [v.sessionId,v.ownerGeneration,v.revision,v.planToken].every(id) && v.revision !== v.planToken &&
     uint(v.draftRevision) && uint(v.baselineGeneration);
 }
-function review(v: unknown): v is ImagesAgentReview {
+export function isImagesAgentReview(v: unknown): v is ImagesAgentReview {
   return keys(v, ['original','nativeStatusRevision','platform','locale','assetType','fileCount','createCount','replaceCount','preserveCount','selectedBytes','preparedSha256']) &&
     original(v.original) && uint(v.nativeStatusRevision) && (v.platform === 'android' || v.platform === 'ios') &&
     typeof v.locale === 'string' && /^[A-Za-z0-9-]{2,12}(?![\s\S])/.test(v.locale) &&
@@ -79,7 +79,7 @@ function review(v: unknown): v is ImagesAgentReview {
 }
 function request(v: unknown): v is ImagesAgentRequest {
   if (!keys(v, ['schemaVersion','origin','grantId','revision','phase','settlement','review','cancelRequested','result','doNotReplay']) ||
-    v.schemaVersion !== 1 || !origin(v.origin) || !id(v.grantId) || !uint(v.revision,0xfffffffe,1) || !review(v.review) ||
+    v.schemaVersion !== 1 || !origin(v.origin) || !id(v.grantId) || !uint(v.revision,0xfffffffe,1) || !isImagesAgentReview(v.review) ||
     !['queued','admitting','applying','stopping','final','unknown'].includes(String(v.phase)) ||
     !['pending','settled','unknown'].includes(String(v.settlement)) || (v.phase === 'unknown') !== (v.settlement === 'unknown') ||
     (v.phase === 'final') !== (v.settlement === 'settled') || (v.phase === 'final') !== (v.result !== null) ||
@@ -99,7 +99,7 @@ function request(v: unknown): v is ImagesAgentRequest {
 function access(v: unknown): v is ImagesAgentAccess {
   if (!keys(v, ['schemaVersion','serviceInstance','projectId','grantId','nonce','review','live','remainingMs','request']) ||
     v.schemaVersion !== 1 || !id(v.serviceInstance) || !nullable(v.projectId,id) || !nullable(v.grantId,id) || !nullable(v.nonce,id) ||
-    !nullable(v.review,review) || !nullable(v.request,request) || typeof v.live !== 'boolean' || !uint(v.remainingMs,900000) ||
+    !nullable(v.review,isImagesAgentReview) || !nullable(v.request,request) || typeof v.live !== 'boolean' || !uint(v.remainingMs,900000) ||
     v.live !== (v.remainingMs > 0)) return false;
   const group = [v.projectId,v.grantId,v.nonce,v.review];
   if (!group.every(x => x === null) && !group.every(x => x !== null) || v.live && (!v.review || v.request) || !v.review && v.request) return false;

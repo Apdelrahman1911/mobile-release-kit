@@ -16,7 +16,7 @@ impl SelectionStart { pub(crate) fn context(&self) -> Context {
 pub(crate) struct SelectionCancel { pub operation_id: String }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Open { pub project_id: String, pub selection_token: String }
+pub(crate) struct Open { pub project_id: String, pub selection_token: String, #[serde(default)] pub cli_preparation: bool }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RecoveryOpen { pub project_id: String }
@@ -80,7 +80,10 @@ mod tests {
             let mut bad = value.clone(); bad[key] = Value::Null; assert!(choose(&bad).is_err());
         }
         let value = json!({"projectId":"project-1","selectionToken":"a".repeat(32)});
-        assert!(open(&value).is_ok());
+        assert!(!open(&value).unwrap().cli_preparation);
+        let mut profiled=value.clone();profiled["cliPreparation"]=json!(true);assert!(open(&profiled).unwrap().cli_preparation);
+        for invalid in [Value::Null,json!(1),json!("true")] {profiled["cliPreparation"]=invalid;assert!(open(&profiled).is_err());}
+        assert!(recovery_open(&json!({"projectId":"project-1","cliPreparation":true})).is_err());
         for key in ["platform", "locale", "assetType", "paths", "images", "expectedBaseline"] {
             let mut bad = value.clone(); bad[key] = Value::Null; assert!(open(&bad).is_err());
         }

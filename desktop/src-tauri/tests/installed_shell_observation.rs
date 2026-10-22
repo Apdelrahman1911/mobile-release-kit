@@ -49,6 +49,10 @@ mod bounded_json_seed;
 mod service_metadata_images_protocol;
 #[path="../src/service_metadata_images_requests.rs"]
 mod service_metadata_images_requests;
+#[path="../src/service_metadata_images_prepare_protocol.rs"]
+mod service_metadata_images_prepare_protocol;
+#[path="../src/service_metadata_images_prepare_requests.rs"]
+mod service_metadata_images_prepare_requests;
 #[path="../src/service_metadata_text_protocol.rs"]
 mod service_metadata_text_protocol;
 #[path="../src/service_metadata_text_requests.rs"]

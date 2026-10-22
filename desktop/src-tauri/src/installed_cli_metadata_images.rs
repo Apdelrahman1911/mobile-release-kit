@@ -94,6 +94,9 @@ fn output(
     if let p::ResponseBody::Error(e) = r.response {
         return Err(e);
     }
+    if grant.is_none() && matches!(&r.response,p::ResponseBody::MetadataImagesPreparation(_)) {
+        return super::metadata_images_prepare::output(r,origin.ok_or(Error::StateUnknown)?,json);
+    }
     let (code, text) = match (&r.response, origin) {
         (p::ResponseBody::MetadataImagesAccess(a), None) => {
             a.validate()?;
@@ -312,7 +315,7 @@ mod tests {
         assert!(bytes.len() <= super::super::CAPABILITIES_BYTES);
         let caps: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let images = &caps["metadataImages"];
-        assert_eq!(images["commands"].as_array().unwrap().len(), 4);
+        assert_eq!(images["commands"].as_array().unwrap().len(), 6);
         assert!(caps["requestDiscovery"]["families"]
             .as_array()
             .unwrap()
@@ -327,7 +330,9 @@ mod tests {
             crate::service_request_catalogue::LIMIT
         );
         for key in [
-            "desktopPreparedImportOnly",
+            "nativeOpenedCliProfileOnly",
+            "read",
+            "prepare",
             "scalarIdsOnly",
             "oneUseSeparateApproval",
         ] {
@@ -336,7 +341,6 @@ mod tests {
         for key in [
             "nativeAvailabilityChecked",
             "chooseFiles",
-            "prepare",
             "recovery",
             "storeUpload",
             "headless",

@@ -1,6 +1,7 @@
-//! Image Apply-only continuation of the ORIGINAL borrowed Edit census. This
-//! quote starts only after its own Open and Prepare write buffers have returned
-//! and dropped. It grants no child/IO/runtime completion or new payload credit.
+//! Image continuations of the ORIGINAL borrowed Edit census. Ordinary Apply
+//! requires returned Open+Prepare buffers; immutable-profile preparation starts
+//! after Open alone and retains its remaining frame/Prepare debt. Buffer return
+//! grants no child/IO/runtime completion or new payload credit.
 use super::*;
 
 // A malformed THIRD frame still reaches the SAME bounded Seed before sequence
@@ -18,8 +19,29 @@ const IMAGE_FUTURE: usize = 2 * crate::protocol::NODE_LIMIT * 512
     + 2 * size_of::<crate::service_metadata_images_requests::Call>()
     + 4 * (size_of::<crate::application_service_host::NativeProject>() + 4096 + 128);
 
+// Immutable CLI Import profile, installed BEFORE the first reader byte.
+// Five representations cover queued/current future Prepared, Seed+typed decode
+// and two Status copies. Current/last private trees remain independently charged.
+const PREPARE_FUTURE: usize = 5 * crate::service_metadata_images_prepare_protocol::FRAME_NODES * 512
+    + 10 * crate::service_metadata_images_prepare_protocol::FRAME_BYTES
+    + 2 * i::SMALL_REQUEST_LIMIT + 2 * i::STATUS_LIMIT + 1024 * 1024
+    + size_of::<Session>() + size_of::<Resources>() + size_of::<ActiveOwner>()
+    + size_of::<agent_metadata_images::Link>() + size_of::<agent_metadata_images_prepare::Link>()
+    + 2 * size_of::<agent_metadata_images::PreparedOriginal>()
+    + 2 * size_of::<agent_metadata_images::Claim>() + 2 * size_of::<agent_metadata_images_prepare::Claim>()
+    + 2 * size_of::<agent_metadata_images_prepare::GuiClaim>()
+    + 2 * size_of::<crate::service_metadata_images_requests::Call>()
+    + 2 * size_of::<crate::service_metadata_images_prepare_requests::Call>()
+    + 4 * (size_of::<crate::application_service_host::NativeProject>() + 4096 + 128);
+
 impl EditOwner {
     pub(crate) fn images_agent_edit_backing(&self) -> Result<usize, BridgeError> {
+        self.images_agent_backing(false)
+    }
+    pub(crate) fn images_agent_prepare_backing(&self) -> Result<usize, BridgeError> {
+        self.images_agent_backing(true)
+    }
+    fn images_agent_backing(&self, preparing: bool) -> Result<usize, BridgeError> {
         let r = self
             .inner
             .registry
@@ -70,13 +92,14 @@ impl EditOwner {
         }
         if let Some(a) = &r.active {
             if a.session.domain != EditDomain::MetadataImages
-                || a.projection.phase != Phase::Reviewing
-                || a.claimed_seq != 1
+                || preparing && !a.session.image_prepare_profile
+                || a.projection.phase != if preparing { Phase::Editing } else { Phase::Reviewing }
+                || a.claimed_seq != if preparing { 0 } else { 1 }
                 || !a.opened
-                || !a.prepared
+                || a.prepared == preparing
                 || a.unknown
                 || a.cleanup_start.is_some()
-                || a.session.image_written.load(Ordering::Acquire) != 2
+                || a.session.image_written.load(Ordering::Acquire) != if preparing { 1 } else { 2 }
                 || a.projection
                     .metadata_images
                     .as_ref()
@@ -91,6 +114,12 @@ impl EditOwner {
                 n.add(link.project.canonical_root.capacity())?;
                 link.project.runtime_id.heap(&mut n)?;
             }
+            if let Some(link) = a.session.agent_metadata_images_prepare.get() {
+                n.add(size_of::<agent_metadata_images_prepare::Link>() + 64)?;
+                n.add(link.project.canonical_root.capacity())?;
+                link.project.runtime_id.heap(&mut n)?;
+            }
+            if a.session.image_identity.is_some() { n.add(64)?; }
             // Do not pretend a live native runtime has zero retained source/ACL
             // backing. Borrow its own existing census; try-lock/opaque refuses.
             #[cfg(all(
@@ -124,7 +153,7 @@ impl EditOwner {
         }
         // The absent-active form is only a census for default/overbound tests.
         // images_prepared independently demands the real active native original.
-        n.add(IMAGE_FUTURE)?;
+        n.add(if preparing || r.active.as_ref().is_some_and(|a| a.session.image_prepare_profile) { PREPARE_FUTURE } else { IMAGE_FUTURE })?;
         Ok(n.bytes)
     }
 }
@@ -155,6 +184,16 @@ mod tests {
             native_finality: NativeFinality::Pending,
             late_settled: false,
         }
+    }
+    #[test]
+    fn immutable_editing_quote_retains_five_bounded_frames_and_foreign_last_capacity() {
+        let fixed=5*4096*512+10*128*1024+2*i::SMALL_REQUEST_LIMIT+2*i::STATUS_LIMIT+1024*1024;
+        assert_eq!(fixed,17_170_432);assert!(PREPARE_FUTURE>fixed);
+        let owner=EditOwner::new(RuntimeConfig::packaged(PathBuf::from("/never-opened-images-preparation-census")));
+        let original=owner.images_agent_prepare_backing().unwrap();assert!(original>PREPARE_FUTURE);
+        let mut last=data();last.project_id=String::with_capacity(1024*1024);let cap=last.project_id.capacity();let ptr=last.project_id.as_ptr();owner.inner.lock().last=Some(last);
+        assert!(owner.images_agent_prepare_backing().unwrap()>=original+cap);assert_eq!(owner.inner.lock().last.as_ref().unwrap().project_id.as_ptr(),ptr);
+        owner.inner.lock().exhausted=true;assert!(owner.images_agent_prepare_backing().is_err());
     }
     #[test]
     fn retained_image_private_view_capacity_and_foreign_last_are_not_buffer_credit() {

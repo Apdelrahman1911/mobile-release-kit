@@ -1,3 +1,4 @@
+import type { MetadataImagesPrepareApi } from './serviceMetadataImagesPrepareProtocol.ts';
 // Bounded, public image-summary DATA. Tokens correlate an original native owner;
 // none of these types authorizes a renderer path, byte buffer or transaction.
 import type { BridgeMode, CoreEditOutcome, EditAvailability, HelpContent, NativeEditReason } from './types.ts';
@@ -136,12 +137,13 @@ export type MetadataImagesCommand = 'metadata_images_catalog' | 'metadata_images
   'metadata_images_edit_apply' | 'metadata_images_edit_close' | 'metadata_images_edit_status';
 export interface MetadataImagesApi {
   mode: BridgeMode;
+  preparation?: MetadataImagesPrepareApi;
   agent?: MetadataImagesAgentApi;
   metadataImagesCatalog(): Promise<MetadataImagesCatalog>;
   chooseMetadataImages(input: ChooseMetadataImagesRequest): Promise<MetadataImagesSelectionStatus>;
   metadataImagesSelectionStatus(): Promise<MetadataImagesSelectionStatus>;
   cancelMetadataImagesSelection(operationId: string): Promise<MetadataImagesSelectionStatus>;
-  openMetadataImagesEdit(input: { projectId: string; selectionToken: string }): Promise<MetadataImagesEditStatus>;
+  openMetadataImagesEdit(input: { projectId: string; selectionToken: string; cliPreparation?: boolean }): Promise<MetadataImagesEditStatus>;
   openMetadataImagesRecovery(projectId: string): Promise<MetadataImagesEditStatus>;
   prepareMetadataImagesEdit(input: PrepareMetadataImagesRequest): Promise<MetadataImagesEditStatus>;
   applyMetadataImagesEdit(sessionId: string, planToken: string): Promise<MetadataImagesEditStatus>;

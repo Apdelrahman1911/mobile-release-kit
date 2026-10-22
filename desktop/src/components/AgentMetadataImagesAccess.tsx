@@ -15,7 +15,7 @@ export function AgentMetadataImagesAccess({ controller }: { controller: ServiceM
       {' '}Nothing is uploaded to a Store. Stop cannot undo a copy.</p>}
     <details className="advanced-settings"><summary>Advanced: let the installed CLI apply this image review</summary>
       <p>First review every destination and replacement above. This allowance permits one local copy of that same batch only.
-        The CLI cannot choose files, prepare another batch, recover a journal or upload images.</p>
+        The CLI cannot choose files, replace the captured batch, recover a journal or upload images. Preparing an untouched selection is a separate Advanced option.</p>
       <label><input type="checkbox" checked={key !== null && reviewed === key} disabled={!controller.canAllow()}
         onChange={e => setReviewed(e.target.checked ? key : null)} /> I reviewed the complete local-copy preview and allow the CLI to apply it once.</label>
       <div className="button-row"><button type="button" disabled={key === null || reviewed !== key || !controller.canAllow()}

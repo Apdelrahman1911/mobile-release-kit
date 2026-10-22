@@ -79,7 +79,7 @@ impl std::io::Write for Hasher {
         Ok(())
     }
 }
-fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
+pub(super) fn review(a: &ActiveOwner, revision: u32) -> Result<p::Review, BridgeError> {
     if a.session.domain != EditDomain::MetadataImages
         || a.projection.phase != Phase::Reviewing
         || a.projection.native_reason != Reason::None
@@ -270,6 +270,7 @@ impl EditOwner {
         window(&r, w)?;
         let a = r.active.as_ref().ok_or_else(invalid_owner)?;
         let current = review(a, r.revision)?;
+        if a.session.agent_metadata_images_prepare.get().is_some_and(|l|!l.entry.reviewing(&current)){return Err(invalid_owner());}
         if current.original != *expected
             || revision != r.revision
             || a.session.agent_metadata_images.get().is_some()
@@ -303,9 +304,13 @@ impl EditOwner {
             review: original.review.clone(),
             wake: Arc::downgrade(&original.session.wake),
         };
+        let preparation={
+            let r=self.inner.lock();let a=r.active.as_ref().filter(|a|Arc::ptr_eq(&a.session,&original.session)).ok_or_else(invalid_owner)?;
+            a.session.agent_metadata_images_prepare.get().map(|l|l.entry.clone())
+        };
         service
             .configuration_requests()
-            .images_install(nonce, grant, |entry| {
+            .images_install_with_preparation(nonce, grant, preparation.as_ref(), |entry| {
                 let r = self.inner.lock();
                 window(&r, w).map_err(|_| crate::service_protocol::Error::Conflict)?;
                 let a = r
@@ -391,10 +396,19 @@ impl EditOwner {
         } else {
             link.entry.gui_claim().map_err(public)?;
         }
-        Ok(Decision::Apply(Claim {
-            session: a.session.clone(),
-            entry: entry.cloned(),
-        }))
+        let claim = Claim { session: a.session.clone(), entry: entry.cloned() };
+        if let Some(p)=a.session.agent_metadata_images_prepare.get(){
+            // Both real rows already exist. Under this SAME Registry cut the
+            // predecessor retires only its control; the successor keeps READ.
+            // A cancellation/overflow at transfer after the real winning
+            // preclaim must STOP that original, never orphan/rearm its claim.
+            if let Err(error) = p.entry.transfer(entry,&g.review) {
+                drop(r);
+                self.images_claim_failed(&claim);
+                return Err(public(error));
+            }
+        }
+        Ok(Decision::Apply(claim))
     }
     pub(crate) fn apply_images_claimed(
         &self,
