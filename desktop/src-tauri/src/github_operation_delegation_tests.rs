@@ -83,7 +83,7 @@ fn maximum_private_pr_shares_one_real_allocation_and_keeps_native_modes_and_capa
         assert!(a.retained_fits());assert!(a.same_original(&b));assert!(!a.same_original(&input(v.clone())));assert_eq!(selected.limit(),MAIN_RAW_LIMIT);
         let command=a.pull_request_command().unwrap();let pr::Command::Prepare(args)=command else {panic!("not original PR Prepare")};
         let raw=serde_json::to_vec(&args).unwrap();assert!(raw.len()>4096&&raw.len()<=16*1024);
-        assert!(matches!(pr::decode_command("github_pull_request_prepare",&pr::raw_input(&raw).unwrap()).unwrap(),pr::Command::Prepare(_)));
+        assert!(matches!(pr::decode_command("github_pull_request_prepare",&pr::raw_input("github_pull_request_prepare",&raw).unwrap()).unwrap(),pr::Command::Prepare(_)));
         let mut bad=v.clone();bad["draft"]["creationMode"]=Value::Null;assert!(serde_json::from_value::<super::super::dispatch::Selection>(bad).is_err());
         let mut excessive=input(v);let Input::PrPrepare(a)=&mut excessive else{unreachable!()};
         Arc::get_mut(a).unwrap().draft.body.reserve_exact(INPUT_BACKING+1);

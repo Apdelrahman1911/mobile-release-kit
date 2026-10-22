@@ -15,7 +15,7 @@ fn maximum_frame() -> ChildFrame {
     let generated="y".repeat(16*1024);let previous="x".repeat(16*1024);
     let current_hash=format!("{:x}",sha2::Sha256::digest(generated.as_bytes()));
     let old_hash=format!("{:x}",sha2::Sha256::digest(previous.as_bytes()));
-    let files:Vec<_>=w::IDS.into_iter().map(|id|json!({"id":id,"path":id.path(),"action":"update",
+    let files:Vec<_>=[w::WorkflowId::Preflight,w::WorkflowId::Candidate,w::WorkflowId::ExternalTesting,w::WorkflowId::ProductionSubmit].into_iter().map(|id|json!({"id":id,"path":id.path(),"action":"update",
         "observed":{"state":"present","byteLength":previous.len(),"sha256":old_hash},
         "generated":{"byteLength":generated.len(),"sha256":current_hash,"content":generated},
         "previous":{"byteLength":previous.len(),"sha256":old_hash,"content":previous}})).collect();
