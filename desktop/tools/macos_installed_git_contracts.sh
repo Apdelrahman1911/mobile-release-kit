@@ -219,8 +219,8 @@ selected_tests=(
   asset_session::vault::backup_selection::tests::first_path_stays_with_original_and_only_both_closed_start_one_io_clock
   asset_session::vault::backup_selection::tests::returned_second_stop_retains_both_originals_and_never_invents_child_return
   asset_session::vault::key_sources::p12::census_tests::selected_p12_census_distinguishes_real_none_contention_and_poison
-  asset_session::vault::upload_key::controls::delegation::reuse::tests::original_weak_body_and_one_reply_token_are_reserved_before_attachment
-  asset_session::vault::upload_key::controls::delegation::reuse::tests::selected_row_is_exact_full_reference_and_never_an_inert_return_receipt
+  asset_session::vault::assignment_native::upload_key::controls::delegation::reuse::tests::original_weak_body_and_one_reply_token_are_reserved_before_attachment
+  asset_session::vault::assignment_native::upload_key::controls::delegation::reuse::tests::selected_row_is_exact_full_reference_and_never_an_inert_return_receipt
   asset_session::version_reserve::agent::review::tests::actual_review_document_source_future_and_retained_payload_obey_original_cap
   asset_session::version_reserve::agent::review::tests::main_review_decoder_requires_exact_origin_and_nullable_status_selection
   asset_session::version_reserve::agent::tests::allow_requires_exact_review_revision_and_consent_without_caller_authority
@@ -262,7 +262,7 @@ selected_tests=(
   github_history_protocol::download::tests::download_unknown_state_keeps_diagnostics_without_minting_any_ticket
   github_history_protocol::tests::closed_history_commands_frames_and_original_context
   github_history_protocol::tests::complete_history_result_shapes_and_retained_status_are_bounded
-  github_preflight_session::tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
+  github_preflight_session::installation_memory_capacity_tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
   github_pull_request_protocol::mode::tests::absent_only_defaults_to_draft_while_null_bool_object_unknown_and_duplicate_refuse
   github_pull_request_protocol::mode::tests::both_modes_share_existing_record_response_and_heap_bounds_without_an_extra_pool
   github_pull_request_protocol::mode::tests::legacy_draft_omits_mode_and_preserves_old_canonical_confirmation_and_digest
@@ -273,7 +273,7 @@ selected_tests=(
   github_pull_request_protocol::pull_request_data_tests::pull_request_pending_is_scope_only_and_never_restores_consent_or_write
   github_pull_request_protocol::pull_request_data_tests::pull_request_private_text_is_bound_but_not_in_initial_or_public_review
   github_pull_request_protocol::pull_request_data_tests::pull_request_raw_requires_exact_explicit_draft_and_never_merge_or_token
-  github_release_session::tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
+  github_release_session::installation_memory_capacity_tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
   installed_cli::android_build::tests::exact_prepare_and_start_are_separate_no_arbitrary_configuration_or_commands
   installed_cli::android_build::tests::lost_ack_preserves_exact_correlation_and_whole_frame_stays_bounded
   installed_cli::android_build::tests::signed_scope_is_explicit_but_unknown_never_prints_start_or_private_assignment
@@ -602,10 +602,15 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '561 tests, 0 benchmarks' "$list_log"
+missing=0
 for test_name in "${selected_tests[@]}"; do
-  [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
+  if [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" != 1 ]]; then
+    printf 'Required test is missing or duplicated: %s\n' "$test_name" >&2
+    missing=1
+  fi
 done
+(( missing == 0 )) || exit 1
+/usr/bin/grep -Fx '561 tests, 0 benchmarks' "$list_log"
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
 /usr/bin/grep -Eq '^test result: ok\. 561 passed; 0 failed; 0 ignored;' "$run_log"
 

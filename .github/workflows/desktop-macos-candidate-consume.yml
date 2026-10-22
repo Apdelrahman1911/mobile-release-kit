@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Package a matching remover from the existing signed app; no app rebuild or installation
+        description: Package a matching remover or inspect the fixed delivered predecessor; no app rebuild or installation
         type: choice
-        options: [remove-delivery]
+        options: [remove-delivery, inspect-predecessor]
         default: remove-delivery
       architecture:
         description: Package only the selected architecture
@@ -25,6 +25,84 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  inspect-predecessor:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'inspect-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-inspection'
+    name: Read-only delivered ARM predecessor controls
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Require the isolated dispatch, never the Restore push route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-predecessor-inspection ]]
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: arm64
+      - name: Acquire only artifact 12157830080, with its original transport pin
+        timeout-minutes: 6
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-predecessor.XXXXXXXX")
+          export MRK_PREDECESSOR_WORK="$work"
+          printf 'MRK_PREDECESSOR_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          python3 -I -S -B desktop/tools/macos_predecessor_inspection.py acquire
+      - name: Read-only mount, expand as DATA, retain public controls, detach original
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          python3 -I -S -B desktop/tools/macos_predecessor_inspection.py inspect
+      - name: Retain only producer, signature, inventory and the DATA-only inspection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: delivered-predecessor-controls-arm64-12157830080-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MRK_PREDECESSOR_WORK }}/output/producer.json
+            ${{ env.MRK_PREDECESSOR_WORK }}/output/producer.sig
+            ${{ env.MRK_PREDECESSOR_WORK }}/output/install-inventory.json
+            ${{ env.MRK_PREDECESSOR_WORK }}/output/inspection.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Clean only this completed, detached original; retain every unknown
+        if: always() && env.MRK_PREDECESSOR_WORK != ''
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          python3 -I -S -B desktop/tools/macos_predecessor_inspection.py cleanup
+
   consume:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate-consume'
     name: candidate-consume-${{ matrix.target }}-${{ matrix.mode }}
