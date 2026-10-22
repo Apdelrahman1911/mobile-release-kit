@@ -467,7 +467,12 @@ def inspect(root, fd, original, context):
         device = stager.distribution_mount_data(out, err, code, mount)
         mounted = os.open("mount", READ | os.O_DIRECTORY, dir_fd=fd); mount_id = identity(os.fstat(mounted))[:5]
         info = os.stat(device, follow_symlinks=False)
-        need((stat.S_ISBLK(info.st_mode) or stat.S_ISCHR(info.st_mode)) and info.st_uid == 0, "mounted-device")
+        caller_uid = os.getuid()
+        print("MRK_PREDECESSOR_INSPECTION_DEVICE=" + encoded({"modeType": stat.S_IFMT(info.st_mode),
+              "uid": info.st_uid, "callerUid": caller_uid}).decode("ascii").rstrip("\n"), flush=True)
+        # Darwin media owner-uid may select this caller instead of the root default.
+        need((stat.S_ISBLK(info.st_mode) or stat.S_ISCHR(info.st_mode))
+             and info.st_uid in (0, caller_uid), "mounted-device")
         device_id = identity(info)[:5] + [info.st_rdev]
         def same_mount():
             same_root(root, fd, original)
