@@ -19,7 +19,7 @@ _PLUGINS = frozenset({"com.android.application", "com.android.library",
 _PROVIDER_PLUGINS = frozenset({"com.google.gms.google-services", "com.google.firebase.crashlytics"})
 _MUTATORS = frozenset({"afterEvaluate", "beforeEvaluate", "projectsEvaluated", "androidComponents",
     "applicationVariants", "setApplicationId", "setApplicationIdSuffix", "finalizeDsl",
-    "beforeVariants", "onVariants", "extensions"})
+    "beforeVariants", "onVariants", "extensions", "initWith"})
 
 
 class _Scopes:

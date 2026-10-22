@@ -181,6 +181,43 @@ class ProjectIdentityTests(unittest.TestCase):
                              ('defaultConfig.applicationId = "com.example.other"', "dynamic-identity")):
             self.refused(android(f'plugins {{ id("com.android.application") }}\nandroid {{ defaultConfig {{ applicationId = "{OLD}" }}\n{suffix}\n}}'), code)
 
+    def test_build_type_init_with_refuses_inherited_debug_suffix(self):
+        for path, build_types in (
+                ("app/build.gradle.kts",
+                 '  getByName("debug") { applicationIdSuffix = ".debug" }\n'
+                 '  getByName("release") {\n   initWith(getByName("debug"))\n  }\n'),
+                ("app/build.gradle",
+                 '  debug { applicationIdSuffix ".debug" }\n'
+                 '  release {\n   initWith debug\n  }\n')):
+            with self.subTest(path=path):
+                raw = ('plugins { id("com.android.application") }\n'
+                       'android {\n namespace = "com.example.source"\n'
+                       f' defaultConfig {{ applicationId = "{OLD}" }}\n'
+                       ' buildTypes {\n' + build_types + ' }\n}\n')
+                sources = android()
+                del sources["app/build.gradle.kts"]
+                sources[path] = raw.encode()
+                diagnostic = self.refused(sources, "dynamic-identity")
+                self.assertEqual((diagnostic.path, diagnostic.line, diagnostic.column), (path, 8, 4))
+
+    def test_init_with_comments_and_strings_keep_literal_identity_supported(self):
+        for path, declaration, debug in (
+                ("app/build.gradle.kts", "val", 'getByName("debug") { applicationIdSuffix = ".debug" }'),
+                ("app/build.gradle", "def", 'debug { applicationIdSuffix ".debug" }')):
+            with self.subTest(path=path):
+                raw = ('plugins { id("com.android.application") }\n'
+                       f'{declaration} note = "initWith(debug)"\n'
+                       '// initWith(debug)\n/* initWith debug */\n'
+                       'android {\n namespace = "com.example.source"\n'
+                       f' defaultConfig {{ applicationId = "{OLD}" }}\n'
+                       ' buildTypes { ' + debug + ' }\n}\n')
+                sources = android()
+                del sources["app/build.gradle.kts"]
+                sources[path] = raw.encode()
+                prepared = self.prepared(sources)
+                self.assertEqual(set(dict(prepared._payloads)), {identity.CONFIG_PATH, path})
+                self.assertEqual(dict(prepared._payloads)[path], raw.replace(OLD, NEW).encode())
+
     def test_root_and_settings_controls_or_buildsrc_cannot_be_silently_ignored(self):
         for path, source in (("build.gradle.kts", 'subprojects { android { } }'),
                              ("settings.gradle.kts", 'includeBuild("build-logic")'),
