@@ -1297,9 +1297,11 @@ jobs:
       # run39845106162 atdd1b9bb9. Definitions/helper remain available; only an
       # affected logic change requires their targeted rerun. Continue directly
       # to the uncompleted native work, not another library test compilation.
+      # Actual Tool/ARM build hit31min; restore the existing observer48 after
+      # removing the completed contracts. Overall350 and native clocks stay fixed.
       - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Build the current nonshipping observer' || 'Build the ordinary selected-target desktop image' }}
         id: app_build
-        timeout-minutes: ${{ matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin' && 31 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
         shell: bash
         env:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
