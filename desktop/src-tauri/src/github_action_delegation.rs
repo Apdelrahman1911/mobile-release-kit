@@ -14,7 +14,7 @@ pub(crate) struct Review {
     pub(crate) data: p::Review,
     pub(crate) activity: Option<super::activity::delegation::Capture>,
     pub(crate) dispatch: Option<dispatch::Capture>,
-    pub(crate) operation: Option<operation::Capture>,
+    pub(crate) operation: Option<Box<operation::Capture>>,
     pub(crate) enrollment: Option<crate::asset_session::CounterEnrollmentCapture>,
 }
 struct Hash {

@@ -232,11 +232,14 @@ pub(super) fn bounded_decode<T:serde::de::DeserializeOwned>(bytes:&[u8])->Result
 /// One PR input allocation shared by Allow and both Doc captures. The RAW Tauri
 /// Request is explicitly dropped before entering this phase. Root/String/Scope
 /// copies and the typed enum expansion are still charged, not "shared" away.
+/// Both Review boxes coexist before drop(current); charge their full payloads
+/// plus a Capture stack cell at the constructor/unbox move frontier.
 pub(super) fn allow_bytes()->Option<usize> {
     use std::mem::size_of;
-    use native::operation::{INPUT_BACKING,ROOT_BACKING,CONTEXT_BACKING};
+    use native::operation::{Capture,INPUT_BACKING,ROOT_BACKING,CONTEXT_BACKING};
     sum(&[5*ROOT_BACKING,INPUT_BACKING,2*CONTEXT_BACKING,r::NativeScope::unused_main_backing()?,
-        2*size_of::<native::Review>(),2*size_of::<NativeProject>(),size_of::<crate::asset_source::RegisteredRoot>(),
+        2*size_of::<native::Review>(),2usize.checked_mul(size_of::<Capture>())?,size_of::<Capture>(),
+        2*size_of::<NativeProject>(),size_of::<crate::asset_source::RegisteredRoot>(),
         size_of::<Allow>(),2*size_of::<crate::edit_owner::SavedEditStamp>(),2048])
 }
 pub(super) fn decode_bytes()->Option<usize> {

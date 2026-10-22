@@ -67,12 +67,12 @@ impl ConnectionState {
             _=>return Err(no()),
         };
         if !data.valid() || !data.retained_fits() { return Err(no()); }
-        Ok(action_delegation::Review { identity,stamp:edit.stamp()?,end,data,activity:None,dispatch:None,enrollment:None,operation:Some(capture) })
+        Ok(action_delegation::Review { identity,stamp:edit.stamp()?,end,data,activity:None,dispatch:None,enrollment:None,operation:Some(Box::new(capture)) })
     }
     pub(crate) fn actions_retry_operation_allow(&mut self, review:action_delegation::Review, scope:&Arc<rows::NativeScope>)->Result<(),BridgeError> {
         if self.native_work_pending() || self.actions_retry.agent_permission.is_some() || self.actions_retry.consent.is_some()
             || scope.review!=review.data || !Arc::ptr_eq(&scope.identity,&review.identity) || scope.current(false).is_err() { return Err(no()); }
-        let capture=review.operation.ok_or_else(no)?;
+        let capture=*review.operation.ok_or_else(no)?;
         let same=match &capture.input {
             Input::FailedJobsPrepare(_) | Input::FailedJobsPending(_) => Arc::ptr_eq(&self.actions_retry.agent_identity,&review.identity),
             Input::FailedJobsReconcile(_) => self.actions_retry.agent_records.as_ref().is_some_and(|r|Arc::ptr_eq(&r.identity,&review.identity)),

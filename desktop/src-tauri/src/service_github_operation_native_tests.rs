@@ -9,6 +9,17 @@ fn pr(ready:bool)->serde_json::Value {
 }
 #[test]
 fn original_main_phase_and_maximum_private_pr_decode_fit_without_changing_old_bounds() {
+    use std::mem::size_of;
+    use native::operation::{Capture,INPUT_BACKING,ROOT_BACKING,CONTEXT_BACKING};
+    // Two actual Review stack cells include their Box pointers, not payloads.
+    // Neither allocation nor the constructor/unbox stack frontier is free.
+    let other=sum(&[5*ROOT_BACKING,INPUT_BACKING,2*CONTEXT_BACKING,r::NativeScope::unused_main_backing().unwrap(),
+        2*size_of::<NativeProject>(),size_of::<crate::asset_source::RegisteredRoot>(),size_of::<Allow>(),
+        2*size_of::<crate::edit_owner::SavedEditStamp>(),2048]).unwrap();
+    let reviews=size_of::<native::Review>().checked_add(size_of::<Capture>()).unwrap().checked_mul(2).unwrap();
+    assert_eq!(allow_bytes(),other.checked_add(reviews).and_then(|n|n.checked_add(size_of::<Capture>())));
+    eprintln!("GitHub operation MAIN allow={:?} decode={:?} Review={} boxedCapture={} transientCapture={}",
+        allow_bytes(),decode_bytes(),size_of::<native::Review>(),2*size_of::<Capture>(),size_of::<Capture>());
     assert!(main_call_fits(),"decode={:?} allow={:?}",decode_bytes(),allow_bytes());
     assert_eq!(decode_bytes(),Some(47616+2*std::mem::size_of::<Allow>()));
     assert!(super::super::dispatch::main_call_fits());assert_eq!(p::MAIN_CALL_BACKING,48*1024);assert_eq!(p::DOCUMENT_BACKING,786432);assert_eq!(r::retained_document_backing(),Some(p::DOCUMENT_BACKING));

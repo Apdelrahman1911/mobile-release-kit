@@ -108,14 +108,29 @@ fn original_capture_preserves_account_only_repository_and_exact_retry_witness_re
 }
 #[test]
 fn all_three_origin_checks_precede_retirement_and_claim_once_on_same_private_input() {
+    // Entry's one temporary Review is gone before original native admission.
+    // The private Input Arc is already in the inline retained Permission; only
+    // the temporary root/context, Box payload and move frontier are additional.
+    let entry_bytes=[std::mem::size_of::<super::super::Review>(),2*std::mem::size_of::<Capture>(),
+        ROOT_BACKING,CONTEXT_BACKING,2048].into_iter().try_fold(0usize,|n,v|n.checked_add(v)).unwrap();
+    assert!(entry_bytes<=16*1024,"original per-owner transition/return reserve: {entry_bytes}");
     for family in 0..3 {
         let at=Instant::now();let mut s=state(at);let doc=Arc::new(());let editor=editor(&doc);let edit=editor.saved_registration_guard(&doc).unwrap();let root=root();
         let revision=match family {0=>s.repository_create_status(true,at,Reason::None).revision,1=>s.pull_request_status(true,at,Reason::None).revision,_=>s.actions_retry_status(true,at,Reason::None).revision};
         let mut v=choices()[family*3+1].clone();v["expectedRevision"]=json!(revision);v["expectedConnectionRevision"]=json!(s.status.revision);let i=input(v);
         let review=match family {0=>s.repository_create_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None),1=>s.pull_request_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None),_=>s.actions_retry_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None)}.unwrap();
+        let current=match family {0=>s.repository_create_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None),1=>s.pull_request_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None),_=>s.actions_retry_operation_review(i.clone(),2,&root,&"a".repeat(64),&edit,at,None)}.unwrap();
+        let first:&Box<Capture>=review.operation.as_ref().unwrap();let second:&Box<Capture>=current.operation.as_ref().unwrap();
+        assert!(!std::ptr::eq(first.as_ref(),second.as_ref()));assert!(first.same(second));
+        assert!(first.input.same_original(&i)&&second.input.same_original(&i));
+        let capture_heap=first.heap().unwrap();let before=s.retained_heap_bytes_if_quiescent().unwrap();
+        drop(current); // Same final Doc cut; no second Box survives installation.
         let sc=scope(&doc,review.data.clone(),review.identity.clone(),at);let foreign=scope(&doc,review.data.clone(),review.identity.clone(),at);
         match family {0=>s.repository_create_operation_allow(review,&sc),1=>s.pull_request_operation_allow(review,&sc),_=>s.actions_retry_operation_allow(review,&sc)}.unwrap();
+        assert_eq!(s.retained_heap_bytes_if_quiescent(),before.checked_add(capture_heap));
         let (_book,call,entry)=claim(sc,4);let (_other,other,wrong)=claim(foreign,5);
+        let installed=match family {0=>s.repository_create_operation_input(&entry),1=>s.pull_request_operation_input(&entry),_=>s.actions_retry_operation_input(&entry)}.unwrap();
+        assert!(installed.same_original(&i));
         macro_rules! check {($command:expr,$origin:ident,$enter:ident)=>{{let command=$command.unwrap();
             assert!(s.$origin(&command,None).is_err());assert!(s.$origin(&command,Some(&wrong)).is_err());assert!(s.$origin(&command,Some(&entry)).is_ok());
             s.$enter(&command,Some(&entry),2,&root,&"a".repeat(64),&edit,at).unwrap();
