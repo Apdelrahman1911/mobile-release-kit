@@ -585,8 +585,14 @@ selected_tests=(
   service_metadata_images_prepare_requests::tests::repeated_unknown_and_stop_samples_do_not_self_wake_the_original_waiter
   metadata_images_commands::tests::picker_and_import_renderer_arguments_cannot_supply_paths_or_bodies
   metadata_images_edit_protocol::tests::checkout_binds_original_selection_and_prepared_preserve_is_not_the_selected_image
+  # Ordinary GitHub SetupPrepare: five new; eight changed/affected already above.
+  github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_main_selection_has_purpose_absent_native_hash_and_command_only_none
+  github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_selection_keeps_original_scalar_and_real_capacity_bounds
+  github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_compact_result_is_read_only_and_hashes_the_full_native_five_file_review
+  github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_prepare_producer_needs_native_caller_and_history_before_a_separate_publish
+  github_connection_session::publication::delegation::counter::setup_prepare_tests::lost_prepare_native_caller_or_history_never_becomes_a_ready_producer
 )
-[[ "${#selected_tests[@]}" == 556 ]] || exit 1
+[[ "${#selected_tests[@]}" == 561 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -596,12 +602,12 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '556 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '561 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 556 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 561 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

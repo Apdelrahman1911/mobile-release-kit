@@ -4,22 +4,23 @@ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, connectionNumericId as numericId, sameConnectionData as same } from './githubConnectionProtocol.ts';
 import { githubPreflightRequestFits } from './githubPreflightProtocol.ts';
 import { githubReleaseRequestFits } from './githubReleaseProtocol.ts';
-import { publicationRequestFits } from './githubPublicationProtocol.ts';
+import { publicationRequestFits, publicationPrepared } from './githubPublicationProtocol.ts';
 import type { GitHubPreflightPrepare, GitHubPreflightDispatch, GitHubPreflightControl, GitHubPreflightPrepared, GitHubPreflightRecord } from './githubPreflightTypes.ts';
 import type { GitHubReleasePrepare, GitHubReleaseDispatch, GitHubReleaseControl, GitHubReleasePrepared, GitHubReleaseRecord } from './githubReleaseTypes.ts';
 import type { CounterPrepared } from './versionCounterSetup.ts';
-import type { PublicationPending } from './githubPublicationTypes.ts';
-export const GITHUB_DISPATCH_KINDS=['preflight-prepare','preflight-dispatch','preflight-pending','preflight-observe','release-prepare','release-dispatch','release-pending','release-observe','counter-prepare','counter-create','publication-pending','counter-reconcile'] as const;
+import type { PublicationPending, PublicationPrepared } from './githubPublicationTypes.ts';
+export const GITHUB_DISPATCH_KINDS=['preflight-prepare','preflight-dispatch','preflight-pending','preflight-observe','release-prepare','release-dispatch','release-pending','release-observe','setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'] as const;
 export type GithubDispatchKind=typeof GITHUB_DISPATCH_KINDS[number];
 interface Original {readonly sessionId:string;readonly expectedRevision:number}
 export interface WorkflowObserveSelection extends Original {readonly kind:'preflight-observe'|'release-observe';readonly marker:string;readonly observe:'track'|'reconcile';readonly runId:string|null}
 export type GithubDispatchSelection=
  ({readonly kind:'preflight-prepare'}&GitHubPreflightPrepare)|({readonly kind:'preflight-dispatch'}&GitHubPreflightDispatch)|({readonly kind:'preflight-pending'}&GitHubPreflightControl)|
  ({readonly kind:'release-prepare'}&GitHubReleasePrepare)|({readonly kind:'release-dispatch'}&GitHubReleaseDispatch)|({readonly kind:'release-pending'}&GitHubReleaseControl)|WorkflowObserveSelection|
+ ({readonly kind:'setup-prepare';readonly expectedConnectionRevision:number;readonly base:string}&Original)|
  ({readonly kind:'counter-prepare';readonly expectedConnectionRevision:number;readonly base:string;readonly purpose:'version-counter'}&Original)|
  ({readonly kind:'counter-create';readonly consentId:string;readonly confirm:true}&Original)|
  ({readonly kind:'publication-pending';readonly expectedConnectionRevision:number}&Original)|({readonly kind:'counter-reconcile';readonly marker:string}&Original);
-export type GithubDispatchReference=(Original&{readonly kind:'preflight-prepare'|'preflight-pending'|'release-prepare'|'release-pending'|'counter-prepare'|'publication-pending';readonly requestSha256:string})|
+export type GithubDispatchReference=(Original&{readonly kind:'preflight-prepare'|'preflight-pending'|'release-prepare'|'release-pending'|'setup-prepare'|'counter-prepare'|'publication-pending';readonly requestSha256:string})|
  (Original&{readonly kind:'preflight-dispatch'|'release-dispatch'|'counter-create';readonly consentId:string;readonly preparedSha256:string})|
  (WorkflowObserveSelection&{readonly recordSha256:string})|(Original&{readonly kind:'counter-reconcile';readonly marker:string;readonly recordSha256:string});
 export type GithubDispatchSnapshot={readonly type:'prepared';readonly marker:string;readonly preparedSha256:string;readonly sourceSha:string;readonly platform:'android'|'ios'|'both'|null;readonly stage:'candidate'|'external-testing'|'production-submit'|null}|
@@ -37,7 +38,8 @@ function releaseSelection(v:Record<string,unknown>):Record<string,unknown>{const
 /** Reconstruct only the fixed native Args declaration order used by its hash. */
 function orderedInput(v:GithubDispatchSelection):GithubDispatchSelection {
  const names=['kind','sessionId','expectedRevision'];
- if(v.kind.endsWith('-prepare'))names.push('expectedConnectionRevision',v.kind==='counter-prepare'?'base':'branch',...(v.kind==='counter-prepare'?['purpose']:['platform',...(v.kind==='release-prepare'?['selection']:[])]));
+ if(v.kind==='setup-prepare')names.push('expectedConnectionRevision','base');
+ else if(v.kind.endsWith('-prepare'))names.push('expectedConnectionRevision',v.kind==='counter-prepare'?'base':'branch',...(v.kind==='counter-prepare'?['purpose']:['platform',...(v.kind==='release-prepare'?['selection']:[])]));
  else if(v.kind==='publication-pending')names.push('expectedConnectionRevision');
  else if(v.kind==='counter-create'||v.kind.endsWith('-dispatch'))names.push('consentId','confirm',...(v.kind==='release-dispatch'?['confirmation']:[]));
  else if(v.kind.endsWith('-observe'))names.push('marker','observe','runId');
@@ -57,6 +59,7 @@ export function parseGithubDispatchSelection(raw:unknown):GithubDispatchSelectio
  case 'release-pending':valid=githubReleaseRequestFits('github_release_pending',a);break;
  case 'preflight-observe':case 'release-observe':valid=keys(a,['sessionId','expectedRevision','marker','observe','runId'])&&original(a)&&hex(a.marker,32)&&
    (a.observe==='track'&&numericId(a.runId)||a.observe==='reconcile'&&a.runId===null);break;
+ case 'setup-prepare':valid=keys(a,['sessionId','expectedRevision','expectedConnectionRevision','base'])&&publicationRequestFits('github_setup_publication_prepare',a);break;
  case 'counter-prepare':valid=a.purpose==='version-counter'&&publicationRequestFits('github_setup_publication_prepare',a);break;
  case 'counter-create':valid=publicationRequestFits('github_setup_publication_publish',a);break;
  case 'publication-pending':valid=publicationRequestFits('github_setup_publication_pending',a);break;
@@ -80,8 +83,12 @@ export function parseGithubDispatchReference(raw:unknown):GithubDispatchReferenc
 // Small bounded SHA-256 comparison, not a credential/signature/provenance issuer.
 // Fixed 64-word working schedule; input is already closed copied native DATA.
 const K=Uint32Array.from([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
-export function githubDispatchHash(v:unknown):string {
- const data=new TextEncoder().encode(JSON.stringify(v));if(data.length>16384)throw new Error('Comparison limit');
+export function githubDispatchHash(v:unknown):string { return boundedHash(v,16384); }
+// Only the validated ordinary five-file comparator below uses its existing
+//384KiB review bound. Every original dispatch hash keeps its16KiB bound.
+function boundedHash(v:unknown,limit:number):string {
+ const json=JSON.stringify(v);if(json.length>limit)throw new Error('Comparison limit');
+ const data=new TextEncoder().encode(json);if(data.length>limit)throw new Error('Comparison limit');
  const padded=new Uint8Array(Math.ceil((data.length+9)/64)*64);padded.set(data);padded[data.length]=128;
  new DataView(padded.buffer).setUint32(padded.length-4,data.length*8);const w=new Uint32Array(64),h=Uint32Array.from([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
  const rotate=(n:number,b:number)=>(n>>>b)|(n<<(32-b));
@@ -108,7 +115,7 @@ export const githubDispatchInitial=(k:GithubDispatchKind)=>k.endsWith('-dispatch
 export function parseGithubDispatchSnapshot(v:unknown,k:GithubDispatchKind):GithubDispatchSnapshot|null{
  try{const c=copyBoundedComparisonData(v,8192,540) as Record<string,unknown>|null;if(!c||typeof c!=='object'||!('type'in c))return null;let valid=false;
  switch(c.type){case 'prepared':valid=keys(c,['type','marker','preparedSha256','sourceSha','platform','stage'])&&hex(c.marker,32)&&hex(c.preparedSha256,64)&&hex(c.sourceSha,40)&&
- (k==='counter-prepare'?c.platform===null&&c.stage===null:k==='preflight-prepare'?['android','ios','both'].includes(String(c.platform))&&c.stage===null:
+ (k==='setup-prepare'||k==='counter-prepare'?c.platform===null&&c.stage===null:k==='preflight-prepare'?['android','ios','both'].includes(String(c.platform))&&c.stage===null:
  k==='release-prepare'&&['android','ios'].includes(String(c.platform))&&['candidate','external-testing','production-submit'].includes(String(c.stage)));break;
  case 'pending':valid=keys(c,['type','rows'])&&Array.isArray(c.rows)&&c.rows.length<=64&&['preflight-pending','release-pending','publication-pending'].includes(k)&&c.rows.every((r,i,rows)=>keys(r,['marker','runId','purpose'])&&hex(r.marker,32)&&!rows.slice(0,i).some(x=>x.marker===r.marker)&&(r.runId===null||numericId(r.runId))&&
  (k==='preflight-pending'?r.purpose==='preflight':k==='release-pending'?r.purpose==='release':r.runId===null&&['setup','counter'].includes(String(r.purpose))));break;
@@ -117,6 +124,17 @@ export function parseGithubDispatchSnapshot(v:unknown,k:GithubDispatchKind):Gith
  case 'counter':valid=keys(c,['type','marker','commitSha','ledgerId','genesisSha256'])&&['counter-create','counter-reconcile'].includes(k)&&hex(c.marker,32)&&hex(c.commitSha,40)&&typeof c.ledgerId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(c.ledgerId)&&hex(c.genesisSha256,64);break;}
  return valid?freeze(c) as unknown as GithubDispatchSnapshot:null;
  }catch{return null;}
+}
+/** Ordinary native Prepared declaration order. Large file strings are only
+ * borrowed into this fixed shallow projection; JSON/UTF8/padding scratch are
+ * bounded by384KiB each (UTF16 JSON <=768KiB), never retained in a service row.
+ * This comparison neither creates nor refreshes native publication authority. */
+export function githubSetupPreparedHash(p:PublicationPrepared):string {
+ if(!publicationPrepared(p))throw new Error('Invalid ordinary setup review');
+ const target=pick(p.target as unknown as Record<string,unknown>,['projectBinding','repository','accountId','repositoryId','base','toolingRepository','toolingSha','marker']);
+ const o=pick(p as unknown as Record<string,unknown>,['protocol','target','baseCommit','baseTree','desiredTree','files','head','confirmation']);
+ o.target=target;o.files=p.files.map(f=>pick(f as unknown as Record<string,unknown>,['path','before','after']));
+ return boundedHash(o,384*1024);
 }
 const targetKeys=['projectBinding','repository','accountId','repositoryId','branch','toolingRepository','toolingSha','platform','marker'];
 function workflowPrepared(p:GitHubPreflightPrepared|GitHubReleasePrepared):unknown{

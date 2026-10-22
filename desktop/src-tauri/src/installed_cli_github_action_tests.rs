@@ -88,28 +88,25 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let v = &value["githubActions"];
     assert_eq!(v["commands"], serde_json::json!(COMMANDS));
-    assert_eq!(
-        v["kinds"],
-        serde_json::json!(["repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview"])
-    );
-    assert_eq!(v["readOnlyKinds"], serde_json::json!(["setup-reconcile", "activity-overview"]));
-    assert_eq!(v["counterSetup"], false);
-    assert_eq!(v["normalPrCreation"], true);
-    assert_eq!(v["cliPendingLoad"], false);
-    for key in ["oneUse", "mutating", "requiresExactDesktopConsent"] {
-        assert_eq!(v[key], true);
+    assert_eq!(v["kinds"], serde_json::json!([
+        "repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview",
+        "preflight-prepare", "preflight-dispatch", "preflight-pending", "preflight-observe",
+        "release-prepare", "release-dispatch", "release-pending", "release-observe",
+        "setup-prepare", "counter-prepare", "counter-create", "publication-pending", "counter-reconcile"
+    ]));
+    assert_eq!(v["readOnlyKinds"], serde_json::json!([
+        "setup-reconcile", "activity-overview", "preflight-pending", "preflight-observe",
+        "release-pending", "release-observe", "publication-pending", "counter-reconcile"
+    ]));
+    assert_eq!(v["prepareKinds"], serde_json::json!(["preflight-prepare", "release-prepare", "counter-prepare", "setup-prepare"]));
+    for key in ["oneUse", "mutating", "requiresExactDesktopConsent", "requiresRunningDesktop", "requiresProjectReadGrant",
+        "normalPrCreation", "counterSetup", "firstCounterOnly", "counterPrepareMayCreateLocalState", "cliPendingLoad",
+        "cliPrepare", "workflowDispatch", "dispatchMayRunProjectCode"] {
+        assert_eq!(v[key], true, "{key}");
     }
-    for key in [
-        "cliPrepare",
-        "privateArguments",
-        "readGrantAuthorizesWrites",
-
-        "merge",
-        "workflowDispatch",
-        "automaticRetry",
-        "nativeAvailabilityChecked",
-    ] {
-        assert_eq!(v[key], false);
+    for key in ["defaultEnabled", "privateArguments", "readGrantAuthorizesWrites", "prepareAuthorizesDispatch",
+        "merge", "automaticRetry", "nativeAvailabilityChecked"] {
+        assert_eq!(v[key], false, "{key}");
     }
 }
 

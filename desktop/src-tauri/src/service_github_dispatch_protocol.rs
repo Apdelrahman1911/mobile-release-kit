@@ -294,7 +294,7 @@ impl Snapshot {
                 Kind::ReleasePrepare => {
                     matches!(platform, Some(Platform::Android | Platform::Ios)) && stage.is_some()
                 }
-                Kind::CounterPrepare => platform.is_none() && stage.is_none(),
+                Kind::SetupPrepare | Kind::CounterPrepare => platform.is_none() && stage.is_none(),
                 _ => false,
             },
             Self::Pending { rows } => {

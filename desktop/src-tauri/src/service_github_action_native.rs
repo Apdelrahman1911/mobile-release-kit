@@ -74,7 +74,7 @@ impl DocumentBinding {
         let available = match a.kind() {
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_status(supervisor.github_preflight_profile_available(),now,gate).available,
             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_status(supervisor.github_release_profile_available(),now,gate).available,
-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
+            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
 
             p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
             p::Kind::RepositoryCreate => {
@@ -123,7 +123,7 @@ impl DocumentBinding {
         let review = match a.kind() {
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
 
             p::Kind::ActivityOverview => s.github.github_activity_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root,
                 &github_setup_project_binding(&root)?, &edit, now),
@@ -273,7 +273,7 @@ impl DocumentBinding {
         let installed = match review.data.kind() {
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_allow(review,&scope),
             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_allow(review,&scope),
-            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_allow(review,&scope),
+            p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_allow(review,&scope),
 
             p::Kind::ActivityOverview => s.github.github_activity_agent_allow(review, &scope),
             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
@@ -318,7 +318,7 @@ impl DocumentBinding {
             match scope.review.kind() {
                 p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_revoke(scope),
                 p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_revoke(scope),
-                p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_revoke(scope),
+                p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_revoke(scope),
 
                 p::Kind::ActivityOverview => s.github.github_activity_agent_revoke(scope),
                 p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(scope),
@@ -378,7 +378,7 @@ impl DocumentBinding {
         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
         let v = &scope.review;
         match v.kind() {
-            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
             p::Kind::ActivityOverview => {
                 let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
                 self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {

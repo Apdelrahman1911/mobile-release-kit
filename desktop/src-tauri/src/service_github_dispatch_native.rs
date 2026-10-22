@@ -19,7 +19,8 @@ impl DocumentBinding {
                 K::ReleasePrepare | K::ReleaseDispatch | K::ReleasePending | K::ReleaseObserve => {
                     s.github.release_agent_input(entry)
                 }
-                K::CounterPrepare
+                K::SetupPrepare
+                | K::CounterPrepare
                 | K::CounterCreate
                 | K::PublicationPending
                 | K::CounterReconcile => s.github.counter_agent_input(entry),
@@ -39,13 +40,13 @@ impl DocumentBinding {
             K::ReleasePrepare | K::ReleaseDispatch | K::ReleasePending | K::ReleaseObserve => {
                 self.github_release_execute(input.release_command()?, Some(entry.clone()))?;
             }
-            K::CounterPrepare | K::CounterCreate | K::PublicationPending | K::CounterReconcile => {
+            K::SetupPrepare | K::CounterPrepare | K::CounterCreate | K::PublicationPending | K::CounterReconcile => {
                 if matches!(kind, K::CounterPrepare | K::CounterCreate) && app_data.is_none() {
                     return Err(BridgeError::invalid());
                 }
                 self.github_publication_execute(
                     input.counter_command()?,
-                    app_data,
+                    if kind == K::SetupPrepare { None } else { app_data },
                     Some(entry.clone()),
                 )?;
             }

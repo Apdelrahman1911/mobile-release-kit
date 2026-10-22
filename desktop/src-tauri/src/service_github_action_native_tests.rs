@@ -131,6 +131,19 @@ fn only_new_prepare_main_input_gets_four_kib_and_physical_capacity_is_bounded() 
     if let native::dispatch::Selection::ReleasePrepare(v)=&mut args.selection {v.branch.reserve_exact(4096);}
     assert!(!args.selection.retained_fits());
     assert!(decode_allow(br#"{"selection":{"kind":"release-prepare","kind":"preflight-prepare"}}"#).is_err());
+    let ordinary=serde_json::json!({"selection":{"kind":"setup-prepare","sessionId":"session-a",
+        "expectedRevision":1,"expectedConnectionRevision":2,"base":"release/setup"},
+        "consentVersion":"agent-setup-prepare-once-v1","expectedPermissionRevision":"0"});
+    let mut bytes=serde_json::to_vec(&ordinary).unwrap();bytes.resize(4096,b' ');
+    let parsed=decode_allow(&bytes).unwrap();
+    assert_eq!(parsed.selection.kind(),p::Kind::SetupPrepare);
+    assert!(decode::<Allow>(&bytes).is_err()); // only this existing MAIN route accepts4KiB
+    bytes.push(b' ');assert!(decode_allow(&bytes).is_err());
+    for purpose in [serde_json::json!(null),serde_json::json!("version-counter")] {
+        let mut wrong=ordinary.clone();wrong["selection"]["purpose"]=purpose;
+        assert!(decode_allow(&serde_json::to_vec(&wrong).unwrap()).is_err());
+    }
+
 }
 
 #[test]

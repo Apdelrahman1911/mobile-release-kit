@@ -47,7 +47,7 @@ async function permission(t,h,kind,original){const calls=[];let peer=null;let c;
 }
 
 test('twelve exact MAIN selections preserve separate confirmation and hashes; no CLI/private argument widening',async()=>{
- assert.deepEqual(selections.map(s=>s.kind),[...GITHUB_DISPATCH_KINDS]);const calls=[];const port=createAgentGithubActionPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
+ assert.deepEqual(selections.map(s=>s.kind),GITHUB_DISPATCH_KINDS.filter(k=>k!=='setup-prepare'));const calls=[];const port=createAgentGithubActionPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;});
  for(const s of selections){assert.ok(parseGithubDispatchSelection(s),s.kind);await port.allow(s,'0');const sent=calls.at(-1)[1];assert.equal(sent.consentVersion,`agent-${s.kind}-once-v1`);assert.equal(sent.expectedPermissionRevision,'0');
   for(const k of ['token','root','ledgerId','projectId','workflow','force','url'])assert.equal(parseGithubDispatchSelection({...s,[k]:'INERT'}),null);}
  const r=reference(selections[0]);assert.ok(parseGithubDispatchReference(r));assert.equal(parseGithubDispatchSelection(r),null);assert.equal(parseGithubDispatchReference(selections[0]),null);

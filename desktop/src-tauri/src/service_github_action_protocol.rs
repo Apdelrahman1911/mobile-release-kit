@@ -43,14 +43,15 @@ pub(crate) enum Kind {
     ReleaseDispatch,
     ReleasePending,
     ReleaseObserve,
+    SetupPrepare,
     CounterPrepare,
     CounterCreate,
     PublicationPending,
     CounterReconcile,
 }
 impl Kind {
-    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
-    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
     pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::ActivityOverview => "github-activity-",
@@ -62,6 +63,7 @@ impl Kind {
             Self::ReleaseDispatch => "github-release-",
             Self::ReleasePending => "github-release-",
             Self::ReleaseObserve => "github-release-",
+            Self::SetupPrepare => "github-publication-",
             Self::CounterPrepare => "github-publication-",
             Self::CounterCreate => "github-publication-",
             Self::PublicationPending => "github-publication-",
@@ -84,6 +86,7 @@ impl Kind {
             Self::ReleaseDispatch => "agent-release-dispatch-once-v1",
             Self::ReleasePending => "agent-release-pending-once-v1",
             Self::ReleaseObserve => "agent-release-observe-once-v1",
+            Self::SetupPrepare => "agent-setup-prepare-once-v1",
             Self::CounterPrepare => "agent-counter-prepare-once-v1",
             Self::CounterCreate => "agent-counter-create-once-v1",
             Self::PublicationPending => "agent-publication-pending-once-v1",
@@ -108,6 +111,7 @@ impl Kind {
             Self::ReleaseDispatch => crate::service_protocol::Action::GitHubReleaseDispatch,
             Self::ReleasePending => crate::service_protocol::Action::GitHubReleasePending,
             Self::ReleaseObserve => crate::service_protocol::Action::GitHubReleaseObserve,
+            Self::SetupPrepare => crate::service_protocol::Action::GitHubSetupPrepare,
             Self::CounterPrepare => crate::service_protocol::Action::GitHubCounterPrepare,
             Self::CounterCreate => crate::service_protocol::Action::GitHubCounterCreate,
             Self::PublicationPending => crate::service_protocol::Action::GitHubPublicationPending,
@@ -175,6 +179,7 @@ pub(crate) enum Review {
     ReleaseDispatch(PreparedReference),
     ReleasePending(dispatch::RequestReference),
     ReleaseObserve(dispatch::RecordReference),
+    SetupPrepare(dispatch::RequestReference),
     CounterPrepare(dispatch::RequestReference),
     CounterCreate(PreparedReference),
     PublicationPending(dispatch::RequestReference),
@@ -217,6 +222,7 @@ impl Review {
             Self::ReleaseDispatch(_) => Kind::ReleaseDispatch,
             Self::ReleasePending(_) => Kind::ReleasePending,
             Self::ReleaseObserve(_) => Kind::ReleaseObserve,
+            Self::SetupPrepare(_) => Kind::SetupPrepare,
             Self::CounterPrepare(_) => Kind::CounterPrepare,
             Self::CounterCreate(_) => Kind::CounterCreate,
             Self::PublicationPending(_) => Kind::PublicationPending,
@@ -240,7 +246,7 @@ impl Review {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::ActivityOverview(v) => v.valid(),
-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
+            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.valid(),
             Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
@@ -250,7 +256,7 @@ impl Review {
         // Same exact three string-allocation bounds as the original profile.
         match self {
             Self::ActivityOverview(v) => v.retained_fits(),
-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
+            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.retained_fits(),
             Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),

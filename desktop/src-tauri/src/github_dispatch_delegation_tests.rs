@@ -83,11 +83,13 @@ fn release_all_six_stage_platform_inputs_preserve_real_lineage_and_recovery_rule
 
 #[test]
 fn actual_capture_requires_selected_account_repo_generation_and_original_clock() {
+    for selection in [selections()[0].clone(), json!({"kind":"setup-prepare","sessionId":"github-session-1",
+        "expectedRevision":1,"expectedConnectionRevision":3,"base":"main"})] {
     let at=Instant::now();let mut s=state(at);let root=root();let binding="a".repeat(64);
-    let mut v=selections()[0].clone();v["expectedConnectionRevision"]=json!(s.status.revision);
+    let mut v=selection;v["expectedConnectionRevision"]=json!(s.status.revision);
     let i=input(v);let c=s.dispatch_capture(i.clone(),2,&root,&binding,at).unwrap();assert!(c.retained_fits());
     assert!(s.dispatch_capture(i.clone(),3,&root,&binding,at).is_err());
-    let mut stale=i.clone();if let Input::PreflightPrepare(v)=&mut stale{v.expected_connection_revision+=1;}
+    let mut stale=i.clone();match &mut stale {Input::PreflightPrepare(v)=>v.expected_connection_revision+=1, Input::SetupPrepare(v)=>v.expected_connection_revision+=1, _=>unreachable!()}
     assert!(s.dispatch_capture(stale,2,&root,&binding,at).is_err());
     assert!(s.dispatch_capture(i.clone(),2,&root,&binding,c.credential_end).is_err());
     s.status.account.value.as_mut().unwrap().id="12".into();assert!(s.dispatch_capture(i.clone(),2,&root,&binding,at).is_err());
@@ -98,6 +100,7 @@ fn actual_capture_requires_selected_account_repo_generation_and_original_clock()
     let mut changed=root.clone();changed.path.push("changed");
     assert!(s.dispatch_capture(i,2,&changed,&binding,at).unwrap()!=c); // full exact root equality retained
     let mut excessive=c;excessive.root.path.reserve(ROOT_BACKING+1);assert!(!excessive.retained_fits());
+    }
 }
 
 #[test]

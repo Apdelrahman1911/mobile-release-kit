@@ -111,7 +111,7 @@ fn compact_snapshot_rejects_real_capacity_growth_cross_kind_and_duplicate_rows()
     assert!(!s.valid_for(Kind::ReleasePending)); // len1 cannot hide backing for1025
     let v=json!({"type":"prepared","marker":"a".repeat(32),"preparedSha256":"b".repeat(64),
         "sourceSha":"c".repeat(40),"platform":null,"stage":null});
-    let s:Snapshot=serde_json::from_value(v.clone()).unwrap();assert!(s.valid_for(Kind::CounterPrepare));
+    let s:Snapshot=serde_json::from_value(v.clone()).unwrap();assert!(s.valid_for(Kind::CounterPrepare));assert!(s.valid_for(Kind::SetupPrepare));
     assert!(!s.valid_for(Kind::PreflightPrepare));
     let mut b=v;b.as_object_mut().unwrap().remove("stage");assert!(serde_json::from_value::<Snapshot>(b).is_err());
     assert!(serde_json::from_str::<Snapshot>(r#"{"type":"pending","rows":[],"url":"inert"}"#).is_err());

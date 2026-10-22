@@ -1,4 +1,5 @@
-//! Counter-only sibling of the existing publication delegation. The SAME Facet,
+//! Ordinary Prepare and Counter sibling of the existing publication delegation.
+//! Ordinary Prepare never enters the Counter Facet. The SAME Facet,
 //! PendingRead, source/Host proof, Supervisor and journal remain authoritative.
 use super::*;
 use action_delegation::dispatch as d;
@@ -48,7 +49,7 @@ impl ConnectionState {
         let input = &capture.input;
         let mut end = (now + Duration::from_millis(wire::INTENT_MS)).min(capture.credential_end);
         let (identity, data) = match input {
-            d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
+            d::Input::SetupPrepare(_) | d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
                 if st.consent.is_some() {
                     return Err(no());
                 }
@@ -59,7 +60,9 @@ impl ConnectionState {
                 };
                 (
                     st.agent_identity.clone(),
-                    if matches!(input, d::Input::CounterPrepare(_)) {
+                    if matches!(input, d::Input::SetupPrepare(_)) {
+                        wire::Review::SetupPrepare(v)
+                    } else if matches!(input, d::Input::CounterPrepare(_)) {
                         wire::Review::CounterPrepare(v)
                     } else {
                         wire::Review::PublicationPending(v)
@@ -146,7 +149,7 @@ impl ConnectionState {
         }
         let capture = review.dispatch.ok_or_else(no)?;
         match &capture.input {
-            d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
+            d::Input::SetupPrepare(_) | d::Input::CounterPrepare(_) | d::Input::PublicationPending(_) => {
                 if !Arc::ptr_eq(&self.publication.agent_identity, &review.identity) {
                     return Err(no());
                 }
@@ -302,6 +305,17 @@ impl ConnectionState {
         let no = || refused(p::Reason::ResponseInvalid);
         let v = &self.publication.view;
         Ok(Some(match review.kind() {
+            wire::Kind::SetupPrepare => {
+                let c = v.consent.as_ref().ok_or_else(no)?;
+                let review = c.prepared.setup().ok_or_else(no)?;
+                Snapshot::Prepared {
+                    marker: Hex::parse(&c.id).ok_or_else(no)?,
+                    prepared_sha256: Hex::parse(&d::hash(&c.prepared)?).ok_or_else(no)?,
+                    source_sha: Hex::parse(&review.base_commit).ok_or_else(no)?,
+                    platform: None,
+                    stage: None,
+                }
+            }
             wire::Kind::CounterPrepare => {
                 let c = v.consent.as_ref().ok_or_else(no)?;
                 let review = c.prepared.counter().ok_or_else(no)?;
@@ -352,6 +366,7 @@ impl ConnectionState {
 impl d::Input {
     pub(crate) fn counter_command(&self) -> Result<p::Command, BridgeError> {
         Ok(match self {
+            Self::SetupPrepare(v) => p::Command::Prepare(v.command_args()),
             Self::CounterPrepare(v) => p::Command::Prepare(v.clone()),
             Self::CounterCreate(v) => p::Command::Publish(v.clone()),
             Self::PublicationPending(v) => p::Command::Pending(v.clone()),
@@ -361,6 +376,7 @@ impl d::Input {
     }
     fn matches_counter(&self, c: &p::Command) -> bool {
         match (self, c) {
+            (Self::SetupPrepare(a), p::Command::Prepare(b)) => a.command_args() == *b,
             (Self::CounterPrepare(a), p::Command::Prepare(b)) => a == b,
             (Self::CounterCreate(a), p::Command::Publish(b)) => a == b,
             (Self::PublicationPending(a), p::Command::Pending(b)) => a == b,
@@ -369,3 +385,7 @@ impl d::Input {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "github_setup_prepare_delegation_tests.rs"]
+mod setup_prepare_tests;

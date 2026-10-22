@@ -63,6 +63,8 @@ function prepared(v: unknown): v is PublicationPrepared {
     v.head === `mrk/setup-${v.target.marker}` && v.confirmation === PUBLICATION_CONFIRMATION && Array.isArray(v.files) && v.files.length === 5 &&
     v.files.every((f, i) => keys(f, ['path', 'before', 'after']) && f.path === PUBLICATION_PATHS[i] && text(f.after, i ? 16384 : 65536) && (f.before === null || text(f.before, i ? 16384 : 65536))) && bounded(v, 384 * 1024, 256, 8);
 }
+// Shared bounded ordinary-review validator, not a native consent constructor.
+export { prepared as publicationPrepared };
 function fingerprint(v: unknown, limit: number): boolean { return keys(v, ['bytes', 'sha256']) && typeof v.bytes === 'number' && Number.isInteger(v.bytes) && v.bytes > 0 && v.bytes <= limit && hex(v.sha256, 64); }
 function pending(v: unknown): v is PublicationPending {
   if (!keys(v, ['summary', 'claimed', 'confirmed'])) return false;

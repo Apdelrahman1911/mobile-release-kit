@@ -50,6 +50,37 @@ impl ObserveSelection {
                 .is_none_or(|id| crate::github_connection_protocol::numeric_id(id))
     }
 }
+/// MAIN comparison input is purpose-absent. Do not serialize PrepareArgs
+/// here: its unchanged optional purpose serializes null. Only the final command
+/// conversion below constructs that existing native type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OrdinarySetupPrepare {
+    pub(crate) session_id: String,
+    pub(crate) expected_revision: u32,
+    pub(crate) expected_connection_revision: u32,
+    pub(crate) base: String,
+}
+impl OrdinarySetupPrepare {
+    pub(crate) fn command_args(&self) -> publication::PrepareArgs {
+        publication::PrepareArgs {
+            session_id: self.session_id.clone(),
+            expected_revision: self.expected_revision,
+            expected_connection_revision: self.expected_connection_revision,
+            base: self.base.clone(),
+            purpose: None,
+        }
+    }
+    fn valid(&self) -> bool {
+        // Same original scalar/branch policy, no provider or new source claim.
+        crate::protocol::valid_id(&self.session_id)
+            && self.expected_revision > 0
+            && self.expected_revision <= publication::LAST_REVISION
+            && self.expected_connection_revision > 0
+            && self.expected_connection_revision <= publication::LAST_REVISION
+            && crate::github_preflight_protocol::branch(&self.base)
+    }
+}
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Selection {
@@ -68,6 +99,7 @@ pub(crate) enum Selection {
     ReleaseDispatch(rl::DispatchArgs),
     ReleasePending(rl::ControlArgs),
     ReleaseObserve(ObserveSelection),
+    SetupPrepare(OrdinarySetupPrepare),
     CounterPrepare(publication::PrepareArgs),
     CounterCreate(publication::PublishArgs),
     PublicationPending(publication::PendingArgs),
@@ -106,6 +138,7 @@ impl Selection {
             Self::ReleaseDispatch(v) => Input::ReleaseDispatch(v.clone()),
             Self::ReleasePending(v) => Input::ReleasePending(v.clone()),
             Self::ReleaseObserve(v) => Input::ReleaseObserve(v.clone()),
+            Self::SetupPrepare(v) => Input::SetupPrepare(v.clone()),
             Self::CounterPrepare(v) => Input::CounterPrepare(v.clone()),
             Self::CounterCreate(v) => Input::CounterCreate(v.clone()),
             Self::PublicationPending(v) => Input::PublicationPending(v.clone()),
@@ -130,6 +163,7 @@ impl Selection {
             Self::ReleaseDispatch(_) => p::Kind::ReleaseDispatch,
             Self::ReleasePending(_) => p::Kind::ReleasePending,
             Self::ReleaseObserve(_) => p::Kind::ReleaseObserve,
+            Self::SetupPrepare(_) => p::Kind::SetupPrepare,
             Self::CounterPrepare(_) => p::Kind::CounterPrepare,
             Self::CounterCreate(_) => p::Kind::CounterCreate,
             Self::PublicationPending(_) => p::Kind::PublicationPending,
@@ -144,6 +178,7 @@ impl Selection {
         let bytes = match self {
             Self::PreflightPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.branch.capacity()]),
             Self::ReleasePrepare(v) => release_input_heap(v),
+            Self::SetupPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),
             Self::CounterPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),
             Self::PreflightDispatch(v) => sum_capacities(&[v.session_id.capacity(),v.consent_id.capacity()]),
             Self::ReleaseDispatch(v) => sum_capacities(&[v.session_id.capacity(),v.consent_id.capacity(),v.confirmation.capacity()]),
@@ -160,7 +195,7 @@ impl Selection {
     pub(crate) fn limit(&self) -> usize {
         if matches!(
             self,
-            Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::CounterPrepare(_)
+            Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::SetupPrepare(_) | Self::CounterPrepare(_)
         ) {
             4096
         } else {
@@ -179,6 +214,7 @@ pub(crate) enum Input {
     ReleaseDispatch(rl::DispatchArgs),
     ReleasePending(rl::ControlArgs),
     ReleaseObserve(ObserveSelection),
+    SetupPrepare(OrdinarySetupPrepare),
     CounterPrepare(publication::PrepareArgs),
     CounterCreate(publication::PublishArgs),
     PublicationPending(publication::PendingArgs),
@@ -195,6 +231,7 @@ impl Input {
             Self::ReleaseDispatch(_) => p::Kind::ReleaseDispatch,
             Self::ReleasePending(_) => p::Kind::ReleasePending,
             Self::ReleaseObserve(_) => p::Kind::ReleaseObserve,
+            Self::SetupPrepare(_) => p::Kind::SetupPrepare,
             Self::CounterPrepare(_) => p::Kind::CounterPrepare,
             Self::CounterCreate(_) => p::Kind::CounterCreate,
             Self::PublicationPending(_) => p::Kind::PublicationPending,
@@ -211,6 +248,7 @@ impl Input {
             Self::ReleaseDispatch(v) => &v.session_id,
             Self::ReleasePending(v) => &v.session_id,
             Self::ReleaseObserve(v) => &v.session_id,
+            Self::SetupPrepare(v) => &v.session_id,
             Self::CounterPrepare(v) => &v.session_id,
             Self::CounterCreate(v) => &v.session_id,
             Self::PublicationPending(v) => &v.session_id,
@@ -227,6 +265,7 @@ impl Input {
             Self::ReleaseDispatch(v) => v.expected_revision,
             Self::ReleasePending(v) => v.expected_revision,
             Self::ReleaseObserve(v) => v.expected_revision,
+            Self::SetupPrepare(v) => v.expected_revision,
             Self::CounterPrepare(v) => v.expected_revision,
             Self::CounterCreate(v) => v.expected_revision,
             Self::PublicationPending(v) => v.expected_revision,
@@ -237,6 +276,7 @@ impl Input {
         match self {
             Self::PreflightPrepare(v) => Some(v.expected_connection_revision),
             Self::ReleasePrepare(v) => Some(v.expected_connection_revision),
+            Self::SetupPrepare(v) => Some(v.expected_connection_revision),
             Self::CounterPrepare(v) => Some(v.expected_connection_revision),
             Self::PublicationPending(v) => Some(v.expected_connection_revision),
             _ => None,
@@ -252,6 +292,7 @@ impl Input {
             Self::ReleaseDispatch(v) => v.valid(),
             Self::ReleasePending(v) => v.valid(),
             Self::ReleaseObserve(v) => v.valid(),
+            Self::SetupPrepare(v) => v.valid(),
             Self::CounterPrepare(v) => {
                 v.valid() && v.purpose == Some(publication::counter::Purpose::Counter)
             }
@@ -273,6 +314,7 @@ impl Input {
             Self::ReleaseDispatch(v) => v.session_id.capacity(),
             Self::ReleasePending(v) => v.session_id.capacity(),
             Self::ReleaseObserve(v) => v.session_id.capacity(),
+            Self::SetupPrepare(v) => v.session_id.capacity(),
             Self::CounterPrepare(v) => v.session_id.capacity(),
             Self::CounterCreate(v) => v.session_id.capacity(),
             Self::PublicationPending(v) => v.session_id.capacity(),
@@ -306,6 +348,7 @@ impl Input {
                     .checked_add(v.marker.capacity())?
                     .checked_add(v.run_id.as_ref().map_or(0, String::capacity))?
             }
+            Self::SetupPrepare(v) => n = n.checked_add(v.base.capacity())?,
             Self::CounterPrepare(v) => n = n.checked_add(v.base.capacity())?,
             Self::CounterCreate(v) => n = n.checked_add(v.consent_id.capacity())?,
             Self::CounterReconcile(v) => n = n.checked_add(v.marker.capacity())?,

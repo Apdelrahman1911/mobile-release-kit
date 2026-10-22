@@ -221,6 +221,8 @@ mod tests {
             version: p::VERSION,
             request_id: id('e'),
             service_instance: id('1'),
+            client_id: id('2'),
+            session_id: id('3'),
             response: p::ResponseBody::MetadataImagesPreparation(status),
         };
         assert!(output(&response, &query(), false).is_ok());

@@ -1,11 +1,11 @@
-import { parseGithubDispatchSelection, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
+import { parseGithubDispatchSelection, githubSetupPreparedHash, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
 import type { GithubDispatchKind, GithubDispatchSelection } from './githubDispatchDelegation.ts';
 import { COUNTER_BRANCH, COUNTER_PURPOSE, counterPrepared, counterSummary, counterSourceMatches, publicationPurpose, sameCounterSaved, type CounterSavedWitness, type PublicationPurpose, type CounterSummary } from './versionCounterSetup.ts';
 // Coordinates the original native publication only: no token, HTTP, polling,
 // write retry, local Git mutation or renderer-created consent.
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
-import { PUBLICATION_HELP, publicationError, parsePublicationStatus } from './githubPublicationProtocol.ts';
+import { PUBLICATION_HELP, publicationPrepared, publicationError, parsePublicationStatus } from './githubPublicationProtocol.ts';
 import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
 import type { GithubActionDelegate, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
 import type { GithubPublicationAction, GithubPublicationSelection } from './githubPublicationDelegation.ts';
@@ -283,7 +283,7 @@ export class GitHubPublicationController {
     return null;
   }
   agentSelected(selection: GithubActionSelection): boolean {
-    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.dispatchAgent?sameGithubActionSelection(this.dispatchAgent.selection,selection)&&this.dispatchCurrent(this.dispatchAgent):sameGithubActionSelection(this.dispatchSelection(selection.kind as GithubDispatchKind),selection);
+    if(['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.dispatchAgent?sameGithubActionSelection(this.dispatchAgent.selection,selection)&&this.dispatchCurrent(this.dispatchAgent):sameGithubActionSelection(this.dispatchSelection(selection.kind as GithubDispatchKind),selection);
     const d = this.delegated;
     return d ? sameGithubActionSelection(d.selection, selection) && this.delegatedCurrent(d) :
       (selection.kind === 'setup-publish' || selection.kind === 'setup-reconcile') && sameGithubActionSelection(this.agentSelection(selection.kind), selection);
@@ -296,7 +296,7 @@ export class GitHubPublicationController {
       this.pendingRead === d.read && !!d.row && this.selectedPendingForAgent() === d.row;
   }
   delegatePrepared(selection: GithubActionSelection): GithubActionDelegate | null {
-    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.delegateDispatch(selection);
+    if(['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.delegateDispatch(selection);
     if (selection.kind !== 'setup-publish' && selection.kind !== 'setup-reconcile' ||
         !sameGithubActionSelection(this.agentSelection(selection.kind), selection)) return null;
     const o = this.observer!, r = selection.kind === 'setup-publish' ? this.review : null;
@@ -355,9 +355,10 @@ export class GitHubPublicationController {
   }
   dispatchSelection(kind:GithubDispatchKind):GithubDispatchSelection|null {
     const o=this.observer,s=o?.accepted,c=context(this.connection());
-    if(!['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(kind)||this.disposed||this.delegated||this.dispatchAgent||this.blocked||this.state.uncertain||this.pending||this.discard||this.retired||this.cancelObserver||
+    if(!['setup-prepare','counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(kind)||this.disposed||this.delegated||this.dispatchAgent||this.blocked||this.state.uncertain||this.pending||this.discard||this.retired||this.cancelObserver||
       !o?.active||o.api!==this.api||o.reading||!c||!s?.available||s.sessionId!==c.sessionId||s.reason!=='none'||s.operation&&s.operation.phase!=='settled')return null;
     const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
+    if(kind==='setup-prepare')return !s.consent&&this.state.purpose==='setup-pr'?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,base:this.state.base}):null;
     if(kind==='counter-prepare')return !s.consent&&this.state.purpose===COUNTER_PURPOSE&&this.counterSource()&&this.state.base!==COUNTER_BRANCH?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,base:this.state.base,purpose:COUNTER_PURPOSE}):null;
     if(kind==='publication-pending')return !s.consent?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision}):null;
     if(kind==='counter-create'){const consent=this.currentConsent();return consent&&counterPrepared(consent.prepared)&&this.state.confirmed?parseGithubDispatchSelection({...base,consentId:consent.id,confirm:true}):null;}
@@ -366,6 +367,7 @@ export class GitHubPublicationController {
   private dispatchCurrent(d:DispatchAgent):boolean {
     if(this.dispatchAgent!==d||d.unknown||this.disposed||this.blocked||this.pending||this.delegated||this.discard||this.retired||this.cancelObserver||d.observer!==this.observer||!d.observer.active||d.observer.api!==this.api||d.observer.reading||
       d.epoch!==this.epoch||!same(d.context,context(this.connection()))||d.observer.accepted?.revision!==d.selection.expectedRevision||d.saved&&!sameCounterSaved(d.saved,this.counterSource()))return false;
+    if(d.selection.kind==='setup-prepare')return this.state.purpose==='setup-pr'&&this.state.base===d.selection.base&&d.saved===null&&!this.currentConsent();
     if(d.selection.kind==='counter-prepare')return this.state.purpose===COUNTER_PURPOSE&&this.state.base===d.selection.base&&!!d.saved&&!this.currentConsent();
     if(d.selection.kind==='counter-create')return !!d.review&&this.review===d.review&&this.currentConsent()===d.review.consent;
     if(d.selection.kind==='counter-reconcile')return !!d.row&&this.pendingRead===d.read&&this.currentCounterRecord(d.row.summary.target.marker)===d.row;
@@ -390,11 +392,13 @@ export class GitHubPublicationController {
       !same(s,d.observer.accepted)||s.sessionId!==d.selection.sessionId||s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
     let adopt=false,loaded=false;
     if(f?.settlement==='settled'&&!f.neverAdmitted){
-      const kind=d.selection.kind==='counter-prepare'?'prepare':d.selection.kind==='counter-create'?'publish':d.selection.kind==='publication-pending'?'pending':'reconcile',op=s.operation;
-      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect||op.purpose!==(kind==='pending'?undefined:COUNTER_PURPOSE))return;
+      const kind=d.selection.kind==='setup-prepare'||d.selection.kind==='counter-prepare'?'prepare':d.selection.kind==='counter-create'?'publish':d.selection.kind==='publication-pending'?'pending':'reconcile',op=s.operation;
+      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect||op.purpose!==(kind==='pending'||d.selection.kind==='setup-prepare'?undefined:COUNTER_PURPOSE))return;
       if(f.state==='complete'){
         if(op.reason!=='none')return;const result=f.result;
-        if(d.selection.kind==='counter-prepare'){const c=s.consent;if(!c||!counterPrepared(c.prepared)||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||!d.saved||!counterSourceMatches(c.prepared,d.saved)||
+        if(d.selection.kind==='setup-prepare'){const c=s.consent;if(!c||!publicationPrepared(c.prepared)||d.saved!==null||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||
+          result.marker!==c.id||result.preparedSha256!==githubSetupPreparedHash(c.prepared)||result.sourceSha!==c.prepared.baseCommit)return;adopt=true;}
+        else if(d.selection.kind==='counter-prepare'){const c=s.consent;if(!c||!counterPrepared(c.prepared)||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||!d.saved||!counterSourceMatches(c.prepared,d.saved)||
           result.marker!==c.id||result.preparedSha256!==githubDispatchPreparedHash(c.prepared)||result.sourceSha!==c.prepared.baseCommit)return;adopt=true;}
         else if(d.selection.kind==='publication-pending'){if(!result||result.type!=='pending'||!same(result.rows,s.pending.map(r=>({marker:r.summary.target.marker,runId:null,purpose:counterSummary(r.summary)?'counter':'setup'}))))return;loaded=true;}
         else {const counter=s.counter,original=d.selection.kind==='counter-create'?d.review?.consent.prepared:d.row?.summary;
@@ -407,7 +411,8 @@ export class GitHubPublicationController {
     else return;
     d.released=true;this.dispatchAgent=null;this.review=null;this.pendingRead=null;this.agentPending=null;this.counterAgentRow=null;
     const current=d.epoch===this.epoch&&d.observer.api===this.api&&same(d.context,context(this.connection()));
-    if(current&&adopt&&s.consent&&d.saved&&sameCounterSaved(d.saved,this.counterSource()))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:d.saved,consent:s.consent};
+    if(current&&adopt&&s.consent&&d.selection.kind==='setup-prepare'&&d.saved===null&&this.state.purpose==='setup-pr'&&this.state.base===d.selection.base&&publicationPrepared(s.consent.prepared))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:null,consent:s.consent};
+    else if(current&&adopt&&s.consent&&d.selection.kind==='counter-prepare'&&d.saved&&sameCounterSaved(d.saved,this.counterSource()))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:d.saved,consent:s.consent};
     if(current&&loaded&&s.operation)this.pendingRead={observer:d.observer,context:d.context,epoch:d.epoch,operationId:s.operation.id,rows:s.pending};
     this.update({confirmed:false});this.retireConsent();
   }
