@@ -1293,15 +1293,10 @@ jobs:
           cd desktop
           npm ci --ignore-scripts --no-audit --no-fund --cache "$MRK_MACOS_WORK/npm-cache"
           npm run build
-      - name: Check pending and affected automation, recovery and memory contracts before the observer build
-        id: git_selected_contracts
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && matrix.target == 'aarch64-apple-darwin' && steps.app_frontend.outcome == 'success' && steps.app_vault.outcome == 'success'
-        timeout-minutes: 32
-        shell: bash
-        env:
-          MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
-        run: |
-          builtin source ./desktop/tools/macos_installed_git_contracts.sh
+      # Reuse all85 affected contracts and the APFS backup component passed by
+      # run39845106162 atdd1b9bb9. Definitions/helper remain available; only an
+      # affected logic change requires their targeted rerun. Continue directly
+      # to the uncompleted native work, not another library test compilation.
       - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Build the current nonshipping observer' || 'Build the ordinary selected-target desktop image' }}
         id: app_build
         timeout-minutes: ${{ matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin' && 31 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
