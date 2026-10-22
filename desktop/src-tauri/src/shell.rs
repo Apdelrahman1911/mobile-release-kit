@@ -1283,6 +1283,12 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
 async fn project_initialization_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_initialization::raw_request(bytes,crate::service_initialization_requests::Kind::Open)?;
+        drop(request); // release original RAW bytes/tree before Session/reader install
+        return state.document.agent_initialization_command(window,q,input);
+    }
     let args = edit_commands::initialization_open(request_body(&request)?)?;
     state.bridge.open_project_initialization(&state.document, window, args)
 }
@@ -1290,6 +1296,12 @@ async fn project_initialization_open(webview: Webview, request: tauri::ipc::Requ
 async fn project_initialization_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_initialization::raw_request(bytes,crate::service_initialization_requests::Kind::Prepare)?;
+        drop(request); // release original RAW bytes/tree before Session/reader install
+        return state.document.agent_initialization_command(window,q,input);
+    }
     let args = edit_commands::initialization_prepare(request_body(&request)?)?;
     state.bridge.prepare_project_initialization(&state.document, window, args)
 }
@@ -1297,6 +1309,12 @@ async fn project_initialization_prepare(webview: Webview, request: tauri::ipc::R
 async fn project_initialization_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_initialization::raw_request(bytes,crate::service_initialization_requests::Kind::Apply)?;
+        drop(request); // release original RAW bytes/tree before Session/reader install
+        return state.document.agent_initialization_command(window,q,input);
+    }
     let args = edit_commands::initialization_apply(request_body(&request)?)?;
     state.bridge.apply_project_initialization(&state.document, window, args)
 }
@@ -1735,6 +1753,34 @@ async fn revoke_agent_version_edit(webview:Webview,request:tauri::ipc::Request<'
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))]
     {let _=(window,request,state);Err(BridgeError::unavailable("Version delegation is unavailable on this platform."))}
+}
+
+#[tauri::command]
+async fn agent_initialization_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Initialization delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_initialization_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_initialization_status(q.as_ref())?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Initialization delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_initialization(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Initialization delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_initialization_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_initialization(window,q)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Initialization delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_initialization(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Initialization delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_initialization_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_initialization(window,q)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("Initialization delegation is unavailable on this platform."))}
 }
 
 #[tauri::command]
@@ -3920,7 +3966,7 @@ impl Drop for VersionEditAgentRelayGuard{fn drop(&mut self){self.0.agent_version
 #[cfg(any(target_os="linux",target_os="macos"))]
 struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
 #[cfg(any(target_os="linux",target_os="macos"))]
-impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
+impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_initialization_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
 
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
@@ -4034,6 +4080,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut configuration_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut initialization_agent_revision=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_text_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_images_agent_snapshot=None;
@@ -4110,6 +4158,13 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 let key=(status.origin.clone(),status.revision);
                 if version_prepare_key.as_ref()!=Some(&key){
                     let _=app.emit_to(MAIN_WINDOW,"mrk:agent-version-edit",serde_json::json!({"kind":"preparation","request":status}));version_prepare_key=Some(key);
+                }
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(Some(status))=document.agent_initialization_relay(){
+                let key=(status.service_instance.clone(),status.request.as_ref().map(|s|(s.origin.clone(),s.revision)));
+                if initialization_agent_revision.as_ref()!=Some(&key){
+                    let _=app.emit_to(MAIN_WINDOW,crate::service_initialization_protocol::EVENT,&status);initialization_agent_revision=Some(key);
                 }
             }
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -6110,6 +6165,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+            agent_initialization_status, allow_agent_initialization, revoke_agent_initialization,
             agent_metadata_images_prepare_status, agent_metadata_images_inspect, agent_metadata_images_prepare_cancel,
             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,

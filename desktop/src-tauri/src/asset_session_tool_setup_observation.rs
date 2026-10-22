@@ -161,7 +161,7 @@ impl DocumentBinding {
         };
         if !control.permits(&self.inner.session_identity)
             || !live(&state)
-            || crate::shell::installed_observation::tool_setup::role(index) != Some(role)
+            || crate::shell::installed_observation::tool_setup::role(control.case(),index) != Some(role)
             || root.path != control.project()
             || binding.root != root
             || binding.generation != generation
@@ -188,6 +188,9 @@ impl DocumentBinding {
                     && r.selected.as_deref() == control.target(index)
             })
         })
+    }
+    pub(crate) fn installed_tool_setup_all_locations(&self, operation: &str, generation: &str) -> Option<[std::path::PathBuf;3]> {
+        self.inner.bridge.tool_acquisition.installed_tool_setup_all_locations(&self.inner.session_identity,operation,generation)
     }
     pub(crate) fn installed_tool_setup_sdk_location(
         &self,

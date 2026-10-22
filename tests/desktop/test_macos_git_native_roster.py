@@ -50,8 +50,12 @@ class GitNativeRosterTests(F.Inert):
                 with self.assertRaises(S.Refused): selector(role, scope)
         env = {**I.environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE}
         self.assertEqual(M.current_context(env, M.TARGET)[0], I.BINDING.source)
-        for scope in (M.FETCH_SCOPE, M.PUSH_SCOPE):
-            self.assertEqual(M.observation_scope(env, scope), scope)
+        env27 = {**env, "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+        for current in (env, env27):
+            self.assertEqual(M.current_context(current, M.TARGET)[0], I.BINDING.source)
+            for scope, count in ((M.FETCH_SCOPE, 4), (M.PUSH_SCOPE, 3), (M.PUSH_CREATE_SCOPE, 5), (M.UPSTREAM_SCOPE, 1)):
+                self.assertEqual(M.observation_scope(current, scope), scope)
+                self.assertEqual(len(I.A.selected_cases(scope)), count)
         for scope in (M.GIT_SCOPE, M.SCOPE, M.TOOLS_SCOPE, M.SERVICE_SCOPE, *M.UPLOAD_SCOPES):
             with self.assertRaises(M.Refused): M.observation_scope(env, scope)
         with self.assertRaises(M.Refused): M.arguments(["--target", M.TARGET, "--scope", M.GIT_SCOPE])
@@ -178,6 +182,29 @@ class GitNativeRosterTests(F.Inert):
         self.assertTrue(fixture.inflight); self.assertNotIn("close", events)
         self.assertEqual([event[1] for event in events if type(event) is tuple and event[0] == "producer"], [F.Q.CASES[0]])
         peer.assert_not_called()
+
+    def test_checked_host_data_keeps_original_fetch_calls_and_is_not_reread_at_completion(self):
+        original = M._run
+        for host in (("macos-26", "26.0.1"), ("xcode-27", "27.0.1")):
+            def run(*args, **kwargs):
+                return original(*args, **kwargs, host=host)
+            with self.subTest(host=host), patch.object(M, "_run", side_effect=run), \
+                    patch("platform.mac_ver", side_effect=AssertionError("no new completion host observation")):
+                status, fixture, events, errors, rows = F.OriginalLoopTests.run_loop(self, native_scope=M.GIT_SCOPE)
+            self.assertEqual((status, errors), (0, []))
+            self.assertEqual([event[1] for event in events if type(event) is tuple and event[0] == "producer"], list(F.Q.CASES))
+            self.assertEqual(events[-1], "close")
+            self.assertFalse(fixture.inflight)
+            self.assertEqual(rows[-1]["host"], {"runner": host[0], "osVersion": host[1]})
+            self.assertFalse(rows[-1]["shippingBinaryQualified"])
+            self.assertFalse(rows[-1]["distributionQualified"])
+        error = KeyboardInterrupt("inert original did not return")
+        with patch.object(M, "_run", side_effect=run):
+            status, fixture, events, errors, rows = F.OriginalLoopTests.run_loop(self, native_scope=M.GIT_SCOPE, unknown=error)
+        self.assertEqual(status, 130)
+        self.assertTrue(fixture.inflight)
+        self.assertEqual((errors, rows), ([error], []))
+        self.assertNotIn("close", events)
 
 
 if __name__ == "__main__":

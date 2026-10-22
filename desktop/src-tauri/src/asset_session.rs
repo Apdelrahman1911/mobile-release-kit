@@ -1192,6 +1192,11 @@ mod agent_configuration;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_configuration::ConfigurationAgentGate;
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_initialization.rs"]
+pub(crate) mod agent_initialization;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_initialization::InitializationAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_service_metadata_images.rs"]
 pub(crate) mod agent_metadata_images;
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -4817,6 +4822,10 @@ impl DocumentBinding {
         let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
         let result = (|| {
             let mut state = self.lock();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if domain==crate::edit_protocol::EditDomain::ProjectInitialization{
+                self.inner.bridge.edits.initialization_agent_origin(MAIN,None)?;
+            }
             let registered = self.registered_edit_root_locked_published(&mut state, domain, project_id, None, &mut publisher)?;
             enqueue(&self.inner.bridge, registered, &publisher)
         })();

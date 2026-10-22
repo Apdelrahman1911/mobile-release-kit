@@ -158,7 +158,9 @@ class PackagingTests(Inert):
         self.assertEqual(Q.BOOTSTRAPS, P.FETCH_OBSERVATION_BOOTSTRAPS)
         self.assertFalse(set(Q.BOOTSTRAPS) & set(P.CURRENT_BOOTSTRAPS))
         self.assertFalse(set(Q.BOOTSTRAPS) & S.CURRENT_BOOTSTRAPS)
-        env = {"MRK_MACOS_NATIVE_SCOPE": Q.SCOPE, "MRK_MACOS_PACKAGE_ROLE": M.ROLE, "GITHUB_REF": M.REF}
+        env = {"MRK_MACOS_NATIVE_SCOPE": Q.SCOPE, "MRK_MACOS_PACKAGE_ROLE": M.ROLE, "GITHUB_REF": M.REF,
+               "MRK_MACOS_RUNNER": "macos-26", "MRK_MACOS_MACHINE": "arm64",
+               "MRK_MACOS_HOSTED_JOB": "github-hosted-macos26-arm64"}
         self.assertEqual(M.package_role(env, "package-install", M.TARGET), M.ROLE)
         self.assertEqual(M.observation_scope(env, Q.SCOPE), Q.SCOPE)
         with self.assertRaises(M.Refused): M.observation_scope(env, M.SCOPE)

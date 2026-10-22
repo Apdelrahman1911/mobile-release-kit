@@ -34,6 +34,16 @@ const PREPARE_FUTURE: usize = 5 * crate::service_metadata_images_prepare_protoco
     + 2 * size_of::<crate::service_metadata_images_prepare_requests::Call>()
     + 4 * (size_of::<crate::application_service_host::NativeProject>() + 4096 + 128);
 
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn installed_image_backing(original: &std::sync::Weak<Mutex<InstalledEditSlots>>) -> Result<usize, BridgeError> {
+    let original = original.upgrade().ok_or_else(invalid_owner)?;
+    let installed = original.try_lock().map_err(|_| invalid_owner())?;
+    match &*installed {
+        InstalledEditSlots::MetadataImages(slots) => slots.retained_bytes().ok_or_else(invalid_owner),
+        _ => Err(invalid_owner()),
+    }
+}
+
 impl EditOwner {
     pub(crate) fn images_agent_edit_backing(&self) -> Result<usize, BridgeError> {
         self.images_agent_backing(false)
@@ -128,19 +138,13 @@ impl EditOwner {
                 any(target_arch = "aarch64", target_arch = "x86_64")
             ))]
             {
-                let resources = a
-                    .session
-                    .resources
-                    .try_lock()
-                    .map_err(|_| invalid_owner())?;
-                let installed = resources.installed.as_ref().ok_or_else(invalid_owner)?;
-                let installed = installed.try_lock().map_err(|_| invalid_owner())?;
-                match &*installed {
-                    InstalledEditSlots::MetadataImages(slots) => {
-                        n.add(slots.retained_bytes().ok_or_else(invalid_owner)?)?
-                    }
-                    _ => return Err(invalid_owner()),
-                }
+                // continue_original owns Resources across the entire live
+                // review loop. Do not try to reacquire that long-held lock.
+                // The weak reference was captured from this SAME Session's
+                // installed Arc before admission, including ordinary GUI Open.
+                n.add(installed_image_backing(
+                    a.session.image_installed_census.as_ref().ok_or_else(invalid_owner)?,
+                )?)?;
             }
             #[cfg(not(all(
                 target_os = "macos",
@@ -161,6 +165,38 @@ impl EditOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn image_census_does_not_relock_live_resources_or_adopt_foreign_slots() {
+        // Actual Resources/slot locks reproduce the failed access route without
+        // entering a runtime. This is a lock/census regression, not a native
+        // operation pass or a fabricated Opened/Prepared owner.
+        let slots = Arc::new(Mutex::new(InstalledEditSlots::MetadataImages(MetadataImagesRuntimeSlots::new())));
+        let weak = Arc::downgrade(&slots);
+        let expected = match &*slots.lock().unwrap() {
+            InstalledEditSlots::MetadataImages(slots) => slots.retained_bytes().unwrap(),
+            _ => unreachable!(),
+        };
+        let resources = AsyncMutex::new(Resources { installed: Some(slots), ..Resources::default() });
+        let held = resources.try_lock().unwrap();
+        assert!(resources.try_lock().is_err()); // Old route always refused here.
+        let original = held.installed.as_ref().unwrap();
+        assert!(std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(original)));
+        assert_eq!(installed_image_backing(&weak).unwrap(), expected);
+        assert_eq!(Arc::strong_count(original), 1); // No retained replacement owner.
+        {
+            let mut slot = original.lock().unwrap();
+            assert!(installed_image_backing(&weak).is_err()); // Busy is not zero.
+            slot.mark_interrupted();
+        }
+        assert!(installed_image_backing(&weak).is_err()); // Unknown is not zero.
+        drop(held);
+        drop(resources);
+        assert!(installed_image_backing(&weak).is_err()); // The original is gone.
+        let foreign = Arc::new(Mutex::new(InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new())));
+        assert!(installed_image_backing(&Arc::downgrade(&foreign)).is_err());
+    }
+
     fn data() -> EditProjection {
         EditProjection {
             domain: EditDomain::Configuration,

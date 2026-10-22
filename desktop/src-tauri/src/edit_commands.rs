@@ -300,3 +300,16 @@ pub(crate) fn initialization_apply(body: &Value) -> Result<crate::project_initia
     if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
     Ok(value)
 }
+
+// MAIN compact Initialization controls; original base native/CLI DTOs unchanged.
+pub(crate) fn agent_initialization_status(body:&Value)->Result<Option<crate::service_initialization_protocol::Query>,BridgeError>{
+    #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct Status {origin:Option<crate::service_initialization_protocol::Query>}
+    let args:Status=decode(body,crate::service_initialization_protocol::REQUEST_BYTES)?;Ok(args.origin)
+}
+pub(crate) fn agent_initialization_query(body:&Value)->Result<crate::service_initialization_protocol::Query,BridgeError>{
+    decode(body,crate::service_initialization_protocol::REQUEST_BYTES)
+}
+pub(crate) fn agent_initialization_allow(body:&Value)->Result<crate::service_initialization_protocol::Allow,BridgeError>{
+    let args:crate::service_initialization_protocol::Allow=decode(body,crate::service_initialization_protocol::REQUEST_BYTES)?;
+    args.validate().map_err(|_|BridgeError::invalid())?;Ok(args)
+}

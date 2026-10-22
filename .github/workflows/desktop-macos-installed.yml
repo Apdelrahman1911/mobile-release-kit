@@ -158,7 +158,17 @@ jobs:
           esac
           case "$MRK_MACOS_TARGET" in
             aarch64-apple-darwin)
-              [[ "$MRK_MACOS_RUNNER" == macos-26 && "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+              [[ "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+              case "$MRK_MACOS_RUNNER:$MRK_MACOS_HOSTED_JOB" in
+                macos-26:github-hosted-macos26-arm64) expected_host_major=26 ;;
+                xcode-27:github-hosted-xcode27-arm64)
+                  # Separate source-only matrix selection; never a tool or
+                  # ordinary image fallback, and never a Git nomination.
+                  [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+                  expected_host_major=27
+                  ;;
+                *) exit 1 ;;
+              esac
               expected_supplier_receipt=1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809
               expected_supplier_tar=2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5
               expected_supplier_source=52485f9fd837f0dacb8dc9621e5a1bee30803506
@@ -168,6 +178,7 @@ jobs:
               ;;
             x86_64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+              expected_host_major=26
               expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
               expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
               expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
@@ -210,7 +221,7 @@ jobs:
           [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
           [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
-          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: Check out exact reviewed source without retained credentials
         timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
@@ -882,6 +893,40 @@ jobs:
           PY_ADMISSION_DIAGNOSTIC
             exit "$build_status"
           fi
+      - name: Require the fixed SOURCE producer identity and release before ordinary signing
+        id: app_selection
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Public SOURCE DATA only. This is not a signature/purpose verdict or
+          # a credential source; the native producer/parent verify independently.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
+            --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
+          "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
+          import json, os, re
+          from pathlib import Path
+          body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
+          if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
+          row = json.loads(body)
+          if (type(row) is not dict or row.get("schemaVersion") != 1
+                  or row.get("kind") != "source-packaging-selection-data"
+                  or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
+                  or not isinstance(row.get("leafCertificateSha1"), str)
+                  or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
+                  or row["leafCertificateSha1"] == "0" * 40
+                  or not isinstance(row.get("packageVersion"), str)
+                  or len(row["packageVersion"]) > 32
+                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
+                  or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
+                  or row["packageVersion"] == "0.1.0"):
+              raise ValueError("fixed SOURCE selection")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
+              output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
+              output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
+          PY_PACKAGING_SELECTION
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature')
         timeout-minutes: 2
@@ -895,7 +940,7 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \
+            --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
@@ -1130,40 +1175,6 @@ jobs:
             --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
             --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \
             > "$work/android-support-result.json"
-      - name: Require the fixed SOURCE producer identity and release before ordinary signing
-        id: app_selection
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          # Public SOURCE DATA only. This is not a signature/purpose verdict or
-          # a credential source; the native producer/parent verify independently.
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
-            --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
-          "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
-          import json, os, re
-          from pathlib import Path
-          body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
-          if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
-          row = json.loads(body)
-          if (type(row) is not dict or row.get("schemaVersion") != 1
-                  or row.get("kind") != "source-packaging-selection-data"
-                  or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
-                  or not isinstance(row.get("leafCertificateSha1"), str)
-                  or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
-                  or row["leafCertificateSha1"] == "0" * 40
-                  or not isinstance(row.get("packageVersion"), str)
-                  or len(row["packageVersion"]) > 32
-                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
-                  or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
-                  or row["packageVersion"] == "0.1.0"):
-              raise ValueError("fixed SOURCE selection")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
-              output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
-              output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
-          PY_PACKAGING_SELECTION
       # ARM acquisition/release compilation needs more than the observed480s.
       # Build1200 and step24 remain independent ceilings, not a fit guarantee
       # when later signing consumes its maximum. Intel fetch120/build720 unchanged.
@@ -1681,7 +1692,7 @@ jobs:
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
           [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
-            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.2 \
+            --identifier dev.mobile-release-kit.desktop.installed-fixture --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --store-runtime --fixture --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \
@@ -2214,7 +2225,7 @@ jobs:
           # public archive; never supplier execution or sdkmanager. At least
           # 8GiB free, unchanged private ancestry and no prior task leaf required.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-tool-setup-inputs
-      - name: Observe cancellation, source drift and missing-only SDK registration reuse
+      - name: Observe public acquisition, cancellation and missing-only SDK registration reuse
         id: tool_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_inputs.outcome == 'success'
         timeout-minutes: 122
@@ -2225,9 +2236,11 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # SAME installed observer/package as identity and service above.
-          # Separate source/cache originals per case; existing2400s bounds do
-          # not renew. Unknown stops the driver and preserves exact originals.
+          # SAME installed observer/package. Public pair FIRST: its Cold case
+          # uses a separate fixed cache and an explicitly picked empty SDK;
+          # the old three retain the first actual protected Register below.
+          # Same2400s cases and122min outer; no renewal or ignored78/Unknown.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
       - name: Verify upload-key reuse, cancellation, cold restart and backend backup
         id: upload_key_native

@@ -32,7 +32,7 @@ pub(super) fn admitted() -> bool {
 }
 pub(super) fn application(uid: u32) -> Option<PathBuf> { application_for(uid,NAME) }
 pub(super) fn application_for(uid: u32, name: &str) -> Option<PathBuf> {
-    if name!=NAME && name!=super::vault::upload_key::cli::SCOPE { return None; }
+    if name!=NAME && name!=super::vault::upload_key::cli::SCOPE && name!=super::tool_setup::Case::CancelInTransfer.name() { return None; }
     if !admitted() {
         return None;
     }
@@ -332,6 +332,7 @@ impl Observation {
         report: &crate::application_service_host::HostShutdownReport,
     ) -> bool {
         if super::vault::upload_key::cli::selected(self.case) { return self.backup_cli_host_return(report); }
+        if self.case == Case::ToolSetup(super::tool_setup::Case::CancelInTransfer) { return self.tool_acquisition_cli_host_return(report); }
         if self.case != Case::Cli {
             return true;
         }

@@ -100,7 +100,7 @@ impl CredentialReference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action { LocalHistoryEnroll, LocalHistoryReview,
-    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview,
+    ObserveProject, InitializeProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview,
     GitHubPreflightPrepare,
     GitHubPreflightDispatch,
     GitHubPreflightPending,
@@ -250,6 +250,10 @@ pub enum RequestBody {
     #[serde(rename="upload-key.submit")] UploadKeySubmit(crate::service_upload_key_protocol::Submit),
     #[serde(rename="upload-key.status")] UploadKeyStatus(crate::service_upload_key_protocol::Query),
     #[serde(rename="upload-key.cancel")] UploadKeyCancel(crate::service_upload_key_protocol::Query),
+    #[serde(rename="initialization.prepare")] InitializationPrepare(crate::service_initialization_protocol::Prepare),
+    #[serde(rename="initialization.apply")] InitializationApply(crate::service_initialization_protocol::Apply),
+    #[serde(rename="initialization.status")] InitializationStatus(crate::service_initialization_protocol::Query),
+    #[serde(rename="initialization.cancel")] InitializationCancel(crate::service_initialization_protocol::Query),
     #[serde(rename="configuration.read")] ConfigurationRead(crate::service_configuration_protocol::Read),
     #[serde(rename="configuration.prepare")] ConfigurationPrepare(crate::service_configuration_protocol::Prepare),
     #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
@@ -349,6 +353,7 @@ pub enum ResponseBody {
     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
     UploadKeyAccess(crate::service_upload_key_protocol::Access),
     UploadKeyRequest(crate::service_upload_key_protocol::Status),
+    InitializationRequest(crate::service_initialization_protocol::Status),
     ConfigurationRequest(crate::service_configuration_protocol::Status),
     VersionEditRequest(crate::service_version_edit_protocol::Status),
     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
@@ -445,6 +450,8 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if let RequestBody::ConfigurationRead(input)=&request.request{if input.expected_observation_revision==0{return Err(Error::InvalidRequest);}}
     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
+    if let RequestBody::InitializationPrepare(input)=&request.request{input.validate()?;}
+    if let RequestBody::InitializationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest)}}
     if let RequestBody::MetadataImagesPrepare(input)=&request.request{input.validate()?;}
     if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
@@ -527,6 +534,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             if row.origin.service_instance!=response.service_instance {return Err(Error::InvalidRequest);}
             crate::service_metadata_text_protocol::bounded(response,row.limit())?;
         },
+        ResponseBody::InitializationRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_initialization_protocol::bounded(response,crate::service_initialization_protocol::STATUS_BYTES)?;}
         ResponseBody::MetadataImagesPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_metadata_images_prepare_protocol::bounded(response,crate::service_metadata_images_prepare_protocol::STATUS_BYTES)?;}
         ResponseBody::MetadataImagesAccess(row)=>{
             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}

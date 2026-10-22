@@ -371,14 +371,32 @@ pub(crate) fn decode(bytes:&[u8],session:&str)->Result<ChildFrame,BridgeError>{
     if bytes.len()>RESPONSE_LIMIT||!bytes.ends_with(b"\n"){return Err(BridgeError::protocol());}
     let body=&bytes[..bytes.len()-1];
     if body.first()!=Some(&b'{')||body.last()!=Some(&b'}')||body.iter().any(|b|matches!(*b,b'\r'|b'\n')){return Err(BridgeError::protocol());}
-    let v=strict_json(body)?;
+    let mut v=strict_json(body)?;
     if !keys(&v,&["protocol","session","seq","kind","result"])||v["protocol"]!=PROTOCOL||v["session"]!=session{return Err(BridgeError::protocol());}
-    let raw=&v["result"];check_value(raw).map_err(|_|BridgeError::protocol())?; // Same global20k/32; typed256-row inventory is not the workflow draft8k.
-    match(v["seq"].as_u64(),v["kind"].as_str()){
-        (Some(0),Some("opened"))=>{let x=Opened::deserialize(raw).map_err(|_|BridgeError::protocol())?;if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationOpened(x))},
-        (Some(1),Some("prepared"))=>{let x=PreparedReply::deserialize(raw).map_err(|_|BridgeError::protocol())?;if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationPrepared(x))},
-        (Some(n @ 0..=2),Some("terminal"))=>{bounded(raw,edit::TERMINAL_LIMIT).map_err(|_|BridgeError::protocol())?;let x=TerminalReply::deserialize(raw).map_err(|_|BridgeError::protocol())?;
-            if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationTerminal(n as u32,x))},_=>Err(BridgeError::protocol())}
+    let kind=match(v["seq"].as_u64(),v["kind"].as_str()){
+        (Some(0),Some("opened"))=>ResultKind::Opened,
+        (Some(1),Some("prepared"))=>ResultKind::Prepared,
+        (Some(n @ 0..=2),Some("terminal"))=>ResultKind::Terminal(n as u32),
+        _=>return Err(BridgeError::protocol()),
+    };
+    let raw=v.as_object_mut().and_then(|v|v.remove("result")).ok_or_else(BridgeError::protocol)?;
+    drop(v);
+    decode_result(kind,raw)
+}
+#[derive(Clone,Copy)]
+enum ResultKind {Opened,Prepared,Terminal(u32)}
+// Consume the SAME strictly parsed result. In particular workflow and preview
+// strings move through serde's owned Content conversion; they are not cloned
+// while the original tree is still retained. Container reconstruction/frontier
+// is nonzero and remains covered by the Initialization admission quote.
+fn decode_result(kind:ResultKind,raw:Value)->Result<ChildFrame,BridgeError>{
+    check_value(&raw).map_err(|_|BridgeError::protocol())?; // Same global20k/32; not the workflow draft8k.
+    match kind {
+        ResultKind::Opened=>{let x=Opened::deserialize(raw).map_err(|_|BridgeError::protocol())?;if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationOpened(x))},
+        ResultKind::Prepared=>{let x=PreparedReply::deserialize(raw).map_err(|_|BridgeError::protocol())?;if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationPrepared(x))},
+        ResultKind::Terminal(n)=>{bounded(&raw,edit::TERMINAL_LIMIT).map_err(|_|BridgeError::protocol())?;let x=TerminalReply::deserialize(raw).map_err(|_|BridgeError::protocol())?;
+            if !x.valid(){return Err(BridgeError::protocol());}Ok(ChildFrame::InitializationTerminal(n,x))},
+    }
 }
 
 
@@ -468,6 +486,24 @@ pub(crate) mod tests {
         assert!(matches!(decode(&full_reply,SESSION),Ok(ChildFrame::InitializationPrepared(_))));
         let mut wrong=serde_json::to_value(v).unwrap();wrong["files"][0].as_object_mut().unwrap().remove("beforeBytes");
         assert!(InitializationView::deserialize(&wrong).is_err());
+    }
+    #[test]
+    fn same_decoder_result_moves_original_workflow_strings_without_second_tree_clone() {
+        let v=view();
+        let raw=json!({"intent":"initialize","revision":REVISION,"planToken":PLAN,"view":v,"scopeResources":"settled"});
+        let pointers:Vec<_>=raw["view"]["workflows"].as_array().unwrap().iter()
+            .map(|w|w["content"].as_str().unwrap().as_ptr()).collect();
+        // This is the exact owned helper invoked by decode after its single
+        // strict envelope check, not a parallel test-only deserialize path.
+        let decoded=decode_result(ResultKind::Prepared,raw);
+        let Ok(ChildFrame::InitializationPrepared(PreparedReply::Initialize{view,..}))=decoded else {panic!("valid original result")};
+        for (w,pointer) in view.workflows.iter().zip(pointers) {assert_eq!(w.content.as_ptr(),pointer);}
+        let mut malformed=json!({"intent":"initialize","revision":REVISION,"planToken":PLAN,"view":view,"scopeResources":"settled"});
+        malformed["view"]["configurationPreview"]["assurance"]["writesPerformed"]=json!(true);
+        assert!(decode_result(ResultKind::Prepared,malformed.clone()).is_err());
+        assert!(decode(&envelope(1,"prepared",malformed),SESSION).is_err());
+        let bad_terminal=json!({"kind":"outcome","intent":"initialize","planToken":null,"effect":"not_started","journal":"not_created","resources":"settled","reason":"none","padding":"x".repeat(edit::TERMINAL_LIMIT)});
+        assert!(decode_result(ResultKind::Terminal(0),bad_terminal).is_err());
     }
     #[test]
     fn recovery_keeps_historical_effects_but_never_mints_clean_before_apply() {

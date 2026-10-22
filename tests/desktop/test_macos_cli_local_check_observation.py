@@ -505,5 +505,203 @@ class CliLocalCheckTests(unittest.TestCase):
             self.assertEqual(j.cli.calls.inflight, 1)
 
 
+PUBLIC = C.PUBLIC_TOOLS
+TOOL_GRANT, TOOL_REVIEW = "6" * 32, "7" * 32
+TOOL_REJECTED = {**ORIGIN, "requestId": "8" * 32}
+TOOL_ACTIVE = {"phase": "active", "origin": ORIGIN.copy(),
+               **{k: TERMINAL[k] for k in ("operationId", "ownerGeneration")}}
+
+
+def tool_response(number):
+    """Only fields used by the comparison driver; no native grant is created."""
+    if number == 0:
+        return response(0)
+    if number == 6:
+        value = {"schemaVersion": 2, "scope": "current-host-retained-requests", "sampling": "per-request-not-atomic",
+            "doNotReplay": True, "projectId": ORIGIN["projectId"], "serviceInstance": ORIGIN["serviceInstance"],
+            "requests": [], "additionalRequests": [{"family": "tool-setup", "requestId": ORIGIN["requestId"]}]}
+        kind = "requests"
+    else:
+        value = {"origin": ORIGIN.copy(), "grantId": TOOL_GRANT, "reviewId": TOOL_REVIEW, "revision": number + 1,
+            "review": {"kind": "acquire-reviewed-missing", "platform": "android",
+                       "acquisition": {"missing": ["android-build-tools"]}},
+            "state": "queued" if number == 1 else "stopping" if number == 3 else "cancelled",
+            "settlement": "pending" if number < 4 else "settled",
+            "reason": "none" if number < 4 else "user-cancelled", "outcome": None if number < 4 else "cancelled",
+            "operation": None if number == 1 else {"operationId": TERMINAL["operationId"],
+                "ownerGeneration": TERMINAL["ownerGeneration"], "registrationGeneration": None}, "result": None}
+        kind = "tool-setup-request"
+    return {"version": 1, "requestId": f"{number + 100:032x}", "serviceInstance": ORIGIN["serviceInstance"],
+            "clientId": f"{number + 200:032x}", "sessionId": f"{number + 300:032x}", "response": {"kind": kind, "value": value}}
+
+
+class InertToolJourney(InertJourney):
+    """Reuse the original driver/Calls with tiny phase/archive metadata DATA."""
+    def __init__(self, root, **kw):
+        super().__init__(root, **kw)
+        self.native_send = C.PhaseFile(self.parent, C.PHASES[0], self.fds[1], os.getuid(), True, case=PUBLIC.CANCEL)
+        self.driver_read = C.PhaseFile(self.parent, C.PHASES[1], self.fds[2], os.getuid(), False, case=PUBLIC.CANCEL)
+        self.book = A.Fixtures(BINDING, os.getuid(), os.getgid(), PUBLIC.SCOPE)
+        self.cli = C.Fixture(self.book)
+        self.cli.home = root / "private-home"
+        self.cli.application_fd = self.parent
+        self.cli.native = C.PhaseFile(self.parent, C.PHASES[0], self.fds[1], os.getuid(), False, case=PUBLIC.CANCEL)
+        self.cli.driver = C.PhaseFile(self.parent, C.PHASES[1], self.fds[2], os.getuid(), True, case=PUBLIC.CANCEL)
+        self.cli.current_cli = self.current  # Explicit inert installed-source substitute.
+        self.fixture.cli, self.fixture.cases = self.cli, PUBLIC.CASES
+
+    def close_files(self):
+        if isinstance(self.cli.thread, threading.Thread) and self.cli.thread.is_alive():
+            self.cli.calls.close(failed=True)
+            self.cli.thread.join(2)
+        if isinstance(self.cli.thread, threading.Thread) and self.cli.thread.is_alive():
+            raise AssertionError("test original still live; retaining files")
+        if hasattr(self, "book"):
+            for fd in tuple(self.book.fds):
+                if not self.book._close(fd):
+                    raise AssertionError("test reader close failed")
+        super().close_files()
+
+    def app(self, argv, kw):
+        self.app_calls += 1
+        if threading.current_thread() is not threading.main_thread() or kw["timeout"] != PUBLIC.APP_SECONDS:
+            raise AssertionError("tool app original owner/budget changed")
+        self.native_send.append({"phase": "allowed", "projectId": ORIGIN["projectId"],
+            "serviceInstance": ORIGIN["serviceInstance"], "grantId": TOOL_GRANT, "reviewId": TOOL_REVIEW})
+        sent, until = 0, time.monotonic() + 2
+        while time.monotonic() < until:
+            if self.cli.calls.failed:
+                break
+            rows = self.driver_read.read()
+            if rows and len(rows) > sent:
+                if sent == 0:
+                    job = self.root / "tool-cache-v1/archives" / ("tool-" + TERMINAL["operationId"])
+                    (job / "sources").mkdir(mode=0o700, parents=True)
+                    for parent in (job, job.parent, job.parent.parent):
+                        parent.chmod(0o700)
+                    for name, raw in (("origin.json", b"inert"), (PUBLIC.ARCHIVE, b"x" * PUBLIC.MIN_CUT)):
+                        path = job / name; path.write_bytes(raw); path.chmod(0o600)
+                    self.native_send.append(TOOL_ACTIVE)
+                    sent += 1
+                elif self.cli.calls.returned:
+                    break
+            time.sleep(0.001)
+        else:
+            raise AssertionError("bounded inert tool app did not receive checked phase")
+        return subprocess.CompletedProcess(argv, 0, b"INERT APP RETURN ONLY", b"")
+
+    def owner(self, argv, **kw):
+        if argv[0] != C.CLI:
+            return self.app(argv, kw)
+        number = len(self.calls)
+        self.calls.append((argv.copy(), kw.copy())); self.threads.append(threading.get_ident())
+        if threading.current_thread() is threading.main_thread() or kw.get("cancellation", "absent") is not None:
+            raise AssertionError("tool CLI borrowed main guard")
+        if not 1 <= kw["timeout"] <= 30 or kw["environ"]["HOME"] != str(self.cli.home):
+            raise AssertionError("tool CLI original input/clock changed")
+        if self.thrown == number:
+            raise RuntimeError("inert original did not return")
+        if number == 2:
+            value = {"version": 1, "ok": False, "error": "busy", "request": TOOL_REJECTED.copy(),
+                     "doNotReplay": True, "message": "Inert original unconfirmed response."}
+            result = subprocess.CompletedProcess(argv, 6, C._json(value) + b"\n", PUBLIC.receipt(TOOL_REJECTED))
+        else:
+            result = subprocess.CompletedProcess(argv, 5 if number in (4, 5) else 0,
+                C._json(tool_response(number)) + b"\n", PUBLIC.receipt(ORIGIN) if number == 1 else b"")
+        if number == 3:
+            self.native_send.append({**TOOL_ACTIVE, "phase": "terminal"})
+        return self.change(number, result) if self.change else result
+
+
+class PublicAcquisitionCliTests(unittest.TestCase):
+    def setUp(self):
+        for name in ("subprocess.Popen", "socket.socket", "socket.create_connection"):
+            self.enterContext(patch(name, side_effect=AssertionError("native/process/network forbidden")))
+
+    @contextmanager
+    def journey(self, **kw):
+        with tempfile.TemporaryDirectory(prefix="mrk-tool-cli-inert-") as tmp:
+            j = InertToolJourney(Path(tmp), **kw)
+            try:
+                yield j
+            finally:
+                j.close_files()
+
+    def invoke(self, j):
+        return C.invoke(j.fixture, j.owner, [A.EXECUTABLE, PUBLIC.CANCEL], {"LANG": "C"}, j.root)
+
+    def test_seven_original_calls_use_busy_unconfirmed_six_and_one_live_cut_stop(self):
+        with self.journey() as j:
+            self.invoke(j)
+            self.assertEqual([a[1] for a, _ in j.calls], ["observe", "tool-setup-submit", "tool-setup-submit",
+                "tool-setup-cancel", "tool-setup-status", "tool-setup-status", "requests"])
+            self.assertEqual(j.cli.calls.results[2].returncode, 6)
+            self.assertEqual(C._decode(j.cli.calls.results[2].stdout)["request"], TOOL_REJECTED)
+            self.assertEqual(len(set(j.threads)), 1)
+            self.assertNotEqual(j.threads[0], threading.get_ident())
+            self.assertTrue(j.cli.joined and j.cli.calls.returned)
+            self.assertTrue(j.fixture.inflight)  # Only original run_cases clears this.
+            checked = j.driver_read.read()[-1]
+            value = {k: v for k, v in checked.items() if k != "phase"}
+            value.update(operationId=TERMINAL["operationId"], ownerGeneration=TERMINAL["ownerGeneration"],
+                consumedPermission=True, duplicateRefused=True, nativeCallerHistoryReturned=True,
+                phaseOriginalsClosed=True, hostWorkersJoined=7)
+            j.fixture.inflight, j.fixture.last_returned = False, True
+            output = PUBLIC.cli_readback(j.fixture, value)
+            self.assertEqual(output["ipcWorkersActuallyJoined"], 7)
+            self.assertEqual((output["submissionAttempts"], output["admittedOriginals"]), (2, 1))
+
+    def test_wrong_busy_exit_missing_original_receipt_or_replayed_query_stops_before_cancel(self):
+        def wrong_exit(n, r):
+            if n == 2: r.returncode = 5
+            return r
+        def bad_receipt(n, r):
+            if n in (1, 2): r.stderr = b""
+            return r
+        def reused_query(n, r):
+            if n == 2:
+                value = C._decode(r.stdout); value["request"] = ORIGIN.copy()
+                r.stdout, r.stderr = C._json(value), PUBLIC.receipt(ORIGIN)
+            return r
+        for change in (wrong_exit, bad_receipt, reused_query):
+            with self.subTest(change=change), self.journey(change=change) as j:
+                with self.assertRaisesRegex(ValueError, "originals-not-returned"):
+                    self.invoke(j)
+                self.assertTrue(j.fixture.inflight and j.cli.calls.failed)
+                self.assertLessEqual(len(j.calls), 3)
+                self.assertFalse(j.cli.calls.returned)
+
+    def test_lost_call_or_wrong_terminal_never_promotes_app_data_or_replays(self):
+        with self.journey(thrown=3) as j:
+            with self.assertRaisesRegex(ValueError, "originals-not-returned"):
+                self.invoke(j)
+            self.assertEqual(j.cli.calls.inflight, 3)
+            self.assertEqual(len(j.calls), 4)
+            self.assertTrue(j.fixture.inflight)
+        def wrong(n, r):
+            if n == 4:
+                v = C._decode(r.stdout); v["response"]["value"]["reason"] = "cleanup-unknown"
+                r.stdout = C._json(v)
+            return r
+        with self.journey(change=wrong) as j:
+            with self.assertRaisesRegex(ValueError, "originals-not-returned"):
+                self.invoke(j)
+            self.assertEqual(len(j.calls), 5)
+            self.assertTrue(j.fixture.inflight and j.cli.joined)
+
+    def test_fixed_tool_phase_rows_are_bounded_before_parse_and_old_policy_unchanged(self):
+        self.assertEqual(C._policy(C.SCOPE), (7, 4, 120, 135))
+        self.assertEqual(C._policy(PUBLIC.CANCEL), (7, 3, 2400, 2415))
+        self.assertFalse(C.selected((PUBLIC.COLD,)))
+        with self.journey() as j:
+            with self.assertRaisesRegex(ValueError, "write-bound"):
+                j.native_send.append({"phase": "allowed", "inert": "x" * 512})
+            raw = b'{"inert":"' + b"x" * 512 + b'"}\n'
+            os.pwrite(j.fds[1], raw, 0)
+            with patch.object(C, "_decode", side_effect=AssertionError("oversize parsed")), \
+                 self.assertRaisesRegex(ValueError, "phase-count"):
+                j.cli.native.read()
+
+
 if __name__ == "__main__":
     unittest.main()

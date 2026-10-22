@@ -44,10 +44,11 @@ export function ProjectInitialization({controller,state,setup,setupState,compact
   const owner=state.attempt?.projection??state.unknownEvidence??state.status?.active??state.status?.lastTerminal;
   const apply=currentInitializationApplyBinding(state),recover=currentInitializationRecoveryBinding(state);
   const reason=controller.startReason(),recoveryReason=controller.recoveryStartReason();
-  const result=confirmedInitializationResult(state);
+  const agent=controller.agent.getSnapshot(), linked=controller.agent.isLinked();
+  const result=!linked||state.attempt?.handled?confirmedInitializationResult(state):null;
   const prepared=owner?.prepared;
   const recovery=prepared?.intent==='recover'?prepared.recovery:owner?.checkout?.intent==='recover'?owner.checkout.recovery:null;
-  const terminal=owner?.phase==='final'&&owner.nativeFinality==='settled';
+  const terminal=owner?.phase==='final'&&owner.nativeFinality==='settled'&&(!linked||state.attempt?.handled);
   const repoHelp=setupState.help?.inputs.find(row=>row.id==='toolingRepository');
   const shaHelp=setupState.help?.inputs.find(row=>row.id==='toolingSha');
   return <section className="card" aria-label="Project initialization">
@@ -74,9 +75,22 @@ export function ProjectInitialization({controller,state,setup,setupState,compact
     {!compact&&owner?.conflict&&<div role="alert"><h3>Existing targets differ — nothing overwritten</h3><ul>{owner.conflict.files.map(row=><li key={row.path}><code>{row.path}</code> ({row.kind}, {row.beforeBytes} bytes)</li>)}</ul><p>Resolve these originals deliberately outside this attempt, then request a fresh review after settlement. Existing contents are not exposed.</p></div>}
     {!compact&&prepared?.intent==='initialize'&&<Inventory view={prepared.view}/>}
     {!compact&&recovery&&<RecoveryInventory view={recovery}/>}
-    {!compact&&apply&&<Confirm key={`${apply.sessionId}:${apply.planToken}`} recover={false} disabled={false} onConfirm={()=>controller.apply(apply)}/>}
+    {!compact&&!linked&&apply&&<Confirm key={`${apply.sessionId}:${apply.planToken}`} recover={false} disabled={false} onConfirm={()=>controller.apply(apply)}/>}
     {!compact&&recover&&<Confirm key={`${recover.sessionId}:${recover.planToken}`} recover disabled={false} onConfirm={()=>controller.recover(recover)}/>}
     {!initializationAttemptSettled(state.attempt)&&<><button type="button" disabled={Boolean(state.attempt?.closeRequested)||owner?.phase==='unknown'} onClick={()=>controller.requestClose()}>{state.attempt?.applyClaimed?'Request cancellation':'Cancel review'}</button><p>Before Apply, cancellation retires consent and keeps your draft. After Apply it may be too late: wait for this original owner’s outcome; never resend the action.</p></>}
+    <details><summary>Advanced — CLI initialization</summary>
+      <p>A CLI preparation uses this selected project’s current draft and toolkit pin, not agent-supplied paths or file contents. READ permits review only. Recovery stays in the ordinary Desktop controls.</p>
+      {agent.status?.request&&<p>Request <code>{agent.status.request.origin.requestId}</code> · {agent.status.request.phase}. {agent.status.request.doNotReplay&&'Keep the same ID; never repeat Apply after an unknown result.'}</p>}
+      {agent.message&&<p role={agent.unknown?'alert':'status'}>{agent.message}</p>}
+      <button type="button" disabled={agent.pending!==null||agent.revokePending} onClick={()=>void controller.agent.check()}>Check CLI request and native plan</button>
+      {!compact&&linked&&prepared?.intent==='initialize'&&<>
+        <p>The complete file plan above, including callers and ignore additions, is the plan this permission covers. Allow does not apply it; the agent must submit that same plan once.</p>
+        <label><input type="checkbox" checked={agent.acknowledged} disabled={controller.agent.allowReason()!==null} onChange={event=>controller.agent.acknowledge(event.target.checked)}/> I reviewed this checked original plan and authorize one CLI initialization Apply.</label>
+        <button type="button" disabled={!agent.acknowledged||controller.agent.allowReason()!==null} onClick={()=>void controller.agent.allow()}>Allow this CLI Apply once</button>
+      </>}
+      {agent.status?.request&&<button type="button" disabled={agent.revokePending||agent.status.request.phase==='final'} onClick={()=>void controller.agent.revoke()}>Withdraw / stop original CLI request</button>}
+      {linked&&!state.attempt?.handled&&owner?.phase==='final'&&<p>The native terminal is visible; the original caller and history acknowledgement are still required. No completion is inferred yet.</p>}
+    </details>
     <button type="button" disabled={state.readPending} onClick={()=>void controller.checkStatus()}>Check original status</button>
   </section>;
 }

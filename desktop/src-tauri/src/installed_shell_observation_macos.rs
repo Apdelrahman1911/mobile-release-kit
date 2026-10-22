@@ -291,6 +291,9 @@ impl Case {
         if self == Self::Installation { installation_check::QUIT_ID }
         else if self == Self::ProjectFields { 12 } else if self == Self::FirstSave { 4 } else { 2 } }
     fn tool_index(self,id:u32)->Option<u8> {if let Self::ToolSetup(case)=self {case.picker(id)}else{None}}
+    fn tool_kind(self, i: u8) -> Option<mrk_macos_installed_native::PanelKind> {
+        if let Self::ToolSetup(case)=self {tool_setup::kind(case,i)}else{None}
+    }
     fn inputs(self) -> bool { matches!(self, Self::Ios(case) if case.inputs()) }
     fn file_index(self, id: u32) -> Option<u8> { match self { Self::Ios(case) => session::file_index(case,id), _ => None } }
     fn input_id(self, i: u8) -> Option<u32> { match self { Self::Ios(case) => session::choose_id(case,i), _ => None } }
@@ -302,7 +305,7 @@ impl Case {
             || self.field_index(id).is_some_and(project_fields::accepts) || self.tool_index(id).is_some())
     }
     fn kind_name(self, id: u32) -> &'static str {
-        self.tool_index(id).and_then(tool_setup::kind_name).or_else(||self.field_index(id).and_then(project_fields::kind_name)).unwrap_or(if self.file_index(id).is_some() { "file" } else { "project" })
+        self.tool_index(id).and_then(|i| if let Self::ToolSetup(case)=self {tool_setup::kind_name(case,i)}else{None}).or_else(||self.field_index(id).and_then(project_fields::kind_name)).unwrap_or(if self.file_index(id).is_some() { "file" } else { "project" })
     }
     fn open_id(self, step: Step) -> Option<u32> { match step {
         Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i))) if backup_cli::selected(self) => backup_cli::panel(i).map(|p|p.0),
@@ -1407,6 +1410,7 @@ impl Observation {
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let mut vault_record=matches!(case,Case::Vault(_)).then(vault::Record::default);
         if backup_cli::selected(case) { vault_record.as_mut().ok_or(())?.upload.cli=Some(backup_cli::Record::new(&fixture.root,fixture.uid,vault.as_deref().ok_or(())?)?); }
+        let tool_record = if let Case::ToolSetup(c)=case {Some(tool_setup::Record::new(c,&project_path,fixture.uid)?)}else{None};
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 bootstrap_failure: None, vault_failure: None, upload_failure: None,
@@ -1437,7 +1441,7 @@ impl Observation {
                 local_edits: if let Case::LocalEdits(c)=case{Some(local_edits::Record::new(c))}else{None},
                 checks: if let Case::Checks(c)=case{Some(checks::Record::new(c,started))}else{None},
                 identity: if let Case::Identity(c)=case{Some(identity::Record::new(c))}else{None},
-                tool_setup: tool_setup.as_ref().map(|_|tool_setup::Record::default()),
+                tool_setup: tool_record,
                 git_fetch:git_fetch.as_ref().map(|_|git_fetch::Record::default()),
                 git_push:git_push.as_ref().map(|_|git_push::Record::default()), cli,
                 git_upstream:git_upstream.as_ref().map(|_|git_upstream::Record::default()),
@@ -1468,7 +1472,7 @@ impl Observation {
                 && c.observation().is_some() && !c.completed());
         }
         if let Some(i)=self.case.tool_index(id) {
-            return tool_setup::kind(i)==Some(kind) && self.tool_setup.as_ref().is_some_and(|c|c.target(i).is_some() && c.observation().is_some() && !c.completed());
+            return self.case.tool_kind(i)==Some(kind) && self.tool_setup.as_ref().is_some_and(|c|c.target(i).is_some() && c.observation().is_some() && !c.completed());
         }
         // The real command can construct before the ChooseProject DOM return.
         // Immutable case/id only: no step/project_calls/acknowledgement race.
@@ -1542,7 +1546,7 @@ impl Observation {
             actual_kind
         } else if let Some(i)=self.case.tool_index(id) {
             if configuration.file_panel {self.fail_with("native-default-binding");return;}
-            let Some(kind)=tool_setup::kind(i) else {self.fail_with("native-default-binding");return;};kind
+            let Some(kind)=self.case.tool_kind(i) else {self.fail_with("native-default-binding");return;};kind
         } else if let Some(i) = self.case.field_index(id) {
             if configuration.file_panel { self.fail_with("native-default-binding"); return; }
             let Some(kind) = project_fields::kind(i) else { self.fail_with("native-default-binding"); return; }; kind
@@ -2870,7 +2874,7 @@ impl Observation {
             },
             Step::CancelProject | Step::PickerPending => (1,PanelKind::Project),
             Step::OpenProject => (self.case.selected_id(),PanelKind::Project),
-            Step::ToolSetup(tool_setup::Step::Native(i)) if self.case.tool_index(u32::from(i)+2)==Some(i) => (u32::from(i)+2,tool_setup::kind(i).ok_or("native-step")?),
+            Step::ToolSetup(tool_setup::Step::Native(i)) if self.case.tool_index(u32::from(i)+2)==Some(i) => (u32::from(i)+2,self.case.tool_kind(i).ok_or("native-step")?),
             Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File),
             Step::ProjectFields(project_fields::Step::Native(i)) if self.case == Case::ProjectFields =>
                 (project_fields::id(i).ok_or("native-step")?,project_fields::kind(i).ok_or("native-step")?),
@@ -4055,6 +4059,8 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         directory(&root,uid,0o700,&[git_fetch::NAMES[0],git_fetch::NAMES[1],git_fetch::NAMES[2],git_fetch::NAMES[3],"state"]).ok()?;
     } else if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
         directory(&root,uid,0o700,&[tool_setup::Case::ServicePreparation.name(),"state"]).ok()?;
+    } else if matches!(case,Case::ToolSetup(c) if c.public_acquisition()){
+        directory(&root,uid,0o700,&[tool_setup::PUBLIC_NAMES[0],tool_setup::PUBLIC_NAMES[1],"state"]).ok()?;
     } else if matches!(case,Case::ToolSetup(_)){
         directory(&root,uid,0o700,&[tool_setup::NAMES[0],tool_setup::NAMES[1],tool_setup::NAMES[2],"state"]).ok()?;
     } else if matches!(case,Case::Identity(_)){

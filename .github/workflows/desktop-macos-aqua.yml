@@ -814,6 +814,40 @@ jobs:
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_aqua_wrapping_private.sh
+      - name: Require the fixed SOURCE producer identity and release before ordinary signing
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Public SOURCE DATA only. This is not a signature/purpose verdict or
+          # a credential source; the native producer/parent verify independently.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
+            --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
+          "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
+          import json, os, re
+          from pathlib import Path
+          body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
+          if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
+          row = json.loads(body)
+          if (type(row) is not dict or row.get("schemaVersion") != 1
+                  or row.get("kind") != "source-packaging-selection-data"
+                  or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
+                  or not isinstance(row.get("leafCertificateSha1"), str)
+                  or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
+                  or row["leafCertificateSha1"] == "0" * 40
+                  or not isinstance(row.get("packageVersion"), str)
+                  or len(row["packageVersion"]) > 32
+                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
+                  or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
+                  or row["packageVersion"] == "0.1.0"):
+              raise ValueError("fixed SOURCE selection")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
+              output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
+              output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
+          PY_PACKAGING_SELECTION
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 2
@@ -828,7 +862,7 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.2 \
+            --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
             --target "$MRK_MACOS_TARGET" \
@@ -900,40 +934,6 @@ jobs:
             --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
             --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \
             > "$work/android-support-result.json"
-      - name: Require the fixed SOURCE producer identity and release before ordinary signing
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          # Public SOURCE DATA only. This is not a signature/purpose verdict or
-          # a credential source; the native producer/parent verify independently.
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
-            --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
-          "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
-          import json, os, re
-          from pathlib import Path
-          body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
-          if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
-          row = json.loads(body)
-          if (type(row) is not dict or row.get("schemaVersion") != 1
-                  or row.get("kind") != "source-packaging-selection-data"
-                  or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
-                  or not isinstance(row.get("leafCertificateSha1"), str)
-                  or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
-                  or row["leafCertificateSha1"] == "0" * 40
-                  or not isinstance(row.get("packageVersion"), str)
-                  or len(row["packageVersion"]) > 32
-                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
-                  or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
-                  or row["packageVersion"] == "0.1.0"):
-              raise ValueError("fixed SOURCE selection")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
-              output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
-              output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
-          PY_PACKAGING_SELECTION
       # Intel fetch120 is separate; compile720 and containing job caps are unchanged.
       - name: Build and sign the fixed resident image and C facades
         id: android_helper

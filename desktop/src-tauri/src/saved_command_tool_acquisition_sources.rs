@@ -156,6 +156,14 @@ impl CompletedSources {
             || !self.original.tools.intent.as_ref()?.current() || !original_joined(&self.original) { return None; }
         copy_location(self.locations[index(source_wire::Role::Sdk)].as_deref()?)
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn observed_all(&self, operation: &str, generation: &str) -> Option<[PathBuf;3]> {
+        let progress=self.progress.try_lock().ok()?;
+        if self.origin!=Origin::Acquired || self.roles!=7 || self.original.id!=operation || self.original.generation!=generation
+            || progress.retired || progress.picker.is_some() || progress.published
+            || !self.original.tools.intent.as_ref()?.current() || !original_joined(&self.original) { return None; }
+        Some([copy_location(self.locations[0].as_deref()?)?,copy_location(self.locations[1].as_deref()?)?,copy_location(self.locations[2].as_deref()?)?])
+    }
     pub(super) fn original(&self) -> &Arc<Session> { &self.original }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         self.locations.iter().flatten().try_fold(std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?,

@@ -169,7 +169,9 @@ class PushRouteTests(unittest.TestCase):
         self.assertEqual(a.selected_cases(None), a.CASES)
         self.assertEqual(a.argument_scope(["--scope", setup.SCOPE]), setup.SCOPE)
         self.assertEqual(m.arguments(["--target", m.TARGET, "--scope", setup.SCOPE]), setup.SCOPE)
-        env = {"MRK_MACOS_NATIVE_SCOPE": setup.SCOPE, "MRK_MACOS_PACKAGE_ROLE": m.ROLE, "GITHUB_REF": m.REF}
+        env = {"MRK_MACOS_NATIVE_SCOPE": setup.SCOPE, "MRK_MACOS_PACKAGE_ROLE": m.ROLE, "GITHUB_REF": m.REF,
+               "MRK_MACOS_RUNNER": "macos-26", "MRK_MACOS_MACHINE": "arm64",
+               "MRK_MACOS_HOSTED_JOB": "github-hosted-macos26-arm64"}
         self.assertEqual(m.package_role(env, "prepare", m.TARGET), m.ROLE)
         self.assertEqual(m.observation_scope(env, setup.SCOPE), setup.SCOPE)
         for scope in (m.FETCH_SCOPE, m.SCOPE, m.TOOLS_SCOPE, "all"):

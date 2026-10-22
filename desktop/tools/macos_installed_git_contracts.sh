@@ -582,6 +582,7 @@ selected_tests=(
   installed_cli::metadata_images_prepare::tests::actual_response_variant_keeps_preparation_separate_from_apply_permission
   metadata_images_edit_protocol::tests::immutable_cli_import_profile_accepts_ten_real_files_and_keeps_ordinary_decoder_limits
   edit_owner::agent_configuration::memory::images::tests::immutable_editing_quote_retains_five_bounded_frames_and_foreign_last_capacity
+  edit_owner::agent_configuration::memory::images::tests::image_census_does_not_relock_live_resources_or_adopt_foreign_slots
   service_metadata_images_prepare_requests::tests::repeated_unknown_and_stop_samples_do_not_self_wake_the_original_waiter
   metadata_images_commands::tests::picker_and_import_renderer_arguments_cannot_supply_paths_or_bodies
   metadata_images_edit_protocol::tests::checkout_binds_original_selection_and_prepared_preserve_is_not_the_selected_image
@@ -591,8 +592,48 @@ selected_tests=(
   github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_compact_result_is_read_only_and_hashes_the_full_native_five_file_review
   github_connection_session::publication::delegation::counter::setup_prepare_tests::ordinary_prepare_producer_needs_native_caller_and_history_before_a_separate_publish
   github_connection_session::publication::delegation::counter::setup_prepare_tests::lost_prepare_native_caller_or_history_never_becomes_a_ready_producer
+  # Initialization CLI, original decoder/owner and affected shared catalogue.
+  service_initialization_protocol::tests::initialization_wire_is_closed_required_null_and_never_an_arbitrary_editor
+  service_initialization_protocol::tests::compact_inventory_counts_do_not_mint_a_native_preview_or_cross_instance_response
+  service_initialization_requests::tests::same_initialization_rows_and_all_return_cuts_remain_in_the_original_book
+  service_initialization_requests::tests::original_call_return_is_distinct_from_early_opened_or_prepared_data
+  service_initialization_requests::tests::check_revision_is_consumed_before_wait_and_revoke_or_duplicate_cannot_rearm
+  service_initialization_requests::tests::native_control_imports_earlier_read_even_after_stop_and_poison_is_absorbing
+  service_initialization_requests::tests::known_unclaimed_refusal_waits_for_history_and_thirty_two_tombstones_are_not_evicted
+  service_initialization_requests::tests::full_entry_capacity_is_bounded_without_borrowing_another_family_or_worker_slot
+  service_initialization_requests::tests::initialization_and_existing_configuration_share_exactly_thirty_two_retained_slots
+  application_service::agent_initialization::tests::missing_or_invalid_configuration_queues_only_original_preparation_and_history_requires_real_ack
+  application_service::agent_initialization::tests::initialization_keeps_actual_read_scope_alias_and_unobserved_poison_not_saved_preferences
+  edit_owner::agent_initialization::tests::initialization_seven_original_publications_do_not_skip_repeat_or_rebase
+  edit_owner::agent_initialization::tests::private_inventory_summary_is_from_actual_initialization_preview_not_recovery_or_public_ids
+  edit_owner::agent_initialization::tests::initialization_positive_attribution_requires_original_chain_and_real_native_finality
+  edit_owner::agent_initialization::tests::initialization_code_census_borrows_only_the_same_live_slot_and_refuses_busy_or_lost
+  edit_owner::agent_configuration::memory::initialization::tests::initialization_quote_keeps_global_malformed_decode_and_three_frame_status_coexistence
+  edit_owner::agent_configuration::memory::initialization::tests::original_last_recovery_and_failed_capacity_are_not_erased_to_admit_initialization
+  asset_session::agent_initialization::tests::initialization_raw_is_closed_current_main_input_and_never_recovery_or_ipc_draft
+  asset_session::agent_initialization::tests::initialization_default_document_includes_complete_edit_future_and_retained_capacity
+  asset_session::agent_initialization::tests::initialization_first_peer_cut_has_no_publisher_or_saved_input_side_effect
+  installed_cli::initialization::tests::initialization_cli_has_only_id_prepare_and_explicit_exact_apply
+  installed_cli::initialization::tests::initialization_output_keeps_original_ids_unknown_and_missing_ack_no_replay
+  installed_cli::initialization::tests::complete_capabilities_and_help_disclose_real_desktop_input_and_recovery_boundary
+  installed_runtime::initialization_runtime::tests::initialization_agent_code_quote_uses_actual_target_records_and_native_frame
+  installed_runtime::initialization_runtime::tests::initialization_agent_slot_binding_is_once_before_entry_and_failed_capacity_is_not_zero
+  project_initialization_edit_protocol::tests::same_decoder_result_moves_original_workflow_strings_without_second_tree_clone
+  project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents
+  project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded
+  project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply
+  edit_owner::tests::initialization_intent_original_slot_and_recovery_finality_are_closed
+  service_request_catalogue::tests::additional_ids_have_strict_schema_presence_privacy_and_original_commands
+  # Public acquisition observer contracts and empty distinct Git nomination slots.
+  shell::installed_observation::tool_setup::acquire::tests::public_cases_keep_old_three_and_require_complete_cold_warm_partitions
+  shell::installed_observation::tool_setup::acquire::tests::in_transfer_cut_requires_same_file_nonshrinking_partial_after_real_return
+  shell::installed_observation::tool_setup::acquire::tests::cli_cancel_correlation_does_not_accept_finishing_or_foreign_originals
+  runtime::git_fetch::tests::two_closed_fetch_slots_match_only_distinct_complete_digests
+  runtime::git_push::tests::two_closed_push_slots_do_not_inherit_another_build_or_partial_list
+  runtime::git_fetch::tests::upstream_source_or_installed_version_does_not_supply_missing_clt_nomination
+  runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider
 )
-[[ "${#selected_tests[@]}" == 561 ]] || exit 1
+[[ "${#selected_tests[@]}" == 600 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -610,9 +651,9 @@ for test_name in "${selected_tests[@]}"; do
   fi
 done
 (( missing == 0 )) || exit 1
-/usr/bin/grep -Fx '561 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '600 tests, 0 benchmarks' "$list_log"
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 561 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 600 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

@@ -9,6 +9,8 @@ use std::{ffi::OsString, io::Write, path::PathBuf};
 mod identity;
 #[path="installed_cli_configuration.rs"]
 mod configuration;
+#[path="installed_cli_initialization.rs"]
+mod initialization;
 #[path="installed_cli_metadata_images_prepare.rs"]
 mod metadata_images_prepare;
 #[path="installed_cli_metadata_images.rs"]
@@ -83,6 +85,10 @@ Usage:\n\
   mrk metadata-text-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
   mrk metadata-text-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk metadata-text-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk initialization-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
+  mrk initialization-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+  mrk initialization-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk initialization-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk configuration-read PROJECT_ID OBSERVATION_REVISION [--json]\n\
   mrk configuration-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION --stdin [--json]\n\
   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
@@ -178,6 +184,7 @@ iOS uses the same four archive commands for unsigned archive, signed export, or 
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
 Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
 Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
+Release-project initialization uses the running Desktop's explicit valid draft and toolkit selection, not CLI paths/JSON or Git init. Full native preview and separate Apply consent are required; differing existing targets refuse, recovery stays in Desktop.\n\
 No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
 Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
 Apple key-recover verifies only the selected original durably saved key and may record a local verification association; no replacement key, restored-new reference, provider request or automatic next step.\n\
@@ -325,6 +332,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             },
             "metadataImages":{"commands":["metadata-images-read","metadata-images-prepare","metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":false,"nativeOpenedCliProfileOnly":true,"read":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":true,"recovery":false,"storeUpload":false,"headless":false},
             "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
+            "initialization":{"commands":["initialization-prepare","initialization-apply","initialization-status","initialization-cancel"],"arguments":"see --help","requiresSelectedDesktopDraftAndToolkit":true,"readAuthorizesPrepareOnly":true,"applyRequiresSeparateNativePreviewConsent":true,"existingTargetOverwrite":false,"recovery":false,"headless":false,"nativeAvailabilityChecked":false},
             "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
                 "excludes":["identity","version","enabled-platforms","commands","credentials","signing","recovery"],"nativeAvailabilityChecked":false},
@@ -392,7 +400,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","metadata-text","metadata-images","store","local-history","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","initialization","metadata-text","metadata-images","store","local-history","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -420,7 +428,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(initialization::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -525,6 +533,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+        p::ResponseBody::InitializationRequest(s)=>initialization::human(s),
         p::ResponseBody::AppleProvisioningRequest(_)|p::ResponseBody::AppleProvisioningPreparation(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
         p::ResponseBody::MetadataImagesPreparation(s)=>metadata_images_prepare::human(s),
         p::ResponseBody::MetadataImagesRequest(s)=>metadata_images::human(s),
@@ -575,6 +584,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
     if configuration::recognizes(&args){return configuration::run(args);}
+    if initialization::recognizes(&args){return initialization::run(args);}
     if metadata_images_prepare::recognizes(&args){return metadata_images_prepare::run(args);}
     if metadata_images::recognizes(&args){return metadata_images::run(args);}
     if metadata_text::recognizes(&args){return metadata_text::run(args);}

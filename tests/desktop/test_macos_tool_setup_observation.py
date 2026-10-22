@@ -160,6 +160,10 @@ class ToolSetupPassive(unittest.TestCase):
             paths = [TOOLS.application_path(BINDING, "/Users/example", case, PARENT.need) for case in TOOLS.CASES]
         self.assertEqual(len(set(paths)), 3)
         self.assertTrue(all(str(p).startswith("/Users/example/Library/Application Support/mrk-macos-aqua-tools-") for p in paths))
+        cold = TOOLS.application_path(BINDING, "/Users/example", TOOLS.PUBLIC.COLD, PARENT.need)
+        self.assertEqual(cold.parents[1].name, "mrk-macos-aqua-tools-public-" + "a" * 40 + "-123-1")
+        self.assertEqual({p.parents[1].name for p in paths}, {"mrk-macos-aqua-tools-" + "a" * 40 + "-123-1"})
+        self.assertNotIn(cold.parents[1], [p.parents[1] for p in paths])
         for home in ("/", "relative", "/Users/../foreign", "/Users//foreign", "/Users/foreign/"):
             with self.assertRaises(PARENT.Refused):
                 TOOLS.application_path(BINDING, home, TOOLS.CASES[0], PARENT.need)
@@ -205,6 +209,135 @@ class ToolSetupPassive(unittest.TestCase):
         self.assertIs(caught.exception, failure)
         self.assertTrue(fixture.inflight)
         self.assertFalse(fixture.last_returned)
+        readback.assert_not_called()
+
+
+PUBLIC = TOOLS.PUBLIC
+
+
+def public_report(case, executed=True):
+    """Fixed inert comparison DATA, not a claimed native/tool/HTTP result."""
+    cold = case == PUBLIC.COLD
+    value = {"mechanism": "same-original-public-tool-acquisition-v1", "execution": "executed",
+        "testResult": "cold-warm-source-inspected" if cold else "cancelled-in-transfer", "finding": "none",
+        "initial": sample("initial"), "cold": sample("acquire"),
+        "warmInitial": sample("initial") if cold else None, "warm": sample("acquire") if cold else None,
+        "coldOperation": "1" * 32 if cold else None, "warmOperation": "2" * 32 if cold else None,
+        "initialSdkSelected": cold, "selectedSources": [True] * 3, "sourceReviewed": cold, "cli": None, "normalQuitOriginal": 6 if cold else 5,
+        "normalAcquisitionEnabled": False, "protectedCopyRegistered": False, "selectedCatalogVerified": False,
+        "allOriginalsSettled": True, "projectSentinelPreserved": True, "productionQualified": False}
+    if not cold:
+        value["cold"].update(firstFailure=True, outcome="cancelled", reason="cancelled", completeSdkLocation=False)
+        stamp = [1, 2, 0o100600, 501, 20, 1, PUBLIC.MIN_CUT]
+        value["cli"] = {"origin": {"projectId": "3" * 32, "serviceInstance": "4" * 32, "requestId": "5" * 32},
+            "operationId": "6" * 32, "ownerGeneration": "7" * 32, "cut": stamp, "after": stamp.copy(),
+            "consumedPermission": True, "duplicateRefused": True, "nativeCallerHistoryReturned": True,
+            "phaseOriginalsClosed": True, "hostWorkersJoined": 7}
+    if not executed:
+        value.update(execution="not-executed-prerequisite", testResult="not-executed",
+                     finding="cold-sources-not-absent", selectedSources=[False] * 3,
+                     sourceReviewed=False, normalQuitOriginal=3 if cold else 2)
+        value.update(dict.fromkeys(("cold", "warmInitial", "warm", "coldOperation", "warmOperation", "cli")))
+    return value
+
+
+def public_output(case, executed=True):
+    value = PARENT.expected_result(BINDING, case)
+    value["toolSetup"] = public_report(case, executed)
+    return PARENT.MARKER + json.dumps(value, separators=(",", ":")).encode() + b"\n"
+
+
+class PublicAcquisitionReports(unittest.TestCase):
+    def test_same_report_parser_distinguishes_real_obligations_and_no_registration(self):
+        self.assertEqual(set(PUBLIC.SAMPLE_BOOLS), set(TOOLS.BOOLS))
+        for case in PUBLIC.CASES:
+            value = PARENT.parse_result(public_output(case), b"", BINDING, case)
+            self.assertEqual(value["toolSetup"], public_report(case))
+            self.assertFalse(value["shippingBinaryQualified"])
+            self.assertFalse(value["toolSetup"]["protectedCopyRegistered"])
+        value = PARENT.parse_result(public_output(PUBLIC.COLD, False), b"", BINDING, PUBLIC.COLD)
+        self.assertTrue(value["toolSetup"]["initialSdkSelected"])
+        self.assertEqual(value["toolSetup"]["normalQuitOriginal"], 3)
+        before_pick = public_report(PUBLIC.COLD, False)
+        before_pick.update(initialSdkSelected=False, normalQuitOriginal=2, initial=None, finding="service-or-catalogue")
+        self.assertIs(PUBLIC.report(before_pick, PUBLIC.COLD, PARENT.need, TOOLS._sample), before_pick)
+        for change in (dict(initialSdkSelected=True), dict(normalQuitOriginal=3), dict(initial=sample("initial"))):
+            wrong = copy.deepcopy(before_pick); wrong.update(change)
+            with self.subTest(change=change), self.assertRaises(PARENT.Refused):
+                PUBLIC.report(wrong, PUBLIC.COLD, PARENT.need, TOOLS._sample)
+        self.assertEqual(value["toolSetup"]["testResult"], "not-executed")
+        with self.assertRaises(PARENT.Refused):
+            PUBLIC.report(public_report(PUBLIC.CANCEL, False), PUBLIC.CANCEL, PARENT.need, TOOLS._sample)
+
+    def test_old_pretransfer_unknown_loose_fields_or_truthy_counts_cannot_pass(self):
+        changes = (lambda v: v.update(cold=sample("cancel")),
+                   lambda v: v["cold"].update(reason="cleanup-unknown"),
+                   lambda v: v["cold"].update(extra="not-a-sample"),
+                   lambda v: v["cold"].update(current=1),
+                   lambda v: v["cli"].update(hostWorkersJoined=8),
+                   lambda v: v["cli"].update(hostWorkersJoined=True),
+                   lambda v: v["cli"].update(nativeCallerHistoryReturned=False),
+                   lambda v: v["cli"]["after"].__setitem__(6, PUBLIC.ARCHIVE_BYTES),
+                   lambda v: v["cli"]["after"].__setitem__(1, 99))
+        for change in changes:
+            value = public_report(PUBLIC.CANCEL); change(value)
+            with self.subTest(change=change), self.assertRaises(PARENT.Refused):
+                PUBLIC.report(value, PUBLIC.CANCEL, PARENT.need, TOOLS._sample)
+        for change in (dict(warmOperation="1" * 32), dict(sourceReviewed=False),
+                       dict(protectedCopyRegistered=True), dict(selectedSources=[True] * 4),
+                       dict(initialSdkSelected=False), dict(initialSdkSelected=1), dict(normalQuitOriginal=5)):
+            value = public_report(PUBLIC.COLD); value.update(change)
+            with self.subTest(change=change), self.assertRaises(PARENT.Refused):
+                PUBLIC.report(value, PUBLIC.COLD, PARENT.need, TOOLS._sample)
+
+    def test_closed_additional_selector_preserves_old_order_and_project_bytes(self):
+        self.assertEqual(PARENT.argument_scope(["--scope", "tool-setup", "--tool-cases", "public-acquisition"]), PUBLIC.SCOPE)
+        self.assertEqual(PARENT.selected_cases(PUBLIC.SCOPE), (PUBLIC.CANCEL, PUBLIC.COLD))
+        self.assertEqual(PARENT.selected_cases(TOOLS.SCOPE), TOOLS.CASES)
+        self.assertEqual(TOOLS.RUN_ORDER, (TOOLS.CASES[1], TOOLS.CASES[2], TOOLS.CASES[0]))
+        for bad in (["--scope", PUBLIC.SCOPE], ["--scope", "tool-setup", "--tool-cases", "all"],
+                    ["--tool-cases", "public-acquisition", "--scope", "tool-setup"]):
+            with self.assertRaises(PARENT.Refused):
+                PARENT.argument_scope(bad)
+        for case in PUBLIC.CASES:
+            self.assertEqual(PARENT.case_timeout(case), PUBLIC.APP_SECONDS)
+            self.assertEqual(PARENT.fixture_data(case, False), PARENT.fixture_data(TOOLS.CASES[1], False))
+        path = TOOLS.fixture_path(BINDING, "/Users/example", service=False, public_acquisition=True, need=PARENT.need)
+        self.assertEqual(path.name, "mrk-macos-aqua-" + "a" * 40 + "-123-1-" + PUBLIC.SCOPE)
+
+    def test_same_runner_executes_cancel_first_and_keeps_cold_nonentry_separate(self):
+        calls, outputs = [], []
+        class InertFixtures:
+            cases = PUBLIC.CASES
+            path = TOOLS.fixture_path(BINDING, "/Users/example", service=False, public_acquisition=True, need=PARENT.need)
+            inflight = False
+            last_returned = False
+            def recovery_runtime_paths(self): return ("inert-only",)
+            def before_call(self, case): self.case = case
+        fixture = InertFixtures()
+        def owner(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, public_output(argv[1], argv[1] == PUBLIC.CANCEL), b"")
+        def cli_route(f, call, argv, env, state):
+            self.assertTrue(f.inflight)
+            self.assertEqual(argv[1], PUBLIC.CANCEL)
+            return call(argv, environ=env, cwd=state, timeout=PUBLIC.APP_SECONDS)
+        with patch.object(PARENT.CLI, "invoke", side_effect=cli_route) as cli, \
+             patch.object(TOOLS, "readback", return_value={"inertOnly": True}) as readback:
+            missing = PARENT.run_cases(BINDING, fixture, owner, 501, "example", outputs.append, PUBLIC.SCOPE)
+        self.assertEqual(missing, (PUBLIC.COLD,))
+        self.assertEqual([c[0][1] for c in calls], list(PUBLIC.CASES))
+        self.assertEqual(cli.call_count, 1)
+        self.assertEqual(readback.call_count, 2)
+        self.assertFalse(fixture.inflight)
+        self.assertTrue(fixture.last_returned)
+        fixture = InertFixtures()
+        first = RuntimeError("inert original did not return")
+        with patch.object(PARENT.CLI, "invoke", side_effect=first), patch.object(TOOLS, "readback") as readback:
+            with self.assertRaises(RuntimeError) as caught:
+                PARENT.run_cases(BINDING, fixture, owner, 501, "example", outputs.append, PUBLIC.SCOPE)
+        self.assertIs(caught.exception, first)
+        self.assertTrue(fixture.inflight)
         readback.assert_not_called()
 
 

@@ -99,6 +99,8 @@ mod agent_ios_archive;
 mod request_catalogue;
 #[path="service_git_application.rs"]
 mod git_index;
+#[path="service_initialization_application.rs"]
+mod agent_initialization;
 #[path="service_configuration_application.rs"]
 mod agent_configuration;
 #[path="service_metadata_images_application.rs"]
@@ -546,6 +548,10 @@ impl ApplicationService {
                 p::RequestBody::MetadataTextApply(v) => return self.metadata_text_apply(client,v.clone()),
                 p::RequestBody::MetadataTextStatus(q) => return self.metadata_text_query(client,q,false),
                 p::RequestBody::MetadataTextCancel(q) => return self.metadata_text_query(client,q,true),
+                p::RequestBody::InitializationPrepare(v)=>return self.initialization_prepare(client,v.clone()),
+                p::RequestBody::InitializationApply(v)=>return self.initialization_apply(client,v.clone()),
+                p::RequestBody::InitializationStatus(q)=>return self.initialization_query(client,q,false),
+                p::RequestBody::InitializationCancel(q)=>return self.initialization_query(client,q,true),
                 p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
                 p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
                 p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
@@ -562,6 +568,7 @@ impl ApplicationService {
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                p::RequestBody::InitializationPrepare(_)|p::RequestBody::InitializationApply(_)|p::RequestBody::InitializationStatus(_)|p::RequestBody::InitializationCancel(_)|
                 p::RequestBody::MetadataImagesRead(_)|p::RequestBody::MetadataImagesPrepare(_)|p::RequestBody::MetadataImagesScope(_)|p::RequestBody::MetadataImagesSubmit(_)|p::RequestBody::MetadataImagesStatus(_)|p::RequestBody::MetadataImagesCancel(_)|
                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |

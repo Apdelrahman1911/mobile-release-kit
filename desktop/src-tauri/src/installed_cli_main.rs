@@ -14,6 +14,8 @@ mod service_version_edit_requests;
 mod service_version_edit_prepare_protocol;
 mod service_version_edit_prepare_requests;
 mod service_configuration_protocol;
+mod service_initialization_protocol;
+mod service_initialization_requests;
 mod bounded_json_seed;
 mod service_metadata_images_protocol;
 mod service_metadata_images_requests;

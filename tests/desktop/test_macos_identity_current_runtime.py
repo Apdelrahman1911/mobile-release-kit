@@ -40,6 +40,8 @@ def environment():
     return {
         "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
         "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": "push",
+        "MRK_MACOS_RUNNER": "macos-26", "MRK_MACOS_MACHINE": "arm64",
+        "MRK_MACOS_HOSTED_JOB": "github-hosted-macos26-arm64",
         "GITHUB_REPOSITORY": M.REPOSITORY, "GITHUB_REF": M.REF,
         "GITHUB_WORKSPACE": str(M.CHECKOUT), "GITHUB_WORKFLOW_REF": M.WORKFLOW,
         "GITHUB_SHA": BINDING.source, "GITHUB_WORKFLOW_SHA": BINDING.source,
@@ -61,6 +63,96 @@ class InertOnly(unittest.TestCase):
 
 
 class CurrentRouteTests(InertOnly):
+    def test_public_acquisition_is_only_a_closed_tool_image_selector_not_a_new_package_role(self):
+        args = ["--target", M.TARGET, "--scope", M.TOOLS_SCOPE, "--tool-cases", "public-acquisition"]
+        self.assertEqual(M.arguments(args), M.PUBLIC_TOOLS_SCOPE)
+        env = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.TOOLS_SCOPE}
+        self.assertEqual(M.observation_scope(env, M.PUBLIC_TOOLS_SCOPE), M.PUBLIC_TOOLS_SCOPE)
+        self.assertEqual(M.package_role(env, "package-install", M.TARGET), M.ROLE)
+        for wrong in (["--target", M.TARGET, "--scope", M.PUBLIC_TOOLS_SCOPE], args + ["extra"],
+                      ["--target", A.INTEL_TARGET, *args[2:]], args[:-1] + ["all"]):
+            with self.subTest(args=wrong), self.assertRaises(M.Refused):
+                M.arguments(wrong)
+        for native in (M.SCOPE, M.GIT_SCOPE, M.PUBLIC_TOOLS_SCOPE, "disabled"):
+            with self.subTest(native=native), self.assertRaises(M.Refused):
+                M.observation_scope({**env, "MRK_MACOS_NATIVE_SCOPE": native}, M.PUBLIC_TOOLS_SCOPE)
+
+    def main_with_host_data(self, env, version, scope, *, machine="arm64"):
+        # These substituted host observations are DATA only. main, context,
+        # _native_user and the before-owner refusal ordering are actual code;
+        # no installed owner or Mac native work is invoked.
+        import stat
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, env, clear=True))
+            stack.enter_context(patch.object(sys, "argv", ["entry", "--target", M.TARGET, "--scope", scope]))
+            stack.enter_context(patch.object(M, "__file__", str(M.CHECKOUT / "desktop/tools/macos_identity_current_runtime.py")))
+            stack.enter_context(patch.object(M.Path, "cwd", return_value=M.CHECKOUT))
+            stack.enter_context(patch("platform.machine", return_value=machine))
+            observed = stack.enter_context(patch("platform.mac_ver", return_value=(version, (), "arm64")))
+            stack.enter_context(patch("pwd.getpwuid", return_value=SimpleNamespace(pw_name="runner")))
+            for name, value in (("getuid", 501), ("geteuid", 501), ("getgid", 20), ("getegid", 20)):
+                stack.enter_context(patch.object(M.os, name, return_value=value))
+            stack.enter_context(patch.object(M.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFCHR, st_uid=501)))
+            stack.enter_context(patch.object(M.os, "umask"))
+            stack.enter_context(patch.object(M.sys, "platform", "darwin"))
+            stack.enter_context(patch.object(M.sys, "flags", SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1)))
+            owner = stack.enter_context(patch.object(M, "_load_observer", return_value=SimpleNamespace(Binding=A.Binding)))
+            run = stack.enter_context(patch.object(M, "_run", return_value=0))
+            error = stack.enter_context(redirect_stderr(io.StringIO()))
+            result = M.main()
+        return result, observed, owner, run, error.getvalue()
+
+    def test_selected_mac27_uses_existing_four_driver_scopes_after_one_checked_host_observation(self):
+        env27 = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
+                 "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+        env, version = env27, "27.0.1"
+        for scope in (M.FETCH_SCOPE, M.PUSH_SCOPE, M.PUSH_CREATE_SCOPE, M.UPSTREAM_SCOPE):
+            with self.subTest(version=version, scope=scope):
+                self.assertEqual(M.current_context(env, M.TARGET)[0], BINDING.source)
+                for phase in M.PACKAGE_PHASES + M.DATA_PHASES:
+                    self.assertEqual(M.package_role(env, phase, M.TARGET), M.ROLE)
+                result, observed, owner, run, error = self.main_with_host_data(env, version, scope)
+                self.assertEqual((result, error), (0, ""))
+                observed.assert_called_once_with()
+                owner.assert_called_once_with()
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.kwargs["host"], (env["MRK_MACOS_RUNNER"], version))
+                self.assertEqual(run.call_args.kwargs["scope"], scope)
+
+    def test_old_host_stays_admitted_and_wrong_or_missing_profile_refuses_before_owner(self):
+        result, observed, owner, run, error = self.main_with_host_data(environment(), "26.0.1", M.SCOPE)
+        self.assertEqual((result, error), (0, ""))
+        observed.assert_called_once_with()
+        owner.assert_called_once_with()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["host"], ("macos-26", "26.0.1"))
+        env27 = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
+                 "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+        rejected = [(env27, "26.0.1", M.FETCH_SCOPE),
+                    ({**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE}, "27.0.1", M.FETCH_SCOPE)]
+        for scope, request in ((M.SCOPE, M.SCOPE), (M.TOOLS_SCOPE, M.SCOPE),
+                               (M.FETCH_SCOPE, M.FETCH_SCOPE), (M.PUSH_SCOPE, M.PUSH_SCOPE)):
+            rejected.append(({**env27, "MRK_MACOS_NATIVE_SCOPE": scope}, "27.0.1", request))
+        for key, value in (("MRK_MACOS_RUNNER", "macos-latest"), ("MRK_MACOS_RUNNER", "xcode-27-xlarge"),
+                           ("MRK_MACOS_HOSTED_JOB", "github-hosted-macos26-arm64"),
+                           ("MRK_MACOS_MACHINE", "x86_64"), ("RUNNER_ARCH", "X64"),
+                           ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image"), ("GITHUB_REF", "refs/heads/main")):
+            rejected.append(({**env27, key: value}, "27.0.1", M.FETCH_SCOPE))
+        for key in ("MRK_MACOS_RUNNER", "MRK_MACOS_MACHINE", "MRK_MACOS_HOSTED_JOB"):
+            absent = dict(env27); absent.pop(key)
+            rejected.append((absent, "27.0.1", M.FETCH_SCOPE))
+        for version in ("28.0.1", "027.0.1", "27.0.1\n", "27.0.1\u2028", "27.0.1extra", "27." + "0" * 32):
+            rejected.append((env27, version, M.FETCH_SCOPE))
+        for env, version, scope in rejected:
+            with self.subTest(env=env, version=version, scope=scope):
+                result, _observed, owner, run, error = self.main_with_host_data(env, version, scope)
+                self.assertEqual(result, 1)
+                self.assertEqual(json.loads(error)["reason"], "entry-refused")
+                owner.assert_not_called(); run.assert_not_called()
+        result, _, owner, run, _ = self.main_with_host_data(env27, "27.0.1", M.FETCH_SCOPE, machine="x86_64")
+        self.assertEqual(result, 1)
+        owner.assert_not_called(); run.assert_not_called()
+
     def test_only_explicit_current_arm_scope_and_fixed_preparation_phases(self):
         env = environment()
         for phase in M.PACKAGE_PHASES + M.DATA_PHASES:
@@ -111,8 +203,14 @@ class CurrentRouteTests(InertOnly):
             self.assertEqual(PACKAGE.admit(environment(), phase="prepare"), Path(ordinary["MRK_MACOS_WORK"]))
             self.assertEqual(loader.call_args.args[1], "macos_identity_current_runtime.py")
             PACKAGE.tool_data_context(environment(), M.DATA_PHASES[0], M.TARGET)
+            env27 = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
+                     "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+            self.assertEqual(PACKAGE.admit(env27, phase="prepare"), Path(ordinary["MRK_MACOS_WORK"]))
+            PACKAGE.tool_data_context(env27, M.DATA_PHASES[0], M.TARGET)
             for method in (lambda env: PACKAGE.admit(env, phase="prepare"),
                            lambda env: PACKAGE.tool_data_context(env, M.DATA_PHASES[0], M.TARGET)):
+                with self.assertRaises(M.Refused):
+                    method({**env27, "MRK_MACOS_NATIVE_SCOPE": M.TOOLS_SCOPE})
                 with self.assertRaises(M.Refused):
                     method({**environment(), "MRK_MACOS_NATIVE_SCOPE": "unknown"})
                 with self.assertRaises(PACKAGE.Refused):
@@ -273,9 +371,10 @@ class OriginalCallFlowTests(InertOnly):
         fixtures = A.Fixtures(BINDING, 501, 20, scope)
         def prepare():
             events.append("prepare")
-            if scope in (M.TOOLS_SCOPE, M.SERVICE_SCOPE):
+            if scope in (M.TOOLS_SCOPE, M.SERVICE_SCOPE, M.PUBLIC_TOOLS_SCOPE):
                 # Inert comparison only, never native pwd or a created fixture.
-                fixtures.path = A.TOOLS.fixture_path(BINDING, "/Users/runner", service=scope == M.SERVICE_SCOPE, need=A.need)
+                fixtures.path = A.TOOLS.fixture_path(BINDING, "/Users/runner", service=scope == M.SERVICE_SCOPE,
+                    public_acquisition=scope == M.PUBLIC_TOOLS_SCOPE, need=A.need)
         fixtures.prepare = prepare
         fixtures.recovery_runtime_paths = lambda: events.append("runtime-post")
         fixtures.before_call = lambda case: (events.append(("before", case)), setattr(fixtures, "case", case))
@@ -322,10 +421,20 @@ class OriginalCallFlowTests(InertOnly):
             stack.enter_context(patch.object(A.identity_qualification, "readback", side_effect=readback))
             stack.enter_context(patch.object(A.TOOLS, "readback", side_effect=readback))
             stack.enter_context(patch.object(A.TOOLS, "service_readback", side_effect=readback))
+            if scope == M.PUBLIC_TOOLS_SCOPE:
+                # Routing-only stub. The separate CLI tests use the real Calls
+                # and thread; neither fixture manufactures native authority.
+                stack.enter_context(patch.object(A.CLI, "invoke", side_effect=lambda f, call, argv, env, state:
+                    call(argv, environ=env, cwd=state, timeout=A.case_timeout(argv[1]))))
             parsed = {"projectIdentity": {"inertOnly": True}} if scope == M.SCOPE else {"toolSetup": {
                 "execution": "not-executed-prerequisite" if not_ready else "ready",
                 "testResult": "not-executed" if not_ready else "INERT ONLY"}}
-            stack.enter_context(patch.object(A, "parse_result", return_value=parsed))
+            if scope == M.PUBLIC_TOOLS_SCOPE:
+                stack.enter_context(patch.object(A, "parse_result", side_effect=lambda raw, stderr, binding, case:
+                    {"toolSetup": {"execution": "not-executed-prerequisite" if not_ready and case == A.PUBLIC_TOOLS.COLD else "executed",
+                                   "testResult": "not-executed" if not_ready and case == A.PUBLIC_TOOLS.COLD else "INERT ONLY"}}))
+            else:
+                stack.enter_context(patch.object(A, "parse_result", return_value=parsed))
             stack.enter_context(patch.object(A, "diagnostic", side_effect=diagnose))
             if run_cases:
                 stack.enter_context(patch.object(A, "run_cases", side_effect=run_cases))
@@ -415,6 +524,24 @@ class OriginalCallFlowTests(InertOnly):
         self.assertTrue(fixtures.inflight)
         self.assertNotIn("close", events)
         self.assertEqual(len([e for e in events if type(e) is tuple and e[0] == "original-inert-call"]), 1)
+
+    def test_public_pair_same_driver_close_order_and_cold_prerequisite_do_not_hide_cli_failure(self):
+        for missing in (False, True):
+            status, events, rows, errors, fixtures, _ = self.execute(scope=M.PUBLIC_TOOLS_SCOPE, not_ready=missing)
+            self.assertEqual(status, 78 if missing else 0)
+            self.assertEqual(errors, [])
+            self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], list(A.PUBLIC_TOOLS.CASES))
+            self.assertEqual(events[-1], "close")
+            self.assertFalse(fixtures.inflight)
+            self.assertEqual(rows[-1]["type"], "macos-tool-current-unexecuted" if missing else "macos-tool-public-acquisition-current-complete")
+            if missing:
+                self.assertEqual(rows[-1]["notExecuted"], [A.PUBLIC_TOOLS.COLD])
+        first = RuntimeError("inert CLI/app original did not return")
+        status, events, rows, errors, fixtures, _ = self.execute(scope=M.PUBLIC_TOOLS_SCOPE, failure=first)
+        self.assertEqual((status, rows, errors), (1, [], [first]))
+        self.assertTrue(fixtures.inflight)
+        self.assertNotIn("close", events)
+        self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], [A.PUBLIC_TOOLS.CANCEL])
 
 
 if __name__ == "__main__":

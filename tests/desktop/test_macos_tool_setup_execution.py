@@ -116,9 +116,9 @@ class ServiceReports(PassiveOnly):
         (home / "Library").mkdir(mode=0o700)
         support = home / "Library/Application Support"
         support.mkdir(mode=0o700)
-        fixtures = OBS.Fixtures(OBS.Binding("a" * 40, "2", "1"), 501, 20, T.SERVICE_SCOPE)
+        fixtures = OBS.Fixtures(OBS.Binding("a" * 40, "2", "1"), os.getuid(), os.getgid(), T.SERVICE_SCOPE)
         self.addCleanup(fixtures.close)
-        account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_dir=str(home))
+        account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_dir=str(home))
         with patch("pwd.getpwuid", return_value=account):
             T.prepare_namespace(fixtures, OBS.need, OBS.signature)
         self.assertFalse(fixtures.path.exists())  # This test creates no fixture.
@@ -131,6 +131,56 @@ class ServiceReports(PassiveOnly):
         self.assertEqual(fixtures.fds, retained)
         fixtures.close()
         self.assertFalse(fixtures.fds)
+
+    def test_public_cold_empty_sdk_is_exclusive_current_and_separate_from_old_three(self):
+        # Real private mkdir/open/close only; no native/source receipt or tool IO.
+        with tempfile.TemporaryDirectory(prefix=".tool-public-parents-", dir=ROOT) as temporary:
+            home = Path(temporary)
+            (home / "Library").mkdir(mode=0o700)
+            (home / "Library/Application Support").mkdir(mode=0o700)
+            account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_dir=str(home))
+            for number, mutation in enumerate(("replace", "foreign-entry"), 1):
+                binding = OBS.Binding("a" * 40, str(number), "1")
+                public = OBS.Fixtures(binding, os.getuid(), os.getgid(), T.PUBLIC.SCOPE)
+                old = OBS.Fixtures(binding, os.getuid(), os.getgid(), T.SCOPE)
+                duplicate = OBS.Fixtures(binding, os.getuid(), os.getgid(), T.PUBLIC.SCOPE)
+                owners = (public, old, duplicate)
+                try:
+                    with patch("pwd.getpwuid", return_value=account):
+                        T.prepare_parents(public, OBS.need, OBS.signature)
+                        T.prepare_parents(old, OBS.need, OBS.signature)
+                        # Same binding, distinct CLOSED namespaces. No overwrite/adopt.
+                        with self.assertRaises(FileExistsError):
+                            T.prepare_parents(duplicate, OBS.need, OBS.signature)
+                    cold_parent = public.tool_paths[T.PUBLIC.COLD].parent
+                    sdk = cold_parent / T.EMPTY_SDK
+                    before = public.tool_empty_sdk
+                    self.assertEqual(OBS.signature(sdk.stat()), before)
+                    self.assertEqual(set(p.name for p in cold_parent.iterdir()), {T.EMPTY_SDK})
+                    self.assertNotEqual(cold_parent.parent, old.tool_paths[T.CASES[0]].parent.parent)
+                    self.assertEqual(set(p.name for p in cold_parent.parent.iterdir()), {T.PUBLIC.COLD})
+                    self.assertEqual(set(p.name for p in old.tool_paths[T.CASES[0]].parent.parent.iterdir()), set(T.CASES))
+                    retained = set(public.fds)
+                    T.parents_current(public, OBS.need, OBS.signature)
+                    T.parents_current(old, OBS.need, OBS.signature)
+                    self.assertEqual(public.fds, retained)  # The SDK FD really returned/closed.
+                    self.assertIsNone(old.tool_empty_sdk)
+                    if mutation == "replace":
+                        sdk.rename(cold_parent / "retained-empty-sdk")
+                        sdk.mkdir(mode=0o700)
+                    else:
+                        (sdk / "foreign").write_bytes(b"retained foreign input\n")
+                    with self.assertRaises(OBS.Refused):
+                        T.parents_current(public, OBS.need, OBS.signature)
+                    self.assertEqual(public.tool_empty_sdk, before)  # No recensus/adoption.
+                    self.assertEqual(public.fds, retained)
+                    if mutation == "foreign-entry":
+                        self.assertEqual((sdk / "foreign").read_bytes(), b"retained foreign input\n")
+                finally:
+                    for owner in owners:
+                        owner.close()
+                        self.assertFalse(owner.fds)
+                        self.assertEqual(owner.close_errors, 0)
 
 
 class FixturePreparation(PassiveOnly):
@@ -272,6 +322,157 @@ class FixturePreparation(PassiveOnly):
             original.replay_platform((path, before))
         self.assertIsNone(original.archive_fd)
         self.assertEqual(path.read_bytes(), b"tampered")
+
+
+class PublicAcquisitionReadback(PassiveOnly):
+    """Real tiny private files and original readers, never acquisition/HTTP."""
+    def setUp(self):
+        super().setUp()
+        self.stack.enter_context(patch("socket.socket", side_effect=AssertionError("no socket")))
+        self.temp = tempfile.TemporaryDirectory(prefix="mrk-tool-readback-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.public = T.PUBLIC
+        self.f = OBS.Fixtures(OBS.Binding("a" * 40, "1", "1"), os.getuid(), os.getgid(), self.public.SCOPE)
+        self.f.last_returned = True
+        self.application = self.f._open(str(self.root), directory=True)
+        self.f.parent = self.application
+        self.addCleanup(self.close_files)
+
+    def close_files(self):
+        self.assertFalse(self.f.inflight)
+        for fd in tuple(self.f.fds):
+            self.assertTrue(self.f._close(fd))
+        self.assertEqual(self.f.close_errors, 0)
+
+    def directory(self, relative):
+        path = self.root / relative
+        path.mkdir(mode=0o700, parents=True)
+        # pathlib's intermediate default mode is not fixture authority.
+        for parent in (path, *path.parents):
+            if parent == self.root:
+                break
+            os.chmod(parent, 0o700)
+        return path
+
+    def file(self, relative, raw=b"inert-only\n"):
+        path = self.root / relative
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+
+    def partial(self):
+        operation = "1" * 32
+        job = "tool-cache-v1/archives/tool-" + operation
+        self.directory(job + "/sources")
+        self.file(job + "/origin.json")
+        archive = self.file(job + "/" + self.public.ARCHIVE, b"x" * self.public.MIN_CUT)
+        c = OBS.CLI.Fixture(self.f)
+        c.application_fd = self.application
+        cut = self.public.TransferCut(c, operation)
+        return c, cut, archive
+
+    def capture(self, cut):
+        calls = OBS.CLI.Calls(clock=lambda: 10.0, case=self.public.CANCEL)
+        return cut.capture(calls)
+
+    def test_actual_stat_cut_retains_three_dirs_and_rejects_foreign_inode_without_reading_archive(self):
+        c, cut, archive = self.partial()
+        # Real tiny test-owned descriptors exercise the fixed residual slots;
+        # they are not claimed to be the protected installed thirteen roles.
+        for _ in range(13):
+            c.retain(self.f._open(".", self.application, directory=True))
+        with patch("os.pread", side_effect=AssertionError("archive content reader forbidden")):
+            before = self.capture(cut)
+            self.assertEqual(len(c.extra), OBS.CLI.FD_LIMIT)
+            self.assertEqual(before[6], self.public.MIN_CUT)
+            with archive.open("ab") as writer:
+                writer.write(b"one more returned chunk")
+            after = cut.returned()
+            self.assertEqual(before[:6], after[:6])
+            self.assertGreater(after[6], before[6])
+            replacement = self.file(str(archive.relative_to(self.root)) + ".replacement", b"z" * self.public.MIN_CUT)
+            os.replace(replacement, archive)  # Only a unit-test-owned fixture.
+            with self.assertRaisesRegex(ValueError, "substitution"):
+                cut.returned()
+            self.assertEqual(archive.stat().st_size, self.public.MIN_CUT)
+
+    def test_no_full_or_truncated_archive_no_success_row_or_second_job_can_pass(self):
+        _, cut, archive = self.partial()
+        before = self.capture(cut)
+        original_stat = os.stat
+        def full(name, *args, **kw):
+            s = original_stat(name, *args, **kw)
+            if name == self.public.ARCHIVE:
+                return SimpleNamespace(st_dev=s.st_dev, st_ino=s.st_ino, st_mode=s.st_mode,
+                    st_uid=s.st_uid, st_gid=s.st_gid, st_nlink=s.st_nlink, st_size=self.public.ARCHIVE_BYTES)
+            return s
+        # Full-size metadata DATA, not a 77MB allocation or download.
+        with patch("os.stat", side_effect=full), self.assertRaisesRegex(ValueError, "file-shape"):
+            cut.returned()
+        other = self.directory("tool-cache-v1/archives/tool-" + "2" * 32)
+        with self.assertRaisesRegex(OBS.Refused, "only-original-job"):
+            cut.returned()
+        other.rmdir()  # Remove only this test's own empty negative fixture.
+        self.file(str(archive.parent.relative_to(self.root)) + "/result.json")
+        with self.assertRaisesRegex(OBS.Refused, "job-roster"):
+            cut.returned()
+        self.assertEqual(cut.cut, before)
+
+    def test_original_clock_cut_and_symlink_refusal_are_not_a_new_timer_or_retry(self):
+        _, cut, archive = self.partial()
+        archive.unlink()
+        archive.symlink_to("origin.json")
+        with self.assertRaisesRegex(ValueError, "file-shape"):
+            cut.sample()
+        tick, waits = [10.0], []
+        calls = SimpleNamespace(success_end=2410.0, clock=lambda: tick[0], check=lambda: None,
+            stop=SimpleNamespace(wait=lambda delay: (waits.append(delay), tick.__setitem__(0, tick[0] + 61))))
+        with patch.object(cut, "sample", return_value=None), self.assertRaisesRegex(ValueError, "not-observed"):
+            cut.capture(calls)
+        self.assertEqual(waits, [self.public.POLL_INTERVAL] * 2)
+        self.assertIsNone(cut.cut)
+
+    def test_warm_job_uses_exact_producer_roster_without_new_archive_or_extra_job(self):
+        cold, warm = "1" * 32, "2" * 32
+        self.directory("tool-cache-v1/origins")
+        self.file("tool-cache-v1/.lease")
+        for number, operation in enumerate((cold, warm)):
+            job = "tool-cache-v1/archives/tool-" + operation
+            self.directory(job + "/sources")
+            self.file(job + "/origin.json"); self.file(job + "/result.json")
+            if number == 0:
+                for part in self.public.PARTS:
+                    self.file(job + "/" + part + ".archive")
+        value = {"execution": "executed", "coldOperation": cold, "warmOperation": warm}
+        before = self.f.fds.copy()
+        self.public.cold_readback(self.f, self.application, value)
+        self.assertEqual(self.f.fds, before)  # Every temporary original closed.
+        new_archive = self.file("tool-cache-v1/archives/tool-" + warm + "/jdk.archive")
+        with self.assertRaisesRegex(OBS.Refused, "producer-or-warm-roster"):
+            self.public.cold_readback(self.f, self.application, value)
+        new_archive.unlink()
+        self.directory("tool-cache-v1/archives/tool-" + "3" * 32)
+        with self.assertRaisesRegex(OBS.Refused, "two-original-jobs"):
+            self.public.cold_readback(self.f, self.application, value)
+        self.assertEqual(self.f.fds, before)
+
+    def test_whole_remaining_disk_is_checked_before_the_original_case_admission(self):
+        for case, payload in ((self.public.COLD, self.public.COLD_WARM_BYTES),
+                              (self.public.CANCEL, self.public.COPY_BYTES + self.public.ARCHIVE_BYTES)):
+            total = payload + self.public.METADATA + self.public.RESERVE
+            with patch("os.fstatvfs", return_value=SimpleNamespace(f_bavail=total - 1, f_frsize=1)), \
+                 self.assertRaisesRegex(ValueError, "disk-prerequisite"):
+                self.public.space_before(self.f, case)
+            with patch("os.fstatvfs", return_value=SimpleNamespace(f_bavail=total, f_frsize=1)):
+                self.public.space_before(self.f, case)
+        self.f.inflight = True
+        try:
+            with patch("os.fstatvfs", side_effect=AssertionError("after admission")), \
+                 self.assertRaisesRegex(ValueError, "space-order"):
+                self.public.space_before(self.f, self.public.COLD)
+        finally:
+            self.f.inflight = False
 
 
 if __name__ == "__main__":

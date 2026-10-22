@@ -20,6 +20,9 @@ mod fixture;
 pub(super) use fixture::Fixture;
 #[path = "installed_shell_observation_macos_tool_service.rs"]
 mod service;
+#[path = "installed_shell_observation_macos_tool_acquire.rs"]
+mod acquire;
+pub(crate) use acquire::{PUBLIC_SCOPE, PUBLIC_NAMES};
 
 pub(crate) const SECONDS: u64 = 2400;
 pub(crate) const NAMES: [&str; 3] = [
@@ -33,6 +36,8 @@ pub(crate) enum Case {
     CancelBeforeTransfer,
     SourceDrift,
     ServicePreparation,
+    ColdWarm,
+    CancelInTransfer,
 }
 impl Case {
     pub(crate) const ALL: [Self; 3] = [
@@ -41,7 +46,7 @@ impl Case {
         Self::SourceDrift,
     ];
     pub(crate) fn name(self) -> &'static str {
-        if self == Self::ServicePreparation { service::NAME } else { NAMES[self as usize] }
+        match self { Self::ServicePreparation => service::NAME, Self::ColdWarm => PUBLIC_NAMES[1], Self::CancelInTransfer => PUBLIC_NAMES[0], _ => NAMES[self as usize] }
     }
     pub(crate) fn seconds(self) -> u64 {
         if self == Self::ServicePreparation { service::SECONDS } else { SECONDS }
@@ -49,55 +54,61 @@ impl Case {
     pub(crate) fn service_only(self) -> bool {
         self == Self::ServicePreparation
     }
+    pub(crate) fn public_acquisition(self) -> bool { matches!(self, Self::ColdWarm | Self::CancelInTransfer) }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> {
-        Self::ALL.into_iter().chain([Self::ServicePreparation]).find(|c| value == c.name())
+        Self::ALL.into_iter().chain([Self::ServicePreparation, Self::ColdWarm, Self::CancelInTransfer]).find(|c| value == c.name())
     }
     pub(crate) fn maximum_original(self) -> u32 {
         if self.service_only() {
             2
-        } else if self == Self::RoundTrip {
+        } else if matches!(self, Self::RoundTrip | Self::ColdWarm) {
             6
         } else {
             5
+        }
+    }
+    fn application_prefix(self) -> &'static str {
+        if self == Self::ColdWarm { "mrk-macos-aqua-tools-public" } else { "mrk-macos-aqua-tools" }
+    }
+    fn public_quit(self, executed: bool, initial_sdk: bool) -> Option<u8> {
+        match (self, executed, initial_sdk) {
+            (Self::ColdWarm, true, true) => Some(6),
+            (Self::ColdWarm, false, true) => Some(3),
+            (Self::ColdWarm, false, false) => Some(2),
+            (Self::CancelInTransfer, true, false) => Some(5),
+            _ => None,
         }
     }
     pub(crate) fn picker(self, id: u32) -> Option<u8> {
         if self.service_only() { return None; }
         id.checked_sub(2)
             .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| *n < if self == Self::RoundTrip { 4 } else { 3 })
+            .filter(|n| *n < if matches!(self, Self::RoundTrip | Self::ColdWarm) { 4 } else { 3 })
     }
 }
-pub(crate) fn role(index: u8) -> Option<sources::Role> {
-    [
-        sources::Role::Jdk,
-        sources::Role::Sdk,
-        sources::Role::Gradle,
-        sources::Role::Sdk,
-    ]
-    .get(usize::from(index))
-    .copied()
+pub(crate) fn role(case: Case, index: u8) -> Option<sources::Role> {
+    if case.picker(u32::from(index) + 2) != Some(index) { return None; }
+    use sources::Role as R;
+    let order = if case == Case::ColdWarm {
+        // An actual initial SDK Browse, then three actual acquired nominations.
+        [R::Sdk, R::Jdk, R::Sdk, R::Gradle]
+    } else { [R::Jdk, R::Sdk, R::Gradle, R::Sdk] };
+    order.get(usize::from(index)).copied()
 }
-pub(super) fn kind(index: u8) -> Option<mrk_macos_installed_native::PanelKind> {
+pub(super) fn kind(case: Case, index: u8) -> Option<mrk_macos_installed_native::PanelKind> {
     use mrk_macos_installed_native::PanelKind as K;
-    [
-        K::AndroidJdk,
-        K::AndroidSdk,
-        K::AndroidGradle,
-        K::AndroidSdk,
-    ]
-    .get(usize::from(index))
-    .copied()
+    Some(match role(case, index)? {
+        sources::Role::Jdk => K::AndroidJdk,
+        sources::Role::Sdk => K::AndroidSdk,
+        sources::Role::Gradle => K::AndroidGradle,
+    })
 }
-pub(super) fn kind_name(index: u8) -> Option<&'static str> {
-    [
-        "android-jdk",
-        "android-sdk",
-        "android-gradle",
-        "android-sdk",
-    ]
-    .get(usize::from(index))
-    .copied()
+pub(super) fn kind_name(case: Case, index: u8) -> Option<&'static str> {
+    Some(match role(case, index)? {
+        sources::Role::Jdk => "android-jdk",
+        sources::Role::Sdk => "android-sdk",
+        sources::Role::Gradle => "android-gradle",
+    })
 }
 fn tuple() -> Option<(&'static str, &'static str, &'static str)> {
     let values = (
@@ -134,7 +145,7 @@ pub(super) fn fixture_root(home: &Path, case: Case) -> Option<PathBuf> {
     if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/") {
         return None;
     }
-    let suffix = if case.service_only() { service::NAME } else { "tool-setup" };
+    let suffix = if case.service_only() { service::NAME } else if case.public_acquisition() { PUBLIC_SCOPE } else { "tool-setup" };
     Some(home.join("Library/Application Support").join(format!(
         "mrk-macos-aqua-{source}-{run}-{attempt}-{suffix}"
     )))
@@ -147,7 +158,7 @@ fn application_root(home: &Path, case: Case) -> Option<PathBuf> {
     }
     Some(
         home.join("Library/Application Support")
-            .join(format!("mrk-macos-aqua-tools-{source}-{run}-{attempt}"))
+            .join(format!("{}-{source}-{run}-{attempt}", case.application_prefix()))
             .join(case.name())
             .join("dev.mobile-release-kit.desktop"),
     )
@@ -174,8 +185,8 @@ impl Pair {
 }
 #[derive(Default)]
 struct Trace {
-    pairs: [Option<Pair>; 3],
-    samples: [Option<Sample>; 3],
+    pairs: [Option<Pair>; 4],
+    samples: [Option<Sample>; 4],
 }
 pub(crate) struct Registration {
     control: Arc<Control>,
@@ -187,6 +198,7 @@ pub(crate) struct Control {
     application: PathBuf,
     inputs: [PathBuf; 3],
     acquired_sdk: OnceLock<PathBuf>,
+    acquired_all: OnceLock<[PathBuf; 3]>,
     original: OnceLock<Weak<Observation>>,
     document: OnceLock<Weak<()>>,
     claimed: AtomicBool,
@@ -201,7 +213,7 @@ pub(crate) struct Control {
 }
 impl Control {
     pub(super) fn new(case: Case, project: &Path, uid: u32) -> Result<Arc<Self>, ()> {
-        if !cfg!(target_arch = "aarch64") || uid == 0 {
+        if !cfg!(target_arch = "aarch64") || uid == 0 || case.public_acquisition() && !super::cli::admitted() {
             return Err(());
         }
         let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
@@ -210,13 +222,16 @@ impl Control {
         if user.uid.as_raw() != uid {
             return Err(());
         }
-        let application = application_root(&user.dir, case).ok_or(())?;
-        let inputs = if case.service_only() {
+        let application = if case == Case::CancelInTransfer { super::cli::application_for(uid, case.name()).ok_or(())? }
+            else { application_root(&user.dir, case).ok_or(())? };
+        let inputs = if case == Case::ColdWarm {
+            [PathBuf::new(), application.parent().ok_or(())?.join("empty-sdk"), PathBuf::new()]
+        } else if case.service_only() {
             std::array::from_fn(|_| PathBuf::new())
         } else {
             let input = sources_root(&user.dir).ok_or(())?;
             let shared = input.join(Case::CancelBeforeTransfer.name());
-            [shared.join("jdk/temurin-17.jdk"), input.join(case.name()).join("sdk"), shared.join("gradle")]
+            [shared.join("jdk/temurin-17.jdk"), input.join(if case == Case::CancelInTransfer { Case::CancelBeforeTransfer.name() } else { case.name() }).join("sdk"), shared.join("gradle")]
         };
         Ok(Arc::new(Self {
             case,
@@ -224,6 +239,7 @@ impl Control {
             application,
             inputs,
             acquired_sdk: OnceLock::new(),
+            acquired_all: OnceLock::new(),
             original: OnceLock::new(),
             document: OnceLock::new(),
             claimed: AtomicBool::new(false),
@@ -271,7 +287,10 @@ impl Control {
     }
     pub(crate) fn target(&self, index: u8) -> Option<&Path> {
         if self.case.service_only() { return None; }
-        if index == 3 && self.case == Case::RoundTrip {
+        if self.case == Case::ColdWarm {
+            if index == 0 { Some(self.inputs[1].as_path()) }
+            else { self.acquired_all.get()?.get(usize::from(index - 1)).map(PathBuf::as_path) }
+        } else if index == 3 && self.case == Case::RoundTrip {
             self.acquired_sdk.get().map(PathBuf::as_path)
         } else {
             self.inputs.get(usize::from(index)).map(PathBuf::as_path)
@@ -294,6 +313,9 @@ impl Control {
         if let Some(path) = self.acquired_sdk.get() {
             n = n.checked_add(path.capacity())?;
         }
+        if let Some(paths) = self.acquired_all.get() {
+            for path in paths { n = n.checked_add(path.capacity())?; }
+        }
         drop(self.trace.try_lock().ok()?);
         let q = self.observation()?;
         let record = q.record.try_lock().ok()?;
@@ -314,9 +336,9 @@ impl Control {
     pub(crate) fn claim_prepare(&self, context: &wire::Context) -> bool {
         if self.case.service_only() { return false; }
         let n = self.next.load(Ordering::SeqCst);
-        if n >= if self.case == Case::RoundTrip { 3 } else { 2 }
+        if n >= if self.case == Case::ColdWarm { 4 } else if self.case == Case::RoundTrip { 3 } else { 2 }
             || context.action
-                != if n == 1 {
+                != if n == 1 || n == 3 {
                     wire::Action::Acquire
                 } else {
                     wire::Action::Inspect
@@ -332,9 +354,10 @@ impl Control {
             return false;
         };
         if n == 1 && !trace.samples[0].is_some_and(|s| s.initial())
-            || n == 2
-                && (!self.selected.load(Ordering::SeqCst)
-                    || !trace.samples[1].is_some_and(|s| s.acquired()))
+            || n == 2 && (!trace.samples[1].is_some_and(|s| s.acquired())
+                || if self.case == Case::ColdWarm { self.selected.load(Ordering::SeqCst) }
+                    else { !self.selected.load(Ordering::SeqCst) })
+            || n == 3 && (self.case != Case::ColdWarm || !trace.samples[2].is_some_and(|s| s.initial()))
         {
             return false;
         }
@@ -349,7 +372,7 @@ impl Control {
         let Ok(mut trace) = self.trace.try_lock() else {
             return false;
         };
-        if index >= 3
+        if index >= if self.case == Case::ColdWarm { 4 } else { 3 }
             || self.next.load(Ordering::SeqCst) != index as u8 + 1
             || trace.pairs[index].is_some()
             || projection.phase != wire::Phase::AwaitingConsent
@@ -376,6 +399,15 @@ impl Control {
     pub(crate) fn record(&self, sample: Sample) {
         let result = (|| {
             let mut trace = self.trace.try_lock().ok()?;
+            // The CLI may complete before the observer's next poll. Only this
+            // actual SavedOwner retirement callback can fill the comparison;
+            // no phase/status DATA constructs a native receipt or Prepared.
+            if self.case == Case::CancelInTransfer && self.next.load(Ordering::SeqCst) == 2
+                && trace.pairs[1].is_none() && trace.samples[0].is_some_and(|s| s.initial())
+                && sample.action == wire::Action::Acquire {
+                let (operation, generation) = sample.original_ids();
+                trace.pairs[1] = Some(Pair { operation, generation });
+            }
             let index = trace.pairs.iter().position(|pair| {
                 pair.is_some_and(|p| sample.same_operation(&p.operation, &p.generation))
             })?;
@@ -404,6 +436,21 @@ impl Control {
             && crate::tool_acquisition_protocol::native_path(&path).is_some()
             && self.acquired_sdk.set(path).is_ok()
     }
+    fn bind_cli_original(&self, projection: &wire::Projection) -> bool {
+        if self.case != Case::CancelInTransfer || self.next.load(Ordering::SeqCst) != 2
+            || projection.context.action != wire::Action::Acquire { return false; }
+        let Some(pair) = Pair::new(&projection.operation_id, &projection.owner_generation) else { return false; };
+        let Ok(mut trace) = self.trace.try_lock() else { return false; };
+        if !trace.samples[0].is_some_and(|s|s.initial()) { return false; }
+        match trace.pairs[1] {
+            Some(original) => original == pair,
+            None => { trace.pairs[1] = Some(pair); true },
+        }
+    }
+    fn set_all(&self, paths: [PathBuf; 3]) -> bool {
+        self.case == Case::ColdWarm && paths.iter().all(|p| wire::native_path(p).is_some())
+            && self.acquired_all.set(paths).is_ok()
+    }
     pub(crate) fn quit_id(&self) -> u32 {
         u32::from(self.quit.load(Ordering::SeqCst))
     }
@@ -411,7 +458,7 @@ impl Control {
         self.complete.load(Ordering::SeqCst)
     }
     fn finish(&self, executed: bool) -> bool {
-        if self.case.service_only() { return false; }
+        if self.case.service_only() || self.case.public_acquisition() { return false; }
         let Ok(trace) = self.trace.try_lock() else {
             return false;
         };
@@ -427,7 +474,7 @@ impl Control {
                             || !trace.samples[1].is_some_and(|s| s.cancelled_before_transfer())
                     }
                     Case::SourceDrift => !trace.samples[1].is_some_and(|s| s.refused_source()),
-                    Case::ServicePreparation => true,
+                    Case::ServicePreparation | Case::ColdWarm | Case::CancelInTransfer => true,
                 }
         } else {
             self.next.load(Ordering::SeqCst) != 0 || trace.samples.iter().any(Option::is_some)
@@ -446,6 +493,26 @@ impl Control {
             },
             Ordering::SeqCst,
         );
+        true
+    }
+    fn finish_public(&self, executed: bool, initial_sdk: bool) -> bool {
+        let Some(quit) = self.case.public_quit(executed, initial_sdk) else { return false; };
+        let Ok(trace) = self.trace.try_lock() else { return false; };
+        if !self.case.public_acquisition() || self.complete.load(Ordering::SeqCst) { return false; }
+        let n = self.next.load(Ordering::SeqCst);
+        let valid = if executed {
+            trace.samples[0].is_some_and(|s|s.initial()) && match self.case {
+                Case::ColdWarm => n == 4 && trace.samples[1].is_some_and(|s|s.acquired())
+                    && trace.samples[2].is_some_and(|s|s.initial()) && trace.samples[3].is_some_and(|s|s.acquired()),
+                Case::CancelInTransfer => n == 2 && trace.samples[1].is_some_and(|s|s.cancelled_in_transfer())
+                    && trace.samples[2..].iter().all(Option::is_none),
+                _ => false,
+            }
+        } else { self.case == Case::ColdWarm && ((n == 0 && trace.samples.iter().all(Option::is_none))
+            || (initial_sdk && n == 1 && trace.samples[0].is_some_and(|s|s.initial()) && trace.samples[1..].iter().all(Option::is_none))) };
+        if !valid || self.complete.swap(true,Ordering::SeqCst) { return false; }
+        self.unexecuted.store(!executed,Ordering::SeqCst);
+        self.quit.store(quit,Ordering::SeqCst);
         true
     }
     fn finish_service(&self, ready: bool) -> bool {
@@ -528,6 +595,7 @@ impl Observation {
 pub(super) enum Step {
     Context,
     Prerequisite(service::Step),
+    Public(acquire::Step),
     Service,
     ServiceWait,
     Catalog,
@@ -553,6 +621,7 @@ pub(super) enum Step {
 #[derive(Default)]
 pub(super) struct Record {
     service: service::Record,
+    public: Option<Box<acquire::Record>>,
     context: Option<build::Prepare>,
     active: Option<wire::Projection>,
     requirements: Option<String>,
@@ -569,8 +638,12 @@ pub(super) struct Record {
     pub(super) actions: [bool; 4],
 }
 impl Record {
+    pub(super) fn new(case: Case, project: &Path, uid: u32) -> Result<Self, ()> {
+        Ok(Self { public: if case.public_acquisition() { Some(Box::new(acquire::Record::new(case,project,uid)?)) } else {None}, ..Self::default() })
+    }
     fn retained_bytes(&self) -> Option<usize> {
         let mut n = std::mem::size_of::<Self>().checked_add(self.service.retained_bytes()?)?;
+        if let Some(public) = &self.public { n = n.checked_add(public.retained_bytes()?)?; }
         if let Some(context) = &self.context {
             n = n.checked_add(context.retained_heap_bytes()?)?;
         }
@@ -608,6 +681,7 @@ impl Record {
     }
     pub(super) fn report(&self, control: &Control) -> Option<Value> {
         if control.case.service_only() { return self.service.report(control, self.normal_quit); }
+        if control.case.public_acquisition() { return self.public.as_ref()?.report(control,self); }
         if !control.completed()
             || !self.normal_quit
             || self.executed == control.unexecuted.load(Ordering::SeqCst)
@@ -618,7 +692,7 @@ impl Record {
         Some(
             json!({"mechanism":"same-original-tool-setup-v1","normalAcquisitionEnabled":false,
             "execution":if self.executed {"executed"} else {"not-executed-prerequisite"},
-            "testResult":if !self.executed {"not-executed"} else {match control.case {Case::RoundTrip=>"registered-reused",Case::CancelBeforeTransfer=>"cancelled-before-transfer",Case::SourceDrift=>"source-refused-before-effects",Case::ServicePreparation=>return None}},
+            "testResult":if !self.executed {"not-executed"} else {match control.case {Case::RoundTrip=>"registered-reused",Case::CancelBeforeTransfer=>"cancelled-before-transfer",Case::SourceDrift=>"source-refused-before-effects",Case::ServicePreparation|Case::ColdWarm|Case::CancelInTransfer=>return None}},
             "initial":trace.samples[0],"acquire":trace.samples[1],"reuse":trace.samples[2],
             "selectedSources":self.sources,"protectedCopyRegistered":self.registered,"selectedCatalogVerified":self.selected,
             "normalQuitOriginal":control.quit_id(),"allOriginalsSettled":true,"projectSentinelPreserved":true,
@@ -635,6 +709,12 @@ impl Record {
             }
             self.normal_quit=true;
             return self.service.report(control,true).is_some();
+        }
+        if control.case.public_acquisition() {
+            if self.normal_quit || !finality || quit != control.quit_id() || !control.completed()
+                || !self.public.as_ref().is_some_and(|p|p.final_originals(control,self)) { return false; }
+            self.normal_quit = true;
+            return true;
         }
         if self.normal_quit
             || !control.completed()
@@ -747,6 +827,7 @@ impl Observation {
                     Some(if control.case.service_only() {Step::Prerequisite(service::Step::Request)}else{Step::Service})
                 },
                 Step::Prerequisite(s) => service::tick(self,document,s).await?,
+                Step::Public(s) => acquire::tick(self,document,s).await?,
                 Step::Service => {
                     let before=document.android_tool_service_status()?;
                     if before.operation.is_some() || before.setup_generation!=0 {return Err(invalid());}
@@ -776,16 +857,16 @@ impl Observation {
                     let s=document.android_toolchain_catalog_status()?;
                     if s.phase==catalog::Phase::Reading {None}
                     else if s.phase==catalog::Phase::Ready && s.reason==catalog::Reason::None && s.selected.is_none() {
-                        if s.entries.is_empty() {Some(Step::Inspect)} else {Some(Step::Finish)}
+                        if s.entries.is_empty() {Some(if control.case.public_acquisition() {Step::Public(acquire::Step::Inspect(0))}else{Step::Inspect})} else {Some(Step::Finish)}
                     } else {return Err(invalid());}
                 },
                 Step::Choose(i) => {
                     let s=document.android_tool_sources_status()?;
                     if !matches!(s.phase,sources::Phase::Idle|sources::Phase::Selected) {return Err(invalid());}
-                    let mut v=json!({"schemaVersion":1,"sourceGeneration":s.source_generation,"projectId":project,"role":role(i).ok_or_else(invalid)?});
-                    if i==3 {let p=current()?;v["acquired"]=json!({"operationId":p.operation_id,"ownerGeneration":p.owner_generation});}
+                    let mut v=json!({"schemaVersion":1,"sourceGeneration":s.source_generation,"projectId":project,"role":role(control.case,i).ok_or_else(invalid)?});
+                    if (i==3 && control.case==Case::RoundTrip) || (control.case==Case::ColdWarm && i>0) {let p=current()?;v["acquired"]=json!({"operationId":p.operation_id,"ownerGeneration":p.owner_generation});}
                     let chosen=document.choose_android_tool_source(app.clone(),sources::Choose::parse(&serde_json::to_vec(&v).map_err(|_|invalid())?)?)?;
-                    let op=chosen.operation.as_ref().filter(|op|op.operation_id==u32::from(i)+2 && Some(op.role)==role(i)).ok_or_else(invalid)?;
+                    let op=chosen.operation.as_ref().filter(|op|op.operation_id==u32::from(i)+2 && Some(op.role)==role(control.case,i)).ok_or_else(invalid)?;
                     self.record().ok_or_else(invalid)?.tool_setup.as_mut().ok_or_else(invalid)?.source_generation=op.source_generation;
                     Some(Step::Native(i))
                 },
@@ -794,14 +875,16 @@ impl Observation {
                     let s=document.android_tool_sources_status()?;
                     if matches!(s.phase,sources::Phase::Picking|sources::Phase::Checking) {None}
                     else if s.phase==sources::Phase::Selected && s.reason==sources::Reason::NotInspected
-                        && s.operation.as_ref().is_some_and(|op|op.operation_id==u32::from(i)+2 && Some(op.role)==role(i))
-                        && document.installed_tool_setup_source(u32::from(i)+2,role(i).ok_or_else(invalid)?) {
+                        && s.operation.as_ref().is_some_and(|op|op.operation_id==u32::from(i)+2 && Some(op.role)==role(control.case,i))
+                        && document.installed_tool_setup_source(u32::from(i)+2,role(control.case,i).ok_or_else(invalid)?) {
                         let mut r=self.record().ok_or_else(invalid)?;
                         if r.step!=OuterStep::ToolSetup(step) || !r.retain_open(u32::from(i)+2) {return Err(invalid());}
                         let record=r.tool_setup.as_mut().ok_or_else(invalid)?;
                         if record.sources[usize::from(i)] || record.source_generation!=s.source_generation {return Err(invalid());}
                         record.sources[usize::from(i)]=true;
-                        Some(if i<2 {Step::Choose(i+1)} else if i==2 {Step::Catalog} else {Step::RegisterInspect})
+                        Some(if control.case==Case::ColdWarm {
+                            if i==0 {Step::Catalog} else if i<3 {Step::Choose(i+1)} else {Step::RegisterInspect}
+                        } else if i<2 {Step::Choose(i+1)} else if i==2 {Step::Catalog} else {Step::RegisterInspect})
                     } else {return Err(invalid());}
                 },
                 Step::Inspect|Step::Reuse => {
@@ -874,7 +957,10 @@ impl Observation {
                         if !compatible_sources(&review.sources) {return Err(invalid());}
                         let mut r=self.record().ok_or_else(invalid)?;let v=r.tool_setup.as_mut().ok_or_else(invalid)?;
                         v.registration_generation=s.registration_generation;v.source_generation=review.source_generation;v.review_id=Some(review.review_id.clone());
-                        Some(Step::Register)
+                        if control.case==Case::ColdWarm {
+                            v.public.as_mut().ok_or_else(invalid)?.source_reviewed=true;
+                            Some(Step::Public(acquire::Step::Finish))
+                        } else { Some(Step::Register) }
                     } else {return Err(invalid());}
                 },
                 Step::Register => {
@@ -919,6 +1005,7 @@ impl Observation {
                     self.record().ok_or_else(invalid)?.tool_setup.as_mut().ok_or_else(invalid)?.selected=true;
                     Some(Step::Reuse)
                 },
+                Step::Finish if control.case.public_acquisition() => acquire::prerequisite(self,control)?,
                 Step::Finish => {
                     let executed=self.record().and_then(|r|r.tool_setup.as_ref().map(|v|v.executed)).ok_or_else(invalid)?;
                     self.tool_verify().map_err(|_|invalid())?;

@@ -37,6 +37,15 @@ pub(crate) struct Sample {
     pub(crate) reuse_selected: bool,
 }
 impl Sample {
+    pub(crate) fn original_ids(&self) -> ([u8;32],[u8;32]) { (self.operation,self.generation) }
+    pub(crate) fn cancelled_in_transfer(&self) -> bool {
+        self.originals() && self.action == wire::Action::Acquire && self.source_inspected
+            && self.source_failure.is_none() && self.first_failure && self.accepted && self.terminal
+            && self.outcome == Some(wire::Outcome::Cancelled) && self.reason == wire::Reason::Cancelled
+            && self.cache_attempted && self.ca_armed && self.transfer_attempted
+            && self.child_attempted && self.child_waited && self.io_joined
+            && !self.complete_sdk_location && !self.reuse_selected
+    }
     pub(crate) fn same_operation(&self, operation: &[u8; 32], generation: &[u8; 32]) -> bool {
         &self.operation == operation && &self.generation == generation
     }
@@ -344,6 +353,14 @@ impl SavedCommandOwner {
     }
     pub(crate) fn installed_tool_setup_control(&self, document: &Arc<()>) -> Option<Arc<Control>> {
         control(&self.inner).filter(|control| control.bound(document))
+    }
+    pub(crate) fn installed_tool_setup_all_locations(
+        &self, document: &Arc<()>, operation: &str, generation: &str,
+    ) -> Option<[PathBuf;3]> {
+        let control = self.installed_tool_setup_control(document)?;
+        if !control.permits(document) || control.case() != Case::ColdWarm { return None; }
+        self.inner.registry.try_lock().ok()?.tool_acquisition.completed_sources.as_ref()?
+            .observed_all(operation,generation)
     }
     pub(crate) fn installed_tool_setup_sdk_location(
         &self,

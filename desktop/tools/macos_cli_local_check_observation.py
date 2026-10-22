@@ -1,4 +1,4 @@
-"""Two fixed nonshipping installed-mrk recipes. Import performs no IO.
+"""Three fixed nonshipping installed-mrk recipes. Import performs no IO.
 
 The existing Fixtures owns every file and the existing run_owned owns every
 process. Phase files contain comparison DATA, never a grant or an IPC endpoint.
@@ -29,7 +29,7 @@ LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-
               "core-builds-disabled", "artifact-validation-not-requested",
               "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed"]
 
-# Exactly one additional recipe, loaded from the same first-party directory.
+# Fixed backup recipe, loaded from the same first-party directory.
 # It contains no process/thread/native/cleanup owner.
 _backup_spec = spec_from_file_location("mrk_upload_backup_cli_recipe", Path(__file__).with_name("macos_upload_key_cli_observation.py"))
 if _backup_spec is None or _backup_spec.loader is None:
@@ -39,18 +39,29 @@ _backup_spec.loader.exec_module(BACKUP)
 del _backup_spec
 
 
+# Same fixed directory, no additional process/thread/native owner.
+_tool_spec = spec_from_file_location("mrk_public_tool_recipe", Path(__file__).with_name("macos_tool_acquisition_observation.py"))
+if _tool_spec is None or _tool_spec.loader is None:
+    raise RuntimeError("tool-cli-recipe-unavailable")
+PUBLIC_TOOLS = module_from_spec(_tool_spec)
+_tool_spec.loader.exec_module(PUBLIC_TOOLS)
+del _tool_spec
+
+
 def selected(cases):
-    return cases in (CASES, BACKUP.CASES)
+    return cases in (CASES, BACKUP.CASES, PUBLIC_TOOLS.CASES, PUBLIC_TOOLS.CANCEL_CASES)
 
 
 def _scope(f):
     need(selected(f.cases), "cli-fixed-case")
-    return f.cases[0]
+    return PUBLIC_TOOLS.CANCEL if f.cases == PUBLIC_TOOLS.CASES else f.cases[0]
 
 
 def _policy(case):
     if case == SCOPE:
         return (7, 4, SUCCESS_SECONDS, APP_SECONDS)
+    if case == PUBLIC_TOOLS.CANCEL:
+        return (PUBLIC_TOOLS.CALLS, PUBLIC_TOOLS.ROWS, PUBLIC_TOOLS.SUCCESS_SECONDS, PUBLIC_TOOLS.APP_SECONDS)
     if case == BACKUP.SCOPE:
         return (BACKUP.CALLS, BACKUP.ROWS, BACKUP.SUCCESS_SECONDS, BACKUP.APP_SECONDS)
     raise ValueError("cli-fixed-case")
@@ -235,7 +246,7 @@ class Calls:
 
 def _response(result, argv, kind):
     need(type(result) is subprocess.CompletedProcess and result.args == argv
-         and type(result.returncode) is int and (result.returncode == 0 or kind == "upload-key-request" and result.returncode == 5)
+         and type(result.returncode) is int and (result.returncode == 0 or kind in ("upload-key-request", "tool-setup-request") and result.returncode == 5)
          and type(result.stdout) is bytes and type(result.stderr) is bytes
          and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "cli-original-result")
     v = _decode(result.stdout)
@@ -308,6 +319,20 @@ def _call(c, run_owned, env, state, calls, number, args, kind, *, receipt=False)
     calls.returned_call(number, result)
     calls.check()  # The preclaimed original may return, but cannot advance after STOP.
     c.current_cli()
+    if kind == "tool-concurrent-refusal":
+        need(calls.case == PUBLIC_TOOLS.CANCEL and number == 2 and result.returncode == 6,
+             "tool-cli-concurrent-refusal")
+        error = _decode(result.stdout)
+        # Busy is returned by this exact Submit's one IPC exchange through the
+        # ordinary unconfirmed output, not the generic pre-parse error writer.
+        need(_keys(error, "version", "ok", "error", "request", "doNotReplay", "message")
+             and type(error["version"]) is int and error["version"] == 1 and error["ok"] is False
+             and error["error"] == "busy" and error["doNotReplay"] is True
+             and PUBLIC_TOOLS.origin(error["request"]) and error["request"]["projectId"] == args[1]
+             and error["request"]["serviceInstance"] == args[2] and type(error["message"]) is str
+             and 0 < len(error["message"].encode("utf-8")) <= 1024, "tool-cli-concurrent-refusal")
+        need(result.stderr == PUBLIC_TOOLS.receipt(error["request"]), "tool-cli-refused-receipt")
+        return error["request"]
     if kind is None:
         # The ordinary CLI writes its one JSON result, including a
         # pre-admission denial, to stdout. Public prose is bounded DATA;
@@ -399,6 +424,9 @@ def invoke(f, run_owned, argv, env, state):
         try:
             if calls.case == SCOPE:
                 _journey(f, run_owned, environment, state, calls)
+            elif calls.case == PUBLIC_TOOLS.CANCEL:
+                PUBLIC_TOOLS.journey(c, calls, lambda number, args, kind, **kw:
+                    _call(c, run_owned, environment, state, calls, number, args, kind, **kw))
             else:
                 BACKUP.journey(c, calls, lambda number, args, kind, **kw:
                     _call(c, run_owned, environment, state, calls, number, args, kind, **kw))
@@ -434,6 +462,8 @@ class Fixture:
     def __init__(self, f):
         self.f, self.extra, self.parents, self.cli_row = f, [], [], None
         self.home = None
+        self.application_fd = None
+        self.transfer_cut = None
         self.native = self.driver = self.calls = self.thread = None
         self.joined = False
 
@@ -496,6 +526,7 @@ def prepare(f):
     for name in ("Library", "Application Support", APPLICATION):
         parent = c.directory(parent, name, owner=f.uid, mode=0o700, create=True)
     f._roster(parent, (), "cli-application-not-absent")
+    c.application_fd = parent
     for index, name in enumerate(PHASES):
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = c.retain(os.open(name, flags, 0o600, dir_fd=f.states[_scope(f)]))
@@ -550,6 +581,8 @@ def report(v, require=need):
 
 
 def readback(f, v):
+    if _scope(f) == PUBLIC_TOOLS.CANCEL:
+        return PUBLIC_TOOLS.cli_readback(f, v)
     if _scope(f) == BACKUP.SCOPE:
         return BACKUP.readback(f, v)
     report(v)

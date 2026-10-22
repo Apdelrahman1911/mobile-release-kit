@@ -25,6 +25,7 @@ import { ARTIFACT_INSPECTION_EVENT, encodeArtifactInspectionRequest, artifactIns
 import type { ArtifactInspectionCommand } from './artifactInspectionProtocol.ts';
 import type { ArtifactInspectionStatus } from './artifactInspectionTypes.ts';
 import { initializationRequestFits, parseProjectInitializationStatus, initializationError } from './projectInitializationProtocol.ts';
+import { createInitializationAgentApi } from './serviceInitializationProtocol.ts';
 import type { ProjectInitializationCommand } from './projectInitializationProtocol.ts';
 import type { ProjectInitializationStatus } from './projectInitializationTypes.ts';
 import { installationError, installationCheckError, installationPreparationError, parseInstallationReveal, parseInstallationCancel,
@@ -119,7 +120,7 @@ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'mrk:agent-initialization' | 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -731,6 +732,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     },
     agentVersionEdit: createVersionEditAgentApi(mode, invoke, listen),
     agentConfiguration: createConfigurationApi(mode, invoke, listen),
+    agentInitialization: createInitializationAgentApi(mode, invoke, listen),
     agentMetadataText: createMetadataServiceApi(mode, invoke, listen),
     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
     openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),

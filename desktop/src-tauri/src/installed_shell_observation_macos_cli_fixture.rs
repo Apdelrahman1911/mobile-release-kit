@@ -82,8 +82,19 @@ impl Files {
     pub(in super::super) fn capture_backup(project:&Path,uid:u32)->Result<Self,()> {
         Self::capture_case(project,uid,super::super::vault::upload_key::cli::SCOPE)
     }
+    pub(in super::super) fn capture_tools(project:&Path,uid:u32)->Result<Self,()> {
+        Self::capture_case(project,uid,super::super::tool_setup::Case::CancelInTransfer.name())
+    }
+    pub(in super::super) fn retained_bytes(&self)->Option<usize> {
+        let mut n=std::mem::size_of::<Self>().checked_add(self.held.capacity().checked_mul(std::mem::size_of::<Held>())?)?
+            .checked_add(self.application.capacity())?.checked_add(self.sent.capacity())?.checked_add(self.received.capacity())?;
+        for h in &self.held { n=n.checked_add(h.name.capacity())?; }
+        // One original bounded phase read and parsed comparison, never a tool
+        // archive or a new application-service response budget.
+        n.checked_add(2*(LIMIT+1)+4096)
+    }
     fn capture_case(project:&Path,uid:u32,name:&str)->Result<Self,()> {
-        let row_limit=if name==NAME {4} else if name==super::super::vault::upload_key::cli::SCOPE {7} else{return Err(());};
+        let row_limit=if name==NAME {4} else if name==super::super::vault::upload_key::cli::SCOPE {7} else if name==super::super::tool_setup::Case::CancelInTransfer.name() {3} else{return Err(());};
         let mut f = Self {
             held: Vec::with_capacity(16),
             native: 0,

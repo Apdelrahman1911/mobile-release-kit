@@ -59,7 +59,6 @@ import { ArtifactInspectionController, artifactInspectionOwnerReason } from './a
 import { artifactInspectionError } from './artifactInspectionProtocol.ts';
 import { ArtifactInspection } from './components/ArtifactInspection.tsx';
 import { ProjectInitializationController } from './projectInitializationController.ts';
-import { initializationOwnerReason, initializationRetainsDraft } from './projectInitialization.ts';
 import { ProjectInitialization } from './components/ProjectInitialization.tsx';
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { desktopApi } from './api.ts';
@@ -444,7 +443,7 @@ export function App() {
     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
-    (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
+    (!excludeInitialization && initializationControllerRef.current ? initializationControllerRef.current.ownerReason(workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
     (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy, playCleanupBusy, agentGithubActionBusy]);
   // Tools excludes only itself. Existing peers, passive observation and every
@@ -842,7 +841,7 @@ export function App() {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
-    const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initializationOwnerReason(initialization.getSnapshot(),projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
+    const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initialization.ownerReason(projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
       metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? (excludeToolDoctor ? null : diagnosticsOwnerReason(diagnostics.getSnapshot())) ??
       (excludeVersion ? null : versionOwnerReason(versionEdit.getSnapshot(), projectId)) ??
       (excludeImages ? null : metadataImagesOwnerReason(metadataImages.getSnapshot(), projectId));
@@ -2188,7 +2187,7 @@ export function App() {
     catch (error) { finish({ error }); }
   };
 
-  const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initializationRetainsDraft(initialization.getSnapshot(),projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
+  const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initialization.retainsDraft(projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
 
   const projectScriptsContext = (): ProjectScriptContext => {
     const current = workspaceRef.current, service = pathService.current;
@@ -2474,7 +2473,7 @@ export function App() {
           onRecoveryReload={(projectId) => { if (!configEdit.getSnapshot().status?.active && !configEdit.getSnapshot().nativeBlocked) void loadSnapshot(projectId, true); }}
           onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { const projectId = configEdit.getSnapshot().attempt?.binding.projectId; if (projectId) dispatch({ type: 'config-save-intent', projectId }); releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding); }}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
-        {page !== 'dashboard' && (initializationState.attempt || initializationState.nativeBlocked) && <ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState} compact/>}
+        {page !== 'dashboard' && (initializationState.attempt || initializationState.nativeBlocked || initialization.agent.busyReason()) && <ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState} compact/>}
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'metadata' && <MetadataImagesOperation state={metadataImagesState} controller={metadataImages} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}

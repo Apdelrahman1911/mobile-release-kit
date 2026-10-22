@@ -778,3 +778,6 @@ pub(in crate::edit_owner) fn metadata_submission(p:&EditProjection,submission:&t
 #[cfg(test)]
 #[path = "edit_owner_service_metadata_text_memory_tests.rs"]
 mod metadata_tests;
+
+#[path="edit_owner_service_initialization_memory.rs"]
+pub(in crate::edit_owner) mod initialization;

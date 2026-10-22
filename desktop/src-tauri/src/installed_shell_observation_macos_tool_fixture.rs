@@ -46,6 +46,7 @@ pub(crate) struct Fixture {
     files: [FileFact; 7],
     dirs: [[u64; 6]; 5],
     source: Option<FileFact>,
+    empty_sdk: Option<[u64; 6]>,
     drift_started: bool,
     drifted: bool,
 }
@@ -65,7 +66,7 @@ impl Fixture {
             .map_err(|_| ())?;
         // Service preparation needs only the saved project. Do not enter the
         // tool source reader, require a supplier path, or invent a source fact.
-        let source = if case.service_only() { None } else {
+        let source = if (case.service_only() || case == Case::ColdWarm) { None } else {
             let source = source_file(case, uid, None)?;
             if source.identity[6] != 257 || source.sha256 != PLATFORM_SHA { return Err(()); }
             Some(source)
@@ -74,6 +75,7 @@ impl Fixture {
             files,
             dirs,
             source,
+            empty_sdk: if case == Case::ColdWarm { Some(empty_sdk(uid)?) } else { None },
             drift_started: false,
             drifted: false,
         })
@@ -89,9 +91,11 @@ impl Fixture {
                 return Err(());
             }
         }
-        let source_matches = if case.service_only() { self.source.is_none() }
+        let source_matches = if (case.service_only() || case == Case::ColdWarm) { self.source.is_none() }
             else { self.source.as_ref().is_some_and(|before| source_file(case, uid, None).as_ref()==Ok(before)) };
-        if !source_matches || self.drift_started != self.drifted {
+        let empty_sdk_matches = if case == Case::ColdWarm { self.empty_sdk == Some(empty_sdk(uid)?) }
+            else { self.empty_sdk.is_none() };
+        if !source_matches || !empty_sdk_matches || self.drift_started != self.drifted {
             return Err(());
         }
         Ok(())
@@ -120,6 +124,15 @@ impl Fixture {
             })
     }
 }
+// Comparison only: the real Browse/ProjectProbe/SourceSlots still establish
+// native source custody. This actual empty directory is never populated/moved.
+fn empty_sdk(uid: u32) -> Result<[u64; 6], ()> {
+    if uid == 0 { return Err(()); }
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).map_err(|_| ())?.ok_or(())?;
+    if user.uid.as_raw() != uid { return Err(()); }
+    let application = application_root(&user.dir, Case::ColdWarm).ok_or(())?;
+    directory(&application.parent().ok_or(())?.join("empty-sdk"), uid, 0o700, &[])
+}
 /// All source ancestors and the exact original file stay held through this
 /// task-only byte substitution. Independent one-close attempts run on every path;
 /// any uncertain close returns Err and the observation cannot retry/pass.
@@ -128,12 +141,12 @@ fn source_file(case: Case, uid: u32, change: Option<&FileFact>) -> Result<FileFa
         fcntl::{openat, AtFlags, OFlag},
         sys::stat::Mode,
     };
-    if case.service_only() || uid == 0 {return Err(());}
+    if (case.service_only() || case == Case::ColdWarm) || uid == 0 {return Err(());}
     let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).map_err(|_|())?.ok_or(())?;
     if user.uid.as_raw()!=uid {return Err(());}
     let root = sources_root(&user.dir).ok_or(())?;
     let selected_depth = root.components().count()-1;
-    let directory = root.join(case.name()).join("sdk/platforms/android-35");
+    let directory = root.join(if case == Case::CancelInTransfer { Case::CancelBeforeTransfer.name() } else { case.name() }).join("sdk/platforms/android-35");
     let names: Vec<_> = directory.components().skip(1).map(|component| match component {
         std::path::Component::Normal(name) => Ok(name), _ => Err(()),
     }).collect::<Result<_,_>>()?;
