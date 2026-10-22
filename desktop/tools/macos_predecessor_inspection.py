@@ -451,7 +451,11 @@ def inspect(root, fd, original, context):
     disk(fd, 4 * GIB); os.mkdir("tmp", 0o700, dir_fd=fd)
     stager, calls = data_module(), []
     code, out, _ = native(root, fd, original, calls, "memory", ["/usr/bin/vm_stat"], work_end, 10)
-    need(code == 0 and available_memory(out) >= 3 * GIB, "memory-reserve")
+    measured = available_memory(out) if code == 0 else None
+    print("MRK_PREDECESSOR_INSPECTION_MEMORY=" + encoded({"exitCode": code,
+          "availableEstimateBytes": measured, "requiredBytes": 3 * GIB}).decode("ascii").rstrip("\n"), flush=True)
+    need(code == 0, "memory-probe-exit")
+    need(measured >= 3 * GIB, "memory-reserve")
     mount = root / "mount"; expanded = root / "expanded"
     need(not os.path.lexists(mount) and not os.path.lexists(expanded), "inspection-destination-occupied")
     mounted, device, mount_id, device_id, error = None, None, None, None, None
