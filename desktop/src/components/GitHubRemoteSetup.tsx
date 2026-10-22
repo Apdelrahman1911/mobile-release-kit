@@ -1,3 +1,4 @@
+import type { GithubRemoteSettingsKind } from '../githubRemoteSetupDelegation.ts';
 import { useId, useState } from 'react';
 import type { AssetDisplayState } from '../assetSessionTypes.ts';
 import type { HelpContent } from '../types.ts';
@@ -90,9 +91,9 @@ function environmentInputs(selected?: GitHubRemoteSetupEnvironmentSelection): En
 }
 type SecretInputs = { mode: '' | 'create' | 'replace'; stage: GitHubRemoteSetupSecretSelection['stage']; requirement: '' | GitHubRemoteSetupSecretSelection['requirement']; recordId: string };
 type VariableInputs = { mode: '' | 'create' | 'replace'; stage: GitHubRemoteSetupVariableSelection['stage']; requirement: '' | GitHubRemoteSetupVariableSelection['requirement']; recordId: string };
-export function GitHubRemoteSetup({ state, controller, onHelp, compact = false, onShow, assets = null, projectId = null, onCredentials }: {
+export function GitHubRemoteSetup({ state, controller, onHelp, compact = false, onShow, assets = null, projectId = null, onCredentials, onDelegate }: {
   state: GitHubRemoteSetupView; controller: GitHubRemoteSetupController; onHelp: (help: HelpContent) => void; compact?: boolean; onShow?: () => void;
-  assets?: AssetDisplayState | null; projectId?: string | null; onCredentials?: () => void;
+  assets?: AssetDisplayState | null; projectId?: string | null; onCredentials?: () => void; onDelegate?: (kind:GithubRemoteSettingsKind) => void;
 }) {
   const choiceId = useId(), enabledId = useId(), permissionsId = useId(), approvalsId = useId(), confirmId = useId(), reasonId = useId();
   const environmentId = useId(), modeId = useId(), timerId = useId(), selfReviewId = useId(), reviewerId = useId(), branchesId = useId();
@@ -238,6 +239,12 @@ export function GitHubRemoteSetup({ state, controller, onHelp, compact = false, 
       {op.effect === 'unknown' && <p>A write may have occurred. Stopping locally cannot roll it back. Never retry Apply automatically.</p>}
     </section>}
     {status?.observed && <section aria-label="Last remote observation"><h3>Last native remote observation · not a fresh authorization</h3><ObservationRows observed={status.observed} /></section>}
+    {onDelegate&&<details><summary>Advanced: prepare or apply one setting from the CLI</summary>
+      <p>Select the exact nonsecret setting here first. These buttons only select the action in the shared CLI permission panel; they do not grant permission or send a request. Secret upload stays in Desktop.</p>
+      <div className="button-row"><button type="button" className="button secondary" disabled={!controller.agentSelection('remote-setup-prepare')} onClick={()=>onDelegate('remote-setup-prepare')}>Choose CLI Prepare</button>
+      <button type="button" className="button secondary" disabled={!controller.agentSelection('remote-setup-apply')} onClick={()=>onDelegate('remote-setup-apply')}>Choose CLI Apply</button></div>
+      <p>After the original CLI request settles, Read local Status here. After Prepare, Revoke and Check the old permission, review and confirm the displayed change, then separately Allow Apply in the shared permission panel. Nothing automatically applies or retries.</p>
+    </details>}
     {controls}
   </section>;
 }

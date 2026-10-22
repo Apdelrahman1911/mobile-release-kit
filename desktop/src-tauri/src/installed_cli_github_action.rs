@@ -118,6 +118,8 @@ fn output(
             status.effect
         ));
         match status.review.kind() {
+            github::Kind::RemoteSetupPrepare => text.push_str("One non-secret settings review. Read the exact native before/after in Desktop; withdraw this permission, then explicitly confirm and Allow Apply separately. No automatic write.\n"),
+            github::Kind::RemoteSetupApply => text.push_str("One exact reviewed non-secret settings change. A204 is not readback; settings-readback-observed is only this original bounded observation, not atomic CAS, future stability or release qualification. Stop does not undo a sent change.\n"),
             github::Kind::ActivityOverview => {
                 text.push_str("One historical Activity overview; no write, automatic refresh, current-head/CI proof, jobs, logs or artifacts.
 ");

@@ -131,7 +131,7 @@ impl ConnectionState {
             data,
             activity: None,
             dispatch: Some(capture),
-            enrollment: None,
+            enrollment: None, operation: None,
         })
     }
     pub(crate) fn counter_agent_allow(

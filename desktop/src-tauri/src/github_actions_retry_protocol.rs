@@ -719,7 +719,7 @@ fn strings(values: &[&String]) -> Option<usize> {
         .iter()
         .try_fold(0usize, |n, v| n.checked_add(v.capacity()))
 }
-#[derive(Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrepareArgs {
     pub(crate) session_id: String,
@@ -737,19 +737,43 @@ pub(crate) struct StartArgs {
     pub(crate) consent_id: String,
     pub(crate) confirm: bool,
 }
-#[derive(Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PendingArgs {
     pub(crate) session_id: String,
     pub(crate) expected_revision: u32,
     pub(crate) expected_connection_revision: u32,
 }
-#[derive(Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ReconcileArgs {
     pub(crate) session_id: String,
     pub(crate) expected_revision: u32,
     pub(crate) marker: String,
+}
+impl PrepareArgs {
+    pub(crate) fn valid(&self) -> bool {
+        valid_id(&self.session_id)
+            && self.expected_revision > 0 && self.expected_revision <= LAST_REVISION
+            && self.expected_connection_revision > 0 && self.expected_connection_revision <= LAST_REVISION
+            && self.activity_revision > 0 && self.activity_revision <= LAST_REVISION
+            && numeric_id(&self.run_id)
+            && (1..=1000).contains(&self.attempt)
+    }
+}
+impl PendingArgs {
+    pub(crate) fn valid(&self) -> bool {
+        valid_id(&self.session_id)
+            && self.expected_revision > 0 && self.expected_revision <= LAST_REVISION
+            && self.expected_connection_revision > 0 && self.expected_connection_revision <= LAST_REVISION
+    }
+}
+impl ReconcileArgs {
+    pub(crate) fn valid(&self) -> bool {
+        valid_id(&self.session_id)
+            && self.expected_revision > 0 && self.expected_revision <= LAST_REVISION
+            && hex(&self.marker, 32)
+    }
 }
 pub(crate) enum Command {
     Status,
@@ -784,13 +808,7 @@ pub(crate) fn decode_command(name: &str, v: &Value) -> Result<Command, BridgeErr
         }
         "github_actions_retry_prepare" => {
             let a: PrepareArgs = read(v)?;
-            if !valid_id(&a.session_id)
-                || !rev(a.expected_revision)
-                || !rev(a.expected_connection_revision)
-                || !rev(a.activity_revision)
-                || !numeric_id(&a.run_id)
-                || !(1..=1000).contains(&a.attempt)
-            {
+            if !a.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Prepare(a)
@@ -808,17 +826,14 @@ pub(crate) fn decode_command(name: &str, v: &Value) -> Result<Command, BridgeErr
         }
         "github_actions_retry_pending" => {
             let a: PendingArgs = read(v)?;
-            if !valid_id(&a.session_id)
-                || !rev(a.expected_revision)
-                || !rev(a.expected_connection_revision)
-            {
+            if !a.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Pending(a)
         }
         "github_actions_retry_reconcile" => {
             let a: ReconcileArgs = read(v)?;
-            if !valid_id(&a.session_id) || !rev(a.expected_revision) || !hex(&a.marker, 32) {
+            if !a.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Reconcile(a)

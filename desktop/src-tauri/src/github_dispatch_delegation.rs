@@ -106,8 +106,35 @@ pub(crate) enum Selection {
     CounterReconcile(publication::ReconcileArgs),
     CounterEnrollmentReview(p::enrollment::ReviewSelection),
     CounterEnrollmentConnect(p::enrollment::ConnectSelection),
+    RemoteSetupPrepare(remote_setup::Prepare),
+    RemoteSetupApply(remote_setup::Apply),
+    RepositoryPrepare(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_repository_create_protocol::PrepareArgs>),
+    RepositoryPending(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_repository_create_protocol::PendingArgs>),
+    RepositoryReconcile(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_repository_create_protocol::ReconcileArgs>),
+    PrPrepare(#[serde(deserialize_with="super::operation::pr_input")] Arc<crate::github_pull_request_protocol::PrepareArgs>),
+    PrPending(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_pull_request_protocol::PendingArgs>),
+    PrReconcile(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_pull_request_protocol::ReconcileArgs>),
+    FailedJobsPrepare(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_actions_retry_protocol::PrepareArgs>),
+    FailedJobsPending(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_actions_retry_protocol::PendingArgs>),
+    FailedJobsReconcile(#[serde(deserialize_with="super::operation::shared")] Arc<crate::github_actions_retry_protocol::ReconcileArgs>),
+
 }
 impl Selection {
+    pub(crate) fn operation_input(&self) -> Option<super::operation::Input> {
+        Some(match self {
+            Self::RepositoryPrepare(v) => super::operation::Input::RepositoryPrepare(v.clone()),
+            Self::RepositoryPending(v) => super::operation::Input::RepositoryPending(v.clone()),
+            Self::RepositoryReconcile(v) => super::operation::Input::RepositoryReconcile(v.clone()),
+            Self::PrPrepare(v) => super::operation::Input::PrPrepare(v.clone()),
+            Self::PrPending(v) => super::operation::Input::PrPending(v.clone()),
+            Self::PrReconcile(v) => super::operation::Input::PrReconcile(v.clone()),
+            Self::FailedJobsPrepare(v) => super::operation::Input::FailedJobsPrepare(v.clone()),
+            Self::FailedJobsPending(v) => super::operation::Input::FailedJobsPending(v.clone()),
+            Self::FailedJobsReconcile(v) => super::operation::Input::FailedJobsReconcile(v.clone()),
+            _ => return None,
+        })
+    }
+
     pub(crate) fn enrollment_input(&self) -> Option<p::enrollment::Input> {
         Some(match self {
             Self::CounterEnrollmentReview(v) => p::enrollment::Input::CounterEnrollmentReview(v.clone()),
@@ -139,6 +166,8 @@ impl Selection {
     }
     pub(crate) fn input(&self) -> Option<Input> {
         Some(match self {
+            Self::RemoteSetupPrepare(v) => Input::RemoteSetupPrepare(v.clone()),
+            Self::RemoteSetupApply(v) => Input::RemoteSetupApply(v.clone()),
             Self::PreflightPrepare(v) => Input::PreflightPrepare(v.clone()),
             Self::PreflightDispatch(v) => Input::PreflightDispatch(v.clone()),
             Self::PreflightPending(v) => Input::PreflightPending(v.clone()),
@@ -157,6 +186,16 @@ impl Selection {
     }
     pub(crate) fn kind(&self) -> p::Kind {
         match self {
+            Self::RepositoryPrepare(_) => p::Kind::RepositoryPrepare,
+            Self::RepositoryPending(_) => p::Kind::RepositoryPending,
+            Self::RepositoryReconcile(_) => p::Kind::RepositoryReconcile,
+            Self::PrPrepare(_) => p::Kind::PrPrepare,
+            Self::PrPending(_) => p::Kind::PrPending,
+            Self::PrReconcile(_) => p::Kind::PrReconcile,
+            Self::FailedJobsPrepare(_) => p::Kind::FailedJobsPrepare,
+            Self::FailedJobsPending(_) => p::Kind::FailedJobsPending,
+            Self::FailedJobsReconcile(_) => p::Kind::FailedJobsReconcile,
+
             Self::RepositoryCreate(_) => p::Kind::RepositoryCreate,
             Self::DraftPrCreate(_) => p::Kind::DraftPrCreate,
             Self::PrCreate(_) => p::Kind::PrCreate,
@@ -164,6 +203,8 @@ impl Selection {
             Self::SetupPublish(_) => p::Kind::SetupPublish,
             Self::SetupReconcile(_) => p::Kind::SetupReconcile,
             Self::ActivityOverview(_) => p::Kind::ActivityOverview,
+            Self::RemoteSetupPrepare(_) => p::Kind::RemoteSetupPrepare,
+            Self::RemoteSetupApply(_) => p::Kind::RemoteSetupApply,
             Self::PreflightPrepare(_) => p::Kind::PreflightPrepare,
             Self::PreflightDispatch(_) => p::Kind::PreflightDispatch,
             Self::PreflightPending(_) => p::Kind::PreflightPending,
@@ -182,6 +223,7 @@ impl Selection {
         }
     }
     pub(crate) fn valid(&self) -> bool {
+        if let Some(v) = self.operation_input() { return v.valid(); }
         match self {
             Self::CounterEnrollmentReview(v) => return v.valid(),
             Self::CounterEnrollmentConnect(v) => return v.valid(),
@@ -191,9 +233,12 @@ impl Selection {
             .map_or_else(|| self.input().is_some_and(|v| v.valid()), |v| v.valid())
     }
     pub(crate) fn retained_fits(&self) -> bool {
+        if let Some(v) = self.operation_input() { return v.retained_fits(); }
         let bytes = match self {
             Self::CounterEnrollmentReview(v) => Some(v.session_id.capacity()),
             Self::CounterEnrollmentConnect(v) => v.session_id.capacity().checked_add(v.review_id.capacity()),
+            Self::RemoteSetupPrepare(v) => v.heap(),
+            Self::RemoteSetupApply(v) => v.heap(),
             Self::PreflightPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.branch.capacity()]),
             Self::ReleasePrepare(v) => release_input_heap(v),
             Self::SetupPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),
@@ -211,9 +256,10 @@ impl Selection {
         bytes.is_some_and(|n| n <= INPUT_BACKING)
     }
     pub(crate) fn limit(&self) -> usize {
+        if matches!(self,Self::PrPrepare(_)) { return super::operation::MAIN_RAW_LIMIT; }
         if matches!(
             self,
-            Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::SetupPrepare(_) | Self::CounterPrepare(_)
+            Self::RemoteSetupPrepare(_) | Self::PreflightPrepare(_) | Self::ReleasePrepare(_) | Self::SetupPrepare(_) | Self::CounterPrepare(_)
         ) {
             4096
         } else {
@@ -237,10 +283,14 @@ pub(crate) enum Input {
     CounterCreate(publication::PublishArgs),
     PublicationPending(publication::PendingArgs),
     CounterReconcile(publication::ReconcileArgs),
+    RemoteSetupPrepare(remote_setup::Prepare),
+    RemoteSetupApply(remote_setup::Apply),
 }
 impl Input {
     pub(crate) fn kind(&self) -> p::Kind {
         match self {
+            Self::RemoteSetupPrepare(_) => p::Kind::RemoteSetupPrepare,
+            Self::RemoteSetupApply(_) => p::Kind::RemoteSetupApply,
             Self::PreflightPrepare(_) => p::Kind::PreflightPrepare,
             Self::PreflightDispatch(_) => p::Kind::PreflightDispatch,
             Self::PreflightPending(_) => p::Kind::PreflightPending,
@@ -258,6 +308,8 @@ impl Input {
     }
     pub(crate) fn session(&self) -> &str {
         match self {
+            Self::RemoteSetupPrepare(v) => &v.session_id,
+            Self::RemoteSetupApply(v) => &v.session_id,
             Self::PreflightPrepare(v) => &v.session_id,
             Self::PreflightDispatch(v) => &v.session_id,
             Self::PreflightPending(v) => &v.session_id,
@@ -275,6 +327,8 @@ impl Input {
     }
     pub(crate) fn revision(&self) -> u32 {
         match self {
+            Self::RemoteSetupPrepare(v) => v.expected_revision,
+            Self::RemoteSetupApply(v) => v.expected_revision,
             Self::PreflightPrepare(v) => v.expected_revision,
             Self::PreflightDispatch(v) => v.expected_revision,
             Self::PreflightPending(v) => v.expected_revision,
@@ -292,6 +346,7 @@ impl Input {
     }
     pub(crate) fn connection_revision(&self) -> Option<u32> {
         match self {
+            Self::RemoteSetupPrepare(v) => Some(v.expected_connection_revision),
             Self::PreflightPrepare(v) => Some(v.expected_connection_revision),
             Self::ReleasePrepare(v) => Some(v.expected_connection_revision),
             Self::SetupPrepare(v) => Some(v.expected_connection_revision),
@@ -302,6 +357,8 @@ impl Input {
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
+            Self::RemoteSetupPrepare(v) => v.valid(),
+            Self::RemoteSetupApply(v) => v.valid(),
             Self::PreflightPrepare(v) => v.valid(),
             Self::PreflightDispatch(v) => v.valid(),
             Self::PreflightPending(v) => v.valid(),
@@ -324,6 +381,8 @@ impl Input {
     }
     pub(crate) fn heap(&self) -> Option<usize> {
         let mut n = match self {
+            Self::RemoteSetupPrepare(v) => return v.heap(),
+            Self::RemoteSetupApply(v) => return v.heap(),
             Self::PreflightPrepare(v) => v.session_id.capacity(),
             Self::PreflightDispatch(v) => v.session_id.capacity(),
             Self::PreflightPending(v) => v.session_id.capacity(),
@@ -387,6 +446,7 @@ pub(crate) struct Capture {
     pub(crate) generation: u32,
     pub(crate) root: RegisteredRoot,
     pub(crate) credential_end: Instant,
+    pub(crate) remote_variable: Option<crate::asset_session::RemoteSetupVariablePins>,
     pub(crate) account: String,
     pub(crate) repository: String,
     pub(crate) coordinate: String,
@@ -406,7 +466,8 @@ impl Capture {
             .checked_add(self.account.capacity())?
             .checked_add(self.repository.capacity())?
             .checked_add(self.coordinate.capacity())?
-            .checked_add(self.binding.capacity())
+            .checked_add(self.binding.capacity())?
+            .checked_add(self.remote_variable.as_ref().map_or(0, |_| crate::asset_session::RemoteSetupVariablePins::backing()))
     }
 }
 pub(crate) struct Permission {
@@ -434,6 +495,14 @@ impl Producer {
             entry: Arc::downgrade(entry),
             operation: operation.into(),
         }
+    }
+    pub(crate) fn pending_unknown(&self) {
+        if let Some(e) = self.entry.upgrade() {
+            if !e.positively_returned(&self.operation) { e.unknown(p::Reason::CleanupUnknown); }
+        }
+    }
+    pub(crate) fn belongs_to(&self, scope: &Arc<r::NativeScope>) -> bool {
+        self.entry.upgrade().is_some_and(|e| Arc::ptr_eq(e.scope(), scope))
     }
     pub(crate) fn positive(&self) -> bool {
         self.entry
@@ -551,6 +620,7 @@ impl ConnectionState {
             generation,
             root: root.clone(),
             credential_end: private.clock.end,
+            remote_variable: None,
             account: account.id.clone(),
             repository: repo.id.clone(),
             coordinate: repo.full_name.clone(),
@@ -576,6 +646,8 @@ impl ConnectionState {
                 .is_ok_and(|c| c == *capture)
     }
 }
+#[path = "github_remote_setup_delegation.rs"]
+pub(crate) mod remote_setup;
 #[path = "github_preflight_delegation.rs"]
 mod preflight;
 #[path = "github_release_delegation.rs"]

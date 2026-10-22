@@ -107,10 +107,12 @@ impl State {
             exhausted: false,
         }
     }
-    pub(super) fn actions_retry_selection(
+    // SAME accepted Activity frame/revision; a caller-supplied run ID is not a
+    // source. Factoring this borrow does not mint a native selection/nonce.
+    pub(super) fn actions_retry_head(
         &self, revision:u32, session_id:&str, project_id:&str,
-        scope:&crate::github_actions_retry_protocol::Scope, run_id:&str, attempt:u32, marker:String,
-    ) -> Option<crate::github_actions_retry_protocol::Selection> {
+        scope:&crate::github_actions_retry_protocol::Scope, run_id:&str, attempt:u32,
+    ) -> Option<&str> {
         if self.exhausted || self.active.is_some() || self.view.revision != revision
             || self.view.session_id.as_deref() != Some(session_id) { return None; }
         let o=self.view.operation.as_ref()?;
@@ -122,10 +124,17 @@ impl State {
             || o.target!=current || r.target!=current || o.selection!=selected || r.selection!=selected
             || !p::data_valid(&r.data,&p::Request { target:current,selection:selected })
             || r.data["run"]["status"]!="completed"
-            || !matches!(r.data["run"]["conclusion"].as_str(),Some("failure"|"timed_out"))
-            || !crate::github_preflight_protocol::hex(&marker,32) { return None; }
+            || !matches!(r.data["run"]["conclusion"].as_str(),Some("failure"|"timed_out")) { return None; }
+        r.data["run"]["headSha"].as_str()
+    }
+    pub(super) fn actions_retry_selection(
+        &self, revision:u32, session_id:&str, project_id:&str,
+        scope:&crate::github_actions_retry_protocol::Scope, run_id:&str, attempt:u32, marker:String,
+    ) -> Option<crate::github_actions_retry_protocol::Selection> {
+        if !crate::github_preflight_protocol::hex(&marker,32) { return None; }
+        let head = self.actions_retry_head(revision,session_id,project_id,scope,run_id,attempt)?;
         Some(crate::github_actions_retry_protocol::Selection {
-            run_id:run_id.into(), attempt, head_sha:r.data["run"]["headSha"].as_str()?.into(),marker,
+            run_id:run_id.into(), attempt, head_sha:head.into(), marker,
         })
     }
     pub(super) fn native_work_pending(&self) -> bool {

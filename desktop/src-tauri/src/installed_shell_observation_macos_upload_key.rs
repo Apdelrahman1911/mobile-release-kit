@@ -358,6 +358,12 @@ impl Observation {
             let Some(state)=app.try_state::<crate::shell::ShellState>()else{self.fail_with("installed-cli-original-contract");return;};
             self.cli_tick(&state.document,step).await;return;
         }
+        let git_cli=self.record().and_then(|r|match r.step {super::super::Step::GitCli(step)=>Some(step),_=>None});
+        if let Some(step)=git_cli {
+            if !self.timely(){self.tick(app);return;}
+            let Some(state)=app.try_state::<crate::shell::ShellState>()else{self.fail_with("git-cli-original-contract");return};
+            self.git_cli_tick(app,&state.document,step).await;return;
+        }
         let upstream=self.record().and_then(|r|match r.step {super::super::Step::GitUpstream(step)=>Some(step),_=>None});
         if let Some(step)=upstream {
             if !self.timely(){self.tick(app);return;}

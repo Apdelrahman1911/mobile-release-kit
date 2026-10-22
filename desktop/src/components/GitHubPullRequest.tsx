@@ -76,7 +76,12 @@ export function GitHubPullRequest({ controller, state, repository = null, baseSu
       {!!status?.pending.length&&<div><h4>Previous attempts</h4><p>Checking an attempt only reads GitHub. It never resends Create, closes a PR or changes your branches.</p>
         {status.pending.map(p=><div key={p.prepared.target.intent!.marker}><p><strong>{p.prepared.target.scope.repository}</strong> · {pullRequestModeLabel(p.prepared.target.intent!)} · {p.prepared.target.intent!.head} → {p.prepared.target.intent!.base}<br/>
           {p.closed?`Previously confirmed closed${p.closed.merged?' after merging':''}. A new explicit review still checks for an open PR.`:p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
-          <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.intent!.marker)} onClick={()=>controller.reconcile(p.prepared.target.intent!.marker)}>Check this attempt on GitHub</button></div>)}
+          <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.intent!.marker)} onClick={()=>controller.reconcile(p.prepared.target.intent!.marker)}>Check this attempt on GitHub</button>
+          <details><summary>Advanced: select this original attempt for CLI Reconcile</summary>
+            <p>Read saved attempts through this original panel or its CLI Pending action first. Selecting does not read GitHub, resend, or grant permission.</p>
+            <button type="button" className="button small secondary" disabled={!controller.canSelectRecordForAgent(p.prepared.target.intent!.marker)} onClick={()=>controller.selectRecordForAgent(p.prepared.target.intent!.marker)}>Use this returned record</button>
+            {state.agentReconcileMarker===p.prepared.target.intent!.marker&&<p>Selected for a separate explicit CLI Reconcile permission.</p>}
+          </details></div>)}
       </div>}
       <ProgressiveDisclosure title="Help: branches, permissions and separate actions">
         <p>Find remote branch names in the repository’s Code tab → branch menu. Use names such as main or feature/login, not a URL or refs/heads/ path. This route supports two branches in the same repository; fork PRs remain a separate task.</p>

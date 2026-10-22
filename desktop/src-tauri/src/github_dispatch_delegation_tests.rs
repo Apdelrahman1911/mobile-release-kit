@@ -139,3 +139,84 @@ fn producer_weak_entry_queries_final_facts_not_the_retired_consumer_scope() {
     assert!(scope.current(false).is_err());e.cancel(p::Reason::UserCancelled,at);assert!(producer.positive());
     drop(inbox);drop(e);assert!(!producer.positive()); // dead producer is never reconstructed from an ID
 }
+
+#[test]
+fn remote_settings_four_closed_inputs_hash_native_field_order_and_reject_secret_or_extra_material() {
+    let fields=["MOBILE_RELEASE_ANDROID_KEY_ALIAS","MOBILE_RELEASE_GOOGLE_WIF_PROVIDER","MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT","MOBILE_RELEASE_ASC_KEY_ID","MOBILE_RELEASE_ASC_ISSUER_ID","MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION"];
+    let mut settings=vec![json!({"kind":"actions_enabled","enabled":true}),
+        json!({"kind":"workflow_token_policy","defaultWorkflowPermissions":"write","canApprovePullRequestReviews":true}),
+        json!({"kind":"environment_protection","mode":"configure","stage":"candidate","waitTimerMinutes":17,"preventSelfReview":null,"reviewerLogin":null,"branches":null})];
+    for field in fields { settings.push(json!({"kind":"environment_variable","mode":"create","stage":"candidate","requirement":field,
+        "source":{"recordId":"c".repeat(32),"recordRevision":4,"contextRevision":5}})); }
+    for setting in settings {
+        let v=json!({"kind":"remote-setup-prepare","sessionId":"github-session-1","expectedRevision":2,"expectedConnectionRevision":3,"selection":setting});
+        let s:Selection=serde_json::from_value(v.clone()).unwrap();assert!(s.valid()&&s.retained_fits());let i=s.input().unwrap();
+        let command=i.remote_command().unwrap();let crate::github_setup_protocol::Command::Prepare(a)=command else {panic!("closed command")};
+        assert_eq!((a.session_id.as_str(),a.expected_revision,a.expected_connection_revision),("github-session-1",2,3));
+        assert_eq!(serde_json::to_value(&a.selection).unwrap(),v["selection"]);
+        assert_eq!(i.hash().unwrap(),format!("{:x}",Sha256::digest(serde_json::to_vec(&i).unwrap())));
+        assert!(i.preflight_command().is_err()&&i.release_command().is_err()&&i.counter_command().is_err());
+        for key in ["token","url","value","purpose"] {let mut bad=v.clone();bad["selection"][key]=json!("not accepted");assert!(serde_json::from_value::<Selection>(bad).is_err());}
+        if setting["kind"]=="environment_variable" {
+            let mut secret=v.clone();secret["selection"]["kind"]=json!("environment_secret");assert!(serde_json::from_value::<Selection>(secret).is_err());
+            let mut positional=v.clone();positional["selection"]["source"]=json!(["c".repeat(32),4,5]);assert!(serde_json::from_value::<Selection>(positional).is_err());
+        }
+    }
+    let exact=r#"{"kind":"remote-setup-prepare","sessionId":"s","expectedRevision":1,"expectedConnectionRevision":2,"selection":{"kind":"actions_enabled","enabled":true}}"#;
+    assert_eq!(serde_json::to_string(&input(serde_json::from_str(exact).unwrap())).unwrap(),exact);
+    let mut disabled:Value=serde_json::from_str(exact).unwrap();disabled["selection"]["enabled"]=json!(false);assert!(input(disabled).valid()); // native enabled boolean, not a one-way enable policy
+}
+
+#[test]
+fn remote_original_permission_precedes_take_and_completed_prepare_withdrawal_preserves_only_its_consent() {
+    use crate::{github_setup_protocol as w,github_setup_session as st};
+    let at=Instant::now();let mut s=state(at);let root=root();let binding="a".repeat(64);let doc=Arc::new(());
+    let owner=EditOwner::new(RuntimeConfig::packaged(PathBuf::from("/never-opened-remote-entry")));
+    owner.bind_saved_registration(&doc,Arc::new(crate::saved_command_owner::AndroidRegistrationControl::default()));
+    owner.initial_document("main").unwrap();let guard=owner.saved_registration_guard(&doc).unwrap();
+    assert!(s.setup_status(true,at,Reason::None).available); // inert existing state fixture, no runtime nomination
+    let initial=input(json!({"kind":"remote-setup-prepare","sessionId":"github-session-1","expectedRevision":s.setup.view.revision,
+        "expectedConnectionRevision":s.status.revision,"selection":{"kind":"actions_enabled","enabled":true}}));
+    let reviewed=s.remote_agent_review(initial.clone(),2,&root,&binding,&guard,at,None,None).unwrap();
+    let id=|n:u64|Id::parse(&format!("{n:032x}")).unwrap();
+    let scope=r::NativeScope::new(id(1),"project-1".into(),root.path.clone(),1,2,3,reviewed.data.clone(),reviewed.identity.clone(),reviewed.end,
+        Arc::new(crate::service_version_reserve_requests::ReadPermission::new(at+Duration::from_secs(300))),Arc::downgrade(&doc),tokio::sync::watch::channel(1).0);
+    let inbox=r::Inbox::new(id(2));inbox.allow(scope.clone(),id(3)).unwrap();s.remote_agent_allow(reviewed,&scope).unwrap();
+    let command=initial.remote_command().unwrap();assert!(s.remote_agent_entry(&command,None,2,&root,&binding,&guard,at,None).is_err());
+    inbox.submit(p::Submit{origin:p::Query{project_id:id(1),service_instance:id(2),request_id:id(4)},grant_id:id(3)}).unwrap();
+    let call=inbox.claim().unwrap().unwrap();let entry=call.entry().clone();
+    assert!(s.remote_agent_entry(&command,Some(&entry),3,&root,&binding,&guard,at,None).is_err());
+    s.status.account.value.as_mut().unwrap().id="99".into();assert!(s.remote_agent_entry(&command,Some(&entry),2,&root,&binding,&guard,at,None).is_err());
+    s.status.account.value.as_mut().unwrap().id="11".into();assert!(s.setup.agent_permission.is_some());
+    s.remote_agent_entry(&command,Some(&entry),2,&root,&binding,&guard,at,None).unwrap();
+    assert!(s.setup.agent_permission.is_none());assert!(s.remote_agent_entry(&command,Some(&entry),2,&root,&binding,&guard,at,None).is_err());
+    entry.entering().unwrap();entry.arm("github-setup-1").unwrap();entry.go("github-setup-1").unwrap();
+    // Existing same-row DATA fixture only: no Ticket/receipt or provider result is constructed.
+    let target=w::Target{project_binding:binding.clone(),repository:"owner/app".into(),account_id:"11".into(),repository_id:"22".into(),selection:w::Selection::ActionsEnabled{enabled:true}};
+    let before=w::Policy::Actions{enabled:false,allowed_actions:w::AllowedActions::Selected,sha_pinning_required:true};
+    let prepared=w::Prepared::Repository(w::RepositoryPrepared{after:before.changed(target.selection.clone()).unwrap(),target,before,observed_at:"2026-10-09T00:00:00Z".into(),
+        confirmation:"Change actions_enabled for owner/app? Review the exact before and after values. Enabling Actions can allow configured workflows to run; write tokens or review approvals grant additional privileges. GitHub does not provide an atomic compare-and-set here: another administrator can change settings after this review. This does not configure secrets, change local workflows, or qualify a release.".into()});assert!(prepared.valid());
+    let identity=Arc::new(());let end=at+Duration::from_secs(90);
+    s.setup.consent=Some(st::Consent{identity:identity.clone(),agent:None,producer:Some(Producer::new(&entry,"github-setup-1")),material:None,
+        id:"a".repeat(32),prepared:prepared.clone(),end,session_id:"github-session-1".into(),project_id:s.private.as_ref().unwrap().project_id.clone(),generation:2,root:root.clone(),edit_stamp:guard.stamp().unwrap()});
+    s.setup.view.consent=Some(w::ConsentView{id:"a".repeat(32),expires_at:"2026-10-09T00:01:30Z".into(),prepared});
+    let apply=input(json!({"kind":"remote-setup-apply","sessionId":"github-session-1","expectedRevision":s.setup.view.revision,"consentId":"a".repeat(32),"confirm":true}));
+    assert!(s.remote_agent_review(apply.clone(),2,&root,&binding,&guard,at,None,None).is_err());
+    entry.dispatch_returned("github-setup-1",p::Reason::None,p::Effect::None,Some(p::dispatch::Snapshot::RemoteSettings(p::remote_setup::Snapshot{
+        setting:p::remote_setup::Setting::ActionsEnabled,reason:p::remote_setup::NativeReason::None,write_claimed:Some(false),write_acknowledged:Some(false),
+        consent_id:Some(p::dispatch::Hex([1;16])),prepared_sha256:Some(p::dispatch::Hex([2;32])),observation_sha256:Some(p::dispatch::Hex([3;32]))})));
+    assert!(s.remote_agent_review(apply.clone(),2,&root,&binding,&guard,at,None,None).is_err());call.returned(Ok(()));
+    assert!(s.remote_agent_review(apply.clone(),2,&root,&binding,&guard,at,None,None).is_err());entry.claim_history().unwrap().unwrap().returned(Ok(())).unwrap();
+    s.remote_agent_revoke(&scope);assert!(Arc::ptr_eq(&s.setup.consent.as_ref().unwrap().identity,&identity));assert_eq!(s.setup.consent.as_ref().unwrap().end,end);
+    let next=s.remote_agent_review(apply.clone(),2,&root,&binding,&guard,at,None,None).unwrap();
+    assert!(s.remote_agent_review(apply.clone(),2,&root,&binding,&guard,end,None,None).is_err());
+    let next_scope=r::NativeScope::new(id(1),"project-1".into(),root.path.clone(),1,2,3,next.data.clone(),next.identity.clone(),next.end,
+        Arc::new(crate::service_version_reserve_requests::ReadPermission::new(at+Duration::from_secs(300))),Arc::downgrade(&doc),tokio::sync::watch::channel(1).0);
+    inbox.allow(next_scope.clone(),id(5)).unwrap();s.remote_agent_allow(next,&next_scope).unwrap();s.remote_agent_revoke(&scope);
+    assert!(s.setup.agent_permission.as_ref().unwrap().scope.upgrade().is_some_and(|v|Arc::ptr_eq(&v,&next_scope)));
+    assert!(s.remote_agent_entry(&apply.remote_command().unwrap(),None,2,&root,&binding,&guard,at,None).is_err());assert!(s.setup.consent.is_some());
+    inbox.submit(p::Submit{origin:p::Query{project_id:id(1),service_instance:id(2),request_id:id(6)},grant_id:id(5)}).unwrap();let next_call=inbox.claim().unwrap().unwrap();
+    s.remote_agent_entry(&apply.remote_command().unwrap(),Some(next_call.entry()),2,&root,&binding,&guard,at,None).unwrap();
+    let w::Command::Apply(args)=apply.remote_command().unwrap()else{panic!("closed apply")};let (_,taken)=s.setup_take_apply(args,2,&root,&binding,&guard,at).unwrap();
+    assert!(Arc::ptr_eq(&taken.identity,&identity));assert!(s.setup.consent.is_none());next_call.returned(Err(p::Reason::NativeRefused));
+}

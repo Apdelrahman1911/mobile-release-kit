@@ -12,6 +12,7 @@ impl DocumentBinding {
         let input = {
             let s = self.lock();
             match kind {
+                K::RemoteSetupPrepare | K::RemoteSetupApply => s.github.remote_agent_input(entry),
                 K::PreflightPrepare
                 | K::PreflightDispatch
                 | K::PreflightPending
@@ -31,6 +32,9 @@ impl DocumentBinding {
             return Err(BridgeError::invalid());
         }
         match kind {
+            K::RemoteSetupPrepare | K::RemoteSetupApply => {
+                self.github_remote_setup_execute(input.remote_command()?, Some(entry.clone()))?;
+            }
             K::PreflightPrepare
             | K::PreflightDispatch
             | K::PreflightPending
@@ -71,6 +75,8 @@ pub(super) fn main_call_bytes() -> Option<usize> {
         4096, // original MAIN raw argument, still owned by the same Tauri caller
         r::NativeScope::unused_main_backing()?,
         2 * size_of::<native::Review>(),
+        2 * RemoteSetupVariablePins::backing(), // both captured weak allocation pairs
+        size_of::<GitHubVariableMaterial>(), // transient actual reborrow wrapper
         2 * size_of::<NativeProject>(),
         size_of::<crate::asset_source::RegisteredRoot>(),
         size_of::<Allow>(),

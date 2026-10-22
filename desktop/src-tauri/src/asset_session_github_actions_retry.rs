@@ -154,6 +154,7 @@ impl DocumentBinding {
             None
         };
         let mut state = self.lock();
+        state.github.actions_retry_operation_origin(&command, agent.as_ref())?;
         self.expire(&mut state, Instant::now());
         match &command {
             p::Command::Cancel(args) => {
@@ -205,6 +206,7 @@ impl DocumentBinding {
                     p::Reason::Busy
                 })
             })?;
+        state.github.actions_retry_operation_entry(&command, agent.as_ref(), generation, &root, &binding, &edit, Instant::now())?;
         let gate = GitHubActionsRetryGoGate {
             agent,
             inner: Arc::downgrade(&self.inner),

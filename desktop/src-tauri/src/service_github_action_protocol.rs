@@ -7,6 +7,10 @@ pub(crate) mod activity;
 pub(crate) mod dispatch;
 #[path = "service_counter_enrollment_protocol.rs"]
 pub(crate) mod enrollment;
+#[path = "service_github_remote_setup_protocol.rs"]
+pub(crate) mod remote_setup;
+#[path = "service_github_operation_protocol.rs"]
+pub(crate) mod operation;
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
@@ -52,13 +56,29 @@ pub(crate) enum Kind {
     CounterReconcile,
     CounterEnrollmentReview,
     CounterEnrollmentConnect,
+    RemoteSetupPrepare,
+    RemoteSetupApply,
+    RepositoryPrepare,
+    RepositoryPending,
+    RepositoryReconcile,
+    PrPrepare,
+    PrPending,
+    PrReconcile,
+    FailedJobsPrepare,
+    FailedJobsPending,
+    FailedJobsReconcile,
 }
 impl Kind {
+    pub(crate) fn remote_setup_family(self) -> bool { matches!(self, Self::RemoteSetupPrepare | Self::RemoteSetupApply) }
+    pub(crate) fn operation_family(self) -> bool { matches!(self, Self::RepositoryPrepare | Self::RepositoryPending | Self::RepositoryReconcile | Self::PrPrepare | Self::PrPending | Self::PrReconcile | Self::FailedJobsPrepare | Self::FailedJobsPending | Self::FailedJobsReconcile) }
+    pub(crate) fn operation_reconcile(self) -> bool { matches!(self, Self::RepositoryReconcile | Self::PrReconcile | Self::FailedJobsReconcile) }
+
     pub(crate) fn enrollment_family(self) -> bool { matches!(self, Self::CounterEnrollmentReview | Self::CounterEnrollmentConnect) }
-    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
-    pub(crate) fn mutation(self)->bool { !matches!(self, Self::CounterEnrollmentReview | Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::RemoteSetupPrepare | Self::RemoteSetupApply | Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn mutation(self)->bool { !self.operation_family() && !matches!(self, Self::RemoteSetupPrepare | Self::CounterEnrollmentReview | Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
     pub(crate) fn prefix(self) -> &'static str {
         match self {
+            Self::RemoteSetupPrepare | Self::RemoteSetupApply => "github-setup-",
             Self::ActivityOverview => "github-activity-",
             Self::PreflightPrepare => "github-preflight-",
             Self::PreflightDispatch => "github-preflight-",
@@ -75,14 +95,26 @@ impl Kind {
             Self::CounterReconcile => "github-publication-",
             Self::CounterEnrollmentReview | Self::CounterEnrollmentConnect => "version-enrollment-",
 
-            Self::RepositoryCreate => "repository-create-",
-            Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
-            Self::FailedJobsRetry => "github-actions-retry-",
+            Self::RepositoryPrepare | Self::RepositoryPending | Self::RepositoryReconcile | Self::RepositoryCreate => "repository-create-",
+            Self::PrPrepare | Self::PrPending | Self::PrReconcile | Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
+            Self::FailedJobsPrepare | Self::FailedJobsPending | Self::FailedJobsReconcile | Self::FailedJobsRetry => "github-actions-retry-",
             Self::SetupPublish | Self::SetupReconcile => "github-publication-",
         }
     }
     pub(crate) fn consent(self) -> &'static str {
         match self {
+            Self::RemoteSetupPrepare => "agent-remote-setup-prepare-once-v1",
+            Self::RemoteSetupApply => "agent-remote-setup-apply-once-v1",
+            Self::RepositoryPrepare => "agent-repository-prepare-once-v1",
+            Self::RepositoryPending => "agent-repository-pending-once-v1",
+            Self::RepositoryReconcile => "agent-repository-reconcile-once-v1",
+            Self::PrPrepare => "agent-pr-prepare-once-v1",
+            Self::PrPending => "agent-pr-pending-once-v1",
+            Self::PrReconcile => "agent-pr-reconcile-once-v1",
+            Self::FailedJobsPrepare => "agent-failed-jobs-prepare-once-v1",
+            Self::FailedJobsPending => "agent-failed-jobs-pending-once-v1",
+            Self::FailedJobsReconcile => "agent-failed-jobs-reconcile-once-v1",
+
             Self::ActivityOverview => "agent-activity-overview-once-v1",
             Self::PreflightPrepare => "agent-preflight-prepare-once-v1",
             Self::PreflightDispatch => "agent-preflight-dispatch-once-v1",
@@ -110,6 +142,18 @@ impl Kind {
     }
     pub(crate) fn action(self) -> crate::service_protocol::Action {
         match self {
+            Self::RemoteSetupPrepare => crate::service_protocol::Action::GitHubRemoteSetupPrepare,
+            Self::RemoteSetupApply => crate::service_protocol::Action::GitHubRemoteSetupApply,
+            Self::RepositoryPrepare => crate::service_protocol::Action::GitHubRepositoryPrepare,
+            Self::RepositoryPending => crate::service_protocol::Action::GitHubRepositoryPending,
+            Self::RepositoryReconcile => crate::service_protocol::Action::GitHubRepositoryReconcile,
+            Self::PrPrepare => crate::service_protocol::Action::GitHubPrPrepare,
+            Self::PrPending => crate::service_protocol::Action::GitHubPrPending,
+            Self::PrReconcile => crate::service_protocol::Action::GitHubPrReconcile,
+            Self::FailedJobsPrepare => crate::service_protocol::Action::GitHubFailedJobsPrepare,
+            Self::FailedJobsPending => crate::service_protocol::Action::GitHubFailedJobsPending,
+            Self::FailedJobsReconcile => crate::service_protocol::Action::GitHubFailedJobsReconcile,
+
             Self::ActivityOverview => crate::service_protocol::Action::GitHubActivityOverview,
             Self::PreflightPrepare => crate::service_protocol::Action::GitHubPreflightPrepare,
             Self::PreflightDispatch => crate::service_protocol::Action::GitHubPreflightDispatch,
@@ -197,6 +241,18 @@ pub(crate) enum Review {
     CounterReconcile(PendingReference),
     CounterEnrollmentReview(enrollment::ReviewReference),
     CounterEnrollmentConnect(enrollment::ConnectReference),
+    RemoteSetupPrepare(dispatch::RequestReference),
+    RemoteSetupApply(PreparedReference),
+    RepositoryPrepare(dispatch::RequestReference),
+    RepositoryPending(dispatch::RequestReference),
+    RepositoryReconcile(PendingReference),
+    PrPrepare(dispatch::RequestReference),
+    PrPending(dispatch::RequestReference),
+    PrReconcile(PendingReference),
+    FailedJobsPrepare(dispatch::RequestReference),
+    FailedJobsPending(dispatch::RequestReference),
+    FailedJobsReconcile(PendingReference),
+
 
 }
 fn original(session: &str, revision: u32) -> bool {
@@ -215,11 +271,22 @@ impl Review {
             Kind::PreflightDispatch => Self::PreflightDispatch(value),
             Kind::ReleaseDispatch => Self::ReleaseDispatch(value),
             Kind::CounterCreate => Self::CounterCreate(value),
+            Kind::RemoteSetupApply => Self::RemoteSetupApply(value),
             _ => return None,
         })
     }
     pub(crate) fn kind(&self) -> Kind {
         match self {
+            Self::RepositoryPrepare(_) => Kind::RepositoryPrepare,
+            Self::RepositoryPending(_) => Kind::RepositoryPending,
+            Self::RepositoryReconcile(_) => Kind::RepositoryReconcile,
+            Self::PrPrepare(_) => Kind::PrPrepare,
+            Self::PrPending(_) => Kind::PrPending,
+            Self::PrReconcile(_) => Kind::PrReconcile,
+            Self::FailedJobsPrepare(_) => Kind::FailedJobsPrepare,
+            Self::FailedJobsPending(_) => Kind::FailedJobsPending,
+            Self::FailedJobsReconcile(_) => Kind::FailedJobsReconcile,
+
             Self::RepositoryCreate(_) => Kind::RepositoryCreate,
             Self::DraftPrCreate(_) => Kind::DraftPrCreate,
             Self::PrCreate(_) => Kind::PrCreate,
@@ -242,19 +309,21 @@ impl Review {
             Self::CounterReconcile(_) => Kind::CounterReconcile,
             Self::CounterEnrollmentReview(_) => Kind::CounterEnrollmentReview,
             Self::CounterEnrollmentConnect(_) => Kind::CounterEnrollmentConnect,
+            Self::RemoteSetupPrepare(_) => Kind::RemoteSetupPrepare,
+            Self::RemoteSetupApply(_) => Kind::RemoteSetupApply,
 
         }
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) => Some(v),
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) | Self::RemoteSetupApply(v) => Some(v),
             _ => None,
         }
     }
     #[cfg(test)]
     pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) => Some(v),
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) | Self::RemoteSetupApply(v) => Some(v),
             _ => None,
         }
     }
@@ -263,9 +332,9 @@ impl Review {
             Self::ActivityOverview(v) => v.valid(),
             Self::CounterEnrollmentReview(v) => v.valid(),
             Self::CounterEnrollmentConnect(v) => v.valid(),
-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
+            Self::RemoteSetupPrepare(v) | Self::RepositoryPrepare(v) | Self::RepositoryPending(v) | Self::PrPrepare(v) | Self::PrPending(v) | Self::FailedJobsPrepare(v) | Self::FailedJobsPending(v) | Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.valid(),
-            Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
+            Self::RepositoryReconcile(v) | Self::PrReconcile(v) | Self::FailedJobsReconcile(v) | Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
         }
     }
@@ -275,9 +344,9 @@ impl Review {
             Self::ActivityOverview(v) => v.retained_fits(),
             Self::CounterEnrollmentReview(v) => v.retained_fits(),
             Self::CounterEnrollmentConnect(v) => v.retained_fits(),
-            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
+            Self::RemoteSetupPrepare(v) | Self::RepositoryPrepare(v) | Self::RepositoryPending(v) | Self::PrPrepare(v) | Self::PrPending(v) | Self::FailedJobsPrepare(v) | Self::FailedJobsPending(v) | Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.retained_fits(),
-            Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
+            Self::RepositoryReconcile(v) | Self::PrReconcile(v) | Self::FailedJobsReconcile(v) | Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
         }
     }
@@ -378,9 +447,24 @@ pub(crate) enum Effect {
     DraftPrObserved,
     CounterObserved,
     LocalMappingObserved,
+    SettingsReadbackObserved,
+    ClosedConfirmed,
 }
 impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
+        if k.operation_family() { return match self {
+            Self::None => true,
+            Self::CreatedObserved | Self::FoundUnattributed => matches!(k, Kind::RepositoryReconcile | Kind::PrReconcile),
+            Self::ClosedConfirmed => k == Kind::PrReconcile,
+            Self::Accepted | Self::AdvancedUnattributed => k == Kind::FailedJobsReconcile,
+            Self::Unresolved => k.operation_reconcile(),
+            // These are historical uncertainty from the original readback, not
+            // permission to send/repeat the earlier mutation.
+            Self::PotentiallyApplied => k.operation_reconcile(),
+            Self::AcknowledgedUnconfirmed => k == Kind::PrReconcile,
+            Self::AcceptedUnconfirmed => k == Kind::FailedJobsReconcile,
+            _ => false,
+        }; }
         if k.enrollment_family() { return match self {
             Self::None => k == Kind::CounterEnrollmentReview,
             Self::NotSent | Self::PotentiallyApplied | Self::LocalMappingObserved => k == Kind::CounterEnrollmentConnect,
@@ -391,11 +475,12 @@ impl Effect {
             Self::NotSent|Self::PotentiallyApplied=>k.mutation(),
             Self::Accepted=>matches!(k,Kind::PreflightDispatch|Kind::ReleaseDispatch),
             Self::CounterObserved=>matches!(k,Kind::CounterCreate|Kind::CounterReconcile),
+            Self::SettingsReadbackObserved=>k==Kind::RemoteSetupApply,
             Self::Unresolved=>k==Kind::CounterReconcile,
             _=>false,
         }; }
         match self {
-            Self::CounterObserved | Self::LocalMappingObserved=>false,
+            Self::ClosedConfirmed | Self::CounterObserved | Self::LocalMappingObserved | Self::SettingsReadbackObserved=>false,
             Self::None => matches!(k, Kind::SetupReconcile | Kind::ActivityOverview),
             Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
             Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
@@ -445,7 +530,7 @@ pub(crate) struct Status {
 }
 impl Status {
     pub(crate) fn limit(&self) -> usize {
-        if self.review.kind() == Kind::ActivityOverview || self.review.kind().dispatch_family() || self.review.kind().enrollment_family() { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
+        if self.review.kind() == Kind::ActivityOverview || self.review.kind().dispatch_family() || self.review.kind().enrollment_family() || self.review.kind().operation_family() { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let snapshot_valid = match (&self.review, &self.snapshot) {
@@ -456,8 +541,12 @@ impl Status {
             _ => false,
         };
         let result_valid = match &self.result {
+            Some(dispatch::Snapshot::Operation(result)) => self.snapshot.is_none()
+                && result.valid_row(self.review.kind(), self.state, self.reason, self.effect),
             Some(dispatch::Snapshot::Enrollment(result)) => self.snapshot.is_none()
                 && result.valid_row(self.review.kind(), self.state, self.operation_id.as_deref(), self.effect),
+            Some(dispatch::Snapshot::RemoteSettings(result)) => self.snapshot.is_none()
+                && result.valid_row(self.review.kind(), self.state, self.reason, self.effect),
             Some(result)=>self.snapshot.is_none() && self.state==State::Complete && result.valid_for(self.review.kind()),
             None=>self.state!=State::Complete || !dispatch::requires_result(self.review.kind()),
         };
@@ -469,7 +558,7 @@ impl Status {
             || !(1..u32::MAX).contains(&self.revision)
             || !self.do_not_replay
             || !self.effect.valid_for(self.review.kind())
-            || self.effect == Effect::LocalMappingObserved && self.state != State::Complete
+            || matches!(self.effect, Effect::LocalMappingObserved | Effect::SettingsReadbackObserved) && self.state != State::Complete
             || self
                 .operation_id
                 .as_ref()

@@ -48,6 +48,7 @@ struct Active {
 }
 struct Consent {
     identity: Arc<()>,
+    producer: Option<action_delegation::operation::Producer>,
     agent: Option<Weak<crate::service_github_action_requests::NativeScope>>,
     draft: p::Draft,
     id: String,
@@ -60,6 +61,9 @@ struct Consent {
     stamp: SavedEditStamp,
 }
 pub(super) struct State {
+    agent_identity: Arc<()>,
+    agent_permission: Option<action_delegation::operation::Permission>,
+    agent_records: Option<action_delegation::operation::Records>,
     view: p::Status,
     active: Option<Active>,
     consent: Option<Consent>,
@@ -69,6 +73,7 @@ impl State {
     pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() }
     pub(super) fn new() -> Self {
         Self {
+            agent_identity: Arc::new(()), agent_permission: None, agent_records: None,
             view: p::Status {
                 schema_version: 1,
                 revision: 1,
@@ -123,6 +128,8 @@ impl State {
         }
     }
     fn stop(&mut self) {
+        if let Some(p) = self.agent_permission.take() { p.close(); }
+        self.agent_records = None;
         self.revoke_consent();
         if let Some(a) = &self.active {
             a.ticket.stop();
@@ -162,6 +169,8 @@ impl State {
         self.finish(b);
     }
     pub(super) fn reset(&mut self) {
+        if let Some(p) = self.agent_permission.take() { p.close(); }
+        self.agent_records = None;
         let b = self.view.clone();
         self.revoke_consent();
         self.view.pending.clear();
@@ -176,7 +185,7 @@ impl State {
         {
             return None;
         }
-        let mut n = self.view.heap()?;
+        let mut n = self.view.heap()?.checked_add(self.operation_heap()?)?;
         if let Some(c) = &self.consent {
             n = n
                 .checked_add(c.prepared.heap()?)?
@@ -374,8 +383,10 @@ impl ConnectionState {
             return Err(refused(p::Reason::Unqualified));
         }
         if !request.valid()
-            || gate.agent().is_some_and(|e| request.kind != p::Kind::Create
-                || !request.prepared.as_ref().is_some_and(|p| p.agent_kind_matches(e.scope().review.kind())))
+            || gate.agent().is_some_and(|e| if e.scope().review.kind().operation_family() {
+                !operation::request_kind(e.scope().review.kind(), request.kind)
+            } else { request.kind != p::Kind::Create
+                || !request.prepared.as_ref().is_some_and(|p| p.agent_kind_matches(e.scope().review.kind())) })
             || !self.pull_request.view.fits()
             || !crate::github_preflight_protocol::hex(&consent_id, 32)
             || (request.kind == p::Kind::Create) != consent_end.is_some()
@@ -418,7 +429,7 @@ impl ConnectionState {
                         + consent_id.capacity(),
                 )
             })
-            .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + p::GO_LIMIT + 65536));
+            .and_then(|n| n.checked_add(2 * p::RESPONSE_LIMIT + p::GO_LIMIT + 65536 + operation::RETURN_BACKING));
         if !retained.is_some_and(|n| n <= p::RETAINED_LIMIT) {
             return Err(refused(p::Reason::ResourcesUnavailable));
         }
@@ -583,7 +594,8 @@ impl ConnectionState {
             old.intent.clone(),
             now,
         )?;
-        if !action_delegation::origin(&self.pull_request.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
+        if !self.pull_request.consent.as_ref().is_some_and(|c| action_delegation::operation::producer_ready(&c.producer))
+            || !action_delegation::origin(&self.pull_request.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent())
             || !a.confirm
             || !self.pull_request.consent.as_ref().is_some_and(|c| {
                 c.id == a.consent_id
@@ -837,6 +849,7 @@ impl ConnectionState {
                 was_unknown,
                 now,
                 current && external == Reason::None,
+                proof.and_then(|(_, _, e)| e.stamp().ok()),
             ),
             _ => {}
         }
@@ -857,6 +870,7 @@ impl ConnectionState {
         was_unknown: bool,
         now: Instant,
         current: bool,
+        mut records_stamp: Option<SavedEditStamp>,
     ) {
         // Neither a terminal-shaped reply nor later known joins erase original
         // Unknown. Preserve the very same ticket/request/GO buffers here.
@@ -875,6 +889,8 @@ impl ConnectionState {
         };
         let agent = a.agent.clone();
         let agent_id = a.ticket.operation_id().to_owned();
+        let mut returned_records = None;
+
         let mut effect = if a.request.kind == p::Kind::Create {
             if a.ticket.go_claimed() {
                 p::Effect::PotentiallyApplied
@@ -891,6 +907,8 @@ impl ConnectionState {
             self.pull_request
                 .view
                 .heap()
+                .and_then(|n| n.checked_add(self.pull_request.operation_heap()?))
+                .and_then(|n| n.checked_add(operation::RETURN_BACKING))
                 .and_then(|n| n.checked_add(reply.heap()?))
                 .and_then(|n| n.checked_add(a.ticket.retained_heap()?))
                 .and_then(|n| n.checked_add(a.request.heap()?))
@@ -950,6 +968,21 @@ impl ConnectionState {
                     self.pull_request.view.acknowledged = c.acknowledged;
                 }
                 if let Some(rows) = reply.result.pending {
+                    if a.request.kind == p::Kind::Pending && reason == p::Reason::None {
+                        if let (Some(stamp), Some(private)) = (records_stamp.take(), &self.private) {
+                            let end = (settled_at + Duration::from_millis(crate::service_github_action_protocol::INTENT_MS))
+                                .min(private.clock.end).min(agent.as_ref().map_or(private.clock.end, |e| e.scope().read.end()));
+                            if now < end {
+                                if let Ok(digest) = action_delegation::operation::hash(&rows) {
+                                    returned_records = Some(action_delegation::operation::Records {
+                                        identity: Arc::new(()), original: agent_id.clone(), session: a.session_id.clone(),
+                                        generation: a.generation, root: a.root.clone(), stamp, end, digest,
+                                        producer: agent.as_ref().map(|e| action_delegation::operation::Producer::new(e, &agent_id)),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     self.pull_request.view.pending = rows;
                 }
                 if let Some(prepared) = reply.result.prepared {
@@ -986,6 +1019,7 @@ impl ConnectionState {
                         });
                         self.pull_request.consent = Some(Consent {
                             identity: Arc::new(()), agent: None,
+                            producer: agent.as_ref().filter(|e| e.scope().review.kind().operation_family()).map(|e| action_delegation::operation::Producer::new(e, &agent_id)),
                             draft,
                             id: a.consent_id,
                             prepared,
@@ -1044,6 +1078,13 @@ impl ConnectionState {
             self.retire_inner(r, false);
         }
         self.pull_request_finish_retirement();
+        if self.pull_request.view.reason == p::Reason::None {
+            if let Some(records) = returned_records { self.pull_request.agent_records = Some(records); }
+        }
+        if agent.as_ref().is_some_and(|e| e.scope().review.kind().operation_family()) {
+            self.pull_request_operation_returned(&agent, &agent_id);
+            return;
+        }
         if let Some(o)=&self.pull_request.view.operation {
             if o.id==agent_id && o.phase==p::Phase::Settled { action_delegation::accepted(&agent,&agent_id,self.pull_request.view.reason,o.effect); } else { action_delegation::unknown(&agent); }
         } else { action_delegation::unknown(&agent); }
@@ -1105,14 +1146,17 @@ impl ConnectionState {
         let kind = a.kind();
         let a = a.prepared().ok_or_else(|| refused(p::Reason::ConsentExpired))?;
         let c=self.pull_request.consent.as_ref().ok_or_else(||refused(p::Reason::ConsentExpired))?;
-        if !c.prepared.agent_kind_matches(kind) || !c.draft.matches(&c.prepared.target) || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.pull_request.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || self.pull_request.active.is_some() || self.pull_request.exhausted {return Err(refused(p::Reason::ConsentExpired))}
+        if !c.prepared.agent_kind_matches(kind) || !c.draft.matches(&c.prepared.target) || a.session_id!=c.session_id || a.consent_id!=c.id || a.expected_revision!=self.pull_request.view.revision || c.generation!=g || &c.root!=root || !edit.matches(&c.stamp) || now>=c.end || c.agent.is_some() || !action_delegation::operation::producer_ready(&c.producer) || self.pull_request.agent_permission.is_some() || self.pull_request.active.is_some() || self.pull_request.exhausted {return Err(refused(p::Reason::ConsentExpired))}
         action_delegation::review(kind,&c.session_id,&c.id,a.expected_revision,&c.prepared,c.identity.clone(),edit.stamp()?,c.end)
     }
     pub(crate) fn pull_request_agent_allow(&mut self, review:&action_delegation::Review, scope:&Arc<crate::service_github_action_requests::NativeScope>)->Result<(),BridgeError>{
         let c=self.pull_request.consent.as_mut().ok_or_else(||refused(p::Reason::ConsentExpired))?;
-        if !c.prepared.agent_kind_matches(review.data.kind())||!c.draft.matches(&c.prepared.target)||!Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
+        if !c.prepared.agent_kind_matches(review.data.kind())||!c.draft.matches(&c.prepared.target)||!Arc::ptr_eq(&c.identity,&review.identity)||c.agent.is_some()||!action_delegation::operation::producer_ready(&c.producer)||self.pull_request.agent_permission.is_some()||scope.review!=review.data{return Err(refused(p::Reason::ConsentExpired))}c.agent=Some(Arc::downgrade(scope));Ok(())
     }
     pub(crate) fn pull_request_agent_revoke(&mut self, scope:&Arc<crate::service_github_action_requests::NativeScope>){
         if self.pull_request.consent.as_ref().and_then(|c|c.agent.as_ref()).and_then(Weak::upgrade).is_some_and(|s|Arc::ptr_eq(&s,scope)){let before=self.pull_request.view.clone();self.pull_request.revoke_consent();self.pull_request.finish(before);}
     }
 }
+
+#[path = "github_pr_operation_delegation.rs"]
+mod operation;

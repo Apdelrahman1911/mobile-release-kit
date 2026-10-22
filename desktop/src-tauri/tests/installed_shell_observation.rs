@@ -44,7 +44,9 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path="../src/service_version_edit_prepare_requests.rs"] mod service_version_edit_prepare_requests;
 #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
 #[path="../src/service_initialization_protocol.rs"] mod service_initialization_protocol;
+#[path="../src/service_workflow_edit_protocol.rs"] mod service_workflow_edit_protocol;
 #[path="../src/service_initialization_requests.rs"] mod service_initialization_requests;
+#[path="../src/service_workflow_edit_requests.rs"] mod service_workflow_edit_requests;
 #[path="../src/bounded_json_seed.rs"]
 mod bounded_json_seed;
 #[path="../src/service_metadata_images_protocol.rs"]

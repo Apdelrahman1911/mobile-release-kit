@@ -1,3 +1,6 @@
+import { isGithubOperationKind, parseGithubOperationSelection, githubOperationPreparedHash, githubOperationRecord, githubOperationRecordHash } from './githubOperationDelegation.ts';
+import type { GithubOperationKind, GithubOperationSelection } from './githubOperationDelegation.ts';
+import type { ActionsRetryPending } from './githubActionsRetryProtocol.ts';
 import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
 import type { GithubActionSelection, GithubActionStatus, GithubActionDelegate } from './agentGithubActionAccess.ts';
 // One presentation coordinator for the original native connection operation.
@@ -11,12 +14,17 @@ import type { ActionsRetryConsent, ActionsRetryKind, ActionsRetryPort, ActionsRe
 
 interface Context { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string }
 interface Original { port: ActionsRetryPort; live: boolean; unlisten: (() => void) | null; status: ActionsRetryStatus | null; fresh: boolean; closeCheck: object | null }
-interface Work { agentCheck?:{delegate:Delegated;status:ActionsRetryStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
+interface Work { operationCheck?:OperationCheck; agentCheck?:{delegate:Delegated;status:ActionsRetryStatus|null}; owner: Original; kind: 'subscribe' | 'status' | 'start' | 'cancel' | 'discard'; ended: boolean; promise: Promise<unknown> | null }
 interface Attempt { owner: Original; work: Work; context: Context; epoch: object; kind: ActionsRetryKind; picked: ActionsRetryActivitySource | null; target: ActionsRetryTarget | null; revision: number; previousId: string | null; operationId: string | null; marker: string | null;
   sent: boolean; replyOk: boolean; stopWanted: boolean; stopSent: boolean; consent: ActionsRetryConsent | null }
 interface Review { owner: Original; context: Context; epoch: object; consent: ActionsRetryConsent; picked: ActionsRetryActivitySource }
 interface Delegated {prepareId:string;review:Review;selection:GithubActionSelection;allowReturned:boolean;noAllow:boolean;unused:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+interface OperationDelegated {owner:Original;context:Context;epoch:object;selection:GithubOperationSelection;previousId:string|null;record:ActionsRetryPending|null;picked:ActionsRetryActivitySource|null;
+ allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+interface OperationCheck {delegate:OperationDelegated;allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;status:ActionsRetryStatus|null}
+interface OperationRecords {owner:Original;context:Context;epoch:object;status:ActionsRetryStatus}
 export interface ActionsRetryView {
+  agentReconcileMarker:string|null;
   native: boolean; status: ActionsRetryStatus | null;
   confirmed: boolean; pending: boolean; observing: boolean; cancelling: boolean; discarding: boolean; uncertain: boolean;
   error: ActionsRetryReason | null; originalRepository: string | null;
@@ -56,7 +64,7 @@ function advances(a: ActionsRetryStatus, b: ActionsRetryStatus): boolean {
   return true;
 }
 export class GitHubActionsRetryController {
-  private state: ActionsRetryView = immutable({ native: false, status: null, confirmed: false,
+  private state: ActionsRetryView = immutable({ agentReconcileMarker:null,native: false, status: null, confirmed: false,
     pending: false, observing: false, cancelling: false, discarding: false, uncertain: false, error: null, originalRepository: null });
   private listeners = new Set<() => void>();
   private desired: ActionsRetryPort | null = null;
@@ -65,6 +73,7 @@ export class GitHubActionsRetryController {
   private attempt: Attempt | null = null;
   private review: Review | null = null;
   private delegated:Delegated|null=null;
+  private operationDelegate:OperationDelegated|null=null; private operationRecords:OperationRecords|null=null; private operationRecord:ActionsRetryPending|null=null;
   private current: Context | null = null;
   private epoch: object = {};
   private approval: object = {};
@@ -78,14 +87,14 @@ export class GitHubActionsRetryController {
   getSnapshot = (): ActionsRetryView => this.state;
   subscribe = (f: () => void): (() => void) => { this.listeners.add(f); return () => { this.listeners.delete(f); }; };
   private update(patch: Partial<ActionsRetryView> = {}): void {
-    this.state = immutable({ ...this.state, ...patch, pending: this.attempt !== null,
+    this.state = immutable({ ...this.state, ...patch, agentReconcileMarker:this.operationRecord?.prepared.target.selection?.marker??null, pending: this.attempt !== null,
       observing: [...this.work].some((w) => w.kind === 'status' || w.kind === 'subscribe'), cancelling: [...this.work].some((w) => w.kind === 'cancel'),
       discarding: [...this.work].some((w) => w.kind === 'discard') });
     for (const f of [...this.listeners]) { try { f(); } catch { /* Rendering cannot disown an original invocation. */ } }
   }
   private fail(reason: ActionsRetryReason): void { if (this.unknown) { this.update(); return; } this.unknown = true; this.review = null; this.update({ uncertain: true, confirmed: false, error: reason }); }
   private invalidate(): void {
-    this.epoch = {}; this.review = null;
+    this.epoch = {}; this.review = null; this.operationRecords=null; this.operationRecord=null;
     if (this.attempt) this.attempt.stopWanted = true;
     this.update({ confirmed: false }); this.stopInvalidated();
   }
@@ -97,7 +106,7 @@ export class GitHubActionsRetryController {
   };
   setConfirmed(value:boolean):void { if(!this.disposed){this.approval={};this.update({confirmed:value===true&&this.currentConsent()!==null});} }
   private owns(o: Original): boolean {
-    return this.delegated?.review.owner === o || this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
+    return this.operationDelegate?.owner === o || this.delegated?.review.owner === o || this.unknown || o.closeCheck !== null || this.attempt?.owner === o || [...this.work].some((w) => w.owner === o) || !!o.status?.consent ||
       !!o.status?.operation && o.status.operation.phase !== 'settled';
   }
   private maintain(): void {
@@ -129,7 +138,7 @@ export class GitHubActionsRetryController {
     this.desired = port; this.syncContext(); this.invalidate(); this.update({ native: port !== null }); this.maintain();
   }
   private latch(owner: Original, kind: Work['kind']): Work { const w: Work = { owner, kind, ended: false, promise: null }; this.work.add(w); this.update(); return w; }
-  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.settleDelegated(w); this.update(); this.maintain();
+  private finish(w: Work): void { w.ended = true; w.promise=null; this.work.delete(w); this.settle(); this.settleDelegated(w); this.settleOperation(w); this.update(); this.maintain();
     if(w.kind==='discard'&&this.delegated?.noAllow&&!this.unknown)this.checkStatus(); }
   private origin(a: Attempt, s: ActionsRetryStatus): boolean {
     const o = s.operation;
@@ -173,6 +182,8 @@ export class GitHubActionsRetryController {
     const a = this.attempt, s = a?.owner.status;
     if (!a || !s || !a.work.ended || !this.origin(a, s) || s.operation?.phase !== 'settled' || this.unknown) return;
     this.attempt = null;
+    if(a.kind==='pending'&&a.replyOk&&s.operation.reason==='none'&&a.epoch===this.epoch&&a.owner.port===this.desired&&!this.disposed&&same(a.context,context(this.connection())))
+      this.operationRecords={owner:a.owner,context:a.context,epoch:a.epoch,status:s};
     if (a.kind === 'prepare' && a.replyOk && s.consent && a.epoch === this.epoch && a.owner.port === this.desired && !this.disposed &&
       same(a.context, context(this.connection())) && a.picked !== null && sameSelection(s.consent.prepared.target,a.picked)) {
       this.review = { owner: a.owner, epoch: a.epoch, context: a.context, consent: s.consent, picked:a.picked };
@@ -184,15 +195,20 @@ export class GitHubActionsRetryController {
     const o = this.original;
     if (!o?.live || this.disposed && !this.owns(o) || [...this.work].some((w) => w.owner === o && ['status', 'subscribe'].includes(w.kind))) return;
     const closeCheck = o.closeCheck;
-    const w = this.latch(o, 'status');
-    const delegated=this.delegated;
+    // Capture the exact service-final/permission facts BEFORE listener publication.
+    // A later compact event cannot convert a previously started Status into a join.
+    const w:Work={owner:o,kind:'status',ended:false,promise:null};
+    const delegated=this.delegated,operation=this.operationDelegate;
     if(delegated&&(delegated.allowReturned||delegated.noAllow)&&(delegated.unused||delegated.terminal?.settlement==='settled'))w.agentCheck={delegate:delegated,status:null};
+    if(operation)w.operationCheck={delegate:operation,allowed:operation.allowed,unused:operation.unused,noAllow:operation.noAllow,terminal:operation.terminal,status:null};
+    this.work.add(w);this.update();
     const failed = () => { o.fresh = false; if (this.attempt || o.status?.operation && o.status.operation.phase !== 'settled') this.update({ uncertain: true, error: 'response-invalid' });
       else this.update({ error: 'response-invalid' }); };
     try { const promise = o.port.status(); if (!(promise instanceof Promise)) throw new Error('No original status promise'); w.promise=promise;
       void promise.then((v) => {
         const accepted = this.receive(o, v);
         if(w.agentCheck)w.agentCheck.status=accepted;
+        if(w.operationCheck)w.operationCheck.status=accepted;
         // Only a Check started after this exact known refusal can restore
         // freshness. Old polls/events cannot reopen Close or replace its owner.
         if (accepted && !this.unknown && o === this.original && o.live && closeCheck !== null &&
@@ -209,6 +225,7 @@ export class GitHubActionsRetryController {
       same(c, r.context) && same(o.status?.consent, r.consent) && r.picked!==null && sameSelection(r.consent.prepared.target,r.picked) ? r.consent : null;
   }
   ownerReason(): string | null {
+    if(this.operationDelegate)return 'This original preparation/read is delegated. Check or revoke its permission; no Create/Retry is automatic.';
     if(this.delegated)return 'The original GitHub review is delegated to a local CLI. Check or revoke that permission; original Check/Stop/Close remain available.';
     if (this.unknown) return ACTIONS_RETRY_HELP['cleanup-unknown'];
     if (this.attempt || this.work.size || this.original?.status?.operation && this.original.status.operation.phase !== 'settled')
@@ -218,6 +235,7 @@ export class GitHubActionsRetryController {
     return null;
   }
   private startReason(): string | null {
+    if(this.operationDelegate)return 'Withdraw the original preparation/read permission before another action.';
     if(this.delegated)return 'This exact review was delegated. Ordinary Create/Retry cannot consume it, including after a lost Allow reply.';
     const o = this.original, c = context(this.connection()), s = o?.status;
     if (this.disposed || !o?.live || o.port !== this.desired || !o.unlisten) return ACTIONS_RETRY_HELP['runtime-unavailable'];
@@ -273,7 +291,7 @@ export class GitHubActionsRetryController {
     const a: Attempt = { owner: o, work: w, context: c, epoch, kind, picked, target:kind==='retry'?consent?.prepared.target??null:kind==='reconcile'?s.pending.find(p=>p.prepared.target.selection?.marker===marker)?.prepared.target??null:null,
       revision: s.revision, previousId: s.operation?.id ?? null, operationId: null, marker, sent: false, replyOk: false, stopWanted: false, stopSent: false,
       consent: kind === 'retry' ? consent : null };
-    this.attempt = a; this.review = null; this.update({ confirmed: false, error: null, originalRepository: c.repository });
+    this.attempt = a; this.review = null; this.operationRecords=null; this.operationRecord=null; this.update({ confirmed: false, error: null, originalRepository: c.repository });
     const peer = this.peer();
     if (this.attempt !== a || a.stopWanted || kind==='retry'&&approval!==this.approval || kind==='prepare'&&!samePicked(a.picked,this.selectedRun()) || this.epoch !== epoch || o !== this.original || o.port !== this.desired || this.disposed ||
       this.unknown || o.status !== s || !o.fresh || peer ||
@@ -333,7 +351,7 @@ export class GitHubActionsRetryController {
       void promise.then((v) => { this.receive(o, v); }, () => this.fail('response-invalid')).finally(() => this.finish(w));
     } catch { this.fail('response-invalid'); this.finish(w); }
   }
-  canDiscard(): boolean { return !!this.original?.live && this.original.fresh && !!this.original.status?.consent && !this.attempt &&
+  canDiscard(): boolean { return !this.operationDelegate && !!this.original?.live && this.original.fresh && !!this.original.status?.consent && !this.attempt &&
     ![...this.work].some((w) => ['start', 'discard'].includes(w.kind)) && this.original.status.operation?.phase === 'settled' && !this.unknown; }
   discardReview(): void {
     if (!this.canDiscard()) return;
@@ -355,12 +373,14 @@ export class GitHubActionsRetryController {
   }
   // Eligibility comes only from the SAME private review, minted after the
   // original Prepare promise returned; a public status/selection cannot mint it.
-  agentSelection():GithubActionSelection|null {
+  agentSelection(kind?:GithubOperationKind):GithubActionSelection|null {
+    if(kind)return this.operationSelection(kind);
     const r=this.review,s=this.original?.status;
-    return !this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
+    return !this.operationDelegate&&!this.delegated&&!this.attempt&&!this.work.size&&!this.state.uncertain&&r&&s&&this.currentConsent()===r.consent&&s.sessionId?
       Object.freeze({kind:'failed-jobs-retry',sessionId:s.sessionId,consentId:r.consent.id,expectedRevision:s.revision}):null;
   }
   agentSelected(selection:GithubActionSelection):boolean {
+    if(isGithubOperationKind(selection.kind))return this.operationDelegate?sameGithubActionSelection(this.operationDelegate.selection,selection)&&this.operationCurrent(this.operationDelegate):sameGithubActionSelection(this.operationSelection(selection.kind),selection);
     const d=this.delegated;
     if(d)return sameGithubActionSelection(d.selection,selection)&&this.delegatedCurrent(d);
     return sameGithubActionSelection(this.agentSelection(),selection);
@@ -371,6 +391,7 @@ export class GitHubActionsRetryController {
       this.original.status?.revision===d.selection.expectedRevision;
   }
   delegatePrepared(selection:GithubActionSelection):GithubActionDelegate|null {
+    if(isGithubOperationKind(selection.kind))return this.delegateOperation(selection);
     if(!sameGithubActionSelection(this.agentSelection(),selection)||!this.review)return null;
     const d:Delegated={prepareId:this.original!.status!.operation!.id,review:this.review,selection:Object.freeze({...selection}),allowReturned:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
     this.delegated=d;this.update({confirmed:false}); // latch BEFORE listeners; never rearm this Review.
@@ -402,6 +423,90 @@ export class GitHubActionsRetryController {
     else if(d.unused||final?.neverAdmitted){if(op.kind!=='prepare'||op.id!==d.prepareId||s.revision<d.selection.expectedRevision)return;}
     else return;
     d.released=true;this.delegated=null;this.review=null;this.epoch={};
+  }
+
+  // These nine inputs use the SAME original native controller. The relay owns
+  // their native invocation; neither a status event nor a synthetic Prepare
+  // promise can mint the private continuation below.
+  private recordForAgent(marker:string):ActionsRetryPending|null {
+    if(this.operationDelegate||this.delegated||this.attempt||this.work.size||this.unknown||this.disposed)return null;
+    const rr=this.operationRecords,o=this.original,c=context(this.connection()),s=o?.status;
+    if(!rr||!o||!c||!s||rr.owner!==o||rr.epoch!==this.epoch||!same(rr.context,c)||rr.status.operation?.id!==s.operation?.id||!same(rr.status.pending,s.pending))return null;
+    const row=rr.status.pending.find(r=>r.prepared.target.selection?.marker===marker);
+    return row&&inContext(row.prepared.target,c)?row:null;
+  }
+  canSelectRecordForAgent(marker:string):boolean {return this.recordForAgent(marker)!==null;}
+  selectRecordForAgent(marker:string):boolean {
+    const row=this.recordForAgent(marker);if(!row)return false;
+    this.operationRecord=row;this.update();return true;
+  }
+  private operationSelection(kind:GithubOperationKind):GithubOperationSelection|null {
+    if(!['failed-jobs-prepare','failed-jobs-pending','failed-jobs-reconcile'].includes(kind)||this.operationDelegate||this.delegated||this.attempt||this.work.size||this.unknown||this.disposed)return null;
+    const c=context(this.connection()),o=this.original,s=o?.status,connectionRevision=this.connection().status?.revision;
+    if(!c||!o?.live||o.port!==this.desired||!s||!o.fresh||s.sessionId!==c.sessionId||connectionRevision===undefined)return null;
+    if(kind==='failed-jobs-prepare'?this.prepareReason():this.pendingReason())return null;
+    const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
+    if(kind==='failed-jobs-prepare'){const picked=this.selectedRun(),data=picked?.observation.data;if(!picked||data?.kind!=='workflow-run')return null;return parseGithubOperationSelection({...base,expectedConnectionRevision:connectionRevision,activityRevision:picked.revision,runId:data.run.id,attempt:data.run.attempt});}
+    if(kind==='failed-jobs-pending')return parseGithubOperationSelection({...base,expectedConnectionRevision:connectionRevision});
+    const rr=this.operationRecords,row=this.operationRecord;
+    if(!rr||!row||rr.owner!==o||rr.epoch!==this.epoch||!same(rr.context,c)||rr.status.operation?.id!==s.operation?.id||!same(rr.status.pending,s.pending)||!rr.status.pending.includes(row)||!inContext(row.prepared.target,c))return null;
+    return parseGithubOperationSelection({...base,marker:githubOperationRecord(row).marker});
+  }
+  private operationCurrent(d:OperationDelegated):boolean {
+    if(this.operationDelegate!==d||d.unknown||this.unknown||this.disposed||this.delegated||this.attempt||this.work.size||this.state.uncertain||
+      d.owner!==this.original||!d.owner.live||d.owner.port!==this.desired||!d.owner.fresh||d.epoch!==this.epoch||!same(d.context,context(this.connection()))||
+      d.owner.status?.revision!==d.selection.expectedRevision||d.owner.status.consent||'expectedConnectionRevision'in d.selection&&this.connection().status?.revision!==d.selection.expectedConnectionRevision)return false;
+    if(!(d.selection.kind!=='failed-jobs-prepare'||samePicked(d.picked,this.selectedRun())))return false;
+    return !('marker'in d.selection)||this.operationRecord===d.record;
+  }
+  private delegateOperation(raw:GithubActionSelection):GithubActionDelegate|null {
+    if(!isGithubOperationKind(raw.kind))return null;
+    const selected=this.operationSelection(raw.kind);if(!selected||!sameGithubActionSelection(selected,raw))return null;
+    const o=this.original!,d:OperationDelegated={owner:o,context:context(this.connection())!,epoch:this.epoch,selection:selected,previousId:o.status?.operation?.id??null,record:this.operationRecord,picked:this.selectedRun(),
+      allowed:false,unused:false,noAllow:false,terminal:null,unknown:false,released:false};
+    this.operationDelegate=d;this.update({confirmed:false});
+    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
+    return Object.freeze({current:()=>this.operationCurrent(d),released:()=>d.released,
+      allowReturned:()=>{if(this.operationDelegate===d&&!d.unknown){d.allowed=true;this.update();}},
+      observe:(raw:GithubActionStatus)=>{if(this.operationDelegate!==d||d.unknown)return;const f=parseGithubActionStatus(raw);
+        if(!f||!sameGithubActionSelection(f.review,d.selection)||f.settlement==='unknown'){uncertain();return;}
+        if(f.settlement==='settled'){d.terminal=f;this.checkStatus();}
+      },
+      unusedReturned:()=>{if(this.operationDelegate===d&&!d.unknown){d.unused=true;this.checkStatus();}},
+      notSubmitted:()=>{if(this.operationDelegate===d&&!d.unknown){d.noAllow=true;d.unused=true;this.checkStatus();}},uncertain});
+  }
+  private settleOperation(w:Work):void {
+    const check=w.operationCheck,d=check?.delegate,s=check?.status,f=check?.terminal;
+    if(!check||!d||this.operationDelegate!==d||!w.ended||!s||d.unknown||this.unknown||!(check.allowed||check.noAllow)||this.attempt||this.work.size||
+      d.owner!==this.original||!d.owner.live||!same(s,d.owner.status)||s.sessionId!==d.selection.sessionId||s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
+    let adopt=false;
+    try {
+      if(f?.settlement==='settled'&&!f.neverAdmitted){
+        const op=s.operation,kind=d.selection.kind.slice('failed-jobs-'.length);
+        if(!op||op.id!==f.operationId||op.id===d.previousId||op.kind!==kind||op.projectId!==d.context.projectId||op.effect!==f.effect||!inContext(op.target,d.context))return;
+        if('marker'in d.selection&&(!d.record||!('recordSha256'in f.review)||f.review.recordSha256!==githubOperationRecordHash(d.record)||!same(op.target,d.record.prepared.target)))return;
+        const result=f.result;
+        if(f.state==='complete'){
+          if(op.reason!=='none'||!result||result.type!=='operation')return;
+          if(d.selection.kind==='failed-jobs-prepare'){
+            if(result.phase!=='prepared')return;
+            // A known expired/withdrawn Prepared cannot mint a new review, but
+            // the exact completed producer and original Status may still retire.
+            if(s.consent){const p=s.consent.prepared;if(result.consentId!==s.consent.id||result.preparedSha256!==githubOperationPreparedHash(p)||!d.picked||!sameSelection(p.target,d.picked))return;adopt=true;}
+          }else if(d.selection.kind==='failed-jobs-pending'){
+            if(s.consent||result.phase!=='pending'||!same(result.rows,s.pending.map(githubOperationRecord)))return;
+          }else if(s.consent||result.phase!=='reconciled'||!('marker'in d.selection)||result.marker!==d.selection.marker||result.effect!==op.effect||!same(result.observed,s.observed?{target:'failed-jobs',runId:s.observed.id,attempt:s.observed.attempt}:null))return;
+        }else if(result){
+          if(result.type!=='operation'||result.phase!=='reconciled'||!('marker'in d.selection)||result.marker!==d.selection.marker||result.effect!==op.effect||!same(result.observed,s.observed?{target:'failed-jobs',runId:s.observed.id,attempt:s.observed.attempt}:null))return;
+        }
+      }else if(check.unused||f?.neverAdmitted){if((s.operation?.id??null)!==d.previousId||s.revision<d.selection.expectedRevision||s.consent)return;}
+      else return;
+    }catch{d.unknown=true;this.fail('response-invalid');return;}
+    d.released=true;this.operationDelegate=null;this.review=null;this.operationRecord=null;
+    const current=d.epoch===this.epoch&&d.owner.port===this.desired&&!this.disposed&&same(d.context,context(this.connection()))&&(d.selection.kind!=='failed-jobs-prepare'||samePicked(d.picked,this.selectedRun()));
+    if(current&&adopt&&s.consent)this.review={owner:d.owner,context:d.context,epoch:d.epoch,consent:s.consent,picked:d.picked!};
+    if(current&&f?.state==='complete'&&d.selection.kind==='failed-jobs-pending')this.operationRecords={owner:d.owner,context:d.context,epoch:d.epoch,status:s};
+    this.update({confirmed:false});
   }
   dispose(): void { this.disposed = true; this.desired = null; this.invalidate(); this.maintain(); }
 }

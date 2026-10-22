@@ -8,7 +8,7 @@
     "allow-agent-version-edit-status",
     "allow-allow-agent-version-edit-apply",
     "allow-revoke-agent-version-edit",
-    "allow-agent-configuration-status", "allow-agent-initialization-status", "allow-allow-agent-initialization", "allow-revoke-agent-initialization", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
+    "allow-agent-configuration-status", "allow-agent-initialization-status", "allow-allow-agent-initialization", "allow-revoke-agent-initialization", "allow-agent-workflow-edit-status", "allow-allow-agent-workflow-edit", "allow-revoke-agent-workflow-edit", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
     "allow-agent-metadata-images-prepare-status", "allow-agent-metadata-images-inspect", "allow-agent-metadata-images-prepare-cancel",
     "allow-agent-metadata-images-status", "allow-allow-agent-metadata-images-apply", "allow-revoke-agent-metadata-images",
     "allow-agent-metadata-text-status", "allow-allow-agent-metadata-text-apply", "allow-revoke-agent-metadata-text",

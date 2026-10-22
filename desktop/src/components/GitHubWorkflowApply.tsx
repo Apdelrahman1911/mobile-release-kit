@@ -85,6 +85,8 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
 }) {
   const [confirmation, setConfirmation] = useState<WorkflowApplyBinding | null>(null);
   const [recoveryConfirmation, setRecoveryConfirmation] = useState<WorkflowRecoveryApplyBinding | null>(null);
+  const agent = controller.agent.getSnapshot();
+  const linked = controller.agent.isLinked();
   const attempt = state.attempt;
   const owner = attempt?.projection ?? state.unknownEvidence ?? state.status?.active ?? state.status?.lastTerminal ?? null;
   const projectId = owner?.projectId ?? attempt?.binding.projectId ?? null;
@@ -94,11 +96,11 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   const startReason = controller.startReason();
   const recoveryStartReason = controller.recoveryStartReason();
   const recoveryBinding = currentWorkflowRecoveryBinding(state);
-  const mayRecover = canRecoverWorkflows(state, selected);
+  const mayRecover = !linked && canRecoverWorkflows(state, selected);
   const recoveryView = owner?.recovery?.prepared?.view ?? owner?.recovery?.checkout?.view;
   const showRecovery = detailed && selectedId === projectId && recoveryView?.state === 'recoverable';
   const binding = currentWorkflowApplyBinding(state);
-  const mayApply = canApplyWorkflows(state, selected, setup);
+  const mayApply = !linked && canApplyWorkflows(state, selected, setup);
   const owned = Boolean(attempt && owner && attempt.sessionId === owner.sessionId && attempt.binding.windowGeneration === owner.ownerGeneration);
   const terminal = owner?.phase === 'final' || owner?.phase === 'unknown';
   const showReview = detailed && selectedId === projectId && owner?.prepared !== null && owner?.prepared !== undefined;
@@ -106,11 +108,11 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   const mayClose = state.mode === 'native' && attempt !== null && !attempt.handled && !attempt.closeRequested && !state.generationLost && !state.nativeBlocked &&
     (!owner || owned && !terminal);
   useEffect(() => {
-    if (confirmation && (!detailed || selectedId !== projectId || !canApplyWorkflows(state, selected, setup, confirmation))) setConfirmation(null);
-  }, [state, setup, selected, selectedId, projectId, detailed, confirmation]);
+    if (confirmation && (linked || !detailed || selectedId !== projectId || !canApplyWorkflows(state, selected, setup, confirmation))) setConfirmation(null);
+  }, [state, setup, selected, selectedId, projectId, detailed, confirmation, linked]);
   useEffect(() => {
-    if (recoveryConfirmation && (!detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
-  }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation]);
+    if (recoveryConfirmation && (linked || !detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
+  }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation, linked]);
   if (!detailed && !notice) return null;
   return <section className="card native-workflow-panel" aria-label="Local GitHub workflow files">
     <SectionHeading title={notice?.title ?? 'Local workflow files · separate native review'} description={project ? `Original local operation for ${project.project.name}. Configuration drafts remain separate and unsaved.` : 'Create absent, update canonical or preserve identical callers. Passive previews never supply Apply authority.'}>
@@ -141,6 +143,19 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
       'Read-only inspection and preparation work without a valid draft or toolkit pin. A separate explicit confirmation is required for one rollback or private cleanup; incomplete legacy state is preserved and refused.'}</p>}
     {showRecovery && !terminal && <p className="save-note">Changing project or native document retires this recovery review. Draft and toolkit edits are unrelated; no old Apply authority is reattached and no mutation is retried.</p>}
     {showReview && !terminal && <p className="save-note">Selection, draft/baseline, toolkit pin, service/runtime or document changes retire this review before Apply. The native review lifetime is nonrenewable. Nothing is silently rebased, reprepared or retried.</p>}
+    {detailed && <details><summary>Advanced — CLI local workflow editing (macOS)</summary>
+      <p>The installed CLI uses this selected project's draft and toolkit pin through the same four-caller editor. READ permits Open/Prepare only. No configuration save, Git action or GitHub call is included; workflow recovery remains in the ordinary Desktop controls.</p>
+      {agent.status?.request && <p>Request <code>{agent.status.request.origin.requestId}</code> · {agent.status.request.phase}. Keep the same ID; never repeat Apply after an unknown result.</p>}
+      {agent.message && <p role={agent.unknown ? 'alert' : 'status'}>{agent.message}</p>}
+      <button type="button" disabled={agent.pending !== null || agent.revokePending} onClick={() => void controller.agent.check()}>Check CLI request and original native plan</button>
+      {linked && showReview && <>
+        <p>This permission covers the complete four-path native before/after review above. Allow alone does not apply files; the agent must submit that exact checked plan once.</p>
+        <label><input type="checkbox" checked={agent.acknowledged} disabled={controller.agent.allowReason() !== null} onChange={event => controller.agent.acknowledge(event.target.checked)} /> I reviewed all four paths and complete before/after text and authorize this one CLI Apply.</label>
+        <button type="button" disabled={!agent.acknowledged || controller.agent.allowReason() !== null} onClick={() => void controller.agent.allow()}>Allow this CLI Apply once</button>
+      </>}
+      {agent.status?.request && <button type="button" disabled={agent.revokePending || agent.status.request.phase === 'final'} onClick={() => void controller.agent.revoke()}>Withdraw / stop original CLI request</button>}
+      {linked && !attempt?.handled && owner?.phase === 'final' && <p>The native terminal is visible; the original callers and service history acknowledgement are still required.</p>}
+    </details>}
     {recoveryConfirmation && owner?.recovery?.prepared && <WorkflowRecoveryConfirmation view={owner.recovery.prepared.view} binding={recoveryConfirmation}
       allowed={detailed && selectedId === projectId && canRecoverWorkflows(state, selected, recoveryConfirmation)} onCancel={() => setRecoveryConfirmation(null)}
       onConfirm={() => { controller.recover(recoveryConfirmation); setRecoveryConfirmation(null); }} />}

@@ -84,7 +84,8 @@ export type WorkflowEditAction =
   | { type: 'recover-claim'; binding: WorkflowRecoveryApplyBinding }
   | { type: 'close-request'; reason: 'user' | 'context_changed' | 'invoke_failed' }
   | { type: 'close-claim'; sessionId: string }
-  | { type: 'handled'; sessionId: string };
+  | { type: 'handled'; sessionId: string }
+  | { type: 'agent-unentered'; binding: WorkflowDraftBinding };
 
 function unknown(owner: GitHubWorkflowEditProjection | null): boolean { return owner?.phase === 'unknown' || owner?.nativeFinality === 'unknown'; }
 export function workflowAttemptSettled(attempt: WorkflowAttempt | null): boolean {
@@ -220,6 +221,11 @@ export function githubWorkflowEditReducer(state: GitHubWorkflowEditState, action
       if (!attempt || attempt.sessionId !== action.sessionId || !attempt.closeRequested || attempt.closeClaimed ||
           workflowAttemptSettled(attempt) || unknown(attempt.projection) || state.generationLost) return state;
       return { ...state, attempt: { ...attempt, closeClaimed: true } };
+    }
+    case 'agent-unentered': {
+      const a = state.attempt;
+      return a?.binding === action.binding && a.sessionId === null && a.projection === null && !a.applyClaimed
+        ? {...state,attempt:null} : state;
     }
     case 'handled': return state.attempt?.sessionId === action.sessionId ? { ...state, attempt: { ...state.attempt, handled: true } } : state;
   }

@@ -60,6 +60,11 @@ export function GitHubRepositoryCreate({ controller, state, compact = false, onS
         {status.pending.map((p) => <div key={p.prepared.target.marker}><p><strong>{p.prepared.target.repository}</strong> · {p.prepared.target.visibility} ·
           {p.acknowledged ? ' Original creation ID saved; readback still required.' : p.claimed ? ' A request may have been sent.' : ' Saved intent; do not start a replacement.'}</p>
           <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.marker)} onClick={() => controller.reconcile(p.prepared.target.marker)}>Check this attempt on GitHub</button>
+          <details><summary>Advanced: select this original attempt for CLI Reconcile</summary>
+            <p>Read saved attempts through this original panel or its CLI Pending action first. Selecting does not read GitHub, resend, or grant permission.</p>
+            <button type="button" className="button small secondary" disabled={!controller.canSelectRecordForAgent(p.prepared.target.marker)} onClick={()=>controller.selectRecordForAgent(p.prepared.target.marker)}>Use this returned record</button>
+            {state.agentReconcileMarker===p.prepared.target.marker&&<p>Selected for a separate explicit CLI Reconcile permission.</p>}
+          </details>
         </div>)}
       </div>}
       <ProgressiveDisclosure title="Help: permissions and what stays unchanged">

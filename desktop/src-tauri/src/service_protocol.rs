@@ -119,6 +119,20 @@ pub enum Action { LocalHistoryEnroll, LocalHistoryReview,
     GitHubCounterEnrollmentReview,
     #[serde(rename = "counter-enrollment-connect")]
     GitHubCounterEnrollmentConnect,
+    #[serde(rename = "remote-setup-prepare")]
+    GitHubRemoteSetupPrepare,
+    #[serde(rename = "remote-setup-apply")]
+    GitHubRemoteSetupApply,
+    GitHubRepositoryPrepare,
+    GitHubRepositoryPending,
+    GitHubRepositoryReconcile,
+    GitHubPrPrepare,
+    GitHubPrPending,
+    GitHubPrReconcile,
+    GitHubFailedJobsPrepare,
+    GitHubFailedJobsPending,
+    GitHubFailedJobsReconcile,
+
  GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
@@ -256,9 +270,13 @@ pub enum RequestBody {
     #[serde(rename="upload-key.status")] UploadKeyStatus(crate::service_upload_key_protocol::Query),
     #[serde(rename="upload-key.cancel")] UploadKeyCancel(crate::service_upload_key_protocol::Query),
     #[serde(rename="initialization.prepare")] InitializationPrepare(crate::service_initialization_protocol::Prepare),
+    #[serde(rename="workflow-edit.prepare")] WorkflowEditPrepare(crate::service_workflow_edit_protocol::Prepare),
     #[serde(rename="initialization.apply")] InitializationApply(crate::service_initialization_protocol::Apply),
+    #[serde(rename="workflow-edit.apply")] WorkflowEditApply(crate::service_workflow_edit_protocol::Apply),
     #[serde(rename="initialization.status")] InitializationStatus(crate::service_initialization_protocol::Query),
+    #[serde(rename="workflow-edit.status")] WorkflowEditStatus(crate::service_workflow_edit_protocol::Query),
     #[serde(rename="initialization.cancel")] InitializationCancel(crate::service_initialization_protocol::Query),
+    #[serde(rename="workflow-edit.cancel")] WorkflowEditCancel(crate::service_workflow_edit_protocol::Query),
     #[serde(rename="configuration.read")] ConfigurationRead(crate::service_configuration_protocol::Read),
     #[serde(rename="configuration.prepare")] ConfigurationPrepare(crate::service_configuration_protocol::Prepare),
     #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
@@ -359,6 +377,7 @@ pub enum ResponseBody {
     UploadKeyAccess(crate::service_upload_key_protocol::Access),
     UploadKeyRequest(crate::service_upload_key_protocol::Status),
     InitializationRequest(crate::service_initialization_protocol::Status),
+    WorkflowEditRequest(crate::service_workflow_edit_protocol::Status),
     ConfigurationRequest(crate::service_configuration_protocol::Status),
     VersionEditRequest(crate::service_version_edit_protocol::Status),
     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
@@ -456,7 +475,9 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
     if let RequestBody::InitializationPrepare(input)=&request.request{input.validate()?;}
+    if let RequestBody::WorkflowEditPrepare(input)=&request.request{input.validate()?;}
     if let RequestBody::InitializationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest)}}
+    if let RequestBody::WorkflowEditApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest)}}
     if let RequestBody::MetadataImagesPrepare(input)=&request.request{input.validate()?;}
     if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
@@ -540,6 +561,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             crate::service_metadata_text_protocol::bounded(response,row.limit())?;
         },
         ResponseBody::InitializationRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_initialization_protocol::bounded(response,crate::service_initialization_protocol::STATUS_BYTES)?;}
+        ResponseBody::WorkflowEditRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_workflow_edit_protocol::bounded(response,crate::service_workflow_edit_protocol::STATUS_BYTES)?;}
         ResponseBody::MetadataImagesPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_metadata_images_prepare_protocol::bounded(response,crate::service_metadata_images_prepare_protocol::STATUS_BYTES)?;}
         ResponseBody::MetadataImagesAccess(row)=>{
             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}

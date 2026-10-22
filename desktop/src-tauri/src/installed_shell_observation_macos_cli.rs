@@ -32,8 +32,9 @@ pub(super) fn admitted() -> bool {
 }
 pub(super) fn application(uid: u32) -> Option<PathBuf> { application_for(uid,NAME) }
 pub(super) fn application_for(uid: u32, name: &str) -> Option<PathBuf> {
-    if name!=NAME && name!=super::vault::upload_key::cli::SCOPE && name!=super::tool_setup::Case::CancelInTransfer.name() { return None; }
-    if !admitted() {
+    let git=super::git_cli::Case::parse(name).is_some();
+    let tool=name==NAME || name==super::vault::upload_key::cli::SCOPE || name==super::tool_setup::Case::CancelInTransfer.name();
+    if !(git&&super::git_cli::admitted() || tool&&admitted()) {
         return None;
     }
     let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
@@ -333,6 +334,7 @@ impl Observation {
     ) -> bool {
         if super::vault::upload_key::cli::selected(self.case) { return self.backup_cli_host_return(report); }
         if self.case == Case::ToolSetup(super::tool_setup::Case::CancelInTransfer) { return self.tool_acquisition_cli_host_return(report); }
+        if matches!(self.case,Case::GitCli(_)){return self.git_cli_host_return(report);}
         if self.case != Case::Cli {
             return true;
         }

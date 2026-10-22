@@ -184,3 +184,25 @@ fn native_main_capture_abi_fits_same_named_phase_not_a_new_document_or_ipc_quote
     assert_eq!(p::REQUEST_LIMIT,32);
     assert_eq!(p::IPC_WORKER_BACKING,32*1024);
 }
+
+#[test]
+fn remote_settings_main_uses_distinct_consent_early_revision_and_closed_non_secret_decode() {
+    let prepare=serde_json::json!({"selection":{"kind":"remote-setup-prepare","sessionId":"session-a","expectedRevision":1,
+        "expectedConnectionRevision":2,"selection":{"kind":"actions_enabled","enabled":true}},
+        "consentVersion":p::Kind::RemoteSetupPrepare.consent(),"expectedPermissionRevision":"0"});
+    let apply=serde_json::json!({"selection":{"kind":"remote-setup-apply","sessionId":"session-a","expectedRevision":3,"consentId":"a".repeat(32),"confirm":true},
+        "consentVersion":p::Kind::RemoteSetupApply.consent(),"expectedPermissionRevision":"0"});
+    let d=original_document();d.revoke_agent_github_action(MAIN).unwrap();
+    for (value,kind,bound) in [(prepare.clone(),p::Kind::RemoteSetupPrepare,4096),(apply,p::Kind::RemoteSetupApply,1024)] {
+        let mut bytes=serde_json::to_vec(&value).unwrap();bytes.resize(bound,b' ');let args=decode_allow(&bytes).unwrap();assert_eq!(args.selection.kind(),kind);assert_eq!(args.consent_version,kind.consent());
+        assert_eq!(d.allow_agent_github_action(MAIN,args).err().unwrap().code,"cli_access_changed"); // before native/source/service work
+        bytes.push(b' ');assert!(decode_allow(&bytes).is_err());
+        let mut wrong=value;wrong["consentVersion"]=serde_json::json!("agent-setup-prepare-once-v1");let args=decode_allow(&serde_json::to_vec(&wrong).unwrap()).unwrap();
+        assert_ne!(args.consent_version,kind.consent());assert!(d.allow_agent_github_action(MAIN,args).is_err());
+    }
+    let mut bad=prepare.clone();bad["selection"]["selection"]=serde_json::json!({"kind":"environment_secret","mode":"create","stage":"candidate",
+        "requirement":"MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64","source":{"recordId":"c".repeat(32),"recordRevision":4,"contextRevision":5}});
+    assert!(decode_allow(&serde_json::to_vec(&bad).unwrap()).is_err());
+    for key in ["token","value","path","url"] {let mut bad=prepare.clone();bad["selection"][key]=serde_json::json!("not accepted");assert!(decode_allow(&serde_json::to_vec(&bad).unwrap()).is_err());}
+    assert!(d.github_action_service().unwrap().is_none());assert!(!d.inner.agent_github_action_allow_pending.load(Ordering::Acquire));
+}

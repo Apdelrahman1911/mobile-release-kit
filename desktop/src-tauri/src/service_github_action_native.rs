@@ -68,7 +68,7 @@ impl DocumentBinding {
         // Every kind must withdraw the exact old enrollment permission first.
         // Otherwise a different completed-kind Allow could replace Book.lease
         // while leaving the original private Review capture unreachable.
-        if version_enrollment::agent::permission_retained(s) {
+        if version_enrollment::agent::permission_retained(s) || s.github.operation_permission_retained() {
             return Err(public(Error::Busy));
         }
         self.expire(s, Instant::now());
@@ -78,6 +78,7 @@ impl DocumentBinding {
         let now = Instant::now();
         let legacy=a.legacy();
         let available = match a.kind() {
+            p::Kind::RemoteSetupPrepare | p::Kind::RemoteSetupApply => s.github.setup_status(supervisor.github_setup_profile_available(), now, gate).available,
             p::Kind::CounterEnrollmentReview | p::Kind::CounterEnrollmentConnect =>
                 !version_enrollment::pending(s) && supervisor.version_enrollment_available() && gate == GitHubReason::None,
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_status(supervisor.github_preflight_profile_available(),now,gate).available,
@@ -85,7 +86,7 @@ impl DocumentBinding {
             p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
 
             p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
-            p::Kind::RepositoryCreate => {
+            p::Kind::RepositoryPrepare | p::Kind::RepositoryPending | p::Kind::RepositoryReconcile | p::Kind::RepositoryCreate => {
                 s.github
                     .repository_create_status(
                         supervisor.repository_create_profile_available(),
@@ -94,12 +95,12 @@ impl DocumentBinding {
                     )
                     .available
             }
-            p::Kind::DraftPrCreate | p::Kind::PrCreate => {
+            p::Kind::PrPrepare | p::Kind::PrPending | p::Kind::PrReconcile | p::Kind::DraftPrCreate | p::Kind::PrCreate => {
                 s.github
                     .pull_request_status(supervisor.pull_request_profile_available(), now, gate)
                     .available
             }
-            p::Kind::FailedJobsRetry => {
+            p::Kind::FailedJobsPrepare | p::Kind::FailedJobsPending | p::Kind::FailedJobsReconcile | p::Kind::FailedJobsRetry => {
                 s.github
                     .actions_retry_status(supervisor.actions_retry_profile_available(), now, gate)
                     .available
@@ -123,12 +124,20 @@ impl DocumentBinding {
         }
         if (a.kind().dispatch_family() || a.kind().enrollment_family()) && (root.path.capacity() > native::dispatch::ROOT_BACKING
             || !dispatch::main_call_fits()) { return Err(BridgeError::invalid()); }
+        if a.kind().operation_family() && (root.path.capacity()>native::operation::ROOT_BACKING
+            || !operation::main_call_fits() || operation::document_bytes(self,s).is_none()) {return Err(public(Error::Unavailable));}
         let edit = self
             .inner
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
         let review = match a.kind() {
+            p::Kind::RemoteSetupPrepare | p::Kind::RemoteSetupApply => self.remote_setup_agent_review(
+                s, a.input().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
+            p::Kind::RepositoryPrepare | p::Kind::RepositoryPending | p::Kind::RepositoryReconcile => s.github.repository_create_operation_review(a.operation_input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+            p::Kind::PrPrepare | p::Kind::PrPending | p::Kind::PrReconcile => s.github.pull_request_operation_review(a.operation_input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+            p::Kind::FailedJobsPrepare | p::Kind::FailedJobsPending | p::Kind::FailedJobsReconcile => s.github.actions_retry_operation_review(a.operation_input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+
             p::Kind::CounterEnrollmentReview | p::Kind::CounterEnrollmentConnect => self.enrollment_agent_review(
                 s, a.enrollment_input().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
@@ -149,7 +158,7 @@ impl DocumentBinding {
             p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
         }?;
         let native = self.service_project_locked(s, &id)?;
-        if ((a.kind().dispatch_family() || a.kind().enrollment_family()) && native.canonical_root.capacity() > native::dispatch::ROOT_BACKING)
+        if ((a.kind().dispatch_family() || a.kind().enrollment_family() || a.kind().operation_family()) && native.canonical_root.capacity() > native::dispatch::ROOT_BACKING)
             || native.canonical_root != root.path || native.registration_generation != generation {
             return Err(public(Error::Conflict));
         }
@@ -238,6 +247,9 @@ impl DocumentBinding {
             || review.activity != current.activity
             || review.dispatch != current.dispatch
             || review.enrollment != current.enrollment
+            || match (&review.operation,&current.operation) {
+                (None,None)=>false,(Some(a),Some(b))=>!a.same(b),_=>true,
+            }
             || !self
                 .inner
                 .bridge
@@ -282,6 +294,11 @@ impl DocumentBinding {
             Err(error)=>{scope.unused_closed(); return Err(public(error));}
         };
         let installed = match review.data.kind() {
+            p::Kind::RemoteSetupPrepare | p::Kind::RemoteSetupApply => s.github.remote_agent_allow(review, &scope),
+            p::Kind::RepositoryPrepare | p::Kind::RepositoryPending | p::Kind::RepositoryReconcile => s.github.repository_create_operation_allow(review,&scope),
+            p::Kind::PrPrepare | p::Kind::PrPending | p::Kind::PrReconcile => s.github.pull_request_operation_allow(review,&scope),
+            p::Kind::FailedJobsPrepare | p::Kind::FailedJobsPending | p::Kind::FailedJobsReconcile => s.github.actions_retry_operation_allow(review,&scope),
+
             p::Kind::CounterEnrollmentReview | p::Kind::CounterEnrollmentConnect => self.enrollment_agent_allow(&mut s, review, &scope),
             p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_allow(review,&scope),
             p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_allow(review,&scope),
@@ -328,6 +345,11 @@ impl DocumentBinding {
         if let Ok(Some(scope)) = &scope {
             scope.revoke(p::Reason::PermissionRevoked, at);
             match scope.review.kind() {
+                p::Kind::RemoteSetupPrepare | p::Kind::RemoteSetupApply => s.github.remote_agent_revoke(scope),
+                p::Kind::RepositoryPrepare | p::Kind::RepositoryPending | p::Kind::RepositoryReconcile => s.github.repository_create_operation_revoke(scope),
+                p::Kind::PrPrepare | p::Kind::PrPending | p::Kind::PrReconcile => s.github.pull_request_operation_revoke(scope),
+                p::Kind::FailedJobsPrepare | p::Kind::FailedJobsPending | p::Kind::FailedJobsReconcile => s.github.actions_retry_operation_revoke(scope),
+
                 p::Kind::CounterEnrollmentReview | p::Kind::CounterEnrollmentConnect => self.enrollment_agent_revoke(&mut s, scope, at),
                 p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_revoke(scope),
                 p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_revoke(scope),
@@ -396,11 +418,14 @@ impl DocumentBinding {
         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
         let v = &scope.review;
         match v.kind() {
+            p::Kind::RepositoryPrepare | p::Kind::RepositoryPending | p::Kind::RepositoryReconcile
+            | p::Kind::PrPrepare | p::Kind::PrPending | p::Kind::PrReconcile
+            | p::Kind::FailedJobsPrepare | p::Kind::FailedJobsPending | p::Kind::FailedJobsReconcile => self.github_operation_agent_start(entry)?,
             // Live enrollment2 is claimed only by its retained foreground RAW.
             // The normal relay can close stopped unclaimed rows, never launch
             // an async original and immediately mislabel its caller returned.
             p::Kind::CounterEnrollmentReview | p::Kind::CounterEnrollmentConnect => return Err(public(Error::Conflict)),
-            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::SetupPrepare | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile | p::Kind::RemoteSetupPrepare | p::Kind::RemoteSetupApply => self.github_dispatch_agent_start(entry,app_data)?,
             p::Kind::ActivityOverview => {
                 let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
                 self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {
@@ -504,12 +529,12 @@ impl DocumentBinding {
     }
 }
 
-// Only new Prepare allows the bounded native Release selection. Other MAIN
-// variants and all IPC/CLI commands retain their original1024-byte envelope.
+// Only new PR Prepare uses its existing full native16KiB input plus the fixed
+// MAIN envelope. All old selection-specific MAIN and IPC limits are unchanged.
 pub(crate) fn decode_allow(b:&[u8])->Result<Allow,BridgeError>{
-    if b.is_empty()||b.len()>4096{return Err(BridgeError::invalid());}
-    let args:Allow=serde_json::from_slice(b).map_err(|_|BridgeError::invalid())?;
-    if b.len()>args.selection.limit()||!args.selection.valid()||!args.selection.retained_fits(){return Err(BridgeError::invalid());}
+    let args:Allow=operation::bounded_decode(b)?;
+    if b.len()>args.selection.limit()||!args.selection.valid()||!args.selection.retained_fits()
+        || args.selection.kind().operation_family()&&!operation::main_call_fits(){return Err(BridgeError::invalid());}
     Ok(args)
 }
 #[path="service_github_dispatch_native.rs"]
@@ -517,3 +542,6 @@ mod dispatch;
 
 #[path = "service_counter_enrollment_native.rs"]
 pub(crate) mod enrollment;
+
+#[path="service_github_operation_native.rs"]
+mod operation;

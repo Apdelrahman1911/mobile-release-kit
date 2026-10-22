@@ -1337,6 +1337,12 @@ async fn project_initialization_status(webview: Webview, request: tauri::ipc::Re
 async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Open)?;
+        drop(request); // Original bounded RAW graph ends before the native step.
+        return state.document.agent_workflow_edit_command(window,q,input);
+    }
     let args = edit_commands::workflow_open(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_open_request(args.project_id()); }
@@ -1352,6 +1358,12 @@ async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Reques
 async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Prepare)?;
+        drop(request); // Original bounded RAW graph ends before the native step.
+        return state.document.agent_workflow_edit_command(window,q,input);
+    }
     let args = edit_commands::workflow_prepare_request(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let (Some(q), edit_commands::WorkflowPrepare::Edit(args)) = (&state.observation, &args) { q.workflow_prepare_request(args); }
@@ -1367,6 +1379,12 @@ async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Req
 async fn github_workflow_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
+        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Apply)?;
+        drop(request); // Original bounded RAW graph ends before the native step.
+        return state.document.agent_workflow_edit_command(window,q,input);
+    }
     let args = edit_commands::workflow_apply(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_apply_request(args.session_id(), args.plan_token()); }
@@ -1781,6 +1799,34 @@ async fn revoke_agent_initialization(webview:Webview,request:tauri::ipc::Request
     {let q=edit_commands::agent_initialization_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_initialization(window,q)?).map_err(|_|BridgeError::protocol())}
     #[cfg(not(any(target_os="linux",target_os="macos")))]
     {let _=(window,request,state);Err(BridgeError::unavailable("Initialization delegation is unavailable on this platform."))}
+}
+
+#[tauri::command]
+async fn agent_workflow_edit_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_workflow_edit_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_workflow_edit_status(q.as_ref())?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn allow_agent_workflow_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_workflow_edit_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_workflow_edit(window,q)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
+}
+#[tauri::command]
+async fn revoke_agent_workflow_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
+    let window=edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {let q=edit_commands::agent_workflow_edit_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_workflow_edit(window,q)?).map_err(|_|BridgeError::protocol())}
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
 }
 
 #[tauri::command]
@@ -2202,7 +2248,14 @@ async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
-        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode_allow(project_identity_request_bytes(&request)?)?;
+        let bytes=match request.body() {
+            tauri::ipc::InvokeBody::Raw(bytes) if bytes.len()<=16*1024+512=>bytes.as_slice(),
+            _=>return Err(BridgeError::invalid()),
+        };
+        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode_allow(bytes)?;
+        // Only this closed PR MAIN arm can exceed16KiB. The decoder retains all
+        // old variant limits. No original RAW/copy lives across off-Doc Allow.
+        drop(request);
         state.document.allow_agent_github_action(window,args)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
@@ -3994,7 +4047,7 @@ impl Drop for VersionEditAgentRelayGuard{fn drop(&mut self){self.0.agent_version
 #[cfg(any(target_os="linux",target_os="macos"))]
 struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
 #[cfg(any(target_os="linux",target_os="macos"))]
-impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_initialization_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
+impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_initialization_relay_lost();self.0.agent_workflow_edit_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
 
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
@@ -4110,6 +4163,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut initialization_agent_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut workflow_edit_agent_revision=None;
+        #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_text_revision=None;
         #[cfg(any(target_os="linux",target_os="macos"))]
         let mut metadata_images_agent_snapshot=None;
@@ -4193,6 +4248,13 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 let key=(status.service_instance.clone(),status.request.as_ref().map(|s|(s.origin.clone(),s.revision)));
                 if initialization_agent_revision.as_ref()!=Some(&key){
                     let _=app.emit_to(MAIN_WINDOW,crate::service_initialization_protocol::EVENT,&status);initialization_agent_revision=Some(key);
+                }
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Ok(Some(status))=document.agent_workflow_edit_relay(){
+                let key=(status.service_instance.clone(),status.request.as_ref().map(|s|(s.origin.clone(),s.revision)));
+                if workflow_edit_agent_revision.as_ref()!=Some(&key){
+                    let _=app.emit_to(MAIN_WINDOW,crate::service_workflow_edit_protocol::EVENT,&status);workflow_edit_agent_revision=Some(key);
                 }
             }
             #[cfg(any(target_os="linux",target_os="macos"))]
@@ -5965,7 +6027,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
             {
                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application().or_else(||q.git_fetch_application()).or_else(||q.git_push_application()).or_else(||q.git_upstream_application()));
+                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application().or_else(||q.git_fetch_application()).or_else(||q.git_push_application()).or_else(||q.git_upstream_application()).or_else(||q.git_cli_application()));
                 #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
                 let observed_application:Option<&std::path::Path>=None;
                 if let Some(path)=observed_application {document.bind_tool_acquisition(path)?;}
@@ -5976,7 +6038,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_git_fetch(&document)?; q.attach_git_push(&document)?; q.attach_git_upstream(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_git_fetch(&document)?; q.attach_git_push(&document)?; q.attach_git_upstream(&document)?; q.attach_git_cli(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -6194,6 +6256,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
             agent_initialization_status, allow_agent_initialization, revoke_agent_initialization,
+            agent_workflow_edit_status, allow_agent_workflow_edit, revoke_agent_workflow_edit,
             agent_metadata_images_prepare_status, agent_metadata_images_inspect, agent_metadata_images_prepare_cancel,
             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,

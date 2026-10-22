@@ -79,6 +79,9 @@ pub(in super::super) struct Files {
 }
 impl Files {
     pub(in super::super) fn capture(project: &Path, uid: u32) -> Result<Self, ()> { Self::capture_case(project,uid,NAME) }
+    pub(in super::super) fn capture_git(project:&Path,uid:u32,case:super::super::git_cli::Case)->Result<Self,()> {
+        Self::capture_case(project,uid,case.name())
+    }
     pub(in super::super) fn capture_backup(project:&Path,uid:u32)->Result<Self,()> {
         Self::capture_case(project,uid,super::super::vault::upload_key::cli::SCOPE)
     }
@@ -94,7 +97,7 @@ impl Files {
         n.checked_add(2*(LIMIT+1)+4096)
     }
     fn capture_case(project:&Path,uid:u32,name:&str)->Result<Self,()> {
-        let row_limit=if name==NAME {4} else if name==super::super::vault::upload_key::cli::SCOPE {7} else if name==super::super::tool_setup::Case::CancelInTransfer.name() {3} else{return Err(());};
+        let row_limit=if name==NAME {4} else if name==super::super::vault::upload_key::cli::SCOPE {7} else if name==super::super::tool_setup::Case::CancelInTransfer.name() {3} else if let Some(c)=super::super::git_cli::Case::parse(name){c.rows()} else{return Err(());};
         let mut f = Self {
             held: Vec::with_capacity(16),
             native: 0,

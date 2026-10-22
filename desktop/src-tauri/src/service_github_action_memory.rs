@@ -19,6 +19,7 @@ fn sum(values: &[usize]) -> Option<usize> {
 
 fn row_bytes() -> Option<usize> {
     if size_of::<dispatch::Snapshot>() + ARC_HEADER + p::dispatch::ROWS*size_of::<p::dispatch::Pending>() > p::dispatch::SNAPSHOT_BACKING
+        || size_of::<dispatch::Snapshot>() + ARC_HEADER + p::operation::ROWS*size_of::<p::operation::Record>() > p::dispatch::SNAPSHOT_BACKING
         || p::dispatch::SNAPSHOT_BACKING != p::activity::SNAPSHOT_BACKING {return None;}
 
     sum(&[

@@ -320,3 +320,6 @@ export function githubRemoteSetupError(value: unknown): GitHubRemoteSetupError {
   return { code: 'github_remote_setup_unknown', reason: 'response-invalid', admission: 'unknown',
     message: 'The original acknowledgement is unconfirmed. Read local Status or stop that original; never retry Apply automatically.' };
 }
+
+// Pure validation reused by the bounded CLI comparison; never native consent.
+export { prepared as githubRemoteSetupPreparedData };

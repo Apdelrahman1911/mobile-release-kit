@@ -350,6 +350,33 @@ class CliLocalCheckTests(unittest.TestCase):
             self.assertTrue(j.cli.calls.failed and j.cli.joined and j.fixture.inflight)
             self.assertFalse(j.cli.thread.is_alive())
 
+    def test_git_original_pre_setup_end_clips_both_callers_without_renewing_old_case(self):
+        for case, count, rows in ((C.GIT_CLI.INDEX, 8, 5), (C.GIT_CLI.BRANCH, 5, 3)):
+            with self.subTest(case=case):
+                now = [10.0]
+                calls = C.Calls(clock=lambda: now[0], case=case, original_end=100.0)
+                self.assertEqual((calls.count, calls.rows), (count, rows))
+                self.assertEqual((calls.success_end, calls.app_seconds, calls.hard_end), (100.0, 105, 118.0))
+                self.assertEqual(calls.application_timeout(), 105)
+                now[0] = 95.0
+                self.assertEqual(calls.application_timeout(), 20)  # Any thread-start delay is spent.
+                self.assertEqual(calls.claim(0), 5)
+                calls.close(failed=True)
+                calls.returned_call(0, object())
+                self.assertEqual(calls.next, 1)
+                with self.assertRaises(ValueError): calls.claim(1)
+                with self.assertRaises(ValueError): calls.check()
+                now[0] = 114.1
+                with self.assertRaises(ValueError): calls.application_timeout()
+            for end in (None, 100, True, 10.0, 130.1, float("inf"), float("nan")):
+                with self.subTest(case=case, end=end), self.assertRaises(ValueError):
+                    C.Calls(clock=lambda: 10.0, case=case, original_end=end)
+        old = C.Calls(clock=lambda: 10.0)
+        self.assertEqual((old.count, old.rows, old.success_end, old.app_seconds, old.hard_end),
+                         (7, 4, 130.0, 135, 148.0))
+        self.assertEqual(old.application_timeout(), 135)
+        with self.assertRaises(ValueError): C.Calls(clock=lambda: 10.0, original_end=100.0)
+
     def test_unknown_join_does_not_clear_fixture_even_with_normal_app_data(self):
         class UnreturnedThread:
             def __init__(self, **kwargs): self.joins = 0

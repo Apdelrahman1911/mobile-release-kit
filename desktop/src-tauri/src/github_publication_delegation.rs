@@ -248,7 +248,7 @@ impl ConnectionState {
                     data,
                     activity: None,
                     dispatch: None,
-                    enrollment: None,
+                    enrollment: None, operation: None,
                 })
             }
             _ => Err(refused(p::Reason::InvalidInput)),

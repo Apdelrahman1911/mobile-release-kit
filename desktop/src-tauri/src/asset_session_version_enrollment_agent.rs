@@ -230,7 +230,7 @@ impl DocumentBinding {
             data,
             activity: None,
             dispatch: None,
-            enrollment: Some(capture),
+            enrollment: Some(capture), operation: None,
         })
     }
 

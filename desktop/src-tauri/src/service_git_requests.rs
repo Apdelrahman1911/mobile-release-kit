@@ -969,3 +969,24 @@ mod commit;
 #[cfg(test)]
 #[path = "service_git_requests_tests.rs"]
 mod tests;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl Entry {
+    /// Nonshipping comparison of THIS retained original. It grants nothing and
+    /// never substitutes public status/history for native or relay retirement.
+    pub(crate) fn installed_cli_returned(&self, origin:&p::Query, family:Family, phase:Phase, revision:u32)->bool {
+        if self.input.origin!=*origin || self.family!=family || !matches!(family,Family::Index|Family::Repository){return false;}
+        let Ok(r)=self.lock() else{return false};
+        r.status.revision==revision && r.claimed.is_none() && r.prepare_joined
+            && !r.history_failed && r.history_claim.is_none() && r.history_ack==Some(revision)
+            && r.stop.is_none() && r.status.reason.is_none() && match phase {
+                Phase::Prepare=>r.status.state==p::State::Prepared && r.review.is_some()
+                    && !r.apply_joined && r.status.apply_operation_id.is_none(),
+                Phase::Apply=>r.status.state==p::State::Finished && r.apply_joined
+                    && r.status.settlement==Settlement::Settled && r.status.outcome==Some(OperationState::Succeeded)
+                    && r.review.is_none() && r.status.apply_operation_id.is_some(),
+            }
+    }
+}

@@ -338,3 +338,37 @@ fn metadata_tombstones_drop_pathsets_without_eviction_and_history_does_not_settl
     assert_eq!(link.entry.status().unwrap().settlement, Settlement::Pending);
     assert!(DOCUMENT_BACKING < 3 * 1024 * 1024);
 }
+
+#[cfg(all(debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[test]
+fn installed_cli_comparison_requires_each_original_and_exact_history_return() {
+    // DATA calls only: no Document, native admission, files, child or socket.
+    let (_doc,inbox,input)=setup();
+    inbox.prepare(input.clone()).unwrap();
+    let mut claim=inbox.claim().unwrap().unwrap();
+    let link=claim.link().unwrap();link.arm("git-local-1").unwrap();
+    let entry=&link.entry;
+    link.retired(OperationState::Succeeded);
+    link.ready(review(),Instant::now()+Duration::from_secs(300)).unwrap();
+    let yes=||entry.installed_cli_returned(&input.origin,Family::Index,Phase::Prepare,entry.status().unwrap().revision);
+    assert!(!yes()); // actual caller has not returned
+    claim.returned(Ok(()));assert!(!yes());
+    let h=entry.claim_history().unwrap().unwrap();assert!(!yes());
+    entry.history_returned(h.1,Ok(())).unwrap();assert!(yes());
+    assert!(!entry.installed_cli_returned(&input.origin,Family::Repository,Phase::Prepare,h.1));
+    assert!(!entry.installed_cli_returned(&input.origin,Family::Index,Phase::Prepare,h.1-1));
+    let mut foreign=input.origin.clone();foreign.request_id=id('f');
+    assert!(!entry.installed_cli_returned(&foreign,Family::Index,Phase::Prepare,h.1));
+    inbox.start(&start(&input)).unwrap();
+    let mut claim=inbox.claim().unwrap().unwrap();let apply=claim.link().unwrap();apply.arm("git-local-2").unwrap();
+    claim.returned(Ok(()));
+    let finished=||entry.installed_cli_returned(&input.origin,Family::Index,Phase::Apply,entry.status().unwrap().revision);
+    assert!(!finished()); // caller/history can never replace native retirement
+    apply.retired(OperationState::Succeeded);assert!(!finished());
+    let h=entry.claim_history().unwrap().unwrap();assert!(!finished());
+    entry.history_returned(h.1,Ok(())).unwrap();assert!(finished());
+    entry.cancel(p::Reason::UserCancelled,Instant::now());assert!(finished()); // late STOP only
+    entry.unknown();assert!(!finished());
+}

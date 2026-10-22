@@ -152,6 +152,9 @@ pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, P12
 #[path = "asset_session_github_secret.rs"]
 mod github_secret;
 pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+#[path = "asset_session_github_remote_delegation.rs"]
+mod github_remote_delegation;
+pub(crate) use github_remote_delegation::RemoteSetupVariablePins;
 #[path = "asset_session_github_variable.rs"]
 mod github_variable;
 #[path = "asset_session_gh_auth.rs"]
@@ -1198,6 +1201,11 @@ pub(crate) mod agent_initialization;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use agent_initialization::InitializationAgentGate;
 #[cfg(any(target_os="linux",target_os="macos"))]
+#[path="asset_session_service_workflow_edit.rs"]
+pub(crate) mod agent_workflow_edit;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use agent_workflow_edit::WorkflowEditAgentGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
 #[path="asset_session_service_metadata_images.rs"]
 pub(crate) mod agent_metadata_images;
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -1345,8 +1353,12 @@ impl GitHubReleaseGoGate {
 
 /// The existing original writer calls this document-bound gate only after the
 /// exact Setup READY. No URL, token, project root or edit witness comes from UI.
-pub(crate) struct GitHubSetupGoGate { inner: Weak<Inner> }
+pub(crate) struct GitHubSetupGoGate { inner: Weak<Inner>, agent: Option<Arc<crate::service_github_action_requests::Entry>> }
 impl GitHubSetupGoGate {
+    pub(crate) fn agent(&self) -> Option<&Arc<crate::service_github_action_requests::Entry>> { self.agent.as_ref() }
+    pub(crate) fn agent_entering(&self) -> Result<(), BridgeError> {
+        if let Some(e) = &self.agent { e.entering().map_err(application_service::public_error)?; } Ok(())
+    }
     pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_setup_protocol::Request,
         claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
         use crate::{github_setup_protocol as p, github_setup_session as s};
@@ -1369,7 +1381,17 @@ impl GitHubSetupGoGate {
         if let Some(material)=state.github.setup_variable_material(){
             if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
         }
-        state.github.setup_go(id, digest, request, generation, &root, &edit, Instant::now(), claim)
+        if let Some(e) = &self.agent {
+            if matches!(request.target.selection, p::Selection::Secret(_)) { return Err(s::refused(p::Reason::InvalidInput)); }
+            e.current(true).map_err(application_service::public_error)?;
+        }
+        state.github.setup_go(id, digest, request, generation, &root, &edit, Instant::now(), || {
+            let claimed = claim();
+            if claimed { if let Some(e) = &self.agent {
+                if e.go(id).is_err() { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); return false; }
+            }}
+            claimed
+        })
     }
 }
 impl GitHubSetupGoGate {
@@ -2094,6 +2116,27 @@ mod lookup_memory {
                 let snapshot={
                     let book=document.installed_macos_session.try_lock().map_err(|_|Problem::Capacity)?;
                     match book.as_ref().and_then(|b|b.git_upstream.as_ref().map(|c|(b,c))) {
+                        None=>None,
+                        Some((b,c))=>{
+                            if b.originals.len()>2{return Err(Problem::Capacity)}
+                            let bytes=std::mem::size_of::<installed_macos_observation::SessionBook>()
+                                .checked_add(b.originals.capacity().checked_mul(std::mem::size_of::<(Arc<OriginalWork>,Option<Operation>)>()).ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
+                            Some((Arc::clone(c),b.originals.iter().map(|(o,_)|Arc::clone(o)).collect::<Vec<_>>(),bytes))
+                        }
+                    }
+                };
+                if let Some((control,originals,bytes))=snapshot {
+                    self.add(bytes)?;self.add(control.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    for original in &originals {self.owner(original)?;}
+                }
+            }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                // Snapshot originals under the old book, then release it before
+                // visiting any owner. No inferred picker/quit coverage or IO.
+                let snapshot={
+                    let book=document.installed_macos_session.try_lock().map_err(|_|Problem::Capacity)?;
+                    match book.as_ref().and_then(|b|b.git_cli.as_ref().map(|c|(b,c))) {
                         None=>None,
                         Some((b,c))=>{
                             if b.originals.len()>2{return Err(Problem::Capacity)}
@@ -4454,6 +4497,11 @@ impl DocumentBinding {
     pub(crate) fn github_remote_setup_command(&self, name: &str, value: &Value) -> Result<crate::github_setup_protocol::Status, BridgeError> {
         use crate::{github_setup_protocol as p, github_setup_session as s};
         let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_remote_setup_execute(command, None)
+    }
+    pub(super) fn github_remote_setup_execute(&self, command: crate::github_setup_protocol::Command,
+        agent: Option<Arc<crate::service_github_action_requests::Entry>>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
         if matches!(command, p::Command::Status) { return Ok(self.github_remote_setup_status()); }
         // One bounded native nonce, before original admission. No credential,
         // filesystem inspection or network exchange is performed by this step.
@@ -4478,6 +4526,8 @@ impl DocumentBinding {
         let binding = github_setup_project_binding(&root).map_err(|_| s::refused(p::Reason::TargetChanged))?;
         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)
             .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::Busy }))?;
+        let delegated_variable = self.remote_setup_agent_entry(&mut state, &command, agent.as_ref(), &project_id,
+            generation, &root, &binding, &edit, Instant::now())?;
         let setup_material=if let p::Command::Prepare(args)=&command {
             if let p::Selection::Secret(selected)=&args.selection {
                 let material=self.review_github_secret_material(&state,selected,&project_id,generation,&root)?;
@@ -4489,17 +4539,22 @@ impl DocumentBinding {
                 return Err(s::refused(p::Reason::Unqualified));
                 Some(crate::supervisor::SetupNativeAdmission::Secret(admission))
             }else if let p::Selection::Variable(selected)=&args.selection{
-                let material=self.review_github_variable_material(&state,selected,&project_id,generation,&root)?;
+                let material = match delegated_variable {
+                    Some(material) => material,
+                    None => self.review_github_variable_material(&state,selected,&project_id,generation,&root)?,
+                };
                 let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Prepare)?;
                 #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
-                lookup_memory::variable_admission_bytes(&self.inner,&state,&material,admission.bytes()).map_err(|e|
+                lookup_memory::variable_admission_bytes(&self.inner,&state,&material,admission.bytes()).and_then(|bytes| {
+                    if agent.is_some() { self.remote_setup_additional(&state, bytes, 0).map_err(|e| if e.code == "github_remote_setup_refused_cleanup_unknown" { keyring::Problem::CleanupUnknown } else { keyring::Problem::Capacity }) } else { Ok(bytes) }
+                }).map_err(|e|
                     s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
                 #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
                 return Err(s::refused(p::Reason::Unqualified));
                 Some(crate::supervisor::SetupNativeAdmission::Variable(admission))
             }else{None}
         }else{None};
-        let gate = GitHubSetupGoGate { inner: Arc::downgrade(&self.inner) };
+        let gate = GitHubSetupGoGate { inner: Arc::downgrade(&self.inner), agent: agent.clone() };
         let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
         match command {
             p::Command::Prepare(args) => {
@@ -4539,7 +4594,9 @@ impl DocumentBinding {
                         let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
                             .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
                         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
-                        lookup_memory::variable_admission_bytes(&self.inner,&state,&material,future).map_err(|e|
+                        lookup_memory::variable_admission_bytes(&self.inner,&state,&material,future).and_then(|bytes| {
+                    if agent.is_some() { self.remote_setup_additional(&state, bytes, 0).map_err(|e| if e.code == "github_remote_setup_refused_cleanup_unknown" { keyring::Problem::CleanupUnknown } else { keyring::Problem::Capacity }) } else { Ok(bytes) }
+                }).map_err(|e|
                             s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
                         #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
                         return Err(s::refused(p::Reason::Unqualified));
@@ -4826,6 +4883,10 @@ impl DocumentBinding {
             #[cfg(any(target_os="linux",target_os="macos"))]
             if domain==crate::edit_protocol::EditDomain::ProjectInitialization{
                 self.inner.bridge.edits.initialization_agent_origin(MAIN,None)?;
+            }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if domain==crate::edit_protocol::EditDomain::GitHubWorkflows{
+                self.inner.bridge.edits.workflow_edit_agent_origin(MAIN,None)?;
             }
             let registered = self.registered_edit_root_locked_published(&mut state, domain, project_id, None, &mut publisher)?;
             enqueue(&self.inner.bridge, registered, &publisher)
@@ -7385,6 +7446,7 @@ mod installed_macos_observation {
     include!("asset_session_tool_setup_observation.rs");
     mod push_observation {use super::*;include!("asset_session_git_push_observation.rs");}
     mod upstream_observation {use super::*;include!("asset_session_git_upstream_observation.rs");}
+    mod git_cli_observation {use super::*;include!("asset_session_git_cli_observation.rs");}
     mod fetch_observation {use super::*;include!("asset_session_git_fetch_observation.rs");}
     pub(super) struct SessionBook {
         pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
@@ -7399,6 +7461,7 @@ mod installed_macos_observation {
         pub(super) git_fetch:Option<Arc<crate::shell::installed_observation::git_fetch::Control>>,
         pub(super) git_push:Option<Arc<crate::shell::installed_observation::git_push::Control>>,
         pub(super) git_upstream:Option<Arc<crate::shell::installed_observation::git_upstream::Control>>,
+        pub(super) git_cli:Option<Arc<crate::shell::installed_observation::git_cli::Control>>,
     }
     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
         match (project_fields, input_case) {
@@ -7409,7 +7472,7 @@ mod installed_macos_observation {
     }
     impl SessionBook {
         fn original_limit(&self) -> Option<u32> {
-            let git_count=usize::from(self.git_fetch.is_some())+usize::from(self.git_push.is_some())+usize::from(self.git_upstream.is_some());
+            let git_count=usize::from(self.git_fetch.is_some())+usize::from(self.git_push.is_some())+usize::from(self.git_upstream.is_some())+usize::from(self.git_cli.is_some());
             if git_count>0{return (git_count==1&&self.project_fields.is_none()&&self.input_case.is_none()&&self.vault.is_none()&&self.tool_setup.is_none()).then_some(2)}
             if let Some(control)=&self.tool_setup {return (self.project_fields.is_none() && self.input_case.is_none() && self.vault.is_none()).then_some(control.case().maximum_original());}
             if let Some(control) = &self.vault {
@@ -7509,7 +7572,7 @@ mod installed_macos_observation {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if book.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity)?;
-            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None,git_push:None,git_upstream:None });
+            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None });
             Ok(())
         }
         pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
@@ -7655,7 +7718,7 @@ mod installed_macos_observation {
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let input_case = token.consume(&self.inner.session_identity)?;
             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None }); Ok(())
         }
         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
         pub(crate) fn register_installed_macos_project_fields(&self,
@@ -7668,13 +7731,18 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None,git_fetch:None,git_push:None,git_upstream:None,git_cli:None }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
             let Some(book) = book.as_mut() else { return Ok(()); };
             let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
             if let Some(control)=&book.git_fetch {
+                if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
+                    return Err(AssetError::new(Reason::Unqualified))
+                }
+            }
+            if let Some(control)=&book.git_cli {
                 if !control.bound(&self.inner.session_identity)||!matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,None)) {
                     return Err(AssetError::new(Reason::Unqualified))
                 }
@@ -8010,7 +8078,7 @@ mod installed_macos_observation {
                         && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
                             && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
                         || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
-                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project) || self.macos_git_push_selected(&state,project) || self.macos_git_upstream_selected(&state,project)),
+                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project) || self.macos_git_fetch_selected(&state,project) || self.macos_git_push_selected(&state,project) || self.macos_git_upstream_selected(&state,project) || self.macos_git_cli_selected(&state,project)),
                 (Some(project), None, true) => self.macos_project_loss(&state, project),
                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
                 _ => false,

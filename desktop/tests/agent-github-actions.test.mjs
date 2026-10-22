@@ -53,7 +53,7 @@ async function fixture(kind='repository-create',ready=true){
   const port={mode:'native',subscribe:async f=>{listener=f;return()=>{listener=null;};},status:()=>h.deferStatus?call('status',{}):Promise.resolve(copy(current))};
   for(const k of ['prepare','create','start','pending','reconcile','cancel','discard'])port[k]=args=>call(k,args);
   const controller=kind==='repository-create'?new GitHubRepositoryCreateController(()=>connection,()=>peer):kind==='draft-pr-create'?new GitHubPullRequestController(()=>connection,()=>peer):new GitHubActionsRetryController(()=>connection,()=>data.activity,()=>peer);
-  Object.assign(h,{kind,data,port,controller,calls,emit(v){current=copy(v);listener?.(copy(v));},respond(k,v){current=copy(v);calls.filter(x=>x.kind===k).at(-1).resolve(copy(v));},retain(v){current=copy(v);},setPeer(v){peer=v;},move(){connection={...connection,context:{...connection.context,projectGeneration:2}};controller.syncContext();}});
+  Object.assign(h,{kind,data,port,controller,calls,connection:()=>connection,changeConnection(v){connection=v;controller.syncContext();},emit(v){current=copy(v);listener?.(copy(v));},respond(k,v){current=copy(v);calls.filter(x=>x.kind===k).at(-1).resolve(copy(v));},retain(v){current=copy(v);},setPeer(v){peer=v;},move(){connection={...connection,context:{...connection.context,projectGeneration:2}};controller.syncContext();}});
   retained.push(h);controller.connect(port);await flush();
   if(kind==='draft-pr-create')for(const [k,v]of Object.entries(draft))controller.setDraft(k,v);
   if(ready){controller.prepare();h.respond('prepare',data.review());await flush();assert.ok(controller.agentSelection());}
@@ -158,3 +158,6 @@ test('service history Unknown and foreign final cannot clear retained original e
     assert.equal(p.controller.getSnapshot().unknown,true);assert.ok(h.controller.ownerReason());assert.equal(await p.controller.allow(),false);
   }
 });
+
+// Reuse the same inert original-controller fixture; no second test owner.
+export { fixture, fixtureData, flush, deferred, consentId, draft, run, hex };

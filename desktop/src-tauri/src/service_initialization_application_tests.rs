@@ -56,10 +56,12 @@ fn missing_or_invalid_configuration_queues_only_original_preparation_and_history
         let first = view(service.initialization_prepare(&client, input.clone()));
         assert_eq!(first.phase, wire::Phase::QueuedOpen);
         assert!(first.original.is_none() && first.review.is_none() && !first.permission_available);
-        assert_eq!(
-            view(service.initialization_prepare(&client, input.clone())),
-            first
-        );
+        let mut repeated = view(service.initialization_prepare(&client, input.clone()));
+        // An idempotent read keeps the original request and deadline; elapsed
+        // time may decrease the countdown without changing any other state.
+        assert!(repeated.remaining_ms > 0 && repeated.remaining_ms <= first.remaining_ms);
+        repeated.remaining_ms = first.remaining_ms;
+        assert_eq!(repeated, first);
         let unreviewed = wire::Apply {
             origin: input.origin.clone(),
             original: wire::Original {

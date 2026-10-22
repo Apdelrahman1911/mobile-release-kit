@@ -47,9 +47,17 @@ PUBLIC_TOOLS = module_from_spec(_tool_spec)
 _tool_spec.loader.exec_module(PUBLIC_TOOLS)
 del _tool_spec
 
+# Two fixed local-Git recipes reuse this original Calls/Fixture/thread owner.
+_git_spec = spec_from_file_location("mrk_local_git_cli_recipe", Path(__file__).with_name("macos_git_cli_observation.py"))
+if _git_spec is None or _git_spec.loader is None:
+    raise RuntimeError("git-cli-recipe-unavailable")
+GIT_CLI = module_from_spec(_git_spec)
+_git_spec.loader.exec_module(GIT_CLI)
+del _git_spec
+
 
 def selected(cases):
-    return cases in (CASES, BACKUP.CASES, PUBLIC_TOOLS.CASES, PUBLIC_TOOLS.CANCEL_CASES)
+    return cases in (CASES, BACKUP.CASES, PUBLIC_TOOLS.CASES, PUBLIC_TOOLS.CANCEL_CASES) or GIT_CLI.selected(cases)
 
 
 def _scope(f):
@@ -58,6 +66,8 @@ def _scope(f):
 
 
 def _policy(case):
+    if case in GIT_CLI.CASES:
+        return GIT_CLI.policy(case)
     if case == SCOPE:
         return (7, 4, SUCCESS_SECONDS, APP_SECONDS)
     if case == PUBLIC_TOOLS.CANCEL:
@@ -203,14 +213,35 @@ class Calls:
     Main and its one retained thread share only this short lock. No lock spans
     run_owned/join; closing admission never forgets an already claimed original.
     """
-    def __init__(self, clock=time.monotonic, *, case=SCOPE):
+    def __init__(self, clock=time.monotonic, *, case=SCOPE, original_end=None):
         self.count, self.rows, success, app = _policy(case)
         self.case, self.app_seconds = case, app
         self.clock, self.lock, self.stop = clock, threading.Lock(), threading.Event()
         start = clock()
         self.success_end, self.hard_end = start + success, start + app + CLEANUP_SECONDS
+        if case in GIT_CLI.CASES:
+            need(type(original_end) is float and math.isfinite(original_end)
+                 and start < original_end <= start + success, "git-cli-original-case-end")
+            # Setup already spent part of this same 120s case. Both callers
+            # and the app are clipped; the existing 15s app-return allowance,
+            # 3s cleanup and 1s join margin are ceilings, never renewed clocks.
+            self.success_end = min(self.success_end, original_end)
+            self.hard_end = min(self.hard_end, original_end + app - success + CLEANUP_SECONDS)
+            self.app_seconds = min(app, math.floor(original_end + app - success - start))
+            need(self.app_seconds >= 1, "git-cli-original-case-end")
+        else:
+            need(original_end is None, "cli-unexpected-original-end")
         self.next, self.inflight, self.closed, self.failed = 0, None, False, False
         self.results, self.returned = [], False
+
+    def application_timeout(self):
+        if self.case not in GIT_CLI.CASES:
+            return self.app_seconds  # Original tool recipes keep their bytes/clock.
+        # Thread start can itself consume time. Clip once more immediately at
+        # the actual app call, never adding that delay back to the original end.
+        seconds = min(self.app_seconds, math.floor(self.hard_end - CLEANUP_SECONDS - self.clock()))
+        need(seconds >= 1, "git-cli-original-case-end")
+        return seconds
 
     def claim(self, number):
         with self.lock:
@@ -416,7 +447,7 @@ def invoke(f, run_owned, argv, env, state):
     need(selected(f.cases) and f.inflight and not f.last_returned and f.cli is not None
          and f.cli.calls is None and argv[1:] == [_scope(f)], "cli-invocation-order")
     c = f.cli
-    calls = c.calls = Calls(case=_scope(f))
+    calls = c.calls = Calls(case=_scope(f), original_end=f.git_cli["caseEnd"] if GIT_CLI.selected(f.cases) else None)
     environment = dict(env, HOME=str(c.home))
     # One retained non-daemon thread, before the sole start. No thread may use
     # the main DefaultCancellation or own a native application invocation.
@@ -424,6 +455,9 @@ def invoke(f, run_owned, argv, env, state):
         try:
             if calls.case == SCOPE:
                 _journey(f, run_owned, environment, state, calls)
+            elif calls.case in GIT_CLI.CASES:
+                GIT_CLI.journey(c, calls, lambda number, args, kind:
+                    _call(c, run_owned, environment, state, calls, number, args, kind))
             elif calls.case == PUBLIC_TOOLS.CANCEL:
                 PUBLIC_TOOLS.journey(c, calls, lambda number, args, kind, **kw:
                     _call(c, run_owned, environment, state, calls, number, args, kind, **kw))
@@ -437,7 +471,7 @@ def invoke(f, run_owned, argv, env, state):
     try:
         c.thread.start()
         started = True
-        result = run_owned(argv, environ=environment, cwd=state, timeout=calls.app_seconds,
+        result = run_owned(argv, environ=environment, cwd=state, timeout=calls.application_timeout(),
                            capture=True, text=False, output_limit=2 * 1024 * 1024)
     except BaseException:
         calls.close(failed=True)
@@ -581,6 +615,8 @@ def report(v, require=need):
 
 
 def readback(f, v):
+    if GIT_CLI.selected(f.cases):
+        return GIT_CLI.readback(f, v)
     if _scope(f) == PUBLIC_TOOLS.CANCEL:
         return PUBLIC_TOOLS.cli_readback(f, v)
     if _scope(f) == BACKUP.SCOPE:

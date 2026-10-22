@@ -1,3 +1,7 @@
+import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
+import type { GithubActionDelegate, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
+import { isGithubRemoteSettingsKind, parseGithubRemoteSettingsSelection, githubRemoteSettingsPreparedHash, githubRemoteSettingsResultMatches } from './githubRemoteSetupDelegation.ts';
+import type { GithubRemoteSettingsKind, GithubRemoteSettingsSelection, RemoteSetting } from './githubRemoteSetupDelegation.ts';
 // Coordinates only the original native Setup session. No token, HTTP, polling,
 // retry, local workflow write or renderer-created consent is used here.
 import type { AssetDisplayState } from './assetSessionTypes.ts';
@@ -16,6 +20,8 @@ type Observer = { api: Port; active: boolean; unlisten: (() => void) | null; rea
 type Pending = { observer: Observer; context: Context; epoch: object; selection: GitHubRemoteSetupSelection; kind: 'prepare' | 'apply';
   revision: number; previousId: string | null; operationId: string | null; sent: boolean; cancelAfterAdmission: boolean; cancelRequested: boolean; reviewed: GitHubRemoteSetupConsent | null; asset: MaterialBinding | null };
 type Review = { observer: Observer; context: Context; epoch: object; consent: GitHubRemoteSetupConsent; asset: MaterialBinding | null };
+type AgentOrigin = { observer:Observer; context:Context; epoch:object; selection:GithubRemoteSettingsSelection; setting:RemoteSetting; asset:MaterialBinding|null; review:Review|null; originalId:string|null; allowed:boolean; unused:boolean; noAllow:boolean; terminal:GithubActionStatus|null; unknown:boolean; released:boolean };
+type AgentCheck = { origin:AgentOrigin; allowed:boolean; unused:boolean; noAllow:boolean; terminal:GithubActionStatus|null; status:GitHubRemoteSetupStatus|null };
 type Discard = { observer: Observer; session: string; consent: string; revision: number };
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); } return value;
@@ -52,6 +58,8 @@ export class GitHubRemoteSetupController {
   private current: Context | null = null;
   private epoch: object = {};
   private pending: Pending | null = null;
+  private actionCall: Pending | null = null; // Actual original Promise, not a terminal event.
+  private agent: AgentOrigin | null = null;
   private review: Review | null = null;
   private discard: Discard | null = null;
   private retired: { observer: Observer; session: string; consent: string } | null = null;
@@ -92,7 +100,7 @@ export class GitHubRemoteSetupController {
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   private update(patch: Partial<GitHubRemoteSetupView>): void {
     if (this.disposed) return;
-    this.state = freeze({ ...this.state, ...patch }); this.listeners.forEach((fn) => fn());
+    this.state = freeze({ ...this.state, ...patch, pending: this.pending !== null || this.actionCall !== null || this.agent !== null }); this.listeners.forEach((fn) => fn());
   }
   private invalidate(patch: Partial<GitHubRemoteSetupView> = {}): void {
     this.epoch = {}; this.review = null;
@@ -120,9 +128,9 @@ export class GitHubRemoteSetupController {
     this.selectedAsset = value === null ? null : this.assetBinding(value);
     this.invalidate({ selection: value === null ? null : structuredClone(value), error: null });
   }
-  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && this.currentConsent() !== null }); }
+  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && !this.agent && this.currentConsent() !== null }); }
   private needsOriginal(o: Observer): boolean {
-    return this.pending?.observer === o && this.pending.sent || this.cancelObserver === o || this.discard?.observer === o || this.retired?.observer === o ||
+    return this.agent?.observer === o || this.actionCall?.observer === o || o.reading !== null || this.pending?.observer === o && this.pending.sent || this.cancelObserver === o || this.discard?.observer === o || this.retired?.observer === o ||
       !!o.accepted?.operation && o.accepted.operation.phase !== 'settled';
   }
   private detach(o: Observer): void {
@@ -198,12 +206,13 @@ export class GitHubRemoteSetupController {
   }
   private async read(o: Observer): Promise<void> {
     if (!o.active || o.reading) return o.reading ?? undefined;
+    const d=this.agent, check:AgentCheck|null=d?.observer===o?{origin:d,allowed:d.allowed,unused:d.unused,noAllow:d.noAllow,terminal:d.terminal,status:null}:null;
     const work = Promise.resolve().then(async () => {
       if (!o.active) return;
-      try { this.receive(o, await o.api.githubRemoteSetupStatus()); } catch { if (o.active) this.update({ error: 'response-invalid' }); }
+      try { const status=this.receive(o, await o.api.githubRemoteSetupStatus()); if(check)check.status=status; } catch { if (o.active) this.update({ error: 'response-invalid' }); }
     });
     o.reading = work; this.update({ observing: true });
-    try { await work; } finally { if (o.reading === work) { o.reading = null; this.update({ observing: false }); } }
+    try { await work; } finally { if (o.reading === work) { o.reading = null; this.update({ observing: false }); if(check)this.settleAgent(check); this.maintain(); } }
   }
   checkStatus(): Promise<void> { const o = this.maintain(); return !this.disposed && o ? this.read(o) : Promise.resolve(); }
   currentConsent(): GitHubRemoteSetupConsent | null {
@@ -214,7 +223,7 @@ export class GitHubRemoteSetupController {
   // Discard is local native grant retirement, never a remote write or retry.
   private retireConsent(): void {
     const o = this.observer, s = o?.accepted;
-    if (!o || !s?.consent || !s.sessionId || s.operation?.phase !== 'settled' || this.review || this.pending || this.discard || this.retired) return;
+    if (!o || !s?.consent || !s.sessionId || s.operation?.phase !== 'settled' || this.review || this.pending || this.actionCall || this.agent?.observer === o || this.discard || this.retired) return;
     this.retired = { observer: o, session: s.sessionId, consent: s.consent.id }; this.sendDiscard(o, s);
   }
   private sendDiscard(o: Observer, s: GitHubRemoteSetupStatus): void {
@@ -236,7 +245,7 @@ export class GitHubRemoteSetupController {
   startReason(): string | null {
     if (this.disposed || this.state.mode !== 'native' || !this.api || this.observer?.api !== this.api) return 'A current native GitHub session is required. Browser preview never changes repository settings.';
     if (this.blocked || this.state.uncertain) return 'Original acknowledgement or cleanup is unconfirmed. Read local Status; do not repeat Apply.';
-    if (this.pending || this.discard || this.retired || this.state.cancelling || this.state.status?.operation && this.state.status.operation.phase !== 'settled') return 'Wait for the original action or consent retirement. Status and Stop original remain available.';
+    if (this.agent || this.actionCall || this.pending || this.discard || this.retired || this.state.cancelling || this.state.status?.operation && this.state.status.operation.phase !== 'settled') return 'Wait for the original action or consent retirement. Status and Stop original remain available.';
     const c = context(this.connection()), s = this.state.status;
     if (!c || !s || !this.observer?.accepted || s.sessionId !== c.sessionId) return 'Connect the selected project’s repository and read local Status first.';
     if (s.consent && !this.currentConsent()) return 'The previous native consent must be retired before another operation.';
@@ -256,7 +265,7 @@ export class GitHubRemoteSetupController {
     if (this.pending !== p || p.epoch !== this.epoch || o.api !== this.api || !same(c, context(this.connection())) || !this.assetCurrent(p.selection, p.asset) || this.otherOperationReason()) {
       if (this.pending === p) { this.pending = null; this.update({ pending: false, error: 'target-changed' }); this.retireConsent(); } return;
     }
-    p.sent = true;
+    p.sent = true; this.actionCall = p;
     const failed = (error: unknown) => {
       if (this.pending !== p) return;
       const e = githubRemoteSetupError(error);
@@ -264,10 +273,11 @@ export class GitHubRemoteSetupController {
         this.pending = null; this.update({ pending: false, error: e.reason }); this.retireConsent(); this.maintain();
       } else this.update({ uncertain: true, error: e.reason });
     };
+    const done = () => { if(this.actionCall===p){this.actionCall=null;this.update({});this.retireConsent();this.maintain();} };
     try { void invoke(o.api, c, s.revision).then((v) => {
       const accepted = this.receive(o, v);
       if (this.pending === p && (!accepted || p.operationId === null)) this.update({ uncertain: true, error: 'response-invalid' });
-    }, failed); } catch (e) { failed(e); }
+    }, failed).finally(done); } catch (e) { failed(e); done(); }
   }
   prepare(): void {
     if (this.prepareReason()) return;
@@ -278,6 +288,79 @@ export class GitHubRemoteSetupController {
     if (this.applyReason()) return;
     const consent = this.currentConsent()!;
     this.begin('apply', (api, c, revision) => api.githubRemoteSetupApply({ sessionId: c.sessionId, expectedRevision: revision, consentId: consent.id, confirm: true }));
+  }
+  agentSelection(kind:GithubRemoteSettingsKind):GithubRemoteSettingsSelection|null {
+    const o=this.observer,s=o?.accepted,c=context(this.connection()),selected=this.state.selection;
+    if(!isGithubRemoteSettingsKind(kind)||this.disposed||this.agent||this.actionCall||this.pending||this.blocked||this.state.uncertain||this.cancelObserver||this.discard||this.retired||
+       !o?.active||o.api!==this.api||o.reading||!c||!s?.available||s.sessionId!==c.sessionId||s.reason!=='none'||s.operation&&s.operation.phase!=='settled'||
+       !selected||selected.kind==='environment_secret'||!this.assetCurrent(selected,this.selectedAsset))return null;
+    const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
+    if(kind==='remote-setup-prepare')return s.consent?null:parseGithubRemoteSettingsSelection({...base,expectedConnectionRevision:this.connection().status!.revision,selection:selected});
+    const consent=this.currentConsent();
+    return consent&&this.state.confirmed?parseGithubRemoteSettingsSelection({...base,consentId:consent.id,confirm:true}):null;
+  }
+  agentSelected(s:GithubActionSelection):boolean {
+    return this.agent?sameGithubActionSelection(this.agent.selection,s)&&this.agentCurrent(this.agent):
+      isGithubRemoteSettingsKind(s.kind)&&sameGithubActionSelection(this.agentSelection(s.kind),s);
+  }
+  private agentCurrent(d:AgentOrigin):boolean {
+    return this.agent===d&&!d.unknown&&!this.disposed&&!this.blocked&&!this.pending&&!this.actionCall&&!this.cancelObserver&&!this.discard&&!this.retired&&
+      d.observer===this.observer&&d.observer.api===this.api&&d.observer.active&&!d.observer.reading&&d.epoch===this.epoch&&
+      same(d.context,context(this.connection()))&&d.observer.accepted?.revision===d.selection.expectedRevision&&
+      same(d.setting,this.state.selection)&&this.assetCurrent(d.setting,d.asset)&&
+      (d.selection.kind==='remote-setup-prepare'?this.review===null:d.review!==null&&this.review===d.review&&this.currentConsent()===d.review.consent);
+  }
+  delegatePrepared(raw:GithubActionSelection):GithubActionDelegate|null {
+    this.syncContext();this.syncAssetSession();
+    if(!isGithubRemoteSettingsKind(raw.kind))return null;
+    const selection=this.agentSelection(raw.kind),setting=this.state.selection;
+    if(!selection||!sameGithubActionSelection(selection,raw)||!setting||setting.kind==='environment_secret')return null;
+    const o=this.observer!,d:AgentOrigin={observer:o,context:context(this.connection())!,epoch:this.epoch,selection,setting,asset:this.selectedAsset,review:this.review,
+      originalId:o.accepted?.operation?.id??null,allowed:false,unused:false,noAllow:false,terminal:null,unknown:false,released:false};
+    this.agent=d;this.update({confirmed:false,error:null,originalTarget:{repository:d.context.repository,accountId:d.context.accountId,repositoryId:d.context.repositoryId,selection:structuredClone(setting)}});
+    const uncertain=()=>{if(this.agent===d){d.unknown=true;this.fail('cleanup-unknown');}};
+    return Object.freeze({current:()=>this.agentCurrent(d),released:()=>d.released,
+      allowReturned:()=>{if(this.agent===d&&!d.unknown){d.allowed=true;this.update({});}},
+      observe:(raw:GithubActionStatus)=>{if(this.agent!==d||d.unknown)return;const status=parseGithubActionStatus(raw);
+        if(!status||!sameGithubActionSelection(status.review,d.selection)||status.settlement==='unknown'){uncertain();return;}
+        if(status.settlement==='settled'){d.terminal=status;this.update({});}},
+      unusedReturned:()=>{if(this.agent===d&&!d.unknown){d.unused=true;this.update({});}},
+      notSubmitted:()=>{if(this.agent===d&&!d.unknown){d.noAllow=true;d.unused=true;this.update({});}},uncertain});
+  }
+  private settleAgent(check:AgentCheck):void {
+    const d=check.origin,s=check.status,f=check.terminal;
+    if(this.agent!==d||!s||d.unknown||this.blocked||!(check.allowed||check.noAllow)||this.pending||this.actionCall||this.cancelObserver||this.discard||this.retired||
+       d.observer.reading||!d.observer.active||d.observer!==this.observer||!same(s,d.observer.accepted)||s.sessionId!==d.selection.sessionId||
+       s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
+    let adopt=false,unentered=false;
+    if(f?.settlement==='settled'&&!f.neverAdmitted){
+      const kind=d.selection.kind==='remote-setup-prepare'?'prepare':'apply',op=s.operation;
+      if(!op||op.id!==f.operationId||op.kind!==kind)return;
+      const nativeEffect=op.effect==='not-started'?(kind==='prepare'?'none':'not-sent'):op.effect==='unknown'?'potentially-applied':op.effect==='readback-confirmed'?'settings-readback-observed':null;
+      if(nativeEffect===null||nativeEffect!==f.effect&&!(f.state!=='complete'&&f.effect==='potentially-applied'&&nativeEffect==='settings-readback-observed'))return;
+      const result=f.result;
+      if(result&&(result.type!=='remote-settings'||!githubRemoteSettingsResultMatches(result,s,d.setting)))return;
+      if(f.state==='complete'){
+        if(!result||result.type!=='remote-settings')return;
+        if(d.selection.kind==='remote-setup-prepare'){
+          if(result.reason==='none'){
+            if(!s.consent||!inContext(s.consent,d.context,d.setting))return;
+            adopt=true;
+          }else if(result.reason!=='no-change'||s.consent!==null)return;
+        }else{
+          if(op.reason!=='none'||!d.review||!('preparedSha256'in f.review)||f.review.preparedSha256!==githubRemoteSettingsPreparedHash(d.review.consent.prepared)||
+             !githubRemoteSetupObservationMatches(d.review.consent.prepared,s.observed))return;
+        }
+      }
+    }else if(check.unused||f?.neverAdmitted){
+      if((s.operation?.id??null)!==d.originalId||s.revision<d.selection.expectedRevision)return;
+      unentered=true;
+    }else return;
+    d.released=true;this.agent=null;this.review=null;
+    const current=d.epoch===this.epoch&&d.observer.api===this.api&&same(d.context,context(this.connection()))&&same(d.setting,this.state.selection)&&this.assetCurrent(d.setting,d.asset);
+    if(current&&adopt&&s.consent)this.review={observer:d.observer,context:d.context,epoch:d.epoch,consent:s.consent,asset:d.asset};
+    else if(current&&unentered&&d.review&&same(s.consent,d.review.consent))this.review=d.review;
+    this.update({confirmed:false});this.retireConsent();this.maintain();
   }
   canCancel(): boolean { return !this.disposed && !this.cancelObserver && !this.state.cancelling && !!this.observer?.accepted?.operation && this.observer.accepted.operation.phase !== 'settled'; }
   cancel(): void {

@@ -45,6 +45,7 @@ impl DocumentBinding {
             git_fetch: None,
             git_push: None,
             git_upstream: Some(control),
+            git_cli:None,
         });
         Ok(())
     }

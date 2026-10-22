@@ -132,7 +132,7 @@ impl ConnectionState {
                 .min(session.clock.end),
             data,
             dispatch: None,
-            enrollment: None,
+            enrollment: None, operation: None,
             activity: Some(Capture {
                 request,
                 generation,

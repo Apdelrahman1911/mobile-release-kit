@@ -63,6 +63,31 @@ class InertOnly(unittest.TestCase):
 
 
 class CurrentRouteTests(InertOnly):
+    def test_two_git_cli_singletons_require_same_closed_combined_image_and_real_host_gate(self):
+        env = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
+               "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+        self.assertEqual(M.GIT_CLI_SCOPES, ("git-index-cli-native", "git-branch-cli-native"))
+        for scope, case in zip(M.GIT_CLI_SCOPES, ("git-index-cli", "git-branch-cli")):
+            with self.subTest(scope=scope):
+                args = ["--target", M.TARGET, "--scope", scope]
+                self.assertEqual(M.arguments(args), scope)
+                self.assertEqual(M.observation_scope(env, scope), scope)
+                self.assertEqual(A.selected_cases(scope), (case,))
+                self.assertEqual(A.CLI._policy(case), (8, 5, 120, 135) if case == "git-index-cli" else (5, 3, 120, 135))
+                code, observed, owner, run, error = self.main_with_host_data(env, "27.0.1", scope)
+                self.assertEqual((code, error), (0, ""))
+                observed.assert_called_once_with(); owner.assert_called_once_with()
+                self.assertEqual(run.call_args.kwargs["scope"], scope)
+                self.assertEqual(run.call_args.kwargs["host"], ("xcode-27", "27.0.1"))
+                for wrong in (args + ["extra"], args[:-1] + [case], ["--target", A.INTEL_TARGET, *args[2:]]):
+                    with self.assertRaises(M.Refused): M.arguments(wrong)
+                for native in (M.SCOPE, M.TOOLS_SCOPE, M.FETCH_SCOPE, M.PUSH_SCOPE, scope, "disabled"):
+                    with self.subTest(native=native), self.assertRaises(M.Refused):
+                        M.observation_scope({**env, "MRK_MACOS_NATIVE_SCOPE": native}, scope)
+        for old_tool in (M.SCOPE, M.SERVICE_SCOPE, M.TOOLS_SCOPE, M.CLI_SCOPE, M.PUBLIC_TOOLS_SCOPE):
+            with self.subTest(old_tool=old_tool), self.assertRaises(M.Refused):
+                M.observation_scope(env, old_tool)
+
     def test_public_acquisition_is_only_a_closed_tool_image_selector_not_a_new_package_role(self):
         args = ["--target", M.TARGET, "--scope", M.TOOLS_SCOPE, "--tool-cases", "public-acquisition"]
         self.assertEqual(M.arguments(args), M.PUBLIC_TOOLS_SCOPE)

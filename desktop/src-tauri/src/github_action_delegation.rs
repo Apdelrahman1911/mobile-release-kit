@@ -14,6 +14,7 @@ pub(crate) struct Review {
     pub(crate) data: p::Review,
     pub(crate) activity: Option<super::activity::delegation::Capture>,
     pub(crate) dispatch: Option<dispatch::Capture>,
+    pub(crate) operation: Option<operation::Capture>,
     pub(crate) enrollment: Option<crate::asset_session::CounterEnrollmentCapture>,
 }
 struct Hash {
@@ -57,6 +58,7 @@ pub(super) fn review<T: Serialize>(
         activity: None,
         dispatch: None,
         enrollment: None,
+        operation: None,
     })
 }
 pub(super) fn origin(scope: &Option<Weak<r::NativeScope>>, entry: Option<&Arc<r::Entry>>) -> bool {
@@ -121,3 +123,6 @@ mod tests;
 
 #[path="github_dispatch_delegation.rs"]
 pub(crate) mod dispatch;
+
+#[path="github_operation_delegation.rs"]
+pub(crate) mod operation;

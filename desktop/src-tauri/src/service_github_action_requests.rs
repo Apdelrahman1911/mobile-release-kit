@@ -357,7 +357,7 @@ impl Entry {
                 .is_none_or(|f| f.admission != Admission::Running)
             || !effect.valid_for(self.scope.review.kind())
             || !dispatch::valid(&self.scope.review, reason, snapshot.as_deref())
-            || (self.scope.review.kind() == p::Kind::ActivityOverview || self.scope.review.kind().dispatch_family() || self.scope.review.kind().enrollment_family()) && reason == p::Reason::None && !r.go
+            || (self.scope.review.kind() == p::Kind::ActivityOverview || self.scope.review.kind().dispatch_family() || self.scope.review.kind().enrollment_family() || self.scope.review.kind().operation_family()) && reason == p::Reason::None && !r.go
             || matches!(
                 reason,
                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
@@ -507,7 +507,7 @@ impl Entry {
                 // Retain the native fact, but expose the new success label only
                 // after caller+history return. Unknown/Finishing remain honest
                 // about a possibly applied CAS, never NotSent after real GO.
-                p::Effect::LocalMappingObserved if state != p::State::Complete => p::Effect::PotentiallyApplied,
+                p::Effect::LocalMappingObserved | p::Effect::SettingsReadbackObserved if state != p::State::Complete => p::Effect::PotentiallyApplied,
                 effect => effect,
             },
             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
@@ -516,8 +516,9 @@ impl Entry {
             snapshot: if state == p::State::Complete { match r.snapshot.as_deref() { Some(dispatch::Snapshot::Activity(s))=>Some(s.clone()),_=>None } } else { None },
             result: match r.snapshot.as_deref() {
                 Some(dispatch::Snapshot::Dispatch(s)) if state == p::State::Complete
-                    || matches!(s, p::dispatch::Snapshot::Enrollment(_))
-                       && matches!(state, p::State::Refused | p::State::Cancelled) => Some(s.clone()),
+                    || matches!(s, p::dispatch::Snapshot::Enrollment(_) | p::dispatch::Snapshot::RemoteSettings(_))
+                       && matches!(state, p::State::Refused | p::State::Cancelled)
+                    || matches!(s,p::dispatch::Snapshot::Operation(data) if data.valid_row(self.scope.review.kind(),state,reason,f.map_or(self.scope.review.kind().initial_effect(),|f|f.effect))) => Some(s.clone()),
                 _ => None,
             },
         };

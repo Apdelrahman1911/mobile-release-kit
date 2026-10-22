@@ -1646,6 +1646,8 @@ impl ConnectionState {
             request.retained_heap_bytes(), worker_request.retained_heap_bytes(), context_bytes]) {
             return Err(s::refused(p::Reason::ResponseLimit));
         }
+        let agent = gate.agent().cloned();
+        gate.agent_entering()?;
         let ticket = match material {Some(v)=>supervisor.start_github_setup_material(worker_request,gate,v),
             None=>supervisor.start_github_setup(worker_request,gate)}.map_err(|error|
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
@@ -1657,7 +1659,7 @@ impl ConnectionState {
         self.actions_retry.context_changed();self.play_cleanup.context_changed();
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
-        self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
+        self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end, agent }, setup_before);
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.setup.snapshot())
     }
@@ -1816,6 +1818,9 @@ impl ConnectionState {
         was_unknown: bool, now: Instant, current: bool) {
         use crate::{github_setup_protocol as p, github_setup_session as s};
         let Some(active) = self.setup.active.take() else { self.unknown_inner(); return; };
+        let agent = active.agent.clone();
+        let agent_id = agent.as_ref().map(|_| active.ticket.operation_id().to_owned());
+        let agent_selection = agent.as_ref().map(|_| active.request.target.selection.clone());
         let claimed = active.ticket.go_claimed(); let kind = active.request.kind;
         let mut effect = if kind == p::Kind::Apply && claimed { p::Effect::Unknown } else { p::Effect::NotStarted };
         let mut reason = result.as_ref().map_or_else(s::outcome_reason, |v| v.result.reason);
@@ -1836,7 +1841,9 @@ impl ConnectionState {
         if was_unknown || self.unknown || reason == p::Reason::CleanupUnknown {
             self.unknown_inner();
             if let Some(op) = &mut self.setup.view.operation { op.phase = p::Phase::CleanupUnknown; op.effect = effect; }
-            self.complete_retirement(); return;
+            self.complete_retirement();
+            if let Some(e) = &agent { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); }
+            return;
         }
         if let Some(retired) = retirement { reason = s::connection_reason(retired); }
         else if !current { reason = p::Reason::TargetChanged; }
@@ -1862,7 +1869,8 @@ impl ConnectionState {
                         }
                         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
                             && v.generation == active.generation && v.retirement.is_none()).ok_or_else(BridgeError::protocol)?;
-                        let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end);
+                        let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end)
+                            .min(agent.as_ref().map_or(private.clock.end, |e| e.scope().read.end()));
                         if now >= end { return Err(s::refused(p::Reason::ConsentExpired)); }
                         let wall = private.clock.wall.checked_add(end.duration_since(private.clock.admitted)).ok_or_else(BridgeError::protocol)?;
                         Ok((end, display_utc(wall).ok_or_else(BridgeError::protocol)?))
@@ -1872,16 +1880,17 @@ impl ConnectionState {
                             let material=match &prepared {
                                 p::Prepared::Secret(_)=>match active.ticket.take_secret_sealed(){
                                     Ok(Some(v)) if v.retained_heap_bytes().is_some_and(|n|n<=p::RESPONSE_LIMIT+16384)=>Some(s::ConsentMaterial::Secret(v)),
-                                    _=>{self.unknown_inner();self.setup.revoke_consent();return;},
+                                    _=>{self.unknown_inner();self.setup.revoke_consent();if let Some(e)=&agent{e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);}return;},
                                 },
                                 p::Prepared::Variable(prepared)=>match active.ticket.variable_material(){
                                     Some(v) if v.prepared_matches(prepared)=>Some(s::ConsentMaterial::Variable(v.clone())),
-                                    _=>{self.unknown_inner();self.setup.revoke_consent();return;},
+                                    _=>{self.unknown_inner();self.setup.revoke_consent();if let Some(e)=&agent{e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);}return;},
                                 },
                                 p::Prepared::Repository(_)|p::Prepared::Environment(_)=>None,
                             };
                             self.setup.view.consent = Some(p::ConsentView { id: active.consent_id.clone(), expires_at, prepared: public_prepared });
-                            self.setup.consent = Some(s::Consent { material, id: active.consent_id, prepared, end, session_id: active.session_id,
+                            self.setup.consent = Some(s::Consent { identity: std::sync::Arc::new(()), agent: None,
+                                producer: agent.as_ref().map(|e| action_delegation::dispatch::Producer::new(e, active.ticket.operation_id())), material, id: active.consent_id, prepared, end, session_id: active.session_id,
                                 project_id: active.project_id, generation: active.generation, root: active.root, edit_stamp: active.edit_stamp });
                         },
                         (Err(error), _) => { reason = if error.code == "github_remote_setup_refused_response_limit" { p::Reason::ResponseLimit } else { p::Reason::ConsentExpired }; self.setup.revoke_consent(); },
@@ -1899,6 +1908,9 @@ impl ConnectionState {
         };
         if let Some(reason) = retire { self.retire_inner(reason, false); }
         if retirement.is_some() { self.complete_retirement(); }
+        if let (Some(id), Some(selection)) = (agent_id.as_deref(), agent_selection.as_ref()) {
+            self.remote_agent_return(agent.as_ref(), id, kind, selection, reason, effect);
+        }
     }
 }
 

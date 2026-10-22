@@ -781,3 +781,6 @@ mod metadata_tests;
 
 #[path="edit_owner_service_initialization_memory.rs"]
 pub(in crate::edit_owner) mod initialization;
+
+#[path = "edit_owner_service_workflow_edit_memory.rs"]
+pub(in crate::edit_owner) mod workflow_edit;

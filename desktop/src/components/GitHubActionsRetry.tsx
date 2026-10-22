@@ -62,6 +62,11 @@ export function GitHubActionsRetry({controller,state,compact=false,onShow}: {
           <p>{row.prepared.target.scope.repository} · run {row.prepared.run.id} · observed attempt {row.prepared.run.attempt}</p>
           <p className="save-note">{row.acknowledged?'GitHub acceptance was recorded.':'No verified acceptance receipt.'} {row.claimed?'Sending was claimed; it must not be replayed.':'Local intent is retained; do not bypass it with a new marker.'}</p>
           <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(row.prepared.target.selection!.marker)} onClick={()=>controller.reconcile(row.prepared.target.selection!.marker)}>Check run without retrying</button>
+          <details><summary>Advanced: select this original attempt for CLI Reconcile</summary>
+            <p>Read saved attempts through this original panel or its CLI Pending action first. Selecting does not read GitHub, resend, or grant permission.</p>
+            <button type="button" className="button small secondary" disabled={!controller.canSelectRecordForAgent(row.prepared.target.selection!.marker)} onClick={()=>controller.selectRecordForAgent(row.prepared.target.selection!.marker)}>Use this returned record</button>
+            {state.agentReconcileMarker===row.prepared.target.selection!.marker&&<p>Selected for a separate explicit CLI Reconcile permission.</p>}
+          </details>
         </div>)}
         <p>An acknowledged older attempt does not block a genuinely newer explicit retry. Read the newer completed failed attempt in Activity and review it separately. An unacknowledged send remains protected even if GitHub shows another attempt.</p>
       </ProgressiveDisclosure>

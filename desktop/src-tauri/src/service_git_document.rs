@@ -717,3 +717,31 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
 #[cfg(test)]
 #[path = "service_git_document_tests.rs"]
 mod tests;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl DocumentBinding {
+    /// Existing observer only: no new Entry, callback, grant or service IO.
+    /// Sample same-origin positive native, relay and history facts separately.
+    pub(crate) fn installed_git_cli_returned(&self, runtime:&str, origin:&wire::Query, apply:bool)->Result<Option<Value>,BridgeError>{
+        let _state=self.lock();
+        let book=self.inner.installed_macos_session.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let control=book.as_ref().and_then(|b|b.git_cli.as_ref()).ok_or_else(BridgeError::invalid)?;
+        if !control.bound(&self.inner.session_identity){return Err(BridgeError::invalid());}
+        let family=if control.case()==crate::shell::installed_observation::git_cli::Case::Index {Family::Index}else{Family::Repository};
+        let service=self.git_index_service()?.ok_or_else(BridgeError::invalid)?;
+        let entries=service.git_index_requests().entries().map_err(public)?;
+        let mut found=entries.iter().filter(|e|e.input().origin==*origin);
+        let Some(entry)=found.next() else{return Ok(None)};
+        if found.next().is_some()||entry.runtime_id()!=runtime{return Err(BridgeError::invalid());}
+        let status=entry.status().map_err(public)?;
+        if !entry.installed_cli_returned(origin,family,if apply{requests::Phase::Apply}else{requests::Phase::Prepare},status.revision){
+            if matches!(status.state,wire::State::Unknown|wire::State::Refused|wire::State::Cancelled|wire::State::Expired)
+                ||status.reason.is_some(){return Err(BridgeError::invalid());}return Ok(None);
+        }
+        let raw=if family==Family::Index {crate::edit_protocol::bounded(&status.files().map_err(public)?,wire::STATUS_BYTES)?}
+            else {crate::edit_protocol::bounded(&status.repository().map_err(public)?,wire::STATUS_BYTES)?};
+        Ok(Some(crate::protocol::strict_json(&raw)?))
+    }
+}

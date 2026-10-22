@@ -313,3 +313,16 @@ pub(crate) fn agent_initialization_allow(body:&Value)->Result<crate::service_ini
     let args:crate::service_initialization_protocol::Allow=decode(body,crate::service_initialization_protocol::REQUEST_BYTES)?;
     args.validate().map_err(|_|BridgeError::invalid())?;Ok(args)
 }
+
+// MAIN compact Workflow Edit controls; original base native/CLI DTOs unchanged.
+pub(crate) fn agent_workflow_edit_status(body:&Value)->Result<Option<crate::service_workflow_edit_protocol::Query>,BridgeError>{
+    #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct Status {origin:Option<crate::service_workflow_edit_protocol::Query>}
+    let args:Status=decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)?;Ok(args.origin)
+}
+pub(crate) fn agent_workflow_edit_query(body:&Value)->Result<crate::service_workflow_edit_protocol::Query,BridgeError>{
+    decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)
+}
+pub(crate) fn agent_workflow_edit_allow(body:&Value)->Result<crate::service_workflow_edit_protocol::Allow,BridgeError>{
+    let args:crate::service_workflow_edit_protocol::Allow=decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)?;
+    args.validate().map_err(|_|BridgeError::invalid())?;Ok(args)
+}

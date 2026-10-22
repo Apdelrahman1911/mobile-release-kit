@@ -1,6 +1,7 @@
 //! One finite Setup state in the original GitHub ConnectionState.
 //! Secret material is an opaque same-Arc loan; no independent owner or renewed deadline.
-use std::time::Instant;
+use std::{time::Instant, sync::{Arc, Weak}};
+use crate::{github_connection_session::action_delegation::dispatch, service_github_action_requests as agent};
 use crate::{asset_source::RegisteredRoot, edit_owner::SavedEditStamp, error::BridgeError,
     github_setup_protocol as wire, supervisor::{GitHubSetupReceipt, GitHubSetupTicket}};
 
@@ -62,6 +63,7 @@ pub(crate) struct Active {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) generation: u32,
     pub(crate) root: RegisteredRoot, pub(crate) edit_stamp: SavedEditStamp,
     pub(crate) consent_id: String, pub(crate) consent_end: Option<Instant>,
+    pub(crate) agent: Option<Arc<agent::Entry>>,
 }
 // One closed retained authority. Variables carry the original field Arc, not
 // a lookalike SecretSealed or another optional consent beside the real one.
@@ -80,6 +82,8 @@ impl ConsentMaterial {
     pub(crate) fn variable(&self)->Option<&std::sync::Arc<crate::asset_session::GitHubVariableMaterial>>{match self{Self::Variable(v)=>Some(v),Self::Secret(_)=>None}}
 }
 pub(crate) struct Consent {
+    pub(crate) identity: Arc<()>, pub(crate) agent: Option<Weak<agent::NativeScope>>,
+    pub(crate) producer: Option<dispatch::Producer>,
     pub(crate) material: Option<ConsentMaterial>,
     pub(crate) id: String, pub(crate) prepared: wire::Prepared, pub(crate) end: Instant,
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) generation: u32,
@@ -87,6 +91,7 @@ pub(crate) struct Consent {
 }
 impl Consent {
     pub(crate) fn retained_heap_bytes(&self)->Option<usize>{self.id.capacity()
+        .checked_add(2 * std::mem::size_of::<usize>())?.checked_add(self.producer.as_ref().map_or(0,dispatch::Producer::heap))?
         .checked_add(self.prepared.retained_heap_bytes()?)?.checked_add(self.session_id.capacity())?
         .checked_add(self.project_id.capacity())?.checked_add(self.root.path.capacity())?
         .checked_add(self.material.as_ref().map_or(Some(0),|v|v.retained_heap_bytes())?)}
@@ -94,16 +99,23 @@ impl Consent {
 pub(crate) struct State {
     pub(crate) view: wire::Status, pub(crate) active: Option<Active>, pub(crate) consent: Option<Consent>,
     pub(crate) exhausted: bool,
+    pub(crate) agent_identity: Arc<()>, pub(crate) agent_permission: Option<dispatch::Permission>,
 }
 impl State {
     pub(crate) fn new() -> Self { Self { view: wire::Status { schema_version: 1, revision: 1,
         session_id: None, available: false, reason: wire::Reason::NotConnected,
-        operation: None, consent: None, observed: None }, active: None, consent: None, exhausted: false } }
+        operation: None, consent: None, observed: None }, active: None, consent: None, exhausted: false, agent_identity: Arc::new(()), agent_permission: None } }
     pub(crate) fn snapshot(&self) -> wire::Status { self.view.clone() }
     pub(crate) fn native_work_pending(&self) -> bool { self.active.is_some() }
     pub(crate) fn settled(&self) -> bool { self.active.is_none() }
     pub(crate) fn receipt(&self) -> Option<GitHubSetupReceipt> { self.active.as_ref().map(|v| v.ticket.receipt()) }
-    pub(crate) fn revoke_consent(&mut self) { self.consent = None; self.view.consent = None; }
+    pub(crate) fn revoke_consent(&mut self) {
+        if let Some(c) = self.consent.take() {
+            if let Some(scope) = c.agent.and_then(|s| s.upgrade()) { scope.unused_closed(); }
+        }
+        if let Some(p) = self.agent_permission.take() { p.close(); }
+        self.view.consent = None;
+    }
     pub(crate) fn finish(&mut self, before: wire::Status) {
         if self.exhausted { self.view = before; return; }
         if self.view != before {
@@ -118,6 +130,8 @@ impl State {
         }
     }
     pub(crate) fn unknown(&mut self) {
+        if let Some(e) = self.active.as_ref().and_then(|a| a.agent.as_ref()) { e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown); }
+        if let Some(p) = self.consent.as_ref().and_then(|c| c.producer.as_ref()) { p.pending_unknown(); }
         self.revoke_consent(); self.view.available = false; self.view.reason = wire::Reason::CleanupUnknown;
         if let Some(active) = &self.active { active.ticket.stop(); }
         self.observe_go();
@@ -170,11 +184,9 @@ impl State {
             || self.view.operation.as_ref().is_some_and(|v| v.phase != wire::Phase::Settled || v.reason == wire::Reason::CleanupUnknown) {
             return None;
         }
-        let mut bytes = self.view.retained_heap_bytes()?;
-        if let Some(v) = &self.consent { bytes = bytes.checked_add(v.id.capacity())?
-            .checked_add(v.prepared.retained_heap_bytes()?)?.checked_add(v.session_id.capacity())?
-            .checked_add(v.project_id.capacity())?.checked_add(v.root.path.capacity())?
-            .checked_add(v.material.as_ref().map_or(Some(0),|material|material.retained_heap_bytes())?)?; }
+        let mut bytes = self.view.retained_heap_bytes()?.checked_add(2 * std::mem::size_of::<usize>())?;
+        if let Some(v) = &self.consent { bytes = bytes.checked_add(v.retained_heap_bytes()?)?; }
+        if let Some(v) = &self.agent_permission { bytes = bytes.checked_add(v.heap()?)?; }
         Some(bytes)
     }
 }
@@ -230,7 +242,7 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
         after:wire::EnvironmentPolicy {wait_timer_minutes:10,protected_branches:false,required_reviewers:None},reviewer:None,
         observed_at:"2026-10-09T00:00:00Z".into(),confirmation:wire::ENVIRONMENT_CONFIRMATION.into()});
     assert!(expiry_prepared.valid());
-    state.consent=Some(Consent {material:None,id:"a".repeat(32),prepared,end:now+std::time::Duration::from_secs(10),
+    state.consent=Some(Consent {identity:Arc::new(()),agent:None,producer:None,material:None,id:"a".repeat(32),prepared,end:now+std::time::Duration::from_secs(10),
         session_id:"session-1".into(),project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-correlation-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
         edit_stamp:stamp});
@@ -244,15 +256,15 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
     assert!(state.discard(&args).is_err());
     let end=now+std::time::Duration::from_secs(10);
     state.view.consent=Some(wire::ConsentView {id:"b".repeat(32),expires_at:"2026-10-09T00:00:10Z".into(),prepared:expiry_prepared.clone()});
-    state.consent=Some(Consent {material:None,id:"b".repeat(32),prepared:expiry_prepared,end,session_id:"session-1".into(),
+    state.consent=Some(Consent {identity:Arc::new(()),agent:None,producer:None,material:None,id:"b".repeat(32),prepared:expiry_prepared,end,session_id:"session-1".into(),
         project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-expiry-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
         edit_stamp:expiry_stamp});
     state.view.observed=Some(wire::Observation::Environment(expiry_observed));
     let actual_private=state.consent.as_ref().unwrap();
     let private_bytes=actual_private.id.capacity()+actual_private.prepared.retained_heap_bytes().unwrap()
-        +actual_private.session_id.capacity()+actual_private.project_id.capacity()+actual_private.root.path.capacity();
-    assert_eq!(state.retained_heap_bytes_if_quiescent(),Some(state.view.retained_heap_bytes().unwrap()+private_bytes));
+        +actual_private.session_id.capacity()+actual_private.project_id.capacity()+actual_private.root.path.capacity()+2*std::mem::size_of::<usize>();
+    assert_eq!(state.retained_heap_bytes_if_quiescent(),Some(state.view.retained_heap_bytes().unwrap()+private_bytes+2*std::mem::size_of::<usize>()));
     state.expire_consent(now);assert!(state.consent.as_ref().is_some_and(|v|v.end==end));
     state.expire_consent(end);assert!(state.consent.is_none() && state.view.consent.is_none());
     assert_eq!(state.view.reason,wire::Reason::ConsentExpired);
