@@ -1,6 +1,42 @@
 set -euo pipefail
 cd desktop/src-tauri
 set -o noclobber
+report_compiler_failure() {
+  # Optional closed DATA only; raw compiler text and reporter failures stay local.
+  local report
+  if report=$("$MRK_PYTHON" -I -S -B - "$1" "$2" 2>/dev/null <<'PY_COMPILER'
+import importlib.util, json, os, pathlib, stat, sys
+role, status = sys.argv[1], int(sys.argv[2])
+if role not in ("observer", "normal", "remover", "installed-cli", "removal-observer") or not 0 < status < 256:
+    raise ValueError("compiler role/status")
+checkout = pathlib.Path.cwd().parents[1]
+spec = importlib.util.spec_from_file_location("compiler_failure_data", checkout / "desktop/tools/macos_android_helper_package.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)  # Existing DATA-only sanitizer; no packaging main.
+captures, remaining = [], 4 * 1024 * 1024
+for suffix in (".jsonl", ".stderr"):
+    path = pathlib.Path(os.environ["MRK_MACOS_WORK"]) / (role + "-build" + suffix)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > remaining:
+            raise ValueError("compiler capture bound")
+        body = stream.read(remaining + 1)
+        if len(body) != before.st_size or len(body) > remaining:
+            raise ValueError("compiler capture changed")
+    captures.append(body)
+    remaining -= len(body)
+value = module.compiler_diagnostic_data(module.compiler_diagnostic(*captures, str(checkout)))
+if value is None:
+    raise ValueError("compiler diagnostic schema")
+print(json.dumps({"role": role, "status": status, "compiler": value}, sort_keys=True))
+PY_COMPILER
+  ); then
+    printf 'MRK_MACOS_COMPILER_DIAGNOSTIC=%s\n' "$report"
+  else
+    printf 'Compiler diagnostics unavailable for %s; original status %s.\n' "$1" "$2"
+  fi
+}
 if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
 # Same fixed observer target and original Cargo artifact checks;
 # no ordinary cdylib, fallback executable or test execution. Render
@@ -10,12 +46,15 @@ PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin
   --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json-render-diagnostics \
   > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
 status=$?
-set -e
 printf '%s\n' "$status" > "$MRK_MACOS_WORK/observer-build.status"
+status_saved=$?
+set -e
 if [[ "$status" != 0 ]]; then
-  printf 'Observer compiler failed with original status %s; bounded diagnostics are retained.\n' "$status" >&2
+  printf 'Observer compiler failed with original status %s; bounded diagnostics are retained.\n' "$status" >&2 2>/dev/null || :
+  report_compiler_failure observer "$status" >&2 2>/dev/null || :
   exit "$status"
 fi
+[[ "$status_saved" == 0 ]] || exit "$status_saved"
 "$MRK_PYTHON" -I -S -B - <<'PY_BUILD'
 import hashlib, json, os, pathlib, re, stat
 root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
@@ -55,10 +94,15 @@ PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin
   --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
   > "$MRK_MACOS_WORK/normal-build.jsonl" 2> "$MRK_MACOS_WORK/normal-build.stderr"
 cargo_status=$?
-set -e
 printf '%s\n' "$cargo_status" > "$MRK_MACOS_WORK/normal-build.status"
+cargo_status_saved=$?
+set -e
+if [[ "$cargo_status" != 0 ]]; then
+  report_compiler_failure normal "$cargo_status" >&2 2>/dev/null || :
+  exit "$cargo_status"
+fi
+[[ "$cargo_status_saved" == 0 ]] || exit "$cargo_status_saved"
 /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-build.stderr" > "$MRK_MACOS_WORK/normal-build.stderr.tail.txt"
-[[ "$cargo_status" == 0 ]] || exit "$cargo_status"
 # Keep the original Cargo dylib unsigned; the stager binds its exact
 # completed artifact and copies it before nested image signing.
 image_sha=$(/usr/bin/shasum -a 256 "$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/libmrk_desktop_image.dylib")
@@ -84,7 +128,8 @@ set -e
 if [[ "$remover_status" != 0 ]]; then
   # Optional diagnostics cannot replace the original compiler status.
   set +e
-  printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\n' "$remover_status" >&2
+  printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\n' "$remover_status" >&2 2>/dev/null || :
+  report_compiler_failure remover "$remover_status" >&2 2>/dev/null || :
   exit "$remover_status"
 fi
 [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
@@ -100,7 +145,8 @@ printf '%s\n' "$cli_status" > "$MRK_MACOS_WORK/installed-cli-build.status"
 cli_status_saved=$?
 set -e
 if [[ "$cli_status" != 0 ]]; then
-  printf 'Fixed installed CLI compiler failed with original status %s; originals remain local.\n' "$cli_status" >&2 || :
+  printf 'Fixed installed CLI compiler failed with original status %s; originals remain local.\n' "$cli_status" >&2 2>/dev/null || :
+  report_compiler_failure installed-cli "$cli_status" >&2 2>/dev/null || :
   exit "$cli_status"
 fi
 [[ "$cli_status_saved" == 0 ]] || exit "$cli_status_saved"
@@ -116,6 +162,9 @@ if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; the
   printf '%s\n' "$observer_status" > "$MRK_MACOS_WORK/removal-observer-build.status"
   observer_status_saved=$?
   set -e
-  if [[ "$observer_status" != 0 ]]; then exit "$observer_status"; fi
+  if [[ "$observer_status" != 0 ]]; then
+    report_compiler_failure removal-observer "$observer_status" >&2 2>/dev/null || :
+    exit "$observer_status"
+  fi
   [[ "$observer_status_saved" == 0 ]] || exit "$observer_status_saved"
 fi

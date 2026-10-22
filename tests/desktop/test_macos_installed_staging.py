@@ -1,6 +1,6 @@
 """Focused DATA parser definitions; never a native install/GUI qualification.
 
-These tests do not import the core, stage/extract M, launch Python/app children,
+These tests do not import the core, stage/extract M, launch bundled-runtime/app children,
 write an installation, construct a panel, or fabricate an operation permit.
 """
 import ast
@@ -2966,6 +2966,81 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertFalse(cargo["rows"])
         self.assertEqual(cargo["classifications"], ["download-failed", "network-failed"])
         self.assertFalse(parse(stderr=b"x" * (4 * 1024 * 1024 + 1))["scanComplete"])
+
+    def test_existing_app_build_failure_exits_report_safely_and_keep_original_status(self):
+        import subprocess
+        checkout = Path(__file__).absolute().parents[2]
+        source = (checkout / "desktop/tools/macos_installed_app_build.sh").read_text()
+        reporter = source[:source.index('if [[ "$MRK_MACOS_NATIVE_SCOPE"')]
+        secret = "PRIVATE_COMPILER_SENTINEL_DO_NOT_EXPORT"
+        location = "desktop/src-tauri/src/service_github_operation_native.rs"
+        roles = (("observer", "status"), ("normal", "cargo_status"), ("remover", "remover_status"),
+                 ("installed-cli", "cli_status"), ("removal-observer", "observer_status"))
+        for role, variable in roles:
+            start = re.search(r"(?m)^ *" + variable + r"=\$\?\n", source).start()
+            gate = '[[ "$' + variable + '_saved" == 0 ]] || exit "$' + variable + '_saved"'
+            end = source.index(gate, start) + len(gate)
+            # Execute the SAME reporter and each original post-Cargo failure
+            # block, not any compiler argv, artifact validator or native owner.
+            block = source[start:end]
+            faults = ("rust", "linker", "missing", "oversized", "reporter-nonzero", "launcher-failure",
+                      "status-write", "output-write", "success", "success-status-write")
+            if role == "normal":
+                faults += ("optional-tail",)
+            for fault in faults:
+                with self.subTest(role=role, fault=fault), tempfile.TemporaryDirectory() as temporary:
+                    work = Path(temporary)
+                    messages = work / (role + "-build.jsonl")
+                    errors = work / (role + "-build.stderr")
+                    messages.write_bytes(b'{"reason":"build-finished","success":false}\n')
+                    errors.write_bytes((f"error[E0433]: {secret}\n  --> {checkout}/{location}:21:7\n"
+                                        f"   | {secret} source snippet\n\n").encode())
+                    environment = {"PATH": "/usr/bin:/bin", "MRK_PYTHON": sys.executable, "MRK_MACOS_WORK": str(work)}
+                    if fault == "linker":
+                        errors.write_bytes(f"error: linking with cc failed: exit status: 1\n{secret}\n".encode())
+                    elif fault == "missing":
+                        errors.unlink()
+                    elif fault == "oversized":
+                        errors.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+                    elif fault == "reporter-nonzero":
+                        host = work / "inert-reporter"
+                        host.write_text(f"#!/bin/sh\nprintf '{secret}\\n'\nprintf '{secret}\\n' >&2\nexit 73\n")
+                        host.chmod(0o700)
+                        environment["MRK_PYTHON"] = str(host)
+                    elif fault == "launcher-failure":
+                        environment["MRK_PYTHON"] = str(work / secret)
+                    elif fault in ("status-write", "success-status-write"):
+                        (work / (role + "-build.status")).mkdir()
+                    elif fault == "optional-tail":
+                        (work / "normal-build.stderr.tail.txt").mkdir()
+                    status = 0 if fault.startswith("success") else 101
+                    script = reporter + "\nset +e\n"
+                    if fault == "output-write":
+                        script += "exec 2>&-\n"
+                    script += f"(exit {status})\n" + block + "\n"
+                    returned = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                        cwd=checkout, env=environment, capture_output=True, timeout=10, check=False)
+                    self.assertEqual(returned.returncode, 1 if fault == "success-status-write" else status, returned.stderr)
+                    self.assertEqual(returned.stdout, b"")
+                    self.assertNotIn(secret.encode(), returned.stderr)
+                    self.assertNotIn(b"Traceback", returned.stderr)
+                    lines = [line.removeprefix(b"MRK_MACOS_COMPILER_DIAGNOSTIC=") for line in returned.stderr.splitlines()
+                             if line.startswith(b"MRK_MACOS_COMPILER_DIAGNOSTIC=")]
+                    if fault in ("missing", "oversized", "reporter-nonzero", "launcher-failure"):
+                        self.assertEqual(lines, [])
+                        self.assertIn(b"Compiler diagnostics unavailable", returned.stderr)
+                    elif fault in ("output-write", "success", "success-status-write"):
+                        self.assertEqual(lines, [])
+                    else:
+                        self.assertEqual(len(lines), 1, returned.stderr)
+                        value = json.loads(lines[0])
+                        self.assertEqual((value["role"], value["status"]), (role, 101))
+                        self.assertEqual(ANDROID_HELPER.compiler_diagnostic_data(value["compiler"]), value["compiler"])
+                        if fault == "linker":
+                            self.assertEqual(value["compiler"]["classifications"], ["linker-failed"])
+                        else:
+                            self.assertEqual(value["compiler"]["rows"], [{"kind": "rust", "code": "E0433",
+                                "source": location, "line": 21, "column": 7}])
 
     def test_removal_target_routes_keep_preparation_scripts_and_observers_bound(self):
         module = ANDROID_HELPER
