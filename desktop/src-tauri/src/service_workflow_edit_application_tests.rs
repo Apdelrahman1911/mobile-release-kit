@@ -105,9 +105,15 @@ fn missing_or_invalid_configuration_queues_only_original_preparation_and_history
             final_snapshot.revision
         );
         let rows = service.state.lock().unwrap().saved.operations.clone();
-        assert!(rows
+        let workflow = rows
             .iter()
-            .any(|row| row.action == p::Action::EditGitHubWorkflows));
+            .find(|row| row.action == p::Action::EditGitHubWorkflows)
+            .unwrap();
+        let encoded = serde_json::to_value(workflow).unwrap();
+        assert_eq!(encoded["action"], "edit-git-hub-workflows");
+        assert!(encoded["action"].as_str().unwrap().len() <= 32);
+        assert_eq!(serde_json::from_value::<p::OperationObservation>(encoded).unwrap(), *workflow);
+        assert!(serde_json::from_str::<p::Action>(r#""edit-workflow""#).is_err());
         service.stop().unwrap();
         store.close().unwrap();
     }
