@@ -332,8 +332,8 @@ def acquire(root, fd, original, context):
 
 
 def native(root, fd, original, calls, role, argv, endpoint, maximum, *, cleanup=False):
-    """Only four fixed inspection calls; wait, pipe bounds and disk share one loop."""
-    need(role in ("memory", "attach", "expand", "detach") and all(v["role"] != role for v in calls), "native-once")
+    """Only three fixed inspection calls; wait, pipe bounds and disk share one loop."""
+    need(role in ("memory", "attach", "detach") and all(v["role"] != role for v in calls), "native-once")
     point(endpoint, cleanup=cleanup); same_root(root, fd, original)
     end = min(endpoint, time.monotonic() + maximum)
     row = {"role": role, "entered": False, "returned": False, "pipesClosed": False, "returncode": None}
@@ -352,7 +352,7 @@ def native(root, fd, original, calls, role, argv, endpoint, maximum, *, cleanup=
         while streams or child.poll() is None:
             try:
                 point(end - 2, cleanup=cleanup); same_root(root, fd, original)
-                if not cleanup: disk(fd, GIB)  # SAME wait, including throughout expansion.
+                if not cleanup: disk(fd, GIB)  # SAME original wait, not just entry/exit.
             except BaseException as error:
                 if failure is None: failure = error
             if failure is not None:
@@ -400,20 +400,20 @@ def available_memory(body):
     return int(match[1]) * sum(pages)
 
 
-def expanded_tree(root, end):
+def task_tree(root, end):
     count, total, pending = 0, 0, [(root, 0)]
     while pending:
         parent, depth = pending.pop(); point(end)
-        need(depth <= 64 and stat.S_ISDIR(parent.lstat().st_mode), "expanded-directory")
+        need(depth <= 64 and stat.S_ISDIR(parent.lstat().st_mode), "task-directory")
         with os.scandir(parent) as entries:
             for entry in entries:
                 point(end); info = entry.stat(follow_symlinks=False); count += 1
                 need(count <= 32768 and info.st_uid == os.getuid()
-                     and (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)), "expanded-node")
+                     and (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)), "task-node")
                 if stat.S_ISDIR(info.st_mode): pending.append((Path(entry.path), depth + 1))
                 else:
                     total += info.st_size
-                    need(info.st_nlink == 1 and info.st_size <= 512 * MIB and total <= GIB, "expanded-bound")
+                    need(info.st_nlink == 1 and info.st_size <= 512 * MIB and total <= GIB, "task-bound")
     return count, total
 
 
@@ -421,6 +421,66 @@ def data_module():
     spec = importlib.util.spec_from_file_location("_predecessor_stage_data", Path(__file__).with_name("stage_macos_installed.py"))
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
+
+
+def package_allocation(end, phase, live, packed, output, *, parents=0):
+    """Existing codec copy quote inside the same admitted 3GiB, not an OS quota."""
+    point(end)
+    need(phase in ("install-product-toc", "install-product-member", "xar-toc", "xar-member",
+                   "scripts-inflate", "cpio-window", "cpio-slice"), "package-codec-phase")
+    need(all(type(v) is int and 0 <= v <= 8 * 512 * MIB for v in (live, packed, output, parents)),
+         "package-codec-values")
+    # The same prepared-package live/copy expression, with additional reserved
+    # TOC/CPIO tables/names and control memory. Parent aliases are counted once.
+    need(live + 3 * packed + 2 * (output + 1) + parents + 256 * MIB <= 3 * GIB,
+         "package-codec-bound")
+
+
+def package_controls(stager, mounted, expected, end):
+    """Only the exact original complete package supplies these two public bodies."""
+    point(end)
+    need(3 * PACKAGE_BYTES + 256 * MIB <= 3 * GIB, "package-reader-bound")
+    package, observed = read_at(mounted, "Install.pkg", PACKAGE_BYTES, end, mounted=True)
+    need(observed == expected and observed["bytes"] == PACKAGE_BYTES
+         and observed["sha256"] == PACKAGE_SHA, "package-original-changed")
+    parents = 0
+    def allocation(phase, live, packed, output):
+        package_allocation(end, phase, live, packed, output, parents=parents)
+    members = stager.install_product_members(package, allocation_budget=allocation)
+    # This function owns the full read; inspect has no caller-held package body.
+    # Each parser already counts its own input, including our same-object alias.
+    del package
+    if stager.INSTALL_COMPONENT in members:
+        inner = members[stager.INSTALL_COMPONENT]
+        del members
+        component = stager.xar_members(inner, allocation_budget=allocation)
+        del inner
+    else:
+        component = {name: members[stager.INSTALL_COMPONENT + "/" + name] for name in ("PackageInfo", "Scripts")}
+        del members
+    need(set(component) == {"PackageInfo", "Scripts"}, "package-component")
+    package_info, packed = component["PackageInfo"], component["Scripts"]
+    del component
+    need(type(package_info) is bytes and 0 < len(package_info) <= 16 * KIB
+         and type(packed) is bytes and 0 < len(packed) <= 512 * MIB
+         and stager.MAX_BYTES == 512 * MIB, "package-controls-bound")
+    parents = len(package_info)  # Remains independently live during Scripts/CPIO.
+    if packed[:2] == b"\x1f\x8b":
+        allocation("scripts-inflate", len(packed), len(packed), stager.MAX_BYTES)
+        archive = stager.inflate(packed, stager.MAX_BYTES, gzip=True)
+    else:
+        archive = packed
+    del packed
+    rows = stager.cpio_members(archive, allocation_budget=allocation, store_runtime=True)
+    del archive
+    member = rows.get("input/" + stager.INSTALLATION_INVENTORY_NAME)
+    need(type(member) is tuple and len(member) == 2 and member[1] == 0o444
+         and type(member[0]) is bytes and 0 < len(member[0]) <= 12 * MIB
+         and hashlib.sha256(member[0]).hexdigest() == INVENTORY_SHA, "package-inventory")
+    inventory = member[0]
+    del rows, member
+    # All archive graphs leave before release_data performs inventory JSON work.
+    return package_info, inventory
 
 
 def release_data(stager, descriptor, inventory, package_info):
@@ -480,8 +540,8 @@ def inspect(root, fd, original, context):
           "availableEstimateBytes": measured, "requiredBytes": 3 * GIB}).decode("ascii").rstrip("\n"), flush=True)
     need(code == 0, "memory-probe-exit")
     need(measured >= 3 * GIB, "memory-reserve")
-    mount = root / "mount"; expanded = root / "expanded"
-    need(not os.path.lexists(mount) and not os.path.lexists(expanded), "inspection-destination-occupied")
+    mount = root / "mount"
+    need(not os.path.lexists(mount), "inspection-destination-occupied")
     mounted, device, mount_id, device_id, error = None, None, None, None, None
     returned, originals = None, {}
     try:
@@ -512,12 +572,9 @@ def inspect(root, fd, original, context):
             originals[name] = observed
             if name != "Install.pkg": bodies[name] = body
         same_mount()
-        code, _, _ = native(root, fd, original, calls, "expand", ["/usr/sbin/pkgutil", "--expand-full",
-            str(mount / "Install.pkg"), str(expanded)], work_end, 180)
-        need(code == 0, "expand-failed"); same_mount(); expanded_tree(expanded, work_end)
-        package_info, _ = read_at(fd, "expanded/MobileReleaseKit.pkg/PackageInfo", 16 * KIB, work_end)
-        inventory, inventory_info = read_at(fd, "expanded/MobileReleaseKit.pkg/Scripts/input/install-inventory.json", 12 * MIB, work_end)
-        need(inventory_info["sha256"] == INVENTORY_SHA, "inventory-digest")
+        package_info, inventory = package_controls(stager, mounted, originals["Install.pkg"], work_end)
+        same_mount()
+        inventory_info = {"bytes": len(inventory), "sha256": hashlib.sha256(inventory).hexdigest()}
         release, policy, count, size = release_data(stager, bodies["producer.json"], inventory, package_info)
         for name, before in originals.items():
             _, after = read_at(mounted, name, before["bytes"], work_end, body=False, mounted=True)
@@ -557,7 +614,7 @@ def inspect(root, fd, original, context):
                   file=sys.stderr, flush=True)
         except BaseException: pass
         raise error
-    need(returned is not None and [row["role"] for row in calls] == ["memory", "attach", "expand", "detach"]
+    need(returned is not None and [row["role"] for row in calls] == ["memory", "attach", "detach"]
          and all(row["returned"] and row["pipesClosed"] and row["returncode"] == 0 for row in calls), "inspection-incomplete")
     point(work_end); same_root(root, fd, original)
     summary = {"schemaVersion": 1, "kind": "delivered-predecessor-inspection-data-v1", "dataOnly": True,
@@ -591,53 +648,11 @@ def cleanup(root, fd, original, context):
          and record["root"] == original and record["caller"] == context
          and record["originalMountDetached"] is True and not os.path.lexists(root / "mount"), "cleanup-original")
     calls = record["originalCalls"]
-    need(type(calls) is list and [v.get("role") for v in calls] == ["memory", "attach", "expand", "detach"]
+    need(type(calls) is list and [v.get("role") for v in calls] == ["memory", "attach", "detach"]
          and all(v.get("entered") is True and v.get("returned") is True and v.get("pipesClosed") is True
                  and type(v.get("returncode")) is int and v["returncode"] == 0 for v in calls), "cleanup-returns")
     need(identity((root / "output").lstat())[:5] == record["output"], "cleanup-output")
-    expanded_tree(root, end); same_root(root, fd, original)
-    # pkgutil preserves source-owned 0555 Scripts directories. Only after this
-    # completed original is detached, add owner-write to its expanded DATA dirs.
-    # Keep every parent held, never chmod a file/mount/source or an unknown root.
-    edges, count = [], 0
-    def match_edges():
-        point(end); same_root(root, fd, original)
-        for parent, name, held, expected in edges:
-            current = identity(os.fstat(held))
-            need(current == identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
-                 and current[:8] == expected, "cleanup-directory-changed")
-    def writable_directory(parent, name, depth):
-        nonlocal count
-        point(end); need(depth <= 64, "cleanup-directory-depth")
-        held = os.open(name, READ | os.O_DIRECTORY, dir_fd=parent)
-        linked = False
-        try:
-            before = identity(os.fstat(held))
-            need(stat.S_ISDIR(before[2]) and before[0] == original[0]
-                 and before[3] == os.getuid(), "cleanup-directory-owner")
-            expected = before[:8]
-            edges.append((parent, name, held, expected)); linked = True
-            match_edges()
-            with os.scandir(held) as entries:
-                for entry in entries:
-                    point(end); count += 1; need(count <= 32768, "cleanup-entry-bound")
-                    info = entry.stat(follow_symlinks=False)
-                    need(info.st_dev == original[0] and info.st_uid == os.getuid(), "cleanup-entry-owner")
-                    if stat.S_ISDIR(info.st_mode):
-                        writable_directory(held, entry.name, depth + 1)
-                    else:
-                        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "cleanup-entry-type")
-            match_edges()
-            mode = before[2] | stat.S_IWUSR
-            if mode != before[2]: os.fchmod(held, stat.S_IMODE(mode))
-            expected[2] = mode
-            # fchmod legitimately changes ctime; all other retained identity and
-            # permission bits, plus named==held current identity, must still match.
-            match_edges()
-        finally:
-            if linked: edges.pop()
-            os.close(held)
-    writable_directory(fd, "expanded", 0)
+    task_tree(root, end)
     same_root(root, fd, original); point(end)
     # fd-based rmtree never follows a replaced child symlink. An error retains the
     # remainder on the disposable host; never delete an outside root.

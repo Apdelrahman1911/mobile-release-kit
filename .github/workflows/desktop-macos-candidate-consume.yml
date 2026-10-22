@@ -68,7 +68,7 @@ jobs:
           export MRK_PREDECESSOR_WORK="$work"
           printf 'MRK_PREDECESSOR_WORK=%s\n' "$work" >> "$GITHUB_ENV"
           python3 -I -S -B desktop/tools/macos_predecessor_inspection.py acquire
-      - name: Read-only mount, expand as DATA, retain public controls, detach original
+      - name: Read-only mount, parse package DATA, retain public controls, detach original
         timeout-minutes: 12
         shell: bash
         env:
