@@ -357,6 +357,22 @@ fn tracking(value: &Value, configured: bool) -> bool {
     value == &expected
 }
 impl Observation {
+    pub(super) fn git_upstream_final_fixture_readback(&self) -> Option<()> {
+        let c = self.git_upstream.as_ref()?;
+        if self.case != OuterCase::GitUpstream || !c.completed() { return None; }
+        let (fixture, root, uid, after) = {
+            let r = self.record()?;
+            let v = r.git_upstream.as_ref()?;
+            if !self.final_fixture_shape(&r) || !v.normal_quit { return None; }
+            (r.fixture.git_upstream.as_ref()?.clone(), r.fixture.root.clone(), r.fixture.uid, v.after.as_ref()?.clone())
+        };
+        if !self.timely() || fixture.verify_unchanged(&root, uid, &after).is_err() { return None; }
+        let r = self.record()?;
+        (self.final_fixture_shape(&r) && c.completed()
+            && r.fixture.root == root && r.fixture.uid == uid
+            && r.fixture.git_upstream.as_ref() == Some(&fixture)
+            && r.git_upstream.as_ref().is_some_and(|v| v.normal_quit && v.after.as_ref() == Some(&after))).then_some(())
+    }
     pub(super) async fn git_upstream_tick(
         self: &Arc<Self>,
         _app: &tauri::AppHandle,

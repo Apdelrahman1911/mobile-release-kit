@@ -93,6 +93,7 @@ impl GitHubPublicationTicket {
         let receipt = Arc::new(Mutex::new(GitHubPublicationReceipt::Pending));
         let mut owner = super::tests::inert_owner();
         owner.profile = Profile::GitHubPublication;
+        owner.id = format!("github-publication-{}", owner.key);
         owner.publication_request = Some(request);
         owner.publication_receipt = Some(receipt.clone());
         *lock(&owner.state) = OwnerState::new(end, None);

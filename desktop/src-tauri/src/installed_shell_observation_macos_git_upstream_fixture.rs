@@ -64,7 +64,7 @@ pub(super) const CREATED: [&str; 4] = [
     "logs/refs/remotes/origin",
 ];
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(in super::super) struct Fixture {
     files: [FileFact; 6],
     dirs: [[u64; 9]; 3],

@@ -41,7 +41,7 @@ const DIRS: [(&str, &[&str]); 5] = [
     ("release", &["mobile-release.json"]),
 ];
 const PLATFORM_SHA: &str = "2c3764446f335ad2cc44383a0360fe247620b7c774ec100d5087771ac8ed3b28";
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Fixture {
     files: [FileFact; 7],
     dirs: [[u64; 6]; 5],
@@ -302,6 +302,21 @@ fn source_file(case: Case, uid: u32, change: Option<&FileFact>) -> Result<FileFa
     }
 }
 impl Observation {
+    pub(in super::super) fn tool_final_fixture_readback(&self) -> Option<()> {
+        let c = self.tool_setup.as_ref()?;
+        if self.case != OuterCase::ToolSetup(c.case) || !c.completed() { return None; }
+        let (fixture, root, uid) = {
+            let r = self.record()?;
+            if !self.final_fixture_shape(&r) || !r.tool_setup.as_ref()?.normal_quit { return None; }
+            (r.fixture.tools.as_ref()?.clone(), r.fixture.root.clone(), r.fixture.uid)
+        };
+        if !self.timely() || fixture.verify(&root, uid, c.case).is_err() { return None; }
+        let r = self.record()?;
+        (self.final_fixture_shape(&r) && c.completed()
+            && r.fixture.root == root && r.fixture.uid == uid
+            && r.fixture.tools.as_ref() == Some(&fixture)
+            && r.tool_setup.as_ref().is_some_and(|v| v.normal_quit)).then_some(())
+    }
     pub(super) fn tool_verify(&self) -> Result<(), ()> {
         let (fixture, uid) = {
             let r = self.record().ok_or(())?;

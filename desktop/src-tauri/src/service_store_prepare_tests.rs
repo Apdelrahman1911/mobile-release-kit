@@ -662,6 +662,25 @@ fn later_prepare_report_stays_owned_and_waits_for_original_start_and_history() {
 }
 #[test]
 fn later_prepare_excess_capacity_and_wrong_terminal_tuple_never_gain_success() {
+    for kind in [flow::Kind::IosExternalTesting, flow::Kind::IosProductionSubmit] {
+        let selection = selected(kind);
+        let review = stage_review();
+        let bytes = serde_json::to_vec(&stage_report(&selection)).unwrap();
+        let mut report: flow::Report = serde_json::from_slice(&bytes).unwrap();
+        assert!(report.valid_for(&selection, &review) && report.bounded_capacity(), "{kind:?}");
+        let flow::Report::StagePrepare { report: stage } = &mut report else { unreachable!() };
+        let (channel, expected) = match &mut stage.destination {
+            flow::StageDestination::IosExternal { channel } => (channel, "testflight-external"),
+            flow::StageDestination::IosProduction { channel, .. } => (channel, "app-store-review"),
+            _ => unreachable!(),
+        };
+        assert_eq!(channel.as_str(), expected);
+        assert_eq!(channel.capacity(), expected.len());
+        channel.reserve_exact(1);
+        assert!(channel.capacity() > expected.len());
+        assert!(report.valid_for(&selection, &review));
+        assert!(!report.bounded_capacity()); // unchanged bytes do not excuse excess backing.
+    }
     for excessive in [false, true] {
         let f = Fixture::new();
         let (e, caller) = enter(&f, flow::Kind::AndroidExternalTesting);

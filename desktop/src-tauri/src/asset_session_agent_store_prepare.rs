@@ -810,7 +810,23 @@ pub(in crate::asset_session) mod tests {
                 assert_eq!(selected.release.as_ref().unwrap().mode,mode);
                 assert!(selected.later.is_none() && selected.execute.is_none());
                 for other in [AndroidCandidate, IosCandidate, AndroidCandidateUpload, IosCandidateUpload, AndroidExternalTesting, IosExternalTesting, AndroidProductionSubmit, IosProductionSubmit] {
-                    assert!(Input::parse(other, &input.prepare).is_err(),"{kind:?}/{other:?}");
+                    if kind == IosCurrentInternal && other == IosCandidateUpload {
+                        // Both supported native grammars use the same iOS candidate
+                        // references. The explicitly approved kind selects the owner;
+                        // successful parsing is not permission to switch that owner.
+                        let upload = Input::parse(other, &input.prepare).unwrap();
+                        assert!(matches!(&parsed, Input::Reconcile(_)));
+                        assert!(matches!(&upload, Input::Execute(_)));
+                        assert_eq!(selected.kind, IosCurrentInternal);
+                        assert_eq!(selected.kind.native_kind(), p::Kind::Reconcile);
+                        let upload_selection = upload.selection().unwrap();
+                        assert_eq!(upload_selection.kind, IosCandidateUpload);
+                        assert_eq!(upload_selection.kind.native_kind(), p::Kind::Execute);
+                        assert!(upload_selection.execute.is_some() && upload_selection.release.is_none());
+                        assert_ne!(selected.kind.consent(), upload_selection.kind.consent());
+                    } else {
+                        assert!(Input::parse(other, &input.prepare).is_err(),"{kind:?}/{other:?}");
+                    }
                 }
                 for field in ["intentSha256","confirmation","recordRevision","credentialContextRevision"] {
                     let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove(field);

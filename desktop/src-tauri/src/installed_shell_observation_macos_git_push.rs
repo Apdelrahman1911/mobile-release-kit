@@ -641,6 +641,22 @@ impl Record {
     }
 }
 impl Observation {
+    pub(super) fn git_push_final_fixture_readback(&self) -> Option<()> {
+        let c = self.git_push.as_ref()?;
+        if self.case != OuterCase::GitPush(c.case) || !c.completed() { return None; }
+        let (fixture, root, uid, result) = {
+            let r = self.record()?;
+            let v = r.git_push.as_ref()?;
+            if !self.final_fixture_shape(&r) || !v.normal_quit { return None; }
+            (r.fixture.git_push.as_ref()?.clone(), r.fixture.root.clone(), r.fixture.uid, v.result.clone())
+        };
+        if !self.timely() || fixture.verify(&root, uid, c.case, &result).is_err() { return None; }
+        let r = self.record()?;
+        (self.final_fixture_shape(&r) && c.completed()
+            && r.fixture.root == root && r.fixture.uid == uid
+            && r.fixture.git_push.as_ref() == Some(&fixture)
+            && r.git_push.as_ref().is_some_and(|v| v.normal_quit && v.result == result)).then_some(())
+    }
     pub(super) async fn git_push_tick(
         self: &Arc<Self>,
         _app: &tauri::AppHandle,

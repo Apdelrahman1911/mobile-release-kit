@@ -275,7 +275,15 @@ fn store_prepare_cli_lifecycle_receipts_keep_same_id_only_output_and_closed_cata
             let (code,bytes)=preparation::output(&r,&query,Some((true,&id(9),&id(10))),json).unwrap();assert_eq!(code,0);assert!(!bytes.is_empty());
             if json {let parsed=p::decode_response(&bytes[..bytes.len()-1],&r.request_id,&r.service_instance).unwrap();assert_eq!(parsed.response,r.response);}
         }
-        assert!(preparation::output(&r,&query,Some((false,&id(3),&id(4))),true).is_err());
+        // Reconnecting with the original Prepare receipt reads the same later
+        // row. Formatting that receipt cannot submit Start or grant it again.
+        let (code,bytes)=preparation::output(&r,&query,Some((false,&id(3),&id(4))),true).unwrap();
+        assert_eq!(code,0);
+        let same=p::decode_response(&bytes[..bytes.len()-1],&r.request_id,&r.service_instance).unwrap();
+        assert_eq!(same.response,r.response);
+        assert!(preparation::output(&r,&query,Some((false,&id(8),&id(4))),true).is_err());
+        assert!(preparation::output(&r,&query,Some((false,&id(3),&id(7))),true).is_err());
+        assert!(preparation::output(&r,&query,Some((true,&id(3),&id(4))),true).is_err());
         assert!(output(&r,&query,Some((&id(9),&id(10))),true).is_err()); // no old Submit adoption
         assert!(names.contains(&serde_json::to_value(kind).unwrap()));
     }

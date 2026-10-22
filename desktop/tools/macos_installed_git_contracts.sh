@@ -553,6 +553,7 @@ selected_tests=(
   service_version_reserve_review_requests::tests::review_exception_is_exact_and_a_different_live_lease_never_becomes_read_permission
   service_version_reserve_review_requests::tests::separate_allow_and_submit_require_the_same_private_ready_comparison
   service_version_reserve_review_requests::tests::source_review_and_reserve_share_the_exact_thirty_two_original_rows
+  shell::installed_observation::final_fixture_readback_requires_matching_verified_case
   shell::installed_observation::vault::upload_key::backup::tests::generated_backup_continuation_is_fixed_current_original_and_never_a_registration
   shell::installed_observation::vault::upload_key::cli::tests::actual_validated_terminal_requires_same_grant_original_and_known_effect
   shell::installed_observation::vault::upload_key::cli::tests::additional_case_census_keeps_original_caller_and_weak_history_bodies
@@ -669,7 +670,7 @@ selected_tests=(
   installed_cli::upload_key::tests::scope_and_existing_request_catalogue_expose_only_bounded_original_addresses
   installed_cli::upload_key::tests::actual_collector_admits_only_four_ids_only_commands_and_explicit_submit_review
 )
-[[ "${#selected_tests[@]}" == 634 ]] || exit 1
+[[ "${#selected_tests[@]}" == 635 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -687,9 +688,9 @@ for test_name in "${selected_tests[@]}"; do
   fi
 done
 (( missing == 0 )) || exit 1
-/usr/bin/grep -Fx '634 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '635 tests, 0 benchmarks' "$list_log"
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 634 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 635 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

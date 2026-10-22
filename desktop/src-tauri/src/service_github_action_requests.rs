@@ -241,8 +241,10 @@ impl Entry {
     pub(crate) fn unknown(&self, why: p::Reason) {
         self.scope.failed.store(true, Ordering::Release);
         if let Ok(mut r) = self.lock() {
-            r.unknown.get_or_insert(why);
-            let _ = self.change(&mut r);
+            if r.unknown.is_none() {
+                r.unknown = Some(why);
+                let _ = self.change(&mut r);
+            }
         }
     }
     pub(crate) fn cancel(&self, why: p::Reason, at: Instant) {

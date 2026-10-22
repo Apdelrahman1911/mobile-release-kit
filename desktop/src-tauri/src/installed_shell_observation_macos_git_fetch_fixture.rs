@@ -37,7 +37,7 @@ const DIRS: [(&str, &[&str]); 3] = [
     ("release", &["mobile-release.json"]),
 ];
 const ORIGINALS: [&str; 5] = ["HEAD", "config", "index", "refs/heads/main", "logs/HEAD"];
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Fixture {
     files: [FileFact; 5],
     dirs: [[u64; 6]; 3],

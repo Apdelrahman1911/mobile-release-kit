@@ -49,7 +49,7 @@ const ORIGINALS: [&str; 6] = [
     "logs/refs/heads/main",
 ];
 const TRACKING:[&str;2]=["refs/remotes/origin/main","logs/refs/remotes/origin/main"];
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Fixture {
     files: [FileFact; 6],
     dirs: [[u64; 6]; 3],

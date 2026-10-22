@@ -337,6 +337,19 @@ class UpdateDataTests(unittest.TestCase):
     def test_complete_artifact_originals_keep_nested_namespaces_and_post(self):
         # Real existing descriptor-bound owner IO, hashes, POST and consuming
         # closes. No original process, mount, signing or Installer is started.
+        def operation(root, selected):
+            op = HELPER.Operation.__new__(HELPER.Operation)
+            op.entries = []; op.entry_registry = {}; op.errors = []; op.directories = {}
+            op.setup_package = op.setup_verify = op.prepared_staging = False
+            op.prepared_binding = op.candidate_removal_context = op.store_signing = None
+            op.app_absence = None; op.work = root; op.source_entry = None; op.phase = DATA.PHASE
+            op.update = {"nomination": selected, "imageOriginal": None, "readonlyMount": None}
+            op.update_api = HELPER; op.update_module = DATA
+            op.package_sources = []; op.package_outputs = []; op.package_roots = []; op.package_clock = lambda: 1
+            op.calls = []; op.stager_io_pending = None; op.credential_known = lambda: True
+            op.credential_failed = op.signing_mutation_pending = False
+            return op
+
         for fault in (None, "flat", "missing", "extra-root", "extra-child", "case", "hash-install", "hash-removal",
                       "symlink-file", "symlink-directory", "hardlink", "post-replace", "post-extra", "post-directory"):
             with self.subTest(artifact=fault), tempfile.TemporaryDirectory() as directory:
@@ -361,10 +374,7 @@ class UpdateDataTests(unittest.TestCase):
                 elif fault == "symlink-directory":
                     (download / "preview").rename(root / "other"); (download / "preview").symlink_to(root / "other")
                 elif fault == "hardlink": os.link(leaf, root / "other")
-                op = HELPER.Operation.__new__(HELPER.Operation)
-                op.entries = []; op.entry_registry = {}; op.errors = []; op.directories = {}
-                op.app_absence = None; op.update = {}; op.work = root; op.source_entry = None; op.phase = DATA.PHASE
-                op.package_sources = []; op.package_outputs = []; op.package_roots = []; op.package_clock = lambda: 1
+                op = operation(root, selected)
                 try:
                     op.work_entry = op.register(os.open(root, HELPER.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
                     op.work_entry["identity"] = HELPER.directory_identity(os.fstat(op.work_entry["fd"]))
@@ -384,6 +394,166 @@ class UpdateDataTests(unittest.TestCase):
                             with self.assertRaises(HELPER.Refused): op.package_post()
                     else:
                         with self.assertRaises((ValueError, OSError)): DATA.artifact_inputs(op, selected)
+                finally:
+                    for entry in reversed(op.entries): op.close(entry)
+                self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])
+
+        # Same real artifact owner/FDs and actual mount_custody/package_post
+        # order. ONLY macOS mount facts and returned native calls are inert
+        # DATA ports; the private directory below is not a qualified mount.
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        faults = (None, "ctime", "pre-attach", "in-read", "hash", "short", *fields[:8], "other-file",
+                  "return", "capture", "nonzero", "pending", "facts", "readonly", "device", "namespace", "repeat",
+                  "foreign-image", "foreign-mount", "phase", "length", "digest", "closed-live",
+                  "detached", "detach-return", "detach-capture", "detach-live", "detach-close", "readback")
+        for fault in faults:
+            with self.subTest(readonly_image=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); selected = nested_nomination()["targets"][DATA.TARGETS[0]]
+                download = root / "update-predecessor"; download.mkdir(mode=0o700)
+                for row in selected["members"]:
+                    path = download / row["name"]; path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(row["name"].encode()); path.chmod(0o644)
+                op = operation(root, selected)
+                try:
+                    op.work_entry = op.register(os.open(root, HELPER.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
+                    op.work_entry["identity"] = HELPER.directory_identity(os.fstat(op.work_entry["fd"]))
+                    image = DATA.artifact_inputs(op, selected); acquired = image["identity"]
+                    op.update["imageOriginal"] = image
+                    op.package_post()  # Unchanged all-nine pre-attach read.
+                    op.transport_mount = root / "readonly-mount"
+                    op.transport_volumes = op.work_entry
+                    op.removal_unknown = False; op.removal_scan_state = "closed"
+                    op.removal_control_reserved = op.removal_original_reserved = 0
+                    # Same pre-create cut as transport_mount_admit: retain the
+                    # actual held-parent roster, not a fabricated empty list.
+                    op.transport_roster = op.removal_roster(op.transport_volumes)
+                    self.assertNotIn(op.transport_mount.name, op.transport_roster)
+                    parent_facts = HELPER.signature(os.fstat(op.work_entry["fd"]))
+                    # The mount/device relation is a fixed DATA port; ordinary
+                    # directory/file identity still uses its actual private FD.
+                    op.transport_volumes["removal_policy"] = (True, False, False)
+                    op.transport_volumes["removal_facts"] = ((parent_facts[0] + 1, *parent_facts[1:]), 0, {})
+                    op.transport_mount.mkdir(mode=0o700)
+                    if fault == "namespace": (root / "unexpected-peer").write_bytes(b"inert")
+                    op.mount_entered = True; op.mount_known = op.mount_detached = op.installer_entered = False
+                    op.mount_entry = None; op.mount_device = None
+                    op.installer_zero = op.installation_readback = False
+                    op.calls = [{"role": DATA.ROLES[0], "entered": True, "returned": True,
+                                 "capturesSettled": True, "returncode": 0}]
+                    if fault == "return": op.calls[0]["returned"] = False
+                    elif fault == "capture": op.calls[0]["capturesSettled"] = False
+                    elif fault == "nonzero": op.calls[0]["returncode"] = 1
+                    elif fault == "pending": op.stager_io_pending = "inert-unjoined"
+                    events = []
+                    op.transport_source_post = lambda: None
+                    def mount_facts(entry, *, protected=False, readonly=False, private=False):
+                        if entry is op.transport_volumes:
+                            self.assertEqual((protected, readonly, private), (True, False, False))
+                            facts = HELPER.signature(os.fstat(entry["fd"]))
+                            return (facts[0] + 1, *facts[1:]), 0, {}
+                        self.assertIs(entry, op.mount_entry); self.assertTrue(readonly)
+                        return HELPER.signature(os.fstat(entry["fd"])), 0, {
+                            "flags": 0x1000 if fault == "readonly" else 0x1001, "typeName": "hfs",
+                            "mountOn": str(op.transport_mount),
+                            "mountFrom": "/dev/disk98" if fault == "device" else "/dev/disk99"}
+                    def transport_facts():
+                        events.append("transport-facts")
+                        self.assertIsNone(op.update["readonlyMount"]); self.assertFalse(op.mount_known)
+                        self.assertEqual(op.removal_roster(op.transport_volumes), {
+                            **op.transport_roster, op.transport_mount.name:
+                            (op.mount_entry["identity"][0], op.mount_entry["identity"][1], stat.S_IFDIR)})
+                        if fault == "facts": raise HELPER.Refused("inert-transport-facts")
+                    op.removal_directory_facts = mount_facts; op.transport_mount_facts = transport_facts
+                    op.stager = STAGER
+                    attached = SimpleNamespace(stdout=HELPER.plistlib.dumps({"system-entities": [{
+                        "dev-entry": "/dev/disk99", "mount-point": str(op.transport_mount),
+                        "potentially-mountable": True}]}), stderr=b"", returncode=0)
+                    raw_fstat, raw_stat, raw_pread = os.fstat, os.stat, os.pread
+                    image_fd, image_parent, image_name = image["fd"], image["parent"], image["name"]
+                    other = next(entry for entry, _ in op.package_outputs if entry is not image)
+                    drift = [1 if fault is not None else 0]
+                    def adjusted(info, *, target):
+                        values = {name: getattr(info, name) for name in fields}
+                        if target == "image":
+                            values["st_ctime_ns"] += drift[0]
+                            if fault in fields[:8]: values[fault] += 1
+                        elif fault == "other-file": values["st_ctime_ns"] += 1
+                        return SimpleNamespace(**values)
+                    def observed_fd(fd):
+                        info = raw_fstat(fd)
+                        return adjusted(info, target="image" if fd == image_fd else "other") if fd in (image_fd, other["fd"]) else info
+                    def observed_name(name, *args, **kwargs):
+                        info = raw_stat(name, *args, **kwargs)
+                        if (name, kwargs.get("dir_fd")) == (image_name, image_parent): return adjusted(info, target="image")
+                        if (name, kwargs.get("dir_fd")) == (other["name"], other["parent"]): return adjusted(info, target="other")
+                        return info
+                    def observed_read(fd, size, offset):
+                        body = raw_pread(fd, size, offset)
+                        if fd == image_fd:
+                            if fault == "in-read": drift[0] += 1
+                            elif fault == "hash": return b"X" + body[1:]
+                            elif fault == "short": return body[:-1]
+                        return body
+                    with mock.patch.object(os, "fstat", side_effect=observed_fd), \
+                         mock.patch.object(os, "stat", side_effect=observed_name), \
+                         mock.patch.object(os, "pread", side_effect=observed_read):
+                        if fault == "pre-attach":
+                            with self.assertRaises(HELPER.Refused): op.package_post()
+                            self.assertIsNone(op.update["readonlyMount"]); self.assertFalse(op.mount_known)
+                        elif fault in ("in-read", "hash", "short", *fields[:8], "other-file", "return", "capture",
+                                       "nonzero", "pending", "facts", "readonly", "device", "namespace"):
+                            with self.assertRaises((ValueError, HELPER.Refused)):
+                                op.mount_custody(attached, "update-readonly-mount")
+                            self.assertFalse(op.mount_known or op.mount_detached or op.installer_entered)
+                            if fault in ("return", "capture", "nonzero", "pending", "facts", "readonly", "device", "namespace"):
+                                self.assertIsNone(op.update["readonlyMount"])
+                        else:
+                            op.mount_custody(attached, "update-readonly-mount")
+                            mount = op.mount_entry
+                            self.assertEqual(events, ["transport-facts"])
+                            self.assertIs(op.update["readonlyMount"], mount)
+                            self.assertTrue(op.mount_known); self.assertFalse(op.installer_entered or op.mount_detached)
+                            self.assertEqual(len(op.calls), 1)
+                            if fault is not None:
+                                with self.assertRaises(HELPER.Refused): op.read(image)  # Still all nine.
+                            if fault == "repeat":
+                                op.mount_known = False  # Repeat at the original pre-publication cut.
+                                with self.assertRaises(ValueError): DATA.image_mounted(op, mount)
+                                self.assertIs(op.update["readonlyMount"], mount)
+                                op.mount_known = True
+                            elif fault == "foreign-image":
+                                op.update["imageOriginal"] = dict(image)
+                                with self.assertRaises(ValueError): DATA.image_post(op, image, selected["image"]["sha256"])
+                            elif fault == "foreign-mount":
+                                op.mount_entry = dict(mount)
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault == "phase":
+                                op.phase = "package-install"
+                                with self.assertRaises(ValueError): DATA.image_post(op, image, selected["image"]["sha256"])
+                            elif fault in ("length", "digest"):
+                                selected["image"]["bytes" if fault == "length" else "sha256"] = 1 if fault == "length" else "f" * 64
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault == "closed-live":
+                                op.close(mount)
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault in ("detached", "detach-return", "detach-capture", "detach-live", "detach-close", "readback"):
+                                # Actual close of the SAME retained private FD;
+                                # completed native/namespace facts remain DATA.
+                                if fault != "detach-live": op.close(mount)
+                                op.calls.extend({"role": role, "entered": True, "returned": True,
+                                                 "capturesSettled": True, "returncode": 0} for role in DATA.ROLES[1:])
+                                op.installer_entered = op.installer_zero = op.installation_readback = op.mount_detached = True
+                                if fault == "detach-return": op.calls[-1]["returned"] = False
+                                elif fault == "detach-capture": op.calls[-1]["capturesSettled"] = False
+                                elif fault == "detach-close": mount["closed"] = False
+                                elif fault == "readback": op.installation_readback = False
+                                if fault == "detached": op.package_post()
+                                else:
+                                    with self.assertRaises(ValueError): op.package_post()
+                                if fault == "detach-close": mount["closed"] = True  # Fixture bookkeeping only; real close already returned.
+                            else:
+                                op.package_post()  # Same full digest on each later POST.
+                    self.assertEqual(image["identity"], acquired)  # Never rebase original authority.
                 finally:
                     for entry in reversed(op.entries): op.close(entry)
                 self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])

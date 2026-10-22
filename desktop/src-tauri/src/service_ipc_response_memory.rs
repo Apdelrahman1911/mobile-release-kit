@@ -282,7 +282,6 @@ mod tests {
         let old_small = [
             crate::service_git_requests::IPC_WORKER_BACKING,
             crate::service_version_reserve_requests::IPC_WORKER_BACKING,
-        crate::service_version_reserve_review_requests::IPC_WORKER_BACKING,
             crate::service_play_cleanup_requests::IPC_WORKER_BACKING,
             crate::service_upload_key_requests::IPC_WORKER_BACKING,
             crate::service_version_edit_requests::IPC_WORKER_BACKING,
@@ -296,6 +295,11 @@ mod tests {
             + 8 * crate::service_github_action_protocol::IPC_WORKER_BACKING
             + 8 * crate::service_version_edit_prepare_requests::IPC_WORKER_BACKING;
         let q = quote_with(Cells::actual()).unwrap();
+        // ReserveReview was added after the pooled census. It must fit the
+        // current worker maximum, but cannot increase the historical saving.
+        assert!(
+            crate::service_version_reserve_review_requests::IPC_WORKER_BACKING <= q.ordinary_body
+        );
         let saved = old.checked_sub(q.bytes).expect("a real allocation saving");
         // No Local/Build worker saving here: A already removes that term once.
         #[cfg(target_pointer_width = "64")]

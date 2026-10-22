@@ -219,7 +219,8 @@ def start(op, api):
     now = api.time.monotonic_ns()
     op.update = {"nomination": selected, "complete": False, "start": now, "observed": now,
                  "workEnd": now + 420_000_000_000, "hardEnd": now + 480_000_000_000,
-                 "sentinelEntries": [], "originals": [], "case": None}
+                 "sentinelEntries": [], "originals": [], "case": None,
+                 "imageOriginal": None, "readonlyMount": None}
     if op.phase == PHASE:
         op.package_started = op.package_observed = now
         op.package_endpoint = op.update["workEnd"]
@@ -366,12 +367,90 @@ def artifact_inputs(op, selected):
     return image_entry
 
 
+def image_mounted(op, mount):
+    # Called only AFTER the original transport_mount_facts returned, before
+    # package_post/mount_known. This comparison link is NOT cleanup authority.
+    row = op.update
+    need(op.phase == PHASE and type(row) is dict and row.get("readonlyMount") is None
+         and op.mount_entered is True and op.mount_known is False and op.mount_detached is False
+         and op.installer_entered is False and op.package_settled(), "update-image-mount-admission")
+    image = row.get("imageOriginal")
+    need(type(image) is dict and op.entry_registry.get(id(image)) is image
+         and type(image.get("fd")) is int and image["closed"] is False
+         and type(mount) is dict and mount is op.mount_entry
+         and op.entry_registry.get(id(mount)) is mount and mount["kind"] == "mount"
+         and mount["role"] == "update-readonly-mount" and mount["closed"] is False
+         and type(mount["fd"]) is int and mount["parent_entry"] is op.transport_volumes
+         and mount["parent"] == op.transport_volumes["fd"]
+         and op.transport_mount is not None and mount["name"] == op.transport_mount.name,
+         "update-image-mount-original")
+    need(len(op.calls) == 1 and op.calls[0].get("role") == ROLES[0]
+         and all(op.calls[0].get(k) is True for k in ("entered", "returned", "capturesSettled"))
+         and type(op.calls[0].get("returncode")) is int and op.calls[0]["returncode"] == 0,
+         "update-image-attach-return")
+    facts, _flags, fs = mount["removal_facts"]
+    need(mount["removal_policy"] == (False, True, False)
+         and mount["identity"] == (facts[0], facts[1], facts[2], facts[4], facts[5])
+         and facts[0] != op.transport_volumes["removal_facts"][0][0]
+         and fs["flags"] & 1 and fs["flags"] & 0x1000 and not fs["flags"] & (0x20 | 0x400000)
+         and fs["typeName"] in ("hfs", "apfs") and fs["mountOn"] == str(op.transport_mount)
+         and fs["mountFrom"] == op.mount_device, "update-image-readonly-original")
+    row["readonlyMount"] = mount  # Same already-retained Entry, never a new FD or body.
+
+
+def image_post(op, entry, expected):
+    row = op.update
+    need(op.phase == PHASE and type(row) is dict and entry is row.get("imageOriginal")
+         and op.entry_registry.get(id(entry)) is entry and op.package_settled(), "update-image-post-original")
+    mount = row.get("readonlyMount")
+    need(type(mount) is dict and mount is op.mount_entry and op.entry_registry.get(id(mount)) is mount
+         and op.mount_entered is True and 1 <= len(op.calls) <= len(ROLES)
+         and tuple(c.get("role") for c in op.calls) == ROLES[:len(op.calls)]
+         and all(all(c.get(k) is True for k in ("entered", "returned", "capturesSettled"))
+                 and type(c.get("returncode")) is int and c["returncode"] == 0 for c in op.calls),
+         "update-image-post-mount-original")
+    if op.mount_detached is True:
+        # detach_package_mount closes THIS Entry before the actual detach,
+        # then proves its original namespace POST before setting this fact.
+        need(len(op.calls) == len(ROLES) and op.mount_known is True
+             and op.installer_entered is True and op.installer_zero is True and op.installation_readback is True
+             and mount["closed"] is True and mount["fd"] is None, "update-image-post-detach-original")
+    else:
+        need(op.mount_detached is False and len(op.calls) < len(ROLES)
+             and mount["closed"] is False and type(mount["fd"]) is int
+             and (op.mount_known is True or len(op.calls) == 1 and op.installer_entered is False),
+             "update-image-post-live-original")
+    parent, fd, acquired = entry["parent_entry"], entry["fd"], entry["identity"]
+    selected = row["nomination"]["image"]
+    need(type(fd) is int and entry["closed"] is False and entry["parent"] == parent["fd"]
+         and acquired[6] == selected["bytes"] and expected == selected["sha256"], "update-image-post-binding")
+    op.package_clock()
+    op.recheck_directory(parent)
+    before = op.update_api.signature(os.fstat(fd))
+    need(before == op.update_api.signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False))
+         and before[:8] == acquired[:8], "update-image-post-changed")
+    # Only this original image's cross-readonly-mount ctime may differ. Each
+    # full stream remains all-nine stable; acquisition is NEVER rebased.
+    body = os.pread(fd, acquired[6] + 1, 0)
+    need(len(body) == acquired[6] and op.update_api.signature(os.fstat(fd)) == before
+         == op.update_api.signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)),
+         "update-image-post-read-changed")
+    actual = sha(body)
+    need(actual == expected, "update-image-post-bytes")
+    op.recheck_directory(parent)
+    need(entry is row["imageOriginal"] and mount is row["readonlyMount"] is op.mount_entry
+         and entry["parent_entry"] is parent and entry["fd"] == fd and entry["closed"] is False
+         and entry["identity"] == acquired, "update-image-post-original-changed")
+    op.package_clock()
+    return actual
+
+
 def baseline(op):
     api, stager, selected = op.update_api, op.stager, op.update["nomination"]
     op.stage = PHASE
     quote = resource_quote_data(selected)
     reserve(op, selected["resources"]["additionalDiskBytes"])
-    artifact_inputs(op, selected)
+    op.update["imageOriginal"] = artifact_inputs(op, selected)
     expected, current_inventory = source_expectation(op)
     before = io(op, "census", stager.same_package_result_census)
     need(not before and io(op, "absence", root_absent, stager), "update-initial-baseline-occupied")

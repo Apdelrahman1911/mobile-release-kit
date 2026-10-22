@@ -8465,6 +8465,9 @@ class Operation:
         for entry, expected in self.package_outputs:
             sha = (self.notary_stream(entry) if self.phase == "prepare-removal-observers" else
                    self.removal_stream(entry, limit=self.stager.MAX_BYTES)[0][1] if self.phase == "package-removal-fixture" else
+                   self.update_module.image_post(self, entry, expected) if self.phase == UPDATE_PHASE
+                   and self.update is not None and entry is self.update.get("imageOriginal")
+                   and self.update.get("readonlyMount") is not None else
                    digest(self.read(entry)))
             need(sha == expected, "package-original-post")
             self.package_clock()
@@ -8674,6 +8677,8 @@ class Operation:
                  "package-transport-original-device")
             self.removal_own_parent_post(self.transport_volumes, self.transport_roster, path.name, present=True)
             self.transport_mount_facts()
+            if self.phase == UPDATE_PHASE:
+                self.update_module.image_mounted(self, entry)
             self.package_post()
             self.mount_known = True  # Original cleanup authority, NOT parser acceptance.
             need(self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)

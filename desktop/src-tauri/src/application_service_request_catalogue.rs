@@ -470,6 +470,19 @@ mod tests {
             )
             .unwrap();
         claim.returned(true);
+        let before = discover(&service, &client, &project);
+        assert_eq!(before.requests.len(), 2);
+        let pending = &before.requests[1];
+        assert_eq!(pending.request_id, input.request_id);
+        assert_eq!(
+            pending.progress,
+            data::Progress::IosArchive {
+                request_state: build::RequestState::Preparing,
+                start_state: build::StartState::NotRequested
+            }
+        );
+        assert!(pending.operation.is_none());
+        assert!(!pending.history_available);
         let (_, original) = link.entry().claim_history().unwrap().unwrap();
         let returned = service.begin_operation(&ios.runtime_id, original.operation_id().clone(), p::Action::Build,
             original.state(), original.settlement());
@@ -502,7 +515,7 @@ mod tests {
             (native.state, native.settlement),
             (p::OperationState::Prepared, p::Settlement::Pending)
         );
-        assert!(!row.history_available);
+        assert!(row.history_available); // Only the SAME actual history return published it.
         let encoded = serde_json::to_string(&view).unwrap();
         for forbidden in [
             "result",

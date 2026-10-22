@@ -272,7 +272,17 @@ fn reviewed_acquisition_and_old_actions_share_original_32_rows_and_all_return_cu
         let entry = inbox.entries().unwrap().last().unwrap().clone();
         f.link.attach(&entry).unwrap();
         let caller = inbox.claim().unwrap().unwrap();
-        entry.native(f.result());
+        let native = f.result();
+        // The original producer callback retires its SAME scope as well as
+        // publishing row DATA; bypassing it leaves the next grant rightly Busy.
+        f.link.publish(
+            native.operation,
+            native.outcome,
+            native.reason,
+            native.result,
+            native.retired,
+        );
+        assert!(f.scope.retired.load(Ordering::Acquire));
         assert!(entry.pending() && entry.claim_history().unwrap().is_none());
         assert!(inbox.can_allow(&id('f')).is_err());
         caller.returned();

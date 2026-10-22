@@ -554,14 +554,70 @@ mod tests {
         assert!(r.valid());
         let value = serde_json::to_value(&r).unwrap();
         assert_eq!(serde_json::from_value::<Review>(value.clone()).unwrap(), r);
-        for field in ["platform", "candidateOperationId"] {
+        for field in ["platform", "candidateOperationId", "stageOperationId"] {
             let mut bad = value.clone();
             bad[field] = serde_json::Value::Null;
             assert!(serde_json::from_value::<Review>(bad).is_err());
         }
+        let mut unknown = value.clone();
+        unknown["unexpected"] = true.into();
+        assert!(serde_json::from_value::<Review>(unknown).is_err());
+        let response = |review: Review| crate::service_protocol::Response {
+            version: crate::service_protocol::VERSION,
+            request_id: id('8'),
+            service_instance: id('2'),
+            client_id: id('6'),
+            session_id: id('7'),
+            response: crate::service_protocol::ResponseBody::LocalHistoryAccess(Box::new(Access {
+                service_instance: Some(id('2')),
+                project_id: Some(id('1')),
+                grant_id: Some(id('4')),
+                review_id: Some(id('5')),
+                review: Some(review),
+                enabled: true,
+                remaining_ms: 1,
+                consumed: false,
+                pending: false,
+                unknown: false,
+                request_id: None,
+                status: None,
+            })),
+        };
+        let good = response(r.clone());
+        let raw = crate::service_protocol::encode_response(&good).unwrap();
+        assert!(raw.len() <= STATUS_LIMIT);
+        assert!(crate::service_protocol::decode_response(
+            &raw, &good.request_id, &good.service_instance
+        ).is_ok());
+
+        // Android is legal for stage reviews, not an explicit legacy-inputs
+        // platform. Exercise the real semantic codec, not only serde's enum.
         let mut bad = value.clone();
         bad["platform"] = "android".into();
-        assert!(serde_json::from_value::<Review>(bad).is_err());
+        let bad = serde_json::from_value::<Review>(bad).unwrap();
+        assert!(!bad.valid());
+        let bad = response(bad);
+        assert!(crate::service_protocol::encode_response(&bad).is_err());
+        let raw = serde_json::to_vec(&bad).unwrap(); // Bypass encoding only to test rejection on input.
+        assert!(raw.len() <= STATUS_LIMIT);
+        assert!(crate::service_protocol::decode_response(
+            &raw, &bad.request_id, &bad.service_instance
+        ).is_err());
+
+        let stage = Review {
+            kind: Kind::ReviewStagePrepared,
+            platform: Some(Platform::Android),
+            candidate_operation_id: None,
+            stage_operation_id: r.candidate_operation_id.clone(),
+            ..r.clone()
+        };
+        assert!(stage.valid());
+        let stage = response(stage);
+        let raw = crate::service_protocol::encode_response(&stage).unwrap();
+        assert!(raw.len() <= STATUS_LIMIT);
+        assert!(crate::service_protocol::decode_response(
+            &raw, &stage.request_id, &stage.service_instance
+        ).is_ok());
         r.platform = None;
         assert!(r.valid());
         assert_eq!(r.consent(), "agent-local-history-android-inputs-once-v1");

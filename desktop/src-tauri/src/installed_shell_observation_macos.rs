@@ -1034,6 +1034,16 @@ impl Fixture {
     }
 }
 
+// The marker is set only after the selected original fixture reader returned.
+// It is not finality: finish still requires the original Exit/relay/panel gates.
+fn final_fixture_route(case: Case, verified: Option<Case>) -> Result<bool, ()> {
+    match case {
+        Case::ToolSetup(_) | Case::GitFetch(_) | Case::GitPush(_) | Case::GitUpstream =>
+            (verified == Some(case)).then_some(true).ok_or(()),
+        _ => verified.is_none().then_some(false).ok_or(()),
+    }
+}
+
 struct Session {
     projection: EditProjection, prepare_requested: bool, prepare_returned: bool,
     review: Option<Value>, review_visible: bool, confirmation_count: u8, acknowledged: bool,
@@ -3307,6 +3317,16 @@ impl Observation {
         }
         r.originals_final = true; r.actual_exit = true;
     }
+    fn final_fixture_shape(&self, r: &Record) -> bool {
+        self.timely() && r.step == Step::Exit && r.actual_exit && r.originals_final
+            && r.relay_joined && r.pending.is_none() && r.file_readback
+            && r.fixture.root == self.project_path
+            && matches!(self.case, Case::ToolSetup(_) | Case::GitFetch(_) | Case::GitPush(_) | Case::GitUpstream)
+            && r.fixture.tools.is_some() == matches!(self.case, Case::ToolSetup(_))
+            && r.fixture.git_fetch.is_some() == matches!(self.case, Case::GitFetch(_))
+            && r.fixture.git_push.is_some() == matches!(self.case, Case::GitPush(_))
+            && r.fixture.git_upstream.is_some() == (self.case == Case::GitUpstream)
+    }
     fn finish(&self) -> Option<Value> {
         if !self.timely() { return None; }
         let installation_readback = if self.case == Case::Installation {
@@ -3316,6 +3336,17 @@ impl Observation {
             if !self.timely() || expected.verify().is_err() { return None; }
             Some(expected)
         } else { None };
+        // These fixtures intentionally refuse the unrelated config-save
+        // verifier. Read the SAME original expectations outside Record, after
+        // actual Quit, then rematch them before any report can be returned.
+        let verified_fixture = match self.case {
+            Case::ToolSetup(_) => { self.tool_final_fixture_readback()?; Some(self.case) }
+            Case::GitFetch(_) => { self.git_fetch_final_fixture_readback()?; Some(self.case) }
+            Case::GitPush(_) => { self.git_push_final_fixture_readback()?; Some(self.case) }
+            Case::GitUpstream => { self.git_upstream_final_fixture_readback()?; Some(self.case) }
+            _ => None,
+        };
+        let separate_fixture = final_fixture_route(self.case, verified_fixture).ok()?;
         let r = self.record()?;
         if !self.timely() { return None; }
         // The App has already returned. This is saved registration history,
@@ -3417,7 +3448,7 @@ impl Observation {
             // Same completed originals/normal Quit and bounded fixture DATA
             // must survive the real final readback outside this Record guard.
             if !installation_readback.as_ref()?.matches(&r) { return None; }
-        } else if r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields|Case::Vault(vault::Case::UploadKey(_)))).is_err() { return None; }
+        } else if !separate_fixture && r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields|Case::Vault(vault::Case::UploadKey(_)))).is_err() { return None; }
         let sessions: Vec<_> = r.sessions.iter().map(|s| {
             let f = s.finality.as_ref()?; let p = s.projection.prepared.as_ref()?;
             Some(json!({"draftRevision":p.draft_revision,"baselineGeneration":p.baseline_generation,
@@ -4505,8 +4536,39 @@ fn completion_ownership_data_check() -> bool {
     value["mechanism"] == "original-ok-singleton-selection-v1" && value["facts"]["selection"] == "match"
         && value.get("rowSelection").is_none() && value.get("selectedTarget").is_none()
 }
+fn final_fixture_readback_data_check() -> bool {
+    // Only routing DATA: no native read, fixture, successful owner or receipt.
+    let cases: Vec<_> = tool_setup::Case::ALL.into_iter()
+        .chain([tool_setup::Case::ServicePreparation, tool_setup::Case::ColdWarm, tool_setup::Case::CancelInTransfer])
+        .map(Case::ToolSetup)
+        .chain(git_fetch::Case::ALL.into_iter().map(Case::GitFetch))
+        .chain(git_push::Case::ALL.into_iter().map(Case::GitPush))
+        .chain([Case::GitUpstream]).collect();
+    for case in &cases {
+        if final_fixture_route(*case, None) != Err(()) { return false; }
+        for verified in &cases {
+            let expected = if case == verified { Ok(true) } else { Err(()) };
+            if final_fixture_route(*case, Some(*verified)) != expected { return false; }
+        }
+    }
+    for ordinary in [Case::FirstSave, Case::NoopStale, Case::Installation, Case::PickerLoss, Case::Cli] {
+        if final_fixture_route(ordinary, None) != Ok(false)
+            || final_fixture_route(ordinary, Some(ordinary)) != Err(()) { return false; }
+        for case in &cases {
+            if final_fixture_route(ordinary, Some(*case)) != Err(())
+                || final_fixture_route(*case, Some(ordinary)) != Err(()) { return false; }
+        }
+    }
+    true
+}
+#[cfg(test)]
+#[test]
+fn final_fixture_readback_requires_matching_verified_case() {
+    assert!(final_fixture_readback_data_check());
+}
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
+    if !final_fixture_readback_data_check() { return false; }
     if !project_chooser_data_checks() { return false; }
     crate::asset_session::assert_project_selection_gate_contract();
     // harness=false does not discover private #[test] functions. These exact

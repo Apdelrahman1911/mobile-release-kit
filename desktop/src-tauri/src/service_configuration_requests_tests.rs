@@ -611,10 +611,24 @@ fn metadata_configuration_still_uses_the_same_joint_thirty_two_editor_slots() {
                     read.clone(),
                 )
                 .unwrap();
-                book.initialization_entry(&r.origin)
-                    .unwrap()
-                    .cancel(Instant::now())
-                    .unwrap();
+                let entry = book.initialization_entry(&r.origin).unwrap();
+                entry.cancel(Instant::now()).unwrap();
+                assert_eq!(entry.status().unwrap().phase, init::Phase::Refused);
+                // Even an unclaimed Init refusal retains its SAME history
+                // completion. No Session or native retirement is fabricated.
+                let (request, state, settlement) = entry.history().unwrap().unwrap();
+                assert_eq!(request, r.origin.request_id);
+                assert_eq!(state, crate::service_protocol::OperationState::Cancelled);
+                assert_eq!(settlement, crate::service_protocol::Settlement::Settled);
+                assert_eq!(
+                    book.read(input('f'), source(), read.clone()).unwrap_err(),
+                    Error::Busy
+                );
+                entry.history_returned(true).unwrap();
+                let status = entry.status().unwrap();
+                assert_eq!(status.phase, init::Phase::Final);
+                assert!(status.original.is_none());
+                assert_eq!(status.result.unwrap().effect, init::Effect::NotStarted);
             }
         }
         originals.push(r);

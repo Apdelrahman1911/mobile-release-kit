@@ -56,12 +56,30 @@ impl Inspection {
 }
 /// MAIN supplies the displayed ORIGINAL inspection pair, never a session
 /// chosen from a newly arrived report. Native derives the session itself.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Selection {
     Inspect,
     Account { inspection: Inspection },
     Project { inspection: Inspection },
+}
+impl<'de> Deserialize<'de> for Selection {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // An internally tagged unit variant ignores remaining fields. The
+        // private empty-struct variant keeps Inspect's actual input closed.
+        #[derive(Deserialize)]
+        #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+        enum Closed {
+            Inspect {},
+            Account { inspection: Inspection },
+            Project { inspection: Inspection },
+        }
+        Ok(match Closed::deserialize(d)? {
+            Closed::Inspect {} => Self::Inspect,
+            Closed::Account { inspection } => Self::Account { inspection },
+            Closed::Project { inspection } => Self::Project { inspection },
+        })
+    }
 }
 impl Selection {
     pub fn action(&self) -> Action {
@@ -83,7 +101,7 @@ pub enum Mode {
     #[serde(rename = "local-ios-recovery")]
     LocalIosRecovery,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Intent {
     Inspect,
@@ -95,6 +113,40 @@ pub enum Intent {
         inspection: Inspection,
         session: String,
     },
+}
+impl<'de> Deserialize<'de> for Intent {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+        enum Closed {
+            Inspect {},
+            Account {
+                inspection: Inspection,
+                session: String,
+            },
+            Project {
+                inspection: Inspection,
+                session: String,
+            },
+        }
+        Ok(match Closed::deserialize(d)? {
+            Closed::Inspect {} => Self::Inspect,
+            Closed::Account {
+                inspection,
+                session,
+            } => Self::Account {
+                inspection,
+                session,
+            },
+            Closed::Project {
+                inspection,
+                session,
+            } => Self::Project {
+                inspection,
+                session,
+            },
+        })
+    }
 }
 impl Intent {
     pub fn action(&self) -> Action {
@@ -581,6 +633,27 @@ mod tests {
     }
     #[test]
     fn recovery_selection_has_no_session_input_or_implicit_restore_confirmation() {
+        for (value, expected) in [
+            (json!({"action":"inspect"}), Selection::Inspect),
+            (
+                json!({"action":"account","inspection":inspection()}),
+                Selection::Account {
+                    inspection: inspection(),
+                },
+            ),
+            (
+                json!({"action":"project","inspection":inspection()}),
+                Selection::Project {
+                    inspection: inspection(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<Selection>(value.clone()).unwrap(),
+                expected
+            );
+            assert_eq!(serde_json::to_value(expected).unwrap(), value);
+        }
         let value = json!({"action":"account","inspection":inspection()});
         let selected: Selection = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(selected.action().confirmation(), Some(ACCOUNT_CONFIRMATION));
@@ -605,9 +678,44 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<Selection>(bad).is_err());
         }
+        for field in ["inspection", "session", "savedConfig", "unknown"] {
+            for supplied in [Value::Null, json!("not-authority")] {
+                let mut bad = json!({"action":"inspect"});
+                bad[field] = supplied;
+                assert!(serde_json::from_value::<Selection>(bad).is_err(), "{field}");
+            }
+        }
     }
     #[test]
     fn recovery_review_is_configless_and_preserves_displayed_inspection_identity() {
+        for recovery in [
+            Intent::Inspect,
+            Intent::Account {
+                inspection: inspection(),
+                session: "c".repeat(32),
+            },
+            Intent::Project {
+                inspection: inspection(),
+                session: "d".repeat(32),
+            },
+        ] {
+            let review = Review {
+                mode: Mode::LocalIosRecovery,
+                recovery,
+            };
+            let value = serde_json::to_value(&review).unwrap();
+            assert_eq!(serde_json::from_value::<Review>(value).unwrap(), review);
+            assert!(review.valid() && review.capacity_valid());
+        }
+        let inspect_value = json!({"mode":"local-ios-recovery","recovery":{"action":"inspect"}});
+        assert_eq!(serde_json::to_value(inspect()).unwrap(), inspect_value);
+        for field in ["inspection", "session", "savedConfig", "unknown"] {
+            for supplied in [Value::Null, json!("not-authority")] {
+                let mut bad = inspect_value.clone();
+                bad["recovery"][field] = supplied;
+                assert!(serde_json::from_value::<Review>(bad).is_err(), "{field}");
+            }
+        }
         let old = json!({"mode":"saved-ios-unsigned-archive","savedConfig":{"bytes":2,"sha256":"a".repeat(64)},
             "savedVersion":{"bytes":3,"sha256":"b".repeat(64),"name":"1","build":1}});
         assert!(serde_json::from_value::<Review>(old).is_err());

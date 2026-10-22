@@ -279,7 +279,8 @@ impl StageDestination {
     fn bounded_capacity(&self) -> bool {
         match self {
             Self::Android { channel, release_status } => channel.capacity() <= 400 && release_status.capacity() <= 9,
-            Self::IosExternal { channel } | Self::IosProduction { channel, .. } => channel.capacity() <= 18,
+            Self::IosExternal { channel } => channel.capacity() <= "testflight-external".len(),
+            Self::IosProduction { channel, .. } => channel.capacity() <= "app-store-review".len(),
         }
     }
 }

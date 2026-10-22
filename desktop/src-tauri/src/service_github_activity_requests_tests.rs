@@ -231,7 +231,14 @@ fn early_read_revoke_after_stop_and_history_loss_keep_original_read_unknown() {
         p::activity::Snapshot::from_observation(&observation()).ok(),
     );
     assert_eq!(e.status().unwrap(), row);
+    // Repeated late notifications cannot change the first Unknown reason or
+    // consume revisions until exhaustion without a new original fact.
+    e.unknown(p::Reason::CleanupUnknown);
+    e.unknown(p::Reason::HistoryUnavailable);
+    assert_eq!(e.status().unwrap(), row);
     assert!(e.pending());
+    assert!(e.claim_history().unwrap().is_none());
+    assert!(f.inbox.claim().unwrap().is_none());
 }
 
 #[test]

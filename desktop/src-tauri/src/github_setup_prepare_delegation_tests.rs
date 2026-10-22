@@ -378,12 +378,19 @@ fn lost_prepare_native_caller_or_history_never_becomes_a_ready_producer() {
         }
         assert!(!producer.positive(), "fault={fault}");
         assert!(!e.positively_returned("github-publication-2"));
-        assert!(inbox
-            .submit(wire::Submit {
-                origin: e.origin().clone(),
-                grant_id: id(3)
-            })
-            .is_err());
+        // Same-ID reconnect is the same retained DATA row, not another claim.
+        let before = e.status().unwrap();
+        assert_eq!(inbox.submit(wire::Submit {
+            origin: e.origin().clone(), grant_id: id(3),
+        }).unwrap(), before);
+        assert!(inbox.claim().unwrap().is_none());
+        assert_eq!(inbox.entries().unwrap().len(), 1);
+        let mut different = e.origin().clone();
+        different.request_id = id(5);
+        assert!(inbox.submit(wire::Submit {
+            origin: different, grant_id: id(3),
+        }).is_err());
+        assert_eq!(inbox.entries().unwrap().len(), 1);
         // No returned compact DATA or late success clears an absorbing Unknown.
         if fault < 3 {
             e.dispatch_returned(
