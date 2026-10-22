@@ -92,10 +92,11 @@ def point(end, *, cleanup=False):
 
 
 def root_context():
-    need(sys.platform == "darwin" and platform.machine() == "arm64" and os.getuid() != 0,
+    # ARM64 is the fixed artifact target, not executable code on this Intel host.
+    need(sys.platform == "darwin" and platform.machine() == "x86_64" and os.getuid() != 0,
          "host-target")
     expected = {"RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
-                "RUNNER_ARCH": "ARM64", "GITHUB_REPOSITORY": REPOSITORY,
+                "RUNNER_ARCH": "X64", "GITHUB_REPOSITORY": REPOSITORY,
                 "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": REF,
                 "RUNNER_TEMP": "/Users/runner/work/_temp",
                 "GITHUB_WORKSPACE": "/Users/runner/work/mobile-release-kit/mobile-release-kit"}

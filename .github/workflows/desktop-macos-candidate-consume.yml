@@ -28,9 +28,9 @@ jobs:
   inspect-predecessor:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'inspect-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-inspection'
     name: Read-only delivered ARM predecessor controls
-    # Only this one-shot inspection needs a larger ARM host: the standard
-    # runner fell below the unchanged 3-GiB available-memory admission floor.
-    runs-on: macos-26-xlarge
+    # The fixed artifact target remains ARM64; this Intel host only inspects
+    # DATA with native host tools and never executes a target binary.
+    runs-on: macos-26-intel
     timeout-minutes: 20
     steps:
       - name: Require the isolated dispatch, never the Restore push route
@@ -40,11 +40,11 @@ jobs:
         run: |
           set +x
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == X64 ]]
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]]
           [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-predecessor-inspection ]]
           [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
-          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == x86_64 ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
-          architecture: arm64
+          architecture: x64
       - name: Acquire only artifact 12157830080, with its original transport pin
         timeout-minutes: 6
         shell: bash
