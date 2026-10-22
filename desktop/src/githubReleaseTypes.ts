@@ -63,5 +63,5 @@ export interface GitHubReleaseView {
   candidateRunId: string; externalRunId: string; recoveryRunId: string; originalSourceSha: string;
   originalVersionName: string; originalVersionBuild: string; confirmation: string; confirmed: boolean;
   recoveryConfirmation: string; recoveryConfirmationRejected: boolean;
-  pending: boolean; observing: boolean; cancelling: boolean; uncertain: boolean; error: GitHubReleaseReason | null;
+  delegating?: boolean; pending: boolean; observing: boolean; cancelling: boolean; uncertain: boolean; error: GitHubReleaseReason | null;
 }

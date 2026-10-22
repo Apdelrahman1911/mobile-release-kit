@@ -920,7 +920,7 @@ impl Reply {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrepareArgs {
     pub(crate) session_id: String,
@@ -930,7 +930,7 @@ pub(crate) struct PrepareArgs {
     #[serde(default)]
     pub(crate) purpose: Option<counter::Purpose>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PublishArgs {
     pub(crate) session_id: String,
@@ -938,14 +938,14 @@ pub(crate) struct PublishArgs {
     pub(crate) consent_id: String,
     pub(crate) confirm: bool,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PendingArgs {
     pub(crate) session_id: String,
     pub(crate) expected_revision: u32,
     pub(crate) expected_connection_revision: u32,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ReconcileArgs {
     pub(crate) session_id: String,
@@ -978,39 +978,28 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
                 return Err(BridgeError::invalid());
             }
             let v: PrepareArgs = read(value)?;
-            if !valid_id(&v.session_id)
-                || !revision(v.expected_revision)
-                || !revision(v.expected_connection_revision)
-                || !branch(&v.base)
-            {
+            if !v.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Prepare(v)
         }
         "github_setup_publication_publish" => {
             let v: PublishArgs = read(value)?;
-            if !valid_id(&v.session_id)
-                || !revision(v.expected_revision)
-                || !hex(&v.consent_id, 32)
-                || !v.confirm
-            {
+            if !v.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Publish(v)
         }
         "github_setup_publication_pending" => {
             let v: PendingArgs = read(value)?;
-            if !valid_id(&v.session_id)
-                || !revision(v.expected_revision)
-                || !revision(v.expected_connection_revision)
-            {
+            if !v.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Pending(v)
         }
         "github_setup_publication_reconcile" => {
             let v: ReconcileArgs = read(value)?;
-            if !valid_id(&v.session_id) || !revision(v.expected_revision) || !hex(&v.marker, 32) {
+            if !v.valid() {
                 return Err(BridgeError::invalid());
             }
             Command::Reconcile(v)
@@ -1225,3 +1214,11 @@ mod tests {
         assert!(decode_reply("fixture", &wire(&value), &request).is_err());
     }
 }
+
+impl PrepareArgs { pub(crate) fn valid(&self)->bool { let revision=|v:u32|v>0&&v<=LAST_REVISION; let v=self; !(!valid_id(&v.session_id) || !revision(v.expected_revision) || !revision(v.expected_connection_revision) || !branch(&v.base)) } }
+
+impl PublishArgs { pub(crate) fn valid(&self)->bool { let revision=|v:u32|v>0&&v<=LAST_REVISION; let v=self; !(!valid_id(&v.session_id) || !revision(v.expected_revision) || !hex(&v.consent_id, 32) || !v.confirm) } }
+
+impl PendingArgs { pub(crate) fn valid(&self)->bool { let revision=|v:u32|v>0&&v<=LAST_REVISION; let v=self; !(!valid_id(&v.session_id) || !revision(v.expected_revision) || !revision(v.expected_connection_revision)) } }
+
+impl ReconcileArgs { pub(crate) fn valid(&self)->bool { let revision=|v:u32|v>0&&v<=LAST_REVISION; let v=self; !(!valid_id(&v.session_id) || !revision(v.expected_revision) || !hex(&v.marker, 32)) } }

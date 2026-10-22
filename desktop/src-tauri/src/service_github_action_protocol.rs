@@ -3,6 +3,8 @@ use crate::service_protocol::{Error, Id, Settlement};
 use serde::{Deserialize, Deserializer, Serialize};
 #[path = "service_github_activity_protocol.rs"]
 pub(crate) mod activity;
+#[path = "service_github_dispatch_protocol.rs"]
+pub(crate) mod dispatch;
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
@@ -12,6 +14,8 @@ pub(crate) const INTENT_MS: u64 = 120_000;
 // ancillary ceilings. Only the separately named IPC8 term is transferred.
 pub(crate) const ROW_BACKING: usize = 16 * 1024;
 pub(crate) const IPC_WORKER_BACKING: usize = 32 * 1024;
+// Existing two unused/transition rows plus original MAIN scratch, not a new debit.
+pub(crate) const MAIN_CALL_BACKING: usize = 2 * ROW_BACKING + 16 * 1024;
 pub(crate) const DOCUMENT_BACKING: usize = REQUEST_LIMIT * ROW_BACKING + 2 * 128 * 1024;
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::deserialize(d)
@@ -31,11 +35,38 @@ pub(crate) enum Kind {
     SetupPublish,
     SetupReconcile,
     ActivityOverview,
+    PreflightPrepare,
+    PreflightDispatch,
+    PreflightPending,
+    PreflightObserve,
+    ReleasePrepare,
+    ReleaseDispatch,
+    ReleasePending,
+    ReleaseObserve,
+    CounterPrepare,
+    CounterCreate,
+    PublicationPending,
+    CounterReconcile,
 }
 impl Kind {
+    pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
     pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::ActivityOverview => "github-activity-",
+            Self::PreflightPrepare => "github-preflight-",
+            Self::PreflightDispatch => "github-preflight-",
+            Self::PreflightPending => "github-preflight-",
+            Self::PreflightObserve => "github-preflight-",
+            Self::ReleasePrepare => "github-release-",
+            Self::ReleaseDispatch => "github-release-",
+            Self::ReleasePending => "github-release-",
+            Self::ReleaseObserve => "github-release-",
+            Self::CounterPrepare => "github-publication-",
+            Self::CounterCreate => "github-publication-",
+            Self::PublicationPending => "github-publication-",
+            Self::CounterReconcile => "github-publication-",
+
             Self::RepositoryCreate => "repository-create-",
             Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
             Self::FailedJobsRetry => "github-actions-retry-",
@@ -45,6 +76,19 @@ impl Kind {
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::ActivityOverview => "agent-activity-overview-once-v1",
+            Self::PreflightPrepare => "agent-preflight-prepare-once-v1",
+            Self::PreflightDispatch => "agent-preflight-dispatch-once-v1",
+            Self::PreflightPending => "agent-preflight-pending-once-v1",
+            Self::PreflightObserve => "agent-preflight-observe-once-v1",
+            Self::ReleasePrepare => "agent-release-prepare-once-v1",
+            Self::ReleaseDispatch => "agent-release-dispatch-once-v1",
+            Self::ReleasePending => "agent-release-pending-once-v1",
+            Self::ReleaseObserve => "agent-release-observe-once-v1",
+            Self::CounterPrepare => "agent-counter-prepare-once-v1",
+            Self::CounterCreate => "agent-counter-create-once-v1",
+            Self::PublicationPending => "agent-publication-pending-once-v1",
+            Self::CounterReconcile => "agent-counter-reconcile-once-v1",
+
             Self::RepositoryCreate => "agent-repository-create-once-v1",
             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
             Self::PrCreate => "agent-pr-create-once-v1",
@@ -56,6 +100,19 @@ impl Kind {
     pub(crate) fn action(self) -> crate::service_protocol::Action {
         match self {
             Self::ActivityOverview => crate::service_protocol::Action::GitHubActivityOverview,
+            Self::PreflightPrepare => crate::service_protocol::Action::GitHubPreflightPrepare,
+            Self::PreflightDispatch => crate::service_protocol::Action::GitHubPreflightDispatch,
+            Self::PreflightPending => crate::service_protocol::Action::GitHubPreflightPending,
+            Self::PreflightObserve => crate::service_protocol::Action::GitHubPreflightObserve,
+            Self::ReleasePrepare => crate::service_protocol::Action::GitHubReleasePrepare,
+            Self::ReleaseDispatch => crate::service_protocol::Action::GitHubReleaseDispatch,
+            Self::ReleasePending => crate::service_protocol::Action::GitHubReleasePending,
+            Self::ReleaseObserve => crate::service_protocol::Action::GitHubReleaseObserve,
+            Self::CounterPrepare => crate::service_protocol::Action::GitHubCounterPrepare,
+            Self::CounterCreate => crate::service_protocol::Action::GitHubCounterCreate,
+            Self::PublicationPending => crate::service_protocol::Action::GitHubPublicationPending,
+            Self::CounterReconcile => crate::service_protocol::Action::GitHubCounterReconcile,
+
             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
             Self::PrCreate => crate::service_protocol::Action::GitHubPrCreate,
@@ -65,10 +122,10 @@ impl Kind {
         }
     }
     pub(crate) fn initial_effect(self) -> Effect {
-        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::NotSent }
+        if self.mutation() { Effect::NotSent } else { Effect::None }
     }
     pub(crate) fn go_effect(self) -> Effect {
-        if matches!(self, Self::SetupReconcile | Self::ActivityOverview) { Effect::None } else { Effect::PotentiallyApplied }
+        if self.mutation() { Effect::PotentiallyApplied } else { Effect::None }
     }
     pub(crate) fn operation(self, s: &str) -> bool {
         s.strip_prefix(self.prefix()).is_some_and(|n| {
@@ -110,6 +167,19 @@ pub(crate) enum Review {
     SetupPublish(PreparedReference),
     SetupReconcile(PendingReference),
     ActivityOverview(activity::Reference),
+    PreflightPrepare(dispatch::RequestReference),
+    PreflightDispatch(PreparedReference),
+    PreflightPending(dispatch::RequestReference),
+    PreflightObserve(dispatch::RecordReference),
+    ReleasePrepare(dispatch::RequestReference),
+    ReleaseDispatch(PreparedReference),
+    ReleasePending(dispatch::RequestReference),
+    ReleaseObserve(dispatch::RecordReference),
+    CounterPrepare(dispatch::RequestReference),
+    CounterCreate(PreparedReference),
+    PublicationPending(dispatch::RequestReference),
+    CounterReconcile(PendingReference),
+
 }
 fn original(session: &str, revision: u32) -> bool {
     !session.is_empty() && session.len() <= 64
@@ -124,7 +194,10 @@ impl Review {
             Kind::PrCreate => Self::PrCreate(value),
             Kind::FailedJobsRetry => Self::FailedJobsRetry(value),
             Kind::SetupPublish => Self::SetupPublish(value),
-            Kind::SetupReconcile | Kind::ActivityOverview => return None,
+            Kind::PreflightDispatch => Self::PreflightDispatch(value),
+            Kind::ReleaseDispatch => Self::ReleaseDispatch(value),
+            Kind::CounterCreate => Self::CounterCreate(value),
+            _ => return None,
         })
     }
     pub(crate) fn kind(&self) -> Kind {
@@ -136,25 +209,40 @@ impl Review {
             Self::SetupPublish(_) => Kind::SetupPublish,
             Self::SetupReconcile(_) => Kind::SetupReconcile,
             Self::ActivityOverview(_) => Kind::ActivityOverview,
+            Self::PreflightPrepare(_) => Kind::PreflightPrepare,
+            Self::PreflightDispatch(_) => Kind::PreflightDispatch,
+            Self::PreflightPending(_) => Kind::PreflightPending,
+            Self::PreflightObserve(_) => Kind::PreflightObserve,
+            Self::ReleasePrepare(_) => Kind::ReleasePrepare,
+            Self::ReleaseDispatch(_) => Kind::ReleaseDispatch,
+            Self::ReleasePending(_) => Kind::ReleasePending,
+            Self::ReleaseObserve(_) => Kind::ReleaseObserve,
+            Self::CounterPrepare(_) => Kind::CounterPrepare,
+            Self::CounterCreate(_) => Kind::CounterCreate,
+            Self::PublicationPending(_) => Kind::PublicationPending,
+            Self::CounterReconcile(_) => Kind::CounterReconcile,
+
         }
     }
     pub(crate) fn prepared(&self) -> Option<&PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
-            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) => Some(v),
+            _ => None,
         }
     }
     #[cfg(test)]
     pub(crate) fn prepared_mut(&mut self) -> Option<&mut PreparedReference> {
         match self {
-            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) => Some(v),
-            Self::SetupReconcile(_) | Self::ActivityOverview(_) => None,
+            Self::RepositoryCreate(v) | Self::DraftPrCreate(v) | Self::PrCreate(v) | Self::FailedJobsRetry(v) | Self::SetupPublish(v) | Self::PreflightDispatch(v) | Self::ReleaseDispatch(v) | Self::CounterCreate(v) => Some(v),
+            _ => None,
         }
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::ActivityOverview(v) => v.valid(),
-            Self::SetupReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
+            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
+            Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.valid(),
+            Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
             _ => self.prepared().is_some_and(|v| original(&v.session_id, v.expected_revision) && hex(&v.consent_id, 32) && hex(&v.prepared_sha256, 64)),
         }
     }
@@ -162,7 +250,9 @@ impl Review {
         // Same exact three string-allocation bounds as the original profile.
         match self {
             Self::ActivityOverview(v) => v.retained_fits(),
-            Self::SetupReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
+            Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
+            Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.retained_fits(),
+            Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
             _ => self.prepared().is_some_and(|v| v.session_id.capacity() <= 128 && v.consent_id.capacity() <= 64 && v.prepared_sha256.capacity() <= 128),
         }
     }
@@ -261,10 +351,20 @@ pub(crate) enum Effect {
     AdvancedUnattributed,
     BranchObserved,
     DraftPrObserved,
+    CounterObserved,
 }
 impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
+        if k.dispatch_family() { return match self {
+            Self::None=>!k.mutation(),
+            Self::NotSent|Self::PotentiallyApplied=>k.mutation(),
+            Self::Accepted=>matches!(k,Kind::PreflightDispatch|Kind::ReleaseDispatch),
+            Self::CounterObserved=>matches!(k,Kind::CounterCreate|Kind::CounterReconcile),
+            Self::Unresolved=>k==Kind::CounterReconcile,
+            _=>false,
+        }; }
         match self {
+            Self::CounterObserved=>false,
             Self::None => matches!(k, Kind::SetupReconcile | Kind::ActivityOverview),
             Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
             Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
@@ -309,10 +409,12 @@ pub(crate) struct Status {
     // Absent on all six original kinds, preserving their exact serialized bytes.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "activity::optional_snapshot")]
     pub(crate) snapshot: Option<activity::Snapshot>,
+    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="dispatch::optional_snapshot")]
+    pub(crate) result: Option<dispatch::Snapshot>,
 }
 impl Status {
     pub(crate) fn limit(&self) -> usize {
-        if self.review.kind() == Kind::ActivityOverview { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
+        if self.review.kind() == Kind::ActivityOverview || self.review.kind().dispatch_family() { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let snapshot_valid = match (&self.review, &self.snapshot) {
@@ -322,11 +424,15 @@ impl Status {
             (_, None) => true,
             _ => false,
         };
+        let result_valid = match &self.result {
+            Some(result)=>self.snapshot.is_none() && self.state==State::Complete && result.valid_for(self.review.kind()),
+            None=>self.state!=State::Complete || !dispatch::requires_result(self.review.kind()),
+        };
         let terminal = matches!(
             self.state,
             State::Complete | State::Refused | State::Cancelled
         );
-        if !snapshot_valid || !self.review.valid()
+        if !result_valid || !snapshot_valid || !self.review.valid()
             || !(1..u32::MAX).contains(&self.revision)
             || !self.do_not_replay
             || !self.effect.valid_for(self.review.kind())

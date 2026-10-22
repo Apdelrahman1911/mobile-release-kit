@@ -3,7 +3,7 @@
 use super::*;
 use p::release::{Basis, Mode, Review as ReleaseReview};
 
-fn details(c: &Context) -> Option<ReleaseReview> {
+pub(super) fn details(c: &Context) -> Option<ReleaseReview> {
     match c {
         Context::LocalStoreExecute(c) => Some(ReleaseReview {
             mode: match c.later.as_ref().map(|s| s.stage) {

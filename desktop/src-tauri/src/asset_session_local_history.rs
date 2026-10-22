@@ -9,6 +9,13 @@ pub(crate) struct LocalHistoryConsent {
     pub(super) project_id:String,pub(super) candidate_operation_id:Option<String>,pub(super) stage_operation_id:Option<String>,registration:u32,pub(super) root:asset_source::RegisteredRoot,
 }
 impl LocalHistoryConsent {
+    #[cfg(test)]
+    pub(crate) fn unbound_preparation_data(context:&wire::Context,registration:u32,root:asset_source::RegisteredRoot)->Arc<Self>{
+        // Only bounded DATA for the common commit/retirement tests. No original
+        // Document, asset context, key, native currentness or runtime is minted.
+        Arc::new(Self{document:std::sync::Weak::new(),context:None,action:context.action,platform:context.platform,
+            project_id:context.project_id.clone(),candidate_operation_id:context.candidate_operation_id.clone(),stage_operation_id:context.stage_operation_id.clone(),registration,root})
+    }
     pub(crate) fn action(&self)->wire::Action{self.action}
     pub(crate) fn consent(&self)->&'static str{if self.platform==Some(wire::CandidatePlatform::Ios){wire::IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
     fn matches_context(&self,context:&wire::Context)->bool{
@@ -23,6 +30,9 @@ impl LocalHistoryConsent {
             && self.registration==registration && self.root==*root
             && state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
             && !state.stopping && !state.quit_pending && !state.retiring && !state.lock_pending
+    }
+    pub(crate) fn bound_to(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
+        self.matches_context(context) && self.registration==registration && self.root==*root
     }
     pub(crate) fn current(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool{
         let Some(document)=self.document.upgrade() else{return false;};
@@ -49,13 +59,18 @@ impl DocumentBinding {
         let(registration,root)=selected.map_err(|_|crate::local_release_history_owner::unavailable())?;
         // Enrollment has no asset draft/credential prerequisite. An optional
         // existing asset context is only a change snapshot, never local authority.
-        let consent=Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),
-            action:args.action,platform:args.platform,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),stage_operation_id:args.stage_operation_id.clone(),registration,root:root.clone()});
+        let consent=self.capture_history_consent(&state,&args,registration,&root);
         self.inner.bridge.local_history.prepare(args,registration,root,gate,consent)
+    }
+    pub(in crate::asset_session) fn capture_history_consent(&self,state:&DocumentState,args:&wire::Prepare,registration:u32,root:&asset_source::RegisteredRoot)->Arc<LocalHistoryConsent>{
+        Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),action:args.action,
+            platform:args.platform,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),
+            stage_operation_id:args.stage_operation_id.clone(),registration,root:root.clone()})
     }
     pub(crate) fn start_local_release_history(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
         let admitted_at=Instant::now();
         let mut state=self.lock();
+        if !self.inner.bridge.local_history.agent_original().ordinary_history_start(&args.operation_id,&args.owner_generation){return Err(crate::local_release_history_owner::unavailable());}
         let original=self.inner.bridge.local_history.prepared_consent(&args.operation_id,&args.owner_generation)?;
         let project=self.inner.bridge.local_history.prepared_project(&args.operation_id,&args.owner_generation)?;
         let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();

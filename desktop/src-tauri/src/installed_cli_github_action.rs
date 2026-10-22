@@ -1,5 +1,6 @@
 //! IDs-only use of the existing Desktop GitHub owners. No token, URL, draft,
-//! provider, workflow dispatch, CLI Prepare or alternative native executor.
+//! provider arguments or alternative native executor. Each actual Prepare or
+//! mutation requires its distinct MAIN-issued one-use permission.
 use super::*;
 use crate::service_github_action_protocol as github;
 
@@ -126,6 +127,9 @@ fn output(
             }
             github::Kind::SetupReconcile => text.push_str("This GET-only check observes the exact original setup intent. It sends no new publication request and cannot prove that an uncertain original was never sent.\n"),
             github::Kind::SetupPublish => text.push_str("This request uses the reviewed five-file setup only. A sent create/PR request can trigger repository CI; STOP does not undo it. Counter setup is not included.\n"),
+            github::Kind::PreflightDispatch | github::Kind::ReleaseDispatch => text.push_str("One reviewed workflow request. It may run project code and existing workflow privileges; accepted is not CI/release success. Stop does not cancel a GitHub run.\n"),
+            github::Kind::CounterCreate => text.push_str("Only the reviewed FIRST counter creation. No allocation, reset, enrollment, protection change or Store request. A sent ref operation is not undone by Stop.\n"),
+            k if k.dispatch_family() => text.push_str("One separately approved original read/prepare. Its compact result is historical DATA, not the next action's consent. Check the original Desktop panel; never auto-submit a dispatch/create.\n"),
             _ => {}
         }
         text.push_str("A returned request does not mean CI passed or grant another operation. Use the original Desktop recovery surface for uncertainty; never resubmit automatically.\n");

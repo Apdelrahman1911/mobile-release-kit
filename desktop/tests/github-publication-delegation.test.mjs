@@ -213,7 +213,7 @@ async function grant(h,p,kind) {const selection=h.controller.agentSelection(kind
 async function sharedFinal(p,selection,status=cliStatus(selection)) {const work=p.controller.check();p.last('access').resolve(cliAccess(selection,status));await flush();if(status.settlement!=='unknown')p.last('request').resolve(status);await work;}
 
 test('shared publication codec keeps both strict shapes and GET-only effects without inheriting old mutation fallbacks',async()=>{
-  assert.deepEqual(GITHUB_ACTION_KINDS,['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview']);
+  assert.deepEqual(GITHUB_ACTION_KINDS.slice(0,7),['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview']);
   const calls=[],port=createAgentGithubActionPort(async(name,body)=>{calls.push([name,JSON.parse(new TextDecoder().decode(body))]);return null;});
   for(const selection of [publish(),reconcile()]) {
     assert.ok(parseGithubActionSelection(selection));assert.ok(parseGithubActionStatus(cliStatus(selection)));assert.ok(parseAgentGithubActionAccess(cliAccess(selection)));

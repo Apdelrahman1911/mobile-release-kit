@@ -12,7 +12,7 @@ fn selected(kind: flow::Kind) -> flow::Selection {
         kind,
         saved_config: r.saved_config,
         saved_version: r.saved_version,
-        candidate: (kind.prepares_intent() || kind.candidate_upload().is_some()).then(|| p::Candidate {
+        candidate: (kind.prepares_intent() || kind.candidate_upload().is_some() || kind.release_mode().is_some()).then(|| p::Candidate {
             operation_id: "12345678-1234-4234-8234-123456789abc".into(),
             sha256: "e".repeat(64),
         }),
@@ -26,6 +26,23 @@ fn selected(kind: flow::Kind) -> flow::Selection {
             predecessor_receipt_sha256: "f".repeat(64),
         }),
         execute: kind.candidate_upload().map(|_| flow::ExecuteSelection { intent_sha256: "d".repeat(64) }),
+        release: kind.release_mode().map(|(_, _, mode)| {
+            use p::release::Mode;
+            let stage = match mode {
+                Mode::ExternalTesting | Mode::ExternalReadiness => Some("22345678-1234-4234-8234-123456789abc"),
+                Mode::ProductionSubmit => Some("32345678-1234-4234-8234-123456789abc"),
+                _ => None,
+            };
+            p::release::Review {
+                mode, intent_sha256: "d".repeat(64), stage_operation_id: stage.map(str::to_owned),
+                basis: stage.map(|_| p::release::Basis {
+                    operation_id: if mode == Mode::ExternalTesting {
+                        "12345678-1234-4234-8234-123456789abc"
+                    } else { "22345678-1234-4234-8234-123456789abc" }.into(),
+                    receipt_sha256: "f".repeat(64),
+                }),
+            }
+        }),
     }
 }
 fn scope(f: &Fixture, kind: flow::Kind) -> Arc<queue::Scope> {
@@ -316,10 +333,11 @@ fn prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history() {
                 .returned(Ok(()))
                 .unwrap();
         } else {
-            let kind = match (n / 2) % 7 {
+            let kind = match n / 2 {
                 0 => flow::Kind::PairedVersions,
                 i @ 1..=4 => STAGE_KINDS[i - 1],
-                i => UPLOAD_KINDS[i - 5],
+                i @ 5..=6 => UPLOAD_KINDS[i - 5],
+                i => LIFECYCLE_KINDS[(i - 7) % LIFECYCLE_KINDS.len()],
             };
             f.inbox
                 .allow_preparation(scope(&f, kind), id('3'))
@@ -346,7 +364,7 @@ fn prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history() {
             c.returned(true);
             let mut ndata = finished(&f);
             ndata.operation.operation_id = review.operation.operation_id;
-            ndata.result = Some(if kind.stage().is_some() { stage_report(&e.scope.selection) } else if kind.candidate_upload().is_some() {
+            ndata.result = Some(if kind.release_mode().is_some() { lifecycle_report(&e.scope.selection) } else if kind.stage().is_some() { stage_report(&e.scope.selection) } else if kind.candidate_upload().is_some() {
                 upload_report(&e.scope.selection)
             } else { flow::Report::CurrentVersions {
                 inventory: inventory::Inventory::Both {
@@ -473,7 +491,10 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     // 32-byte DATA. Entry includes its inline row and both Native enum cells.
     let scope_cells =
         size_of::<queue::PrepareEntry>() + size_of::<queue::Scope>() + size_of::<Control>();
-    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + 36 + 64 + 64 + 32 * 24 + 512; // retains old predecessor and new intent capacity; never another row.
+    // Original root/IDs/config/version/candidate, plus the largest of the
+    // mutually exclusive later / candidate Execute / lifecycle release tuples.
+    let selection_extension = (36usize + 64).max(64).max(64 + 36 + 36 + 64);
+    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + selection_extension + 32 * 24 + 512;
     assert!(
         scope_cells + scope_heap <= 8192,
         "{scope_cells}+{scope_heap}"
@@ -487,7 +508,8 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     // Six limitations are inline fixed DATA, no Vec capacity to discard.
     let stage_report_heap = 3 * 36 + 4 * 64 + 400 + 9;
     let upload_report_heap = 2 * 36 + 3 * 64 + 8 * size_of::<p::release::Limitation>();
-    let report_heap = original_report_heap.max(stage_report_heap).max(upload_report_heap);
+    let lifecycle_report_heap = upload_report_heap + 36 + 64; // full retained Basis, not merely its length
+    let report_heap = original_report_heap.max(stage_report_heap).max(lifecycle_report_heap);
     assert!(size_of::<queue::Native>() + report_heap <= 8192);
     assert!(
         size_of::<flow::Status>() + size_of::<flow::Access>() + scope_heap + report_heap
@@ -789,4 +811,147 @@ fn candidate_upload_prepare_lost_return_failed_history_and_capacity_remain_absor
         Arc::get_mut(&mut over).unwrap().selection.execute.as_mut().unwrap().intent_sha256.reserve(8192);
         assert!(f.inbox.allow_preparation(over, id('3')).is_err());
     }
+}
+
+const LIFECYCLE_KINDS: [flow::Kind; 8] = [
+    flow::Kind::AndroidExternalTestingExecute, flow::Kind::IosExternalTestingExecute,
+    flow::Kind::AndroidProductionSubmitExecute, flow::Kind::IosProductionSubmitExecute,
+    flow::Kind::AndroidCurrentInternal, flow::Kind::IosCurrentInternal,
+    flow::Kind::AndroidRecoverySettlement, flow::Kind::IosExternalReadiness,
+];
+fn lifecycle_report(s: &flow::Selection) -> flow::Report {
+    use p::release::{Mode, ResultKind, StoreState};
+    let (kind, platform, mode) = s.kind.release_mode().unwrap();
+    let candidate = s.candidate.as_ref().unwrap();
+    let selected = s.release.as_ref().unwrap();
+    let release = p::release::Receipt {
+        mode, head_sequence: *mode.heads().start(),
+        operation_id: selected.stage_operation_id.clone().unwrap_or_else(|| candidate.operation_id.clone()),
+        candidate_operation_id: candidate.operation_id.clone(), candidate_sha256: candidate.sha256.clone(),
+        intent_sha256: selected.intent_sha256.clone(), receipt_sha256: "e".repeat(64), basis: selected.basis.clone(),
+        target: mode.target(platform),
+        result: if kind == p::Kind::Execute { ResultKind::Accepted } else if mode == Mode::ExternalReadiness {
+            ResultKind::Ready
+        } else { ResultKind::Reconciled },
+        state: match (kind, platform, mode) {
+            (p::Kind::Execute, p::Platform::Ios, _) => Some(StoreState::SubmittedForReview),
+            (p::Kind::Execute, p::Platform::Android, Mode::ProductionSubmit) => Some(StoreState::Draft),
+            (p::Kind::Execute, p::Platform::Android, _) | (_, _, Mode::ExternalReadiness) => Some(StoreState::AvailableToTesters),
+            _ => None,
+        },
+        limitations: mode.limitations(),
+    };
+    flow::Report::Ordinary { report: if kind == p::Kind::Execute {
+        p::Report::Execute { release }
+    } else { p::Report::Reconcile { release } } }
+}
+fn release_mut(report: &mut flow::Report) -> &mut p::release::Receipt {
+    match report {
+        flow::Report::Ordinary { report: p::Report::Execute { release } | p::Report::Reconcile { release } } => release,
+        _ => unreachable!(),
+    }
+}
+#[test]
+fn lifecycle_prepare_preserves_thirteen_bytes_and_requires_present_exact_release_tuple() {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Before<'a> {
+        kind: flow::Kind, saved_config: &'a p::Content, saved_version: &'a p::Version, candidate: &'a Option<p::Candidate>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        later: &'a Option<flow::StageSelection>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execute: &'a Option<flow::ExecuteSelection>,
+    }
+    let old = [flow::Kind::AndroidAccess, flow::Kind::IosAccess, flow::Kind::AndroidCandidate, flow::Kind::IosCandidate,
+        flow::Kind::AndroidVersions, flow::Kind::IosVersions, flow::Kind::PairedVersions,
+        STAGE_KINDS[0], STAGE_KINDS[1], STAGE_KINDS[2], STAGE_KINDS[3], UPLOAD_KINDS[0], UPLOAD_KINDS[1]];
+    let mut consents = std::collections::BTreeSet::new();
+    for kind in old {
+        let s = selected(kind); assert!(s.valid()); consents.insert(kind.consent());
+        assert_eq!(serde_json::to_vec(&s).unwrap(), serde_json::to_vec(&Before {
+            kind, saved_config: &s.saved_config, saved_version: &s.saved_version, candidate: &s.candidate,
+            later: &s.later, execute: &s.execute,
+        }).unwrap());
+        let mut v = serde_json::to_value(&s).unwrap(); v["release"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<flow::Selection>(v).is_err());
+        let mut hybrid = s; hybrid.release = selected(LIFECYCLE_KINDS[0]).release; assert!(!hybrid.valid());
+    }
+    for kind in LIFECYCLE_KINDS {
+        let s = selected(kind); assert!(s.valid() && s.bounded_capacity());
+        assert!(consents.insert(kind.consent())); assert!(!kind.prepares_intent() && !kind.inventory());
+        let (native_kind, platform, mode) = kind.release_mode().unwrap();
+        let native = flow::ordinary_review(&s, &r()).unwrap();
+        assert_eq!((native.kind, native.platform, native.release.as_ref().unwrap().mode), (native_kind, platform, mode));
+        assert_eq!(native.consent(), Some(kind.consent()));
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(serde_json::from_value::<flow::Selection>(value.clone()).unwrap(), s);
+        for field in ["basis", "stageOperationId"] {
+            let mut bad = value.clone(); bad["release"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<flow::Selection>(bad).is_err(), "{kind:?}/{field}");
+        }
+        for cut in 0..6 {
+            let mut bad = value.clone();
+            match cut {
+                0 => { bad.as_object_mut().unwrap().remove("release"); },
+                1 => bad["release"] = serde_json::Value::Null,
+                2 => bad["release"]["mode"] = "candidate-upload".into(),
+                3 => bad["release"]["unknown"] = true.into(),
+                4 => bad["execute"] = serde_json::json!({"intentSha256":"d".repeat(64)}),
+                _ => bad["later"] = serde_json::to_value(selected(STAGE_KINDS[0]).later).unwrap(),
+            }
+            assert!(!serde_json::from_value::<flow::Selection>(bad).is_ok_and(|s| s.valid()));
+        }
+        if let Some(b) = &s.release.as_ref().unwrap().basis {
+            let mut over = s.clone(); over.release.as_mut().unwrap().basis.as_mut().unwrap().receipt_sha256.reserve(8192);
+            assert!(over.valid() && !over.bounded_capacity()); assert_eq!(b.receipt_sha256.len(),64);
+        }
+    }
+}
+#[test]
+fn lifecycle_prepare_requires_same_two_callers_native_and_history_in_both_orders() {
+    for kind in LIFECYCLE_KINDS { for native_first in [false, true] {
+        let f = Fixture::new(); let (e, prepare) = enter(&f, kind); prepared(&e);
+        assert!(e.allow_start(&r(), id('6')).is_err()); prepare.returned(true);
+        let start = start(&f, &e); let report = lifecycle_report(&e.scope.selection);
+        assert!(report.valid_for(&e.scope.selection, &r()) && report.bounded_capacity());
+        let mut native = finished(&f); native.result = Some(report.clone());
+        if native_first { e.native(native.clone()); assert!(e.claim_history().unwrap().is_none()); }
+        start.returned(true); if !native_first { assert!(e.pending()); e.native(native); }
+        let history = e.claim_history().unwrap().unwrap(); assert!(e.pending() && e.status().unwrap().result.is_none());
+        history.returned(Ok(())).unwrap();
+        let original = e.status().unwrap(); original.validate().unwrap();
+        assert_eq!(original.result, Some(report)); assert!(!e.pending());
+        let bytes = serde_json::to_vec(&original).unwrap(); assert!(bytes.len() <= flow::STATUS_LIMIT);
+        assert_eq!(serde_json::from_slice::<flow::Status>(&bytes).unwrap(), original);
+        let mut public = original.clone(); let receipt = release_mut(public.result.as_mut().unwrap());
+        assert_ne!(receipt.operation_id.replace('-', ""), r().operation.operation_id.as_str());
+        receipt.operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+        assert!(public.validate().is_err()); assert_eq!(e.status().unwrap(), original);
+        let mut old = selected(if kind.release_mode().unwrap().1 == p::Platform::Ios { UPLOAD_KINDS[1] } else { UPLOAD_KINDS[0] });
+        old.candidate = e.scope.selection.candidate.clone();
+        assert!(!original.result.as_ref().unwrap().valid_for(&old, &r()));
+    }}
+}
+#[test]
+fn lifecycle_prepare_lost_returns_failed_history_and_real_basis_capacity_never_reopen() {
+    for kind in LIFECYCLE_KINDS { for cut in 0..5 {
+        let f = Fixture::new(); let (e, prepare) = enter(&f, kind); prepared(&e);
+        if cut == 0 { prepare.returned(false); } else {
+            prepare.returned(true); let start = start(&f, &e);
+            if cut == 1 { drop(start); } else { start.returned(true); }
+            let mut report = lifecycle_report(&e.scope.selection);
+            if cut == 3 {
+                let release = release_mut(&mut report);
+                if let Some(b) = &mut release.basis { b.operation_id.reserve(8192); } else { release.intent_sha256.reserve(8192); }
+                assert!(report.valid_for(&e.scope.selection, &r()) && !report.bounded_capacity());
+            }
+            if cut == 4 { release_mut(&mut report).head_sequence = 5; }
+            let mut n = finished(&f); n.result = Some(report); e.native(n);
+            if cut == 2 { assert!(e.claim_history().unwrap().unwrap().returned(Err(Error::Unavailable)).is_err()); }
+        }
+        let mut later = finished(&f); later.result = Some(lifecycle_report(&e.scope.selection)); e.native(later);
+        assert_eq!(e.status().unwrap().phase, flow::Phase::Unknown);
+        assert!(e.pending() && e.status().unwrap().result.is_none() && e.claim_history().unwrap().is_none());
+        assert!(e.allow_start(&r(), id('7')).is_err()); assert!(f.inbox.claim_preparation().unwrap().is_none());
+    }}
 }

@@ -94,8 +94,16 @@ export class LocalReleaseHistoryController {
  delegationReview():LocalHistoryReview|null{
   const a=this.attempt,api=this.api,s=this.state,op=s.status?.operation;
   if(!a||!api||a.retired||a.started||a.delegated||!a.id||a.epoch!==this.epoch||s.pending||this.reading||this.hasPendingGuiSubmission()||s.blocked||s.unconfirmed||s.historical||s.status?.availability!=='available'||op?.phase!=='awaiting-consent'||!op.intentUsable||!sameId(a.id,op)||!sameOfflineData(op.context,a.request)||s.consentUntil===null||!Number.isFinite(this.now())||this.now()>=s.consentUntil||!this.invocationCurrent(api,a))return null;
-  const r=a.request;if(!['enroll','verify','review-inputs'].includes(r.action))return null;
-  return parseLocalHistoryReview({kind:r.action,...a.id,statusRevision:s.status.statusRevision,...(r.platform==='ios'?{platform:'ios'}:{}),...(r.action==='review-inputs'?{candidateOperationId:r.candidateOperationId}:{})});
+  const r=a.request;if(r.action==='abandon-inputs')return null;
+  return parseLocalHistoryReview({kind:r.action,...a.id,statusRevision:s.status.statusRevision,...(r.platform!==undefined?{platform:r.platform}:{}),...(r.candidateOperationId!==undefined?{candidateOperationId:r.candidateOperationId}:{}),...('stageOperationId' in r&&r.stageOperationId!==undefined?{stageOperationId:r.stageOperationId}:{})});
+ }
+ // Only a peer/currentness gate for a genuine MAIN comparison. This does not
+ // install an Attempt, infer a return, or grant ordinary GUI Start.
+ cliPreparationReason(review:LocalHistoryReview):string|null {
+  const s=this.state,op=s.status?.operation,a=this.attempt;
+  if(this.disposed||s.blocked||s.unconfirmed||s.pending||this.reading||this.hasPendingGuiSubmission())return 'The original Desktop history caller is still pending or unconfirmed.';
+  if(active(s.status)&&(!sameId(review,op)||a?.id&&sameId(a.id,op)))return 'A different or GUI-owned history intent is retained.';
+  return null;
  }
  delegatePrepared(review:LocalHistoryReview):(()=>boolean)|null{
   const r=this.delegationReview(),a=this.attempt,api=this.api,status=this.state.status;

@@ -40,6 +40,11 @@ struct Pins {
 impl Pins {
     fn capture(m: &Arc<SelectedStoreMaterial>, input: &Input) -> Result<Self, BridgeError> {
         use crate::{local_store_preflight_protocol as access, local_store_prepare_protocol as prepare};
+        fn stage(a: &prepare::StageAssignments) -> [Option<(&str, u32, Kind)>; 3] {
+            [Some((a.review_contact.record_id.as_str(), a.review_contact.record_revision, Kind::AppleReviewContact)),
+             Some((a.commitment.record_id.as_str(), a.commitment.record_revision, Kind::OperationCommitment)),
+             a.review_demo.as_ref().map(|r| (r.record_id.as_str(), r.record_revision, Kind::AppleReviewDemo))]
+        }
         let expected = match input {
             Input::Access(c) => match &c.ios_record {
                 Some(r) if access::paired_versions::selected(c) => [Some((r.record_id.as_str(), r.record_revision, Kind::AscP8)), None, None],
@@ -49,15 +54,25 @@ impl Pins {
             Input::Candidate(c) => match &c.later {
                 Some(later) if c.platform == prepare::Platform::Ios => {
                     let a = later.supplemental_assignments.as_ref().ok_or_else(|| public(Error::Conflict))?;
-                    [Some((a.review_contact.record_id.as_str(), a.review_contact.record_revision, Kind::AppleReviewContact)),
-                     Some((a.commitment.record_id.as_str(), a.commitment.record_revision, Kind::OperationCommitment)),
-                     a.review_demo.as_ref().map(|r| (r.record_id.as_str(), r.record_revision, Kind::AppleReviewDemo))]
+                    stage(a)
                 }
                 Some(later) if later.supplemental_assignments.is_some() => return Err(public(Error::Conflict)),
                 _ => [None, None, None],
             },
             Input::Execute(c) if c.later.is_none() && c.stage_operation_id.is_none() => [None, None, None],
+            Input::Execute(c) if c.stage_operation_id.is_some() => match &c.later {
+                Some(later) if c.platform == crate::local_store_execute_protocol::Platform::Ios => {
+                    stage(later.supplemental_assignments.as_ref().ok_or_else(|| public(Error::Conflict))?)
+                }
+                Some(later) if later.supplemental_assignments.is_none() => [None, None, None],
+                _ => return Err(public(Error::Conflict)),
+            },
             Input::Execute(_) => return Err(public(Error::Conflict)),
+            Input::Reconcile(c) => match &c.readiness {
+                Some(r) if c.refreshing() => stage(&r.supplemental_assignments),
+                None => [None, None, None],
+                _ => return Err(public(Error::Conflict)),
+            },
         };
         let (c, p) = m.census_parts();
         let mut rest = m.supplemental_census();
@@ -133,6 +148,7 @@ impl DocumentBinding {
             Input::Access(c) => self.review_store_preflight_material(s, c, registration, root),
             Input::Candidate(c) => self.review_store_prepare_material(s, c, registration, root),
             Input::Execute(c) => self.review_store_execute_material(s, c, registration, root),
+            Input::Reconcile(c) => self.review_store_reconcile_material(s, c, registration, root),
         }
     }
     fn preparation_budget(
@@ -145,6 +161,7 @@ impl DocumentBinding {
             Input::Access(_) => self.store_preflight_budget(s, m),
             Input::Candidate(_) => self.store_prepare_budget(s, m),
             Input::Execute(_) => self.store_execute_budget(s, m).map(|_| ()),
+            Input::Reconcile(_) => self.store_reconcile_budget(s, m),
         }
     }
     fn preparation_current(
@@ -415,6 +432,7 @@ impl DocumentBinding {
             Input::Access(_) => self.recheck_store_preflight_material(s, m, registration, root),
             Input::Candidate(_) => self.recheck_store_prepare_material(s, m, registration, root),
             Input::Execute(_) => self.recheck_store_execute_material(s, m, registration, root),
+            Input::Reconcile(_) => self.recheck_store_reconcile_material(s, m, registration, root),
         }
     }
     fn admit_store_preparation(
@@ -623,6 +641,23 @@ pub(in crate::asset_session::agent_store) fn flush_preparation(
 #[cfg(test)]
 pub(in crate::asset_session) mod tests {
     use super::*;
+    // Exact owned string capacities in the two added native Context domains.
+    // Material/source descendants remain in the unchanged native census.
+    fn lifecycle_heap(input: &Input) -> usize {
+        let (strings, extra) = match input {
+            Input::Execute(c) => ([&c.project_id, &c.saved_config.sha256, &c.saved_version.sha256,
+                &c.saved_version.source, &c.saved_version.name, &c.record_id, &c.candidate_operation_id,
+                &c.candidate_sha256, &c.confirmation, &c.intent_sha256],
+                c.later.as_ref().unwrap().heap_bytes().unwrap()
+                    + c.stage_operation_id.as_ref().unwrap().capacity()),
+            Input::Reconcile(c) => ([&c.project_id, &c.saved_config.sha256, &c.saved_version.sha256,
+                &c.saved_version.source, &c.saved_version.name, &c.record_id, &c.candidate_operation_id,
+                &c.candidate_sha256, &c.confirmation, &c.intent_sha256],
+                c.readiness.as_ref().map_or(0, |r| r.heap_bytes().unwrap())),
+            _ => unreachable!(),
+        };
+        strings.into_iter().try_fold(extra, |n, s| n.checked_add(s.capacity())).unwrap()
+    }
     #[test]
     fn store_preparation_raw_uses_original_closed_input_and_bounded_nodes() {
         use flow::Kind::*;
@@ -663,8 +698,27 @@ pub(in crate::asset_session) mod tests {
             IosProductionSubmit,
             AndroidCandidateUpload,
             IosCandidateUpload,
+            AndroidExternalTestingExecute,
+            IosExternalTestingExecute,
+            AndroidProductionSubmitExecute,
+            IosProductionSubmitExecute,
+            AndroidCurrentInternal,
+            IosCurrentInternal,
+            AndroidRecoverySettlement,
+            IosExternalReadiness,
         ] {
-            let mut prepare = if kind.candidate_upload().is_some() {
+            let mut prepare = if let Some((domain, platform, mode)) = kind.release_mode() {
+                if domain == p::Kind::Execute {
+                    crate::local_store_execute_protocol::tests::stage_input(platform == p::Platform::Ios, mode == p::release::Mode::ProductionSubmit)
+                } else if mode == p::release::Mode::ExternalReadiness {
+                    crate::local_store_reconcile_protocol::tests::readiness_input()
+                } else {
+                    let mut v = crate::local_store_reconcile_protocol::tests::input();
+                    if platform == p::Platform::Ios { v["platform"] = "ios".into(); v["confirmation"] = "candidate:ios:1.2.3:42".into(); }
+                    if mode == p::release::Mode::RecoverySettlement { v["settlement"] = "record-current-target".into(); }
+                    v
+                }
+            } else if kind.candidate_upload().is_some() {
                 crate::local_store_execute_protocol::tests::input()
             } else if let Some((platform, stage)) = kind.stage() {
                 crate::local_store_prepare_protocol::tests::stage_input(
@@ -704,6 +758,8 @@ pub(in crate::asset_session) mod tests {
                         serde_json::json!({"recordId":"d".repeat(32),"recordRevision":2});
                 }
                 AndroidExternalTesting | IosExternalTesting | AndroidProductionSubmit | IosProductionSubmit => (),
+                AndroidExternalTestingExecute | IosExternalTestingExecute | AndroidProductionSubmitExecute | IosProductionSubmitExecute
+                    | AndroidCurrentInternal | IosCurrentInternal | AndroidRecoverySettlement | IosExternalReadiness => (),
             }
             let raw=serde_json::to_vec(&serde_json::json!({"kind":kind,"prepare":prepare,"expectedPermissionRevision":"0","consentVersion":flow::PREPARE_CONSENT})).unwrap();
             let input: AllowPrepare = decode(&raw).unwrap();
@@ -747,6 +803,40 @@ pub(in crate::asset_session) mod tests {
                 let mut reconcile = input.prepare.clone(); reconcile["action"] = "current-internal".into();
                 assert!(Input::parse(kind, &reconcile).is_err());
             }
+            if let Some((domain, platform, mode)) = kind.release_mode() {
+                let parsed = Input::parse(kind, &input.prepare).unwrap();
+                let selected = parsed.selection().unwrap();
+                assert!(2 * lifecycle_heap(&parsed) <= 16 * 1024); // unchanged two-context native heap term
+                assert_eq!(selected.release.as_ref().unwrap().mode,mode);
+                assert!(selected.later.is_none() && selected.execute.is_none());
+                for other in [AndroidCandidate, IosCandidate, AndroidCandidateUpload, IosCandidateUpload, AndroidExternalTesting, IosExternalTesting, AndroidProductionSubmit, IosProductionSubmit] {
+                    assert!(Input::parse(other, &input.prepare).is_err(),"{kind:?}/{other:?}");
+                }
+                for field in ["intentSha256","confirmation","recordRevision","credentialContextRevision"] {
+                    let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove(field);
+                    assert!(Input::parse(kind, &missing).is_err(),"{kind:?}/{field}");
+                }
+                let mut tools = input.prepare.clone(); tools["toolchainSelection"] = serde_json::Value::Null;
+                assert!(Input::parse(kind,&tools).is_err());
+                if domain == p::Kind::Execute || mode == p::release::Mode::ExternalReadiness {
+                    let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove("stageOperationId");
+                    assert!(Input::parse(kind,&missing).is_err());
+                    if platform == p::Platform::Ios {
+                        // Maximum three refs, not the usual nullable demo fixture.
+                        let mut full = input.prepare.clone();
+                        full["supplementalAssignments"]["reviewDemo"] = serde_json::json!({"recordId":"b".repeat(32),"recordRevision":4});
+                        full["projectId"] = "p".repeat(64).into();
+                        full["savedVersion"]["source"] = format!("{}/{}/version.json", "a".repeat(255), "b".repeat(243)).into();
+                        full["savedVersion"]["name"] = "v".repeat(64).into();
+                        full["savedVersion"]["build"] = 2_100_000_000u32.into();
+                        full["confirmation"] = format!("{}:ios:{}:2100000000", if mode==p::release::Mode::ProductionSubmit {"production-submit"} else {"external-testing"}, "v".repeat(64)).into();
+                        let bytes = serde_json::to_vec(&serde_json::json!({"kind":kind,"prepare":full,"expectedPermissionRevision":"0","consentVersion":flow::PREPARE_CONSENT})).unwrap();
+                        let v:AllowPrepare=decode(&bytes).unwrap(); let parsed=Input::parse(v.kind,&v.prepare).unwrap();
+                        assert_eq!(parsed.selection().unwrap().kind,kind);
+                        assert!(2 * lifecycle_heap(&parsed) <= 16 * 1024);
+                    }
+                }
+            }
         }
         // Rejected before Document/native selection. No hidden full Value
         // tree or arbitrary private fields may outgrow this same RAW quote.
@@ -769,8 +859,13 @@ pub(in crate::asset_session) mod tests {
             + size_of::<Input>()
             + size_of::<Pins>()
             + size_of::<queue::Scope>();
+        // Input's actual largest variant includes full later Execute or
+        // Readiness Context cells, not a guessed scalar-only enum.
+        assert!(size_of::<Input>() >= size_of::<crate::local_store_execute_protocol::Context>());
+        assert!(size_of::<Input>() >= size_of::<crate::local_store_reconcile_protocol::Context>());
         // Fixed bounded roots plus copied small context/publication records for
-        // both grants; no payload is owned by these weak identity records.
+        // both grants; the actual maximum-length lifecycle contexts above fit
+        // the unchanged 16KiB term. Weak records do not own material payloads.
         let heaps = 8 * 4096 + 16 * 1024 + 3 * 32;
         // The remaining 32KiB of the SAME 128KiB fixed term is tested in
         // the actual Saved binding fixture; it is not a second reservation.
@@ -788,21 +883,42 @@ pub(in crate::asset_session) mod tests {
         context: &crate::local_store_prepare_protocol::Context,
         same: bool,
     ) {
-        let input = Input::Candidate(context.clone());
-        let pins = Pins::capture(original, &input).unwrap();
-        assert!(pins.matches(original));
-        assert_eq!(pins.matches(compared), same);
-        assert!(pins.supplemental.iter().flatten().all(|(k, _)| k.id.0.capacity() <= 32));
-        for cut in 0..5 {
-            let mut p = Pins::capture(original, &input).unwrap();
-            match cut {
-                0 => p.supplemental[0] = None,
-                1 => p.supplemental.swap(0, 1),
-                2 => p.supplemental[0].as_mut().unwrap().0.revision += 1,
-                3 => p.supplemental[0].as_mut().unwrap().1 = Weak::new(),
-                _ => p.primary = Weak::new(),
+        let mut raw=serde_json::to_value(context).unwrap(); raw.as_object_mut().unwrap().remove("operation");
+        raw["stageOperationId"]=crate::local_store_prepare_protocol::tests::STAGE_ID.into();
+        raw["intentSha256"]="e".repeat(64).into();
+        let execute=crate::local_store_execute_protocol::prepare(&raw).unwrap().context();
+        for field in ["stage","predecessorOperationId","predecessorReceiptSha256"] {raw.as_object_mut().unwrap().remove(field);}
+        raw["action"]="external-readiness".into();raw["executionReceiptSha256"]="9".repeat(64).into();
+        raw["confirmation"]=format!("external-testing:ios:{}:{}",context.saved_version.name,context.saved_version.build).into();
+        let reconcile=crate::local_store_reconcile_protocol::prepare(&raw).unwrap().context();
+        // This shared DATA helper tests only exact keys and original Payload
+        // Weak identities. It does not claim that a Prepare material is an
+        // Execute/Reconcile command loan or skip those actual native checks.
+        for input in [Input::Candidate(context.clone()),Input::Execute(execute),Input::Reconcile(reconcile)] {
+            let pins = Pins::capture(original, &input).unwrap();
+            assert!(pins.matches(original));
+            assert_eq!(pins.matches(compared), same);
+            assert!(pins.supplemental.iter().flatten().all(|(k, _)| k.id.0.capacity() <= 32));
+            for cut in 0..6 {
+                let mut p = Pins::capture(original, &input).unwrap();
+                match cut {
+                    0 => p.supplemental[0] = None,
+                    1 => p.supplemental.swap(0, 1),
+                    2 => p.supplemental[0].as_mut().unwrap().0.revision += 1,
+                    3 => p.supplemental[0].as_mut().unwrap().1 = Weak::new(),
+                    4 => p.primary = Weak::new(),
+                    _ => p.context = Weak::new(),
+                }
+                assert!(!p.matches(original));
             }
-            assert!(!p.matches(original));
+            let mut wrong=input.clone();
+            let refs=match &mut wrong {
+                Input::Candidate(c)=>c.later.as_mut().unwrap().supplemental_assignments.as_mut().unwrap(),
+                Input::Execute(c)=>c.later.as_mut().unwrap().supplemental_assignments.as_mut().unwrap(),
+                Input::Reconcile(c)=>&mut c.readiness.as_mut().unwrap().supplemental_assignments,
+                _=>unreachable!(),
+            };
+            refs.review_contact.record_revision+=1;assert!(Pins::capture(original,&wrong).is_err());
         }
         let mut wrong = context.clone();
         wrong.later.as_mut().unwrap().supplemental_assignments.as_mut().unwrap().review_contact.record_revision += 1;

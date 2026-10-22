@@ -138,6 +138,7 @@ test('generic dispatch failure and idle reads never authorize a retry; exact ori
   h.retain(review()); await h.controller.checkStatus(); h.controller.setConfirmed(true); h.controller.dispatch();
   assert.equal(h.count('dispatch'), 1); assert.equal(h.state.uncertain, true);
   h.emit(dispatchResult(5, 'potentially-applied', 'network-unavailable'));
+  assert.equal(h.state.pending, true); await h.controller.checkStatus();
   assert.equal(h.state.pending, false); assert.equal(h.state.uncertain, false);
   assert.equal(h.state.status.pending[0].runId, null); assert.equal(h.controller.currentPrepared(), null);
   h.controller.observe(h.state.status.pending[0]); assert.equal(h.count('reconcile'), 1); assert.equal(h.count('dispatch'), 1);
@@ -145,7 +146,7 @@ test('generic dispatch failure and idle reads never authorize a retry; exact ori
 
 test('event-before-reply and coherent older admission never replace newer terminal DATA', async () => {
   const h = await attached(); h.controller.setBranch('release/ui'); h.controller.setPlatform('android'); h.controller.prepare();
-  h.emit(review()); assert.equal(h.state.pending, false); assert.ok(h.controller.currentPrepared());
+  h.emit(review()); assert.equal(h.state.pending, true); assert.equal(h.controller.currentPrepared(),null);
   h.last('prepare').resolve(operation('prepare', 'running', 2)); await flush();
   assert.equal(h.state.status.revision, 3); assert.ok(h.controller.currentPrepared()); assert.equal(h.state.uncertain, false);
 });
@@ -170,14 +171,16 @@ test('context retirement retains original terminal correlation, without adopting
   const h = await attached(); h.controller.setBranch('release/ui'); h.controller.setPlatform('android'); h.controller.prepare();
   h.context({ ...connection(), context: null, status: null });
   const done = operation('prepare', 'settled', 3, 'cancelled'); done.available = false; done.reason = 'not-connected';
-  h.emit(done); assert.equal(h.state.pending, false); assert.equal(h.controller.currentPrepared(), null);
-  h.last('prepare').reject(new Error('late lost reply')); await flush(); assert.equal(h.state.pending, false);
+  h.emit(done); assert.equal(h.state.pending, true); assert.equal(h.controller.currentPrepared(), null);
+  h.last('prepare').reject(new Error('late lost reply')); await flush(); assert.equal(h.state.pending, true);
+  await h.controller.checkStatus(); assert.equal(h.state.pending,false);
 });
 
 test('replacing API retains the original pending observer until its exact settlement', async () => {
   const h = await attached(); h.controller.setBranch('release/ui'); h.controller.setPlatform('android'); h.controller.prepare();
   const replacement = harness(); await h.controller.connect(replacement.api); assert.equal(h.detached, 0); assert.equal(replacement.count('subscribe'), 0);
-  h.emit(review()); await flush(); assert.equal(h.detached, 1); assert.equal(replacement.count('subscribe'), 1);
+  h.emit(review()); await flush(); assert.equal(h.detached,0);
+  h.respond('prepare',review()); await flush(); assert.equal(h.detached, 1); assert.equal(replacement.count('subscribe'), 1);
   assert.equal(h.controller.currentPrepared(), null); assert.equal(h.state.pending, false);
 });
 
@@ -201,3 +204,6 @@ test('pending load and known run tracking are explicit and cannot substitute ano
   assert.deepEqual(h.last('track').args, { sessionId: 'session-a', expectedRevision: 2, marker: MARKER });
   h.respond('track', observed(4)); await flush(); assert.equal(h.state.status.run.attempt, 1);
 });
+
+// Reuse the SAME inert fixture in the closed delegation tests; no extra runner.
+export {connection,prepared,idle,operation,review,dispatchResult,observed,deferred,flush,harness,attached,ready};

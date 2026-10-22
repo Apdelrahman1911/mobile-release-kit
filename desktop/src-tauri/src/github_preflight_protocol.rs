@@ -292,21 +292,21 @@ pub(crate) struct Status {
     pub(crate) pending: Vec<PendingRecord>, pub(crate) run: Option<Run>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ControlArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrepareArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32,
     pub(crate) expected_connection_revision: u32, pub(crate) branch: String, pub(crate) platform: Platform }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DispatchArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32,
     pub(crate) consent_id: String, pub(crate) confirm: bool }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ObserveArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32, pub(crate) marker: String }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CancelArgs { pub(crate) operation_id: String }
 pub(crate) enum Command { Status, Prepare(PrepareArgs), Dispatch(DispatchArgs), Track(ObserveArgs), Reconcile(ObserveArgs), Pending(ControlArgs), Cancel(CancelArgs) }
@@ -325,16 +325,16 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
     let command = match name {
         "github_preflight_status" if value.as_object().is_some_and(|v| v.is_empty()) => Command::Status,
         "github_preflight_prepare" => { let v: PrepareArgs = read(value)?;
-            if !valid_id(&v.session_id) || v.expected_revision == 0 || v.expected_connection_revision == 0 || !branch(&v.branch) { return Err(BridgeError::invalid()); }
+            if !v.valid() { return Err(BridgeError::invalid()); }
             Command::Prepare(v) },
         "github_preflight_dispatch" => { let v: DispatchArgs = read(value)?;
-            if !valid_id(&v.session_id) || v.expected_revision == 0 || !hex(&v.consent_id, 32) || !v.confirm { return Err(BridgeError::invalid()); }
+            if !v.valid() { return Err(BridgeError::invalid()); }
             Command::Dispatch(v) },
         "github_preflight_track" | "github_preflight_reconcile" => { let v: ObserveArgs = read(value)?;
-            if !valid_id(&v.session_id) || v.expected_revision == 0 || !hex(&v.marker, 32) { return Err(BridgeError::invalid()); }
+            if !v.valid() { return Err(BridgeError::invalid()); }
             if name == "github_preflight_track" { Command::Track(v) } else { Command::Reconcile(v) } },
         "github_preflight_pending" => { let v: ControlArgs = read(value)?;
-            if !valid_id(&v.session_id) || v.expected_revision == 0 { return Err(BridgeError::invalid()); }
+            if !v.valid() { return Err(BridgeError::invalid()); }
             Command::Pending(v) },
         "github_preflight_cancel" => { let v: CancelArgs = read(value)?;
             if !valid_id(&v.operation_id) { return Err(BridgeError::invalid()); } Command::Cancel(v) },
@@ -422,3 +422,11 @@ impl Status {
         Some(bytes)
     }
 }
+
+impl PrepareArgs { pub(crate) fn valid(&self)->bool { let v=self; !(!valid_id(&v.session_id) || v.expected_revision == 0 || v.expected_connection_revision == 0 || !branch(&v.branch)) } }
+
+impl DispatchArgs { pub(crate) fn valid(&self)->bool { let v=self; !(!valid_id(&v.session_id) || v.expected_revision == 0 || !hex(&v.consent_id, 32) || !v.confirm) } }
+
+impl ObserveArgs { pub(crate) fn valid(&self)->bool { let v=self; !(!valid_id(&v.session_id) || v.expected_revision == 0 || !hex(&v.marker, 32)) } }
+
+impl ControlArgs { pub(crate) fn valid(&self)->bool { let v=self; !(!valid_id(&v.session_id) || v.expected_revision == 0) } }

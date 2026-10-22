@@ -15,6 +15,15 @@ impl ApplicationService {
         }
         Ok(p::ResponseBody::LocalHistoryAccess(Box::new(access)))
     }
+    pub(super) fn service_local_history_prepare(&self,client:&ClientSession,input:crate::service_local_history_prepare_protocol::Request)->Result<p::ResponseBody,Error>{
+        let at=Instant::now();input.validate()?;
+        let state=self.lock()?;
+        self.authorize_build_client(&state,client,&input.origin.project_id)?;
+        let saved=Self::identity_point(&state,&input.origin.project_id)?;
+        let read=live_grant(&state)?.reserve_read.clone();
+        self.store_requests.prepare_history(input,crate::service_store_requests::history::preparation::Scope{saved,read},at)
+            .map(|s|p::ResponseBody::LocalHistoryPreparation(Box::new(s)))
+    }
     pub(super) fn service_local_history_submit(
         &self,
         client: &ClientSession,
@@ -35,6 +44,11 @@ impl ApplicationService {
     ) -> Result<p::ResponseBody, Error> {
         let state = self.lock()?;
         self.authorize_build_client(&state, client, &q.project_id)?;
+        if self.store_requests.is_history_preparation(q)? {
+            let entry=self.store_requests.history_preparation(q)?;
+            if cancel {entry.cancel(wire::Reason::UserCancelled,Instant::now());}
+            return entry.status().map(|s|p::ResponseBody::LocalHistoryPreparation(Box::new(s)));
+        }
         self.store_requests
             .query_history(q, cancel)
             .map(|s| p::ResponseBody::LocalHistoryRequest(Box::new(s)))

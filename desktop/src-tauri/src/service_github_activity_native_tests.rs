@@ -259,7 +259,7 @@ fn activity_agent_does_not_discard_a_retained_gui_preflight_review() {
         "sourceSha":"c".repeat(40),"workflowId":"7","workflowPath":".github/workflows/mobile-preflight.yml",
         "callerSha256":"d".repeat(64),"observedAt":"2026-10-21T12:00:00Z","expectedRef":"refs/heads/main",
         "displayTitle":"held review","confirmation":"not an authorization fixture"})).unwrap();
-    state.preflight.consent = Some(crate::github_preflight_session::Consent {
+    state.preflight.consent = Some(crate::github_preflight_session::Consent { identity:Arc::new(()),agent:None,producer:None,
         prepared: prepared.clone(),
         end: now + Duration::from_secs(90),
         session_id: "github-session-1".into(),

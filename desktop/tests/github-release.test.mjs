@@ -278,7 +278,7 @@ test('unknown dispatch retains its original observer, blocks re-send, and accept
   assert.equal(h.state.uncertain, true); h.controller.prepare(); h.controller.dispatch(); assert.equal(h.count('dispatch'), 1);
   assert.match(githubReleaseOwnerReason(h.state), /original/i);
   await h.controller.connect(null); assert.equal(h.detached, 0);
-  h.emit(dispatchResult()); await flush(); assert.equal(h.detached, 1); assert.equal(h.state.pending, false);
+  h.emit(dispatchResult()); await flush(); assert.equal(h.detached,0); await h.controller.checkStatus(); assert.equal(h.detached, 1); assert.equal(h.state.pending, false);
   assert.equal(h.state.status.pending[0].runId, '44'); h.controller.dispose();
 });
 
@@ -287,7 +287,7 @@ test('event-before-reply and reentrant click still submit exactly once', async (
   let reentered = false;
   const stop = h.controller.subscribe(() => { if (h.state.pending && !reentered) { reentered = true; h.controller.dispatch(); } });
   h.controller.dispatch(); stop(); assert.equal(h.count('dispatch'), 1);
-  h.emit(dispatchResult()); await flush(); assert.equal(h.state.pending, false);
+  h.emit(dispatchResult()); await flush(); assert.equal(h.state.pending, true);
   h.respond('dispatch', operation('dispatch', 'running', 4)); await flush();
   assert.equal(h.state.status.operation.phase, 'settled'); assert.equal(h.state.uncertain, false); h.controller.dispose();
 });
@@ -361,6 +361,7 @@ test('captured Apple grant remains on the original record through uncertainty an
   assert.equal(h.count('prepare'), 1); assert.equal(h.count('dispatch'), 1);
   const pending = [{ prepared: captured, runId: null }];
   h.emit({ ...operation('dispatch', 'settled', 5, 'network-unavailable', 'potentially-applied'), pending }); await flush();
+  assert.equal(h.state.pending,true); await h.controller.checkStatus();
   assert.equal(h.state.uncertain, false); assert.equal(h.state.status.pending[0].prepared.target.selection.recoveryConfirmation, APPLE_ADOPTION);
   assert.equal(h.controller.currentPrepared(), null); h.controller.dispatch(); assert.equal(h.count('dispatch'), 1);
   h.controller.observe(h.state.status.pending[0]);
@@ -403,3 +404,6 @@ test('bridge uses a distinct closed command family and never falls back in previ
   const unavailable = createNativeApi('unavailable', async () => { throw new Error('must not invoke'); });
   await assert.rejects(unavailable.githubReleaseStatus(), (e) => e.admission === 'not-admitted');
 });
+
+// Reuse the SAME inert fixture in the closed delegation tests; no extra runner.
+export {connection,selection,prepared,idle,operation,review,dispatchResult,observed,deferred,flush,harness,attached,ready};

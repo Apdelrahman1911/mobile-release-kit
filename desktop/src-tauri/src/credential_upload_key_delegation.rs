@@ -38,7 +38,7 @@ impl Proof {
                 Selected::Bind { token, .. } => {
                     2 * std::mem::size_of::<usize>() + std::mem::size_of::<OriginalWork>() + token.capacity()
                 }
-                Selected::Backup(_) => 0, // Entire fixed comparison already in Self; no extra Weak/heap.
+                Selected::Backup(s) => s.extra_bytes(), // Ordinary fixed comparison has no extra allocation.
             }
     }
     pub(in crate::asset_session) fn end(&self, now: Instant) -> Instant {
@@ -232,6 +232,13 @@ pub(in crate::asset_session) fn capture(
     context_revision: u32,
     revision: u32,
 ) -> Result<Proof, AssetError> {
+    capture_qualified(document, state, selected, context_revision, revision,
+        crate::asset_session::vault::backup_desktop::Qualification::Ordinary)
+}
+
+pub(in crate::asset_session) fn capture_qualified(document: &DocumentBinding, state: &DocumentState,
+    selected: &agent::Selection, context_revision: u32, revision: u32,
+    qualification: crate::asset_session::vault::backup_desktop::Qualification) -> Result<Proof, AssetError> {
     if state.revision != revision
         || !selected.valid()
         || selected.kind() == agent::Kind::GenerateNew && !available(document)
@@ -271,7 +278,7 @@ pub(in crate::asset_session) fn capture(
             }
         }
         agent::Selection::BackupEncrypted { .. } | agent::Selection::RestoreEncrypted { .. } => {
-            Selected::Backup(backup_delegation::Selection::capture(document, state, selected)?)
+            Selected::Backup(backup_delegation::Selection::capture_qualified(document, state, selected, qualification)?)
         }
     };
     let proof = Proof {

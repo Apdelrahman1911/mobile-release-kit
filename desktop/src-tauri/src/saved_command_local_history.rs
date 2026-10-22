@@ -13,11 +13,9 @@ impl SavedCommandOwner {
     pub(crate) fn prepare_history(&self,input:history_wire::Prepare,registration:u32,root:RegisteredRoot,gate:history_wire::Availability,
         consent:Arc<crate::asset_session::LocalHistoryConsent>)->Result<history_wire::Status,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
-        let status=self.prepare(Context::LocalReleaseHistory(input.context()),registration,root,Availability::from_history(gate))?;
-        let mut r=self.inner.lock();
-        let p=r.prepared.as_mut().ok_or_else(||self.inner.domain.invalid_owner())?;
-        if p.local_history.is_some(){return Err(self.inner.domain.invalid_owner());}
-        p.local_history=Some(consent);status.history()
+        self.prepare_bound_preparations_history(Context::LocalReleaseHistory(input.context()),registration,root,
+            Availability::from_history(gate),None,None,None,None,None,None,None,
+            Some(history_preparation::Commit{consent,link:None}))?.history()
     }
     pub(crate) fn prepared_history_consent(&self,operation:&str,generation:&str)->Result<Arc<crate::asset_session::LocalHistoryConsent>,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;

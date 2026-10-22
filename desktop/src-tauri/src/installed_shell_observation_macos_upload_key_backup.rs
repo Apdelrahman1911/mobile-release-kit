@@ -17,6 +17,7 @@ pub(crate) enum Action {
     Load,
     Bind,
     LockTarget,
+    CancelImport,
 }
 impl Action {
     fn index(self) -> u8 {
@@ -31,6 +32,7 @@ impl Action {
             Self::Load => 7,
             Self::Bind => 8,
             Self::LockTarget => 9,
+            Self::CancelImport => 9,
         }
     }
     fn original(self) -> u32 {
@@ -42,7 +44,7 @@ impl Action {
             Self::Context | Self::Import => 9,
             Self::Load => 10,
             Self::Bind => 11,
-            Self::LockTarget => 12,
+            Self::LockTarget | Self::CancelImport => 12,
         }
     }
 }
@@ -52,6 +54,7 @@ pub(crate) struct Flow {
     pub(crate) native: Mutex<InstalledUploadBackupTrace>,
 }
 impl Flow {
+    pub(crate) fn phase(&self) -> u8 { self.next.load(Ordering::SeqCst) }
     pub(crate) fn select(
         &self,
         control: Arc<Control>,
@@ -60,7 +63,9 @@ impl Flow {
         original: u32,
     ) -> Option<Selection> {
         if !std::ptr::eq(self, &control.upload.backup)
-            || control.case != super::super::Case::UploadKey(Case::BackupRoundTrip)
+            || !matches!(control.case, super::super::Case::UploadKey(Case::BackupRoundTrip | Case::BackupCli))
+            || action == Action::CancelImport && control.case != super::super::Case::UploadKey(Case::BackupCli)
+            || action == Action::LockTarget && control.case == super::super::Case::UploadKey(Case::BackupCli)
             || !control.permits(document)
             || control.upload.next.load(Ordering::SeqCst) != 8
             || original != action.original()
@@ -95,7 +100,8 @@ pub(crate) struct Selection {
 }
 impl Selection {
     fn matches(&self, document: &Arc<()>, original: u32) -> bool {
-        self.control.case == super::super::Case::UploadKey(Case::BackupRoundTrip)
+        matches!(self.control.case, super::super::Case::UploadKey(Case::BackupRoundTrip | Case::BackupCli))
+            && (self.action != Action::CancelImport || self.control.case == super::super::Case::UploadKey(Case::BackupCli))
             && self
                 .document
                 .upgrade()

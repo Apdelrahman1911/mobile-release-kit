@@ -72,6 +72,16 @@ impl BackupSources {
         })
     }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn compare_installed_picker_pair(mut self, owner: &Arc<OriginalWork>, pair: ComponentPair) -> Result<Self, Reason> {
+        if !owner.installed_backup_import_scope() || self.capture_started || self.authentication_started
+            || !self.book.not_started() || self.component_expected.is_some() { return Err(Reason::SourceChanged); }
+        let (paths, expected) = pair.into_parts();
+        if self.paths != paths { return Err(Reason::SourceChanged); }
+        self.component_expected = Some(expected); // Actual selected paths never replaced.
+        Ok(self)
+    }
+
     /// Test-only same-output comparison; no selected-path or native receipt
     /// can be supplied. All ordinary capture/currentness/cleanup stays below.
     #[cfg(all(test, debug_assertions))]

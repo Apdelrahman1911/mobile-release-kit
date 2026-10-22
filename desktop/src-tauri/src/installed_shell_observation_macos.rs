@@ -14,6 +14,7 @@ use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, Install
         installed_macos_selection_saved_data_checks}, bridge::{AppInfo, Project},
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
+use vault::upload_key::cli as backup_cli;
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
     ObservedPanel, OpenAction, OpenActionBody, OpenRecheckBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
 
@@ -297,12 +298,14 @@ impl Case {
     fn field_index(self, id: u32) -> Option<u8> { (self == Self::ProjectFields).then(|| project_fields::index(id)).flatten() }
     fn accepted_id(self, id: u32) -> bool {
         !matches!(self, Self::PickerLoss | Self::Installation) && (id == self.selected_id() || self.file_index(id).is_some_and(|i| self.input_accepted(i))
+            || backup_cli::selected(self) && matches!(id,6|10|13)
             || self.field_index(id).is_some_and(project_fields::accepts) || self.tool_index(id).is_some())
     }
     fn kind_name(self, id: u32) -> &'static str {
         self.tool_index(id).and_then(tool_setup::kind_name).or_else(||self.field_index(id).and_then(project_fields::kind_name)).unwrap_or(if self.file_index(id).is_some() { "file" } else { "project" })
     }
     fn open_id(self, step: Step) -> Option<u32> { match step {
+        Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i))) if backup_cli::selected(self) => backup_cli::panel(i).map(|p|p.0),
         Step::ToolSetup(tool_setup::Step::Native(i)) if self.tool_index(u32::from(i)+2)==Some(i) => Some(u32::from(i)+2),
         Step::OpenProject if self != Self::Installation => Some(self.selected_id()), Step::Session(session::Step::Native(i)) if self.input_accepted(i) => self.input_id(i),
         Step::ProjectFields(project_fields::Step::Native(i)) if self == Self::ProjectFields && project_fields::accepts(i) => project_fields::id(i),
@@ -556,7 +559,7 @@ impl OpenInputSample {
         // Project/File retain the existing action-schema label. The new P2
         // rows carry their exact closed purpose/ordinal rather than borrowing
         // that historical Project action label.
-        let step = if matches!(step, Step::ProjectFields(_) | Step::ToolSetup(_)) { step } else { Step::OpenProject };
+        let step = if matches!(step, Step::ProjectFields(_) | Step::ToolSetup(_) | Step::UploadKey(vault::upload_key::Step::BackupCli(_))) { step } else { Step::OpenProject };
         let selection = matches!(step, Step::ProjectFields(project_fields::Step::Native(i))
             if project_fields::accepts(i) && project_fields::kind(i) == Some(mrk_macos_installed_native::PanelKind::VersionSource));
         Self { id, step, selection, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
@@ -1096,6 +1099,8 @@ impl BootstrapSample {
 impl Record {
     fn action_returned(&self, step: Step) -> Result<bool, &'static str> {
         match step {
+            Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i))) => self.vault_record.as_ref().and_then(|v|v.upload.cli.as_ref())
+                .and_then(|c|c.actions.get(i as usize)).copied().ok_or("native-step"),
             Step::ToolSetup(tool_setup::Step::Native(i)) => self.tool_setup.as_ref().and_then(|r|r.actions.get(usize::from(i))).copied().ok_or("native-step"),
             Step::Session(session::Step::Native(i)) => self.file_actions.get(usize::from(i)).copied().ok_or("native-step"),
             Step::ProjectFields(project_fields::Step::Native(i)) => self.field_actions.get(usize::from(i)).copied().ok_or("native-step"),
@@ -1400,6 +1405,8 @@ impl Observation {
         let git_push=if let Case::GitPush(c)=case{Some(git_push::Control::new(c,&project_path,fixture.uid)?)}else{None};
         let input_paths = if let Case::Ios(c) = case { session::targets(&project_path, c).ok_or(())? } else { Vec::new() };
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
+        let mut vault_record=matches!(case,Case::Vault(_)).then(vault::Record::default);
+        if backup_cli::selected(case) { vault_record.as_mut().ok_or(())?.upload.cli=Some(backup_cli::Record::new(&fixture.root,fixture.uid,vault.as_deref().ok_or(())?)?); }
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 bootstrap_failure: None, vault_failure: None, upload_failure: None,
@@ -1424,7 +1431,7 @@ impl Observation {
                 ios_record: if let Case::Ios(c) = case { (!c.input_only()).then(|| ios::Record::new(c)) } else { None },
                 session_record: ios.as_ref().filter(|c| c.case.inputs()).map(|c| session::Record::new(c.case)),
                 project_field_record: (case == Case::ProjectFields).then(project_fields::Record::new),
-                vault_record: matches!(case, Case::Vault(_)).then(vault::Record::default),
+                vault_record,
                 installation_record: (case == Case::Installation).then(installation_check::Record::default),
                 recovery_record: (case == Case::PendingRecovery).then(recovery::Record::default),
                 local_edits: if let Case::LocalEdits(c)=case{Some(local_edits::Record::new(c))}else{None},
@@ -1456,6 +1463,10 @@ impl Observation {
         if Instant::now() >= self.end { self.fail_with("observer-deadline"); false } else { true }
     }
     pub(super) fn open_identity_scope(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> bool {
+        if backup_cli::selected(self.case) && matches!(id,6|10|13) {
+            return self.vault.as_ref().is_some_and(|c|c.upload.cli.target(id,kind).is_some()
+                && c.observation().is_some() && !c.completed());
+        }
         if let Some(i)=self.case.tool_index(id) {
             return tool_setup::kind(i)==Some(kind) && self.tool_setup.as_ref().is_some_and(|c|c.target(i).is_some() && c.observation().is_some() && !c.completed());
         }
@@ -1484,6 +1495,7 @@ impl Observation {
     }
     pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
         if !self.open_identity_scope(id, kind) { return None; }
+        if backup_cli::selected(self.case) && matches!(id,6|10|13) {return self.vault.as_ref()?.upload.cli.target(id,kind);}
         if let Some(i)=self.case.tool_index(id) {return self.tool_setup.as_ref()?.target(i);}
         match kind {
             mrk_macos_installed_native::PanelKind::Project => Some(self.project_path.as_path()),
@@ -1522,17 +1534,20 @@ impl Observation {
         // callback/cleanup. Preserve a wrong-path Project result's first reason;
         // the separate ProjectSettled/final gates below still forbid success.
     }
-    pub(super) fn identity_start_returned(&self, id: u32, returned: mrk_macos_installed_native::IdentityStartReturn) {
+    pub(super) fn identity_start_returned(&self, id: u32, actual_kind: mrk_macos_installed_native::PanelKind, returned: mrk_macos_installed_native::IdentityStartReturn) {
         let Some(mut r) = self.record() else { return; };
         let Some(configuration) = returned.configuration else { self.fail_with("native-default-binding"); return; };
-        let kind = if let Some(i)=self.case.tool_index(id) {
+        let kind = if backup_cli::selected(self.case) && backup_cli::panel_index(id,actual_kind).is_some() {
+            if configuration.file_panel!=matches!(actual_kind,mrk_macos_installed_native::PanelKind::EncryptedBackup|mrk_macos_installed_native::PanelKind::RecoveryCode) {self.fail_with("native-default-binding");return;}
+            actual_kind
+        } else if let Some(i)=self.case.tool_index(id) {
             if configuration.file_panel {self.fail_with("native-default-binding");return;}
             let Some(kind)=tool_setup::kind(i) else {self.fail_with("native-default-binding");return;};kind
         } else if let Some(i) = self.case.field_index(id) {
             if configuration.file_panel { self.fail_with("native-default-binding"); return; }
             let Some(kind) = project_fields::kind(i) else { self.fail_with("native-default-binding"); return; }; kind
         } else if configuration.file_panel { mrk_macos_installed_native::PanelKind::File } else { mrk_macos_installed_native::PanelKind::Project };
-        if !self.open_identity_scope(id, kind) || r.identity_binding.is_some() {
+        if kind!=actual_kind || !self.open_identity_scope(id, kind) || r.identity_binding.is_some() {
             self.fail_with("native-default-custody"); return;
         }
         r.identity_binding = Some(IdentitySample { case: self.case, id, start_result: returned.result, configuration,
@@ -2292,7 +2307,7 @@ impl Observation {
             if window.close().is_err() { self.fail(); } return;
         }
         if matches!(step,Step::CancelProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending
-            |Step::Session(session::Step::Native(_))|Step::ProjectFields(project_fields::Step::Native(_))|Step::ToolSetup(tool_setup::Step::Native(_))) {
+            |Step::Session(session::Step::Native(_))|Step::ProjectFields(project_fields::Step::Native(_))|Step::ToolSetup(tool_setup::Step::Native(_))|Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(_)))) {
             {
                 let Some(mut r) = self.record() else { return; };
                 // The entry check preceded this lock. A late tick must not
@@ -2698,6 +2713,10 @@ impl Observation {
             if r.action_returned(r.step) != Ok(false) { self.fail_with("native-duplicate-action"); return true; }
             match r.step {
                 Step::OpenProject => { r.native_actions_returned[1] = true; r.step = Step::ProjectSettled; },
+                Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i))) => {
+                    let Some(c)=r.vault_record.as_mut().and_then(|v|v.upload.cli.as_mut()) else {self.fail_with("native-step");return true;};
+                    c.actions[i as usize]=true;r.step=Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Chosen(i)));
+                },
                 Step::ToolSetup(tool_setup::Step::Native(i)) => {
                     let Some(record)=r.tool_setup.as_mut() else {self.fail_with("tool-setup-original-contract");return true;};
                     record.actions[usize::from(i)]=true;r.step=Step::ToolSetup(tool_setup::Step::Chosen(i));
@@ -2846,6 +2865,9 @@ impl Observation {
         if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }
         use mrk_macos_installed_native::PanelKind;
         let (id,kind) = match step {
+            Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i))) if backup_cli::selected(self.case)=>{
+                let(id,k,_)=backup_cli::panel(i).ok_or("native-step")?;(id,k)
+            },
             Step::CancelProject | Step::PickerPending => (1,PanelKind::Project),
             Step::OpenProject => (self.case.selected_id(),PanelKind::Project),
             Step::ToolSetup(tool_setup::Step::Native(i)) if self.case.tool_index(u32::from(i)+2)==Some(i) => (u32::from(i)+2,tool_setup::kind(i).ok_or("native-step")?),
@@ -2864,7 +2886,9 @@ impl Observation {
             let mut r = self.record().ok_or("observer-record-unavailable")?;
             if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
             r.last_panel = Some(PanelSample::from_original(step, &panel));
-            let attached = if let Some(i)=self.case.tool_index(id) {r.tool_setup.as_ref().ok_or("native-step")?.attached[usize::from(i)]}
+            let attached = if let Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i)))=step {
+                r.vault_record.as_ref().and_then(|v|v.upload.cli.as_ref()).ok_or("native-step")?.attached[i as usize]
+            } else if let Some(i)=self.case.tool_index(id) {r.tool_setup.as_ref().ok_or("native-step")?.attached[usize::from(i)]}
                 else if let Some(i) = self.case.file_index(id) { r.file_attached[usize::from(i)] }
                 else if let Some(i) = self.case.field_index(id) { r.field_attached[usize::from(i)] }
                 else { r.panel_attached[self.case.panel_index(step).ok_or("native-step")?] };
@@ -2874,7 +2898,9 @@ impl Observation {
                 // No action, progress fact, or renewed endpoint is produced.
                 return Ok(false);
             }
-            if let Some(i)=self.case.tool_index(id) {r.tool_setup.as_mut().ok_or("native-step")?.attached[usize::from(i)]=true;}
+            if let Step::UploadKey(vault::upload_key::Step::BackupCli(backup_cli::Step::Native(i)))=step {
+                r.vault_record.as_mut().and_then(|v|v.upload.cli.as_mut()).ok_or("native-step")?.attached[i as usize]=true;
+            } else if let Some(i)=self.case.tool_index(id) {r.tool_setup.as_mut().ok_or("native-step")?.attached[usize::from(i)]=true;}
             else if let Some(i) = self.case.file_index(id) { r.file_attached[usize::from(i)] = true; }
             else if let Some(i) = self.case.field_index(id) { r.field_attached[usize::from(i)] = true; }
             else { r.panel_attached[self.case.panel_index(step).ok_or("native-step")?] = true; }

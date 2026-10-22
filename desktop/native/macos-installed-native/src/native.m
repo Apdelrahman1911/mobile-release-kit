@@ -822,7 +822,7 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
     const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
     // Preserve the original Project proof. Only file-like panels need the
     // parent transformation and their additional readiness getters.
-    if (s->kind != 3 && s->kind != 4) {
+    if (s->kind != 3 && s->kind != 4 && s->kind != 17 && s->kind != 18) {
         BOOL ready = path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
             && strcmp(path, s->observationTarget) == 0;
         if (readiness) *readiness = ready ? MRK_DIRECTORY_READY : MRK_DIRECTORY_NOT_MATCHED;
@@ -1273,7 +1273,7 @@ static uint32_t mrk_original_identifier(id value, uint8_t bytes[64]) {
 static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
     MRKIdentityWire *d = &s->observationIdentity;
     d->flags |= MRK_ID_CONFIG_ATTEMPTED; d->site = MRK_ID_OBJECTS;
-    if (s->kind == 3) d->flags |= MRK_ID_FILE_PANEL;
+    if (s->kind == 3 || s->kind == 17 || s->kind == 18) d->flags |= MRK_ID_FILE_PANEL;
     d->error = MRK_OPEN_INELIGIBLE;
     if (!s->parent || !s->window || !mrk_panel_open_kind(s->kind) || s->unknown || s->responded
         || s->callbackActive || s->closeAttempted || s->closed) return NO;
@@ -1311,7 +1311,7 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         d->site = MRK_ID_DIRECTORY_URL; d->error = MRK_OPEN_INPUT;
         if (!mrk_target_path(s->observationTarget) || s->observationDirectoryReturned) return NO;
         NSString *target = [NSString stringWithUTF8String:s->observationTarget];
-        NSString *directory = s->kind == 3 ? [target stringByDeletingLastPathComponent] : target;
+        NSString *directory = (s->kind == 3 || s->kind == 17 || s->kind == 18) ? [target stringByDeletingLastPathComponent] : target;
         NSURL *url = directory ? [NSURL fileURLWithPath:directory isDirectory:YES] : nil;
         if (!url) return NO;
         // The one actual initial-directory setter precedes beginSheet. No late
@@ -1319,7 +1319,7 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         d->site = MRK_ID_DIRECTORY_SET; d->flags |= MRK_ID_DIRECTORY_ENTERED;
         [(NSOpenPanel *)s->window setDirectoryURL:url];
         d->flags |= MRK_ID_DIRECTORY_RETURNED; s->observationDirectoryReturned = YES;
-        if (s->kind == 3) {
+        if (s->kind == 3 || s->kind == 17 || s->kind == 18) {
             // Genuine file panel only, before beginSheet. Prefilling is not a
             // callback or selection: the exact singleton URL is checked later.
             d->site = MRK_ID_NAME_SET; d->flags |= MRK_ID_NAME_ENTERED;

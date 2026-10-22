@@ -1,11 +1,12 @@
-"""One nonshipping, ordinary installed-mrk journey. Import performs no IO.
+"""Two fixed nonshipping installed-mrk recipes. Import performs no IO.
 
 The existing Fixtures owns every file and the existing run_owned owns every
 process. Phase files contain comparison DATA, never a grant or an IPC endpoint.
-Only the actual Desktop APIs can authorize/admit the one local check.
+Only the actual Desktop APIs can authorize the selected original operation.
 """
 from pathlib import Path
 import hashlib
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 import math
 import os
@@ -27,6 +28,33 @@ DRIVER_PHASES = ("submitted", "checked", "denied", "done")
 LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
               "core-builds-disabled", "artifact-validation-not-requested",
               "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed"]
+
+# Exactly one additional recipe, loaded from the same first-party directory.
+# It contains no process/thread/native/cleanup owner.
+_backup_spec = spec_from_file_location("mrk_upload_backup_cli_recipe", Path(__file__).with_name("macos_upload_key_cli_observation.py"))
+if _backup_spec is None or _backup_spec.loader is None:
+    raise RuntimeError("backup-cli-recipe-unavailable")
+BACKUP = module_from_spec(_backup_spec)
+_backup_spec.loader.exec_module(BACKUP)
+del _backup_spec
+
+
+def selected(cases):
+    return cases in (CASES, BACKUP.CASES)
+
+
+def _scope(f):
+    need(selected(f.cases), "cli-fixed-case")
+    return f.cases[0]
+
+
+def _policy(case):
+    if case == SCOPE:
+        return (7, 4, SUCCESS_SECONDS, APP_SECONDS)
+    if case == BACKUP.SCOPE:
+        return (BACKUP.CALLS, BACKUP.ROWS, BACKUP.SUCCESS_SECONDS, BACKUP.APP_SECONDS)
+    raise ValueError("cli-fixed-case")
+
 
 
 def need(ok, reason):
@@ -82,17 +110,19 @@ def _sig(info):
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def fixture_path(binding):
+def fixture_path(binding, *, case=SCOPE):
     binding.checked()
-    return Path("/private/tmp") / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{SCOPE}"
+    _policy(case)
+    return Path("/private/tmp") / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{case}"
 
 
-def short_home(binding, native_home):
+def short_home(binding, native_home, *, case=SCOPE):
     binding.checked()
+    _policy(case)
     home = Path(native_home)
     need(home.is_absolute() and home != Path("/") and len(home.parts) <= 6
          and str(home) == str(home.absolute()), "cli-native-home")
-    tag = _hash(f"{binding.source}/{binding.run}/{binding.attempt}/{SCOPE}".encode("ascii"))[:12]
+    tag = _hash(f"{binding.source}/{binding.run}/{binding.attempt}/{case}".encode("ascii"))[:12]
     home = home / (".c-" + tag)
     need(len(os.fsencode(home / "Library/Application Support" / APPLICATION / "service-v1/s")) < 104,
          "cli-socket-path-bound")
@@ -101,7 +131,8 @@ def short_home(binding, native_home):
 
 class PhaseFile:
     """A borrowed Fixtures FD; one append-only writer and no destructor/close."""
-    def __init__(self, parent, name, fd, uid, writable):
+    def __init__(self, parent, name, fd, uid, writable, *, case=SCOPE):
+        self.case, self.limit = case, _policy(case)[1]
         self.parent, self.name, self.fd, self.uid, self.writable = parent, name, fd, uid, writable
         self.original = _sig(os.fstat(fd))
         self.prefix, self.rows = b"", []
@@ -130,19 +161,19 @@ class PhaseFile:
         need(len(raw) == before[6] and raw.startswith(self.prefix), "cli-phase-rewritten")
         complete = raw.rsplit(b"\n", 1)[0] + b"\n" if b"\n" in raw else b""
         lines = complete.splitlines()
-        need(len(lines) <= 4, "cli-phase-count")
+        need(len(lines) <= self.limit and (self.case == SCOPE or all(len(line) <= 512 for line in lines)), "cli-phase-count")
         rows = [_decode(line, PHASE_LIMIT) for line in lines]
         need(rows[:len(self.rows)] == self.rows, "cli-phase-changed")
         self.prefix, self.rows = complete, rows
         return rows
 
     def append(self, value):
-        need(self.writable and len(self.rows) < 4, "cli-phase-write-role")
+        need(self.writable and len(self.rows) < self.limit, "cli-phase-write-role")
         self.read()
         before = self.current()
         need(before[6] == len(self.prefix), "cli-phase-partial-write")
         raw = _json(value) + b"\n"
-        need(len(self.prefix) + len(raw) <= PHASE_LIMIT, "cli-phase-write-bound")
+        need((self.case == SCOPE or len(raw) - 1 <= 512) and len(self.prefix) + len(raw) <= PHASE_LIMIT, "cli-phase-write-bound")
         offset = 0
         while offset < len(raw):
             n = os.pwrite(self.fd, raw[offset:], len(self.prefix) + offset)
@@ -156,15 +187,17 @@ class PhaseFile:
 
 
 class Calls:
-    """Seven numbered admissions, NOT a process/cancellation executor.
+    """One closed recipe's numbered admissions, NOT a process executor.
 
     Main and its one retained thread share only this short lock. No lock spans
     run_owned/join; closing admission never forgets an already claimed original.
     """
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, *, case=SCOPE):
+        self.count, self.rows, success, app = _policy(case)
+        self.case, self.app_seconds = case, app
         self.clock, self.lock, self.stop = clock, threading.Lock(), threading.Event()
         start = clock()
-        self.success_end, self.hard_end = start + SUCCESS_SECONDS, start + APP_SECONDS + CLEANUP_SECONDS
+        self.success_end, self.hard_end = start + success, start + app + CLEANUP_SECONDS
         self.next, self.inflight, self.closed, self.failed = 0, None, False, False
         self.results, self.returned = [], False
 
@@ -174,7 +207,7 @@ class Calls:
             timeout = math.floor(min(30, self.success_end - now,
                                      self.hard_end - now - CLEANUP_SECONDS - JOIN_MARGIN))
             need(not self.closed and not self.failed and self.inflight is None
-                 and number == self.next and number < 7 and timeout >= 1, "cli-call-admission")
+                 and number == self.next and number < self.count and timeout >= 1, "cli-call-admission")
             self.inflight = number  # Linearizes against main's close, before launch.
             return timeout
 
@@ -202,7 +235,7 @@ class Calls:
 
 def _response(result, argv, kind):
     need(type(result) is subprocess.CompletedProcess and result.args == argv
-         and type(result.returncode) is int and result.returncode == 0
+         and type(result.returncode) is int and (result.returncode == 0 or kind == "upload-key-request" and result.returncode == 5)
          and type(result.stdout) is bytes and type(result.stderr) is bytes
          and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "cli-original-result")
     v = _decode(result.stdout)
@@ -261,38 +294,42 @@ def _phase(channel, calls, name, index):
         calls.wait()
 
 
+def _call(c, run_owned, env, state, calls, number, args, kind, *, receipt=False):
+    c.current_cli()
+    argv = [CLI, *args, "--json"]
+    timeout = calls.claim(number)
+    result = run_owned(argv, environ=env, cwd=state, timeout=timeout, capture=True,
+                       text=False, output_limit=OUTPUT_LIMIT, cancellation=None)
+    # Only the original normal return is retained. Exception leaves the
+    # claim in flight; no later call or fixture close can replace it.
+    need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
+         and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+         and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "cli-call-original")
+    calls.returned_call(number, result)
+    calls.check()  # The preclaimed original may return, but cannot advance after STOP.
+    c.current_cli()
+    if kind is None:
+        # The ordinary CLI writes its one JSON result, including a
+        # pre-admission denial, to stdout. Public prose is bounded DATA;
+        # only the closed error code/shape and exit status identify denial.
+        need(result.returncode == 4 and result.stderr == b"", "cli-revoke-not-denied")
+        error = _decode(result.stdout)
+        need(_keys(error, "version", "ok", "error", "message")
+             and type(error["version"]) is int and error["version"] == 1
+             and error["ok"] is False and error["error"] == "access_denied"
+             and type(error["message"]) is str
+             and 0 < len(error["message"].encode("utf-8")) <= 1024, "cli-revoke-not-denied")
+        return None
+    instance, value = _response(result, argv, kind)
+    need(receipt or result.stderr == b"", "cli-unexpected-stderr")
+    return instance, value
+
+
 def _journey(f, run_owned, env, state, calls):
     """Exactly one submit; every other command is a fresh real read/late STOP."""
     c = f.cli
     def call(number, args, kind, *, receipt=False):
-        c.current_cli()
-        argv = [CLI, *args, "--json"]
-        timeout = calls.claim(number)
-        result = run_owned(argv, environ=env, cwd=state, timeout=timeout, capture=True,
-                           text=False, output_limit=OUTPUT_LIMIT, cancellation=None)
-        # Only the original normal return is retained. Exception leaves the
-        # claim in flight; no later call or fixture close can replace it.
-        need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
-             and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
-             and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "cli-call-original")
-        calls.returned_call(number, result)
-        calls.check()  # The preclaimed original may return, but cannot advance after STOP.
-        c.current_cli()
-        if kind is None:
-            # The ordinary CLI writes its one JSON result, including a
-            # pre-admission denial, to stdout. Public prose is bounded DATA;
-            # only the closed error code/shape and exit status identify denial.
-            need(result.returncode == 4 and result.stderr == b"", "cli-revoke-not-denied")
-            error = _decode(result.stdout)
-            need(_keys(error, "version", "ok", "error", "message")
-                 and type(error["version"]) is int and error["version"] == 1
-                 and error["ok"] is False and error["error"] == "access_denied"
-                 and type(error["message"]) is str
-                 and 0 < len(error["message"].encode("utf-8")) <= 1024, "cli-revoke-not-denied")
-            return None
-        instance, value = _response(result, argv, kind)
-        need(receipt or result.stderr == b"", "cli-unexpected-stderr")
-        return instance, value
+        return _call(c, run_owned, env, state, calls, number, args, kind, receipt=receipt)
     allowed = _phase(c.native, calls, "allowed", 0)
     need(_keys(allowed, "phase", "projectId", "revision", "config") and _id(allowed["projectId"])
          and _integer(allowed["revision"]) and _config(allowed["config"]), "cli-native-allow-data")
@@ -351,16 +388,20 @@ def _journey(f, run_owned, env, state, calls):
 
 
 def invoke(f, run_owned, argv, env, state):
-    need(f.cases == CASES and f.inflight and not f.last_returned and f.cli is not None
-         and f.cli.calls is None and argv[1:] == [SCOPE], "cli-invocation-order")
+    need(selected(f.cases) and f.inflight and not f.last_returned and f.cli is not None
+         and f.cli.calls is None and argv[1:] == [_scope(f)], "cli-invocation-order")
     c = f.cli
-    calls = c.calls = Calls()
+    calls = c.calls = Calls(case=_scope(f))
     environment = dict(env, HOME=str(c.home))
     # One retained non-daemon thread, before the sole start. No thread may use
     # the main DefaultCancellation or own a native application invocation.
     def worker():
         try:
-            _journey(f, run_owned, environment, state, calls)
+            if calls.case == SCOPE:
+                _journey(f, run_owned, environment, state, calls)
+            else:
+                BACKUP.journey(c, calls, lambda number, args, kind, **kw:
+                    _call(c, run_owned, environment, state, calls, number, args, kind, **kw))
         except BaseException:
             calls.close(failed=True)  # Fixed failure only, no secret exception retention.
     c.thread = threading.Thread(target=worker, name="mrk-installed-cli-fixture", daemon=False)
@@ -368,7 +409,7 @@ def invoke(f, run_owned, argv, env, state):
     try:
         c.thread.start()
         started = True
-        result = run_owned(argv, environ=environment, cwd=state, timeout=APP_SECONDS,
+        result = run_owned(argv, environ=environment, cwd=state, timeout=calls.app_seconds,
                            capture=True, text=False, output_limit=2 * 1024 * 1024)
     except BaseException:
         calls.close(failed=True)
@@ -383,8 +424,8 @@ def invoke(f, run_owned, argv, env, state):
         if not started or not c.joined or calls.inflight is not None:
             calls.failed = True
         # Existing run_cases alone clears Fixtures.inflight after THIS returns.
-    need(c.joined and not calls.failed and calls.returned and calls.next == 7
-         and calls.inflight is None and len(calls.results) == 7, "cli-thread-originals-not-returned")
+    need(c.joined and not calls.failed and calls.returned and calls.next == calls.count
+         and calls.inflight is None and len(calls.results) == calls.count, "cli-thread-originals-not-returned")
     c.current_cli()
     return result
 
@@ -440,11 +481,11 @@ class Fixture:
 
 def prepare(f):
     import pwd
-    need(f.cases == CASES and not f.inflight and f.cli is None, "cli-fixture-order")
+    need(selected(f.cases) and not f.inflight and f.cli is None, "cli-fixture-order")
     c = f.cli = Fixture(f)
     account = pwd.getpwuid(f.uid)
     need(f.uid > 0 and account.pw_uid == f.uid, "cli-fixture-native-user")
-    c.home = short_home(f.binding, account.pw_dir)
+    c.home = short_home(f.binding, account.pw_dir, case=_scope(f))
     parent = c.directory(None, "/", owner=0)
     path = Path("/")
     for part in Path(account.pw_dir).parts[1:]:
@@ -457,8 +498,8 @@ def prepare(f):
     f._roster(parent, (), "cli-application-not-absent")
     for index, name in enumerate(PHASES):
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-        fd = c.retain(os.open(name, flags, 0o600, dir_fd=f.states[SCOPE]))
-        phase = PhaseFile(f.states[SCOPE], name, fd, f.uid, index == 1)
+        fd = c.retain(os.open(name, flags, 0o600, dir_fd=f.states[_scope(f)]))
+        phase = PhaseFile(f.states[_scope(f)], name, fd, f.uid, index == 1, case=_scope(f))
         if index == 0:
             c.native = phase
         else:
@@ -467,7 +508,7 @@ def prepare(f):
 
 
 def admit_installed(f, stager, parents, inventory):
-    need(f.cases == CASES and not f.inflight and f.cli is not None and f.cli.cli_row is None, "cli-runtime-order")
+    need(selected(f.cases) and not f.inflight and f.cli is not None and f.cli.cli_row is None, "cli-runtime-order")
     c = f.cli
     need(str(stager.INSTALL_ROOT / stager.APP_NAME / stager.INSTALLED_CLI) == CLI
          and stager.INSTALLED_CLI == "Contents/MacOS/mrk", "cli-runtime-fixed-role")
@@ -488,7 +529,7 @@ def admit_installed(f, stager, parents, inventory):
 
 
 def before_call(f):
-    need(f.cases == CASES and f.cli is not None and f.cli.calls is None, "cli-case-reused")
+    need(selected(f.cases) and f.cli is not None and f.cli.calls is None, "cli-case-reused")
     f.cli.current_cli()
     need(f.cli.native.read() == [] and f.cli.driver.read() == [], "cli-phase-not-fresh")
 
@@ -509,6 +550,8 @@ def report(v, require=need):
 
 
 def readback(f, v):
+    if _scope(f) == BACKUP.SCOPE:
+        return BACKUP.readback(f, v)
     report(v)
     c = f.cli
     need(not f.inflight and f.last_returned and c is not None and c.joined and c.calls.returned

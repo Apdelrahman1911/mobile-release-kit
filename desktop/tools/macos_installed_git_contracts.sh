@@ -142,7 +142,10 @@ selected_tests=(
   asset_session::agent_github_action::tests::fixed_main_decoder_accepts_only_the_original_closed_three_selections
   asset_session::agent_github_action::tests::main_expected_revision_is_mandatory_and_cannot_come_from_cli_status
   asset_session::agent_github_action::tests::main_revoke_and_relay_close_share_doc_epoch_and_exhaustion_never_wraps
+  asset_session::agent_github_action::tests::native_main_capture_abi_fits_same_named_phase_not_a_new_document_or_ipc_quote
+  asset_session::agent_github_action::tests::only_new_prepare_main_input_gets_four_kib_and_physical_capacity_is_bounded
   asset_session::agent_github_action::tests::request_byte_bound_precedes_typed_parse_without_a_generic_value_tree
+  asset_session::agent_github_action::tests::same_doc_permission_is_spent_before_actual_inbox_error_or_later_install_failure
   asset_session::agent_identity::tests::delayed_first_allow_uses_old_checked_revision_after_actual_revoke
   asset_session::agent_identity::tests::gui_approval_cannot_supply_a_root_change_or_implicit_acknowledgement
   asset_session::agent_identity::tests::main_check_revision_is_closed_decimal_and_other_reply_bytes_stay_unchanged
@@ -159,6 +162,8 @@ selected_tests=(
   asset_session::agent_local_checks::tests::main_revision_is_closed_lossless_and_not_a_cli_access_field
   asset_session::agent_local_checks::tests::named_consent_has_no_root_command_or_original_authority_field
   asset_session::agent_local_checks::tests::terminal_revision_cannot_install_and_overflow_still_calls_original_stop
+  asset_session::agent_local_history::preparation::tests::existing_main_lookup_accepts_only_empty_or_complete_exact_origin_and_no_material
+  asset_session::agent_local_history::preparation::tests::sixteen_selected_shapes_enter_only_actual_registered_runtime_history_contexts
   asset_session::agent_local_history::tests::local_history_allow_raw_is_original_scalar_only_and_native_backing_bounded
   asset_session::agent_metadata_images::tests::actual_default_document_image_quote_fits_and_keeps_retained_capacity_charged
   asset_session::agent_metadata_images::tests::image_main_request_grammar_is_scalar_and_requires_the_original_apply_arm
@@ -187,6 +192,8 @@ selected_tests=(
   asset_session::ios_signing::agent::tests::four_signed_inputs_and_weak_tombstones_fit_existing_build_ancillary_quote
   asset_session::ios_signing::agent::tests::signed_grant_does_not_adopt_a_changed_payload_or_candidate_material
   asset_session::ios_signing::agent::tests::signed_grant_pins_only_the_same_native_and_payload_graph_without_retaining_private_bodies
+  asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context
+  asset_session::local_history::tests::local_stage_history_consent_cannot_switch_stage_or_platform_or_mint_document
   asset_session::lookup_memory::apple_memory::tests::active_same_original_live_and_pending_census_keep_borrowed_source_and_retirement
   asset_session::lookup_memory::apple_memory::tests::old_review_original_without_return_is_refused_not_credited
   asset_session::lookup_memory::apple_memory::tests::retained_review_material_is_counted_after_current_document_replacement
@@ -200,11 +207,17 @@ selected_tests=(
   asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment
   asset_session::tool_acquisition::tests::changed_selected_root_or_complete_roster_cannot_reuse_prepare
   asset_session::tool_acquisition::tests::equal_saved_bytes_in_a_replacement_lane_are_not_the_original
+  asset_session::vault::assignment_native::upload_key::observation::original_table::tests::backup_roundtrip_registers_only_its_actual_export_new_import_and_bind
+  asset_session::vault::assignment_native::upload_key::observation::original_table::tests::picker_cli_reuses_one_backup_prefix_and_only_adds_cancelled_import_then_quit
   asset_session::vault::backup_delegation::tests::authenticated_kind_policy_has_no_wrong_link_fallback_before_new
   asset_session::vault::backup_delegation::tests::original_picker_import_is_android_only_without_narrowing_the_backend
   asset_session::vault::backup_desktop::tests::android_upload_key_scope_does_not_qualify_other_desktop_contexts
   asset_session::vault::backup_desktop::tests::idle_known_is_not_a_backup_publication_or_native_qualification
   asset_session::vault::backup_native::tests::allocation_quotes_refuse_before_full_record_or_output_allocation
+  asset_session::vault::backup_selection::tests::a_dispatched_unknown_second_cannot_become_not_created_or_reset
+  asset_session::vault::backup_selection::tests::both_distinct_original_calls_exist_before_go_and_id_is_not_binding
+  asset_session::vault::backup_selection::tests::first_path_stays_with_original_and_only_both_closed_start_one_io_clock
+  asset_session::vault::backup_selection::tests::returned_second_stop_retains_both_originals_and_never_invents_child_return
   asset_session::vault::key_sources::p12::census_tests::selected_p12_census_distinguishes_real_none_contention_and_poison
   asset_session::vault::upload_key::controls::delegation::reuse::tests::original_weak_body_and_one_reply_token_are_reserved_before_attachment
   asset_session::vault::upload_key::controls::delegation::reuse::tests::selected_row_is_exact_full_reference_and_never_an_inert_return_receipt
@@ -223,10 +236,21 @@ selected_tests=(
   edit_owner::agent_metadata_images::tests::no_actual_image_original_or_retained_status_can_mint_private_apply_lease
   edit_owner::agent_version_prepare::tests::compact_opened_uses_actual_present_baselines_and_never_constructs_a_handoff
   edit_owner::agent_version_prepare::tests::manual_publication_chain_has_only_the_original_seven_successors
+  github_connection_session::action_delegation::dispatch::tests::actual_capture_requires_selected_account_repo_generation_and_original_clock
+  github_connection_session::action_delegation::dispatch::tests::original_record_witness_rechecks_full_rows_and_same_private_edit_owner
+  github_connection_session::action_delegation::dispatch::tests::producer_weak_entry_queries_final_facts_not_the_retired_consumer_scope
+  github_connection_session::action_delegation::dispatch::tests::release_all_six_stage_platform_inputs_preserve_real_lineage_and_recovery_rules
+  github_connection_session::action_delegation::dispatch::tests::twelve_native_inputs_map_only_to_existing_typed_commands_and_hash_exact_fields
   github_connection_session::activity::activity_control_tests::activity_stop_can_return_only_exact_retained_terminal_data
   github_connection_session::activity::delegation::tests::activity_agent_does_not_discard_a_retained_gui_preflight_review
   github_connection_session::activity::delegation::tests::activity_capture_binds_original_edit_root_connection_and_numeric_account
   github_connection_session::activity::delegation::tests::activity_permission_is_one_actual_scope_not_equal_public_data_or_foreign_edit
+  github_connection_session::publication::delegation::tests::complete_roster_duplicate_foreign_and_nonpending_original_refuse
+  github_connection_session::publication::delegation::tests::exact_original_load_and_full_progress_are_required_not_marker_or_status_alone
+  github_connection_session::publication::delegation::tests::original_native_edit_root_and_deadline_cannot_be_replaced_or_renewed
+  github_connection_session::publication::tests::actual_consent_status_expiry_and_context_change_retire_private_prepared
+  github_connection_session::publication::tests::credential_consent_expiry_and_cooldown_cannot_claim_or_reset_original_clock
+  github_connection_session::publication::tests::unknown_cleanup_keeps_original_until_receipt_and_late_data_never_upgrades
   github_connection_session::pull_request::pull_request_control_tests::pull_request_completion_never_invents_disconnect_or_another_stop_identity
   github_history_protocol::download::tests::download_candidate_and_complete_control_quote_are_bounded
   github_history_protocol::download::tests::download_cleanup_window_cannot_authorize_new_publication
@@ -238,6 +262,7 @@ selected_tests=(
   github_history_protocol::download::tests::download_unknown_state_keeps_diagnostics_without_minting_any_ticket
   github_history_protocol::tests::closed_history_commands_frames_and_original_context
   github_history_protocol::tests::complete_history_result_shapes_and_retained_status_are_bounded
+  github_preflight_session::tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
   github_pull_request_protocol::mode::tests::absent_only_defaults_to_draft_while_null_bool_object_unknown_and_duplicate_refuse
   github_pull_request_protocol::mode::tests::both_modes_share_existing_record_response_and_heap_bounds_without_an_extra_pool
   github_pull_request_protocol::mode::tests::legacy_draft_omits_mode_and_preserves_old_canonical_confirmation_and_digest
@@ -248,6 +273,7 @@ selected_tests=(
   github_pull_request_protocol::pull_request_data_tests::pull_request_pending_is_scope_only_and_never_restores_consent_or_write
   github_pull_request_protocol::pull_request_data_tests::pull_request_private_text_is_bound_but_not_in_initial_or_public_review
   github_pull_request_protocol::pull_request_data_tests::pull_request_raw_requires_exact_explicit_draft_and_never_merge_or_token
+  github_release_session::tests::consent_journal_and_run_all_keep_their_distinct_capacity_charges
   installed_cli::android_build::tests::exact_prepare_and_start_are_separate_no_arbitrary_configuration_or_commands
   installed_cli::android_build::tests::lost_ack_preserves_exact_correlation_and_whole_frame_stays_bounded
   installed_cli::android_build::tests::signed_scope_is_explicit_but_unknown_never_prints_start_or_private_assignment
@@ -267,11 +293,13 @@ selected_tests=(
   installed_cli::ios_archive::tests::signed_cli_describes_exact_approved_policy_without_credentials_or_new_commands
   installed_cli::local_history::tests::local_history_cli_scalar_codec_closed_and_lost_ack_keeps_same_request
   installed_cli::local_history::tests::local_history_cli_status_never_accepts_foreign_family_origin_or_scope
+  installed_cli::local_history::tests::local_history_prepare_cli_has_sixteen_closed_contexts_and_no_start_or_origin_fallback
   installed_cli::metadata_images::tests::image_cli_actual_collector_and_capabilities_admit_only_scalar_prepared_import
   installed_cli::metadata_images::tests::image_cli_same_response_binding_and_lost_ack_never_claim_upload_or_replay
   installed_cli::store::tests::preparation_tests::store_prepare_cli_candidate_upload_keeps_candidate_receipt_and_separate_start_ids
   installed_cli::store::tests::preparation_tests::store_prepare_cli_has_two_fixed_separately_reviewed_id_only_commands
   installed_cli::store::tests::preparation_tests::store_prepare_cli_later_stage_results_keep_fixed_calls_and_nonpublishing_limits
+  installed_cli::store::tests::preparation_tests::store_prepare_cli_lifecycle_receipts_keep_same_id_only_output_and_closed_catalogue
   installed_cli::store::tests::preparation_tests::store_prepare_cli_original_response_and_start_grants_cannot_cross_use
   installed_cli::store::tests::preparation_tests::store_prepare_cli_unknown_keeps_ids_and_catalogue_discloses_query_effects
   installed_cli::store::tests::store_cli_lost_ack_has_only_original_status_cancel_and_no_replay
@@ -300,6 +328,7 @@ selected_tests=(
   saved_command_owner::agent_android_build::tests::candidate_terminal_projection_still_requires_original_retirement
   saved_command_owner::agent_android_build::tests::named_scope_cannot_borrow_signing_candidate_or_signature_inspection
   saved_command_owner::agent_android_build::tests::original_validated_result_projection_drops_labels_paths_and_preserves_failed_checks
+  saved_command_owner::agent_history::tests::actual_native_prepared_file_decoder_projects_only_bounded_current_file_summary
   saved_command_owner::agent_history::tests::local_history_actual_original_result_projects_only_public_current_history
   saved_command_owner::agent_history::tests::local_history_native_review_never_relabels_other_history_actions
   saved_command_owner::agent_history::tests::local_history_terminal_projection_requires_actual_retirement_and_original_ids
@@ -316,9 +345,12 @@ selected_tests=(
   saved_command_owner::agent_ios_recovery::tests::recovery_common_start_requires_same_link_and_read_before_consuming_configless_intent
   saved_command_owner::agent_store::preparation::tests::store_candidate_upload_link_rejects_losing_gui_start_without_retiring_prepared
   saved_command_owner::agent_store::preparation::tests::store_candidate_upload_prepare_uses_original_execute_decoder_and_distinct_candidate_identity
+  saved_command_owner::agent_store::preparation::tests::store_later_execute_prepare_reuses_original_decoder_authorization_and_exact_basis
+  saved_command_owner::agent_store::preparation::tests::store_lifecycle_link_rejects_losing_gui_before_any_context_retirement_or_take
   saved_command_owner::agent_store::preparation::tests::store_preparation_actual_core_decoder_projects_required_inconclusive_inventory
   saved_command_owner::agent_store::preparation::tests::store_preparation_losing_gui_start_checks_link_before_any_retirement_or_take
   saved_command_owner::agent_store::preparation::tests::store_preparation_read_end_and_delayed_earlier_revoke_keep_original_clock
+  saved_command_owner::agent_store::preparation::tests::store_reconcile_prepare_reuses_original_decoder_and_checkpoint_never_repairs_old_finality
   saved_command_owner::agent_store::preparation::tests::store_stage_prepare_uses_actual_core_decoder_lineage_and_distinct_report
   saved_command_owner::agent_store::preparation::tests::store_stage_public_uuid_relation_matches_original_native_uuid4_mapper
   saved_command_owner::agent_store::tests::store_facet_never_delegates_both_query_or_later_context
@@ -337,6 +369,9 @@ selected_tests=(
   saved_command_owner::apple_provisioning::tests::apple_original_clock_and_finite_representation_quote_are_not_renewed
   saved_command_owner::apple_provisioning::tests::apple_original_store_closure_keeps_mode_and_owner_gates
   saved_command_owner::apple_provisioning::tests::apple_start_parent_dispatch_matches_actual_initialized_modes
+  saved_command_owner::history_preparation::tests::common_prepared_commit_keeps_consent_and_waits_actual_prepare_and_history_returns
+  saved_command_owner::history_preparation::tests::failed_install_and_lost_prepare_return_never_reissue_or_clear_the_original
+  saved_command_owner::history_preparation::tests::genuine_preparation_binding_handoff_uses_old_submit_and_cannot_replay_gui_or_old_cancel
   saved_command_owner::tests::recovery_observation_needs_original_final_join_binding_not_just_a_success_report
   saved_command_owner::tests::recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_context_before_effects
   saved_command_owner::tests::signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work_or_material
@@ -376,6 +411,11 @@ selected_tests=(
   service_github_action_protocol::activity::tests::compact_row_refuses_hidden_fields_overallocation_and_unavailable_as_empty
   service_github_action_protocol::activity::tests::old_six_status_bytes_have_no_optional_snapshot_or_permission_revision
   service_github_action_protocol::activity::tests::permission_revision_is_exact_full_u64_and_consumes_only_the_supplied_generation
+  service_github_action_protocol::dispatch::tests::compact_binary_cells_roundtrip_and_reject_noncanonical_ids
+  service_github_action_protocol::dispatch::tests::compact_snapshot_rejects_real_capacity_growth_cross_kind_and_duplicate_rows
+  service_github_action_protocol::dispatch::tests::exact_record_reference_requires_mode_bound_run_and_no_fabricated_consent
+  service_github_action_protocol::dispatch::tests::full_sixty_four_record_capacity_and_outer_access_fit_without_truncation
+  service_github_action_protocol::dispatch::tests::twelve_new_references_are_closed_and_do_not_widen_cli_selection_or_consent
   service_github_action_protocol::tests::all_closed_metadata_fits_status_with_wrapper_and_never_contains_material
   service_github_action_protocol::tests::effect_and_never_admitted_are_not_interchangeable_with_native_success
   service_github_action_protocol::tests::exact_three_kinds_and_original_operation_ids_do_not_upgrade_another_grant
@@ -386,13 +426,23 @@ selected_tests=(
   service_github_action_requests::activity::tests::activity_submit_clock_is_not_restarted_by_queue_grant_or_credential_renewal
   service_github_action_requests::activity::tests::compact_native_data_requires_same_caller_and_matching_final_history_ack
   service_github_action_requests::activity::tests::early_read_revoke_after_stop_and_history_loss_keep_original_read_unknown
+  service_github_action_requests::dispatch::tests::completed_producer_cancel_cannot_revoke_a_different_successor_scope
+  service_github_action_requests::dispatch::tests::missing_go_result_or_history_return_never_makes_a_positive_producer
+  service_github_action_requests::dispatch::tests::mixed_old_and_new_rows_share_original_thirty_two_limit_and_keep_all_snapshots
+  service_github_action_requests::dispatch::tests::producer_positive_requires_same_native_relay_and_latest_history_returns
+  service_github_action_requests::dispatch::tests::refused_before_entry_is_never_a_prepared_producer_and_stop_keeps_earliest_read
   service_github_action_requests::memory::tests::full_retained_row_and_ancillary_have_real_typed_bounds_not_response_size
   service_github_action_requests::memory::tests::retained_ceiling_failure_never_borrows_a_retired_row_or_worker_credit
   service_github_action_requests::tests::history_failure_and_drop_are_absorbing_even_after_native_return
+  service_github_action_requests::tests::known_pre_registration_refusal_has_no_native_receipt
   service_github_action_requests::tests::metadata_census_includes_rows_and_all_eight_worker_copies
   service_github_action_requests::tests::one_32_row_pool_retains_old_three_kind_tombstones_and_refuses_the_33rd
+  service_github_action_requests::tests::publication_impossible_write_effect_and_lost_history_cannot_release_a_read_or_a_write
+  service_github_action_requests::tests::publication_read_go_and_return_stay_read_only_until_original_caller_and_history_return
   service_github_action_requests::tests::short_metadata_with_overbound_physical_capacity_is_not_admitted
   service_github_action_requests::tests::three_kinds_require_caller_native_and_same_history_in_either_order
+  service_local_history_prepare_protocol::tests::old_selection_bytes_and_new_pending_are_not_start_or_native_retirement
+  service_local_history_prepare_protocol::tests::sixteen_native_contexts_are_closed_without_abandon_or_platform_inference
   service_local_history_protocol::tests::local_history_codec_closes_platformless_null_and_candidate_grammar
   service_local_history_protocol::tests::local_history_max_report_fits_typed_and_full_response_caps_without_authority
   service_local_history_protocol::tests::local_history_partial_and_unknown_results_never_smuggle_completed_report
@@ -413,6 +463,12 @@ selected_tests=(
   service_protocol::ipc_response_tests::validation_and_oversize_errors_are_identical_without_growable_outer_output
   service_request_catalogue::tests::combined_build_capacity_and_id_namespace_are_not_per_family
   service_store_requests::history::memory_tests::local_history_cell_quote_checks_real_types_and_overflow_without_crediting_old_pool
+  service_store_requests::history::preparation::tests::cancelled_original_exact_lookup_survives_later_row_without_fallback
+  service_store_requests::history::preparation::tests::exact_preparation_to_start_handoff_and_late_old_cancel_keep_same_joint_book
+  service_store_requests::history::preparation::tests::lost_prepare_caller_history_or_witness_never_releases_original_or_rearms
+  service_store_requests::history::preparation::tests::original_preparation_cells_use_real_types_and_checked_existing_row_budget
+  service_store_requests::history::preparation::tests::original_prepare_caller_and_history_ack_are_both_required_before_ready
+  service_store_requests::history::preparation::tests::read_context_is_original_configless_and_first_stop_is_never_renewed
   service_store_requests::tests::local_history_tests::local_history_and_existing_store_preparation_exclude_only_live_originals
   service_store_requests::tests::local_history_tests::local_history_lost_caller_writer_or_invalid_native_retains_unknown
   service_store_requests::tests::local_history_tests::local_history_quote_keeps_entire_old_store_debit_and_shared_eight_peak
@@ -426,6 +482,9 @@ selected_tests=(
   service_store_requests::tests::preparation_tests::later_prepare_excess_capacity_and_wrong_terminal_tuple_never_gain_success
   service_store_requests::tests::preparation_tests::later_prepare_preserves_seven_wire_shapes_and_requires_exact_kind_and_present_tuple
   service_store_requests::tests::preparation_tests::later_prepare_report_stays_owned_and_waits_for_original_start_and_history
+  service_store_requests::tests::preparation_tests::lifecycle_prepare_lost_returns_failed_history_and_real_basis_capacity_never_reopen
+  service_store_requests::tests::preparation_tests::lifecycle_prepare_preserves_thirteen_bytes_and_requires_present_exact_release_tuple
+  service_store_requests::tests::preparation_tests::lifecycle_prepare_requires_same_two_callers_native_and_history_in_both_orders
   service_store_requests::tests::preparation_tests::prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history
   service_store_requests::tests::preparation_tests::prepare_attachment_fact_and_actual_return_are_both_required_before_start
   service_store_requests::tests::preparation_tests::prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
@@ -494,6 +553,14 @@ selected_tests=(
   service_version_reserve_review_requests::tests::review_exception_is_exact_and_a_different_live_lease_never_becomes_read_permission
   service_version_reserve_review_requests::tests::separate_allow_and_submit_require_the_same_private_ready_comparison
   service_version_reserve_review_requests::tests::source_review_and_reserve_share_the_exact_thirty_two_original_rows
+  shell::installed_observation::vault::upload_key::backup::tests::generated_backup_continuation_is_fixed_current_original_and_never_a_registration
+  shell::installed_observation::vault::upload_key::cli::tests::actual_validated_terminal_requires_same_grant_original_and_known_effect
+  shell::installed_observation::vault::upload_key::cli::tests::additional_case_census_keeps_original_caller_and_weak_history_bodies
+  shell::installed_observation::vault::upload_key::cli::tests::only_five_exact_choice_opens_and_cancel_second_has_no_open_target
+  shell::installed_observation::vault::upload_key::cli::tests::prepare_uses_same_captured_application_not_vault_root_and_never_rereserves
+  shell::installed_observation::vault::upload_key::tests::fixed_actions_keep_original_document_path_and_one_use
+  shell::owned_macos::tests::backup_outcome_keeps_the_original_path_and_unknown_never_consumes_it
+  shell::owned_macos::tests::backup_purposes_are_closed_and_cannot_borrow_an_ordinary_primary
   supervisor::history::download_tests::download_requires_each_original_driver_return_and_no_prior_failure
   supervisor::macos_github_actions_original_data_contract
   vault_store::macos::bound_read_tests::new_record_read_matches_reserved_intent_and_exact_sealed_length
@@ -501,7 +568,7 @@ selected_tests=(
   vault_store::macos::bound_read_tests::stored_record_read_checks_original_witness_and_allowance_before_body
   vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation
 )
-[[ "${#selected_tests[@]}" == 472 ]] || exit 1
+[[ "${#selected_tests[@]}" == 539 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -511,12 +578,12 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '472 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '539 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 472 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 539 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

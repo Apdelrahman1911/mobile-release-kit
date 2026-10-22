@@ -23,7 +23,7 @@ fn status(kind: Kind) -> Status {
         reason: Reason::None,
         effect: Effect::NotSent,
         never_admitted: false,
-        do_not_replay: true, snapshot: None,
+        do_not_replay: true, snapshot: None, result:None,
     }
 }
 #[test]

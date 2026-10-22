@@ -1,6 +1,9 @@
 //! Nonsecret preflight state embedded in the original GitHub ConnectionState.
 //! No independent worker, credential, clock renewal, retry or cleanup owner.
 use std::time::Instant;
+use std::sync::{Arc,Weak};
+use crate::github_connection_session::action_delegation::dispatch as delegation;
+use crate::{service_github_action_requests as rows,edit_owner::SavedEditStamp};
 use crate::{asset_source::RegisteredRoot, error::BridgeError, github_preflight_protocol as wire,
     supervisor::{GitHubPreflightReceipt, GitHubPreflightTicket}};
 
@@ -47,21 +50,24 @@ pub(crate) fn outcome_reason(value: &BridgeError) -> wire::Reason {
 }
 
 pub(crate) struct Active {
+    pub(crate) agent:Option<Arc<rows::Entry>>,pub(crate) stamp:Option<SavedEditStamp>,
     pub(crate) ticket: GitHubPreflightTicket, pub(crate) request: wire::Request,
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) generation: u32,
     pub(crate) root: RegisteredRoot,
 }
 pub(crate) struct Consent {
+    pub(crate) identity:Arc<()>,pub(crate) agent:Option<Weak<rows::NativeScope>>,pub(crate) producer:Option<delegation::Producer>,
     pub(crate) prepared: wire::Prepared, pub(crate) end: Instant, pub(crate) session_id: String,
     pub(crate) project_id: String, pub(crate) generation: u32, pub(crate) root: RegisteredRoot,
 }
 pub(crate) struct State {
+    pub(crate) agent_identity:Arc<()>,pub(crate) agent_permission:Option<delegation::Permission>,pub(crate) agent_records:Option<delegation::Records>,
     pub(crate) view: wire::Status, pub(crate) active: Option<Active>, pub(crate) consent: Option<Consent>,
     pub(crate) exhausted: bool,
 }
 impl State {
     pub(crate) fn new() -> Self {
-        Self { view: wire::Status { schema_version: 1, revision: 1, session_id: None, available: false,
+        Self { agent_identity:Arc::new(()),agent_permission:None,agent_records:None,view: wire::Status { schema_version: 1, revision: 1, session_id: None, available: false,
             reason: wire::Reason::Unqualified, operation: None, prepared: None, consent_expires_at: None,
             pending: Vec::new(), run: None }, active: None, consent: None, exhausted: false }
     }
@@ -72,7 +78,7 @@ impl State {
         if let Some(next) = before.revision.checked_add(1).filter(|v| *v < u32::MAX) { self.view.revision = next; }
         else { self.exhausted = true; self.unknown(); self.view.revision = u32::MAX; }
     }
-    pub(crate) fn revoke_consent(&mut self) { self.consent = None; self.view.prepared = None; self.view.consent_expires_at = None; }
+    pub(crate) fn revoke_consent(&mut self) { if let Some(p)=self.agent_permission.take(){p.close();} self.agent_records=None; self.consent = None; self.view.prepared = None; self.view.consent_expires_at = None; }
     pub(crate) fn expire_consent(&mut self, now: Instant) {
         if self.consent.as_ref().is_some_and(|v| now >= v.end) { self.revoke_consent(); }
     }
@@ -139,10 +145,12 @@ impl State {
                 operation.phase != wire::Phase::Settled || operation.reason == wire::Reason::CleanupUnknown) {
             return None;
         }
-        let mut bytes = self.view.retained_heap_bytes()?;
+        let mut bytes = self.view.retained_heap_bytes()?.checked_add(2*std::mem::size_of::<usize>())?;
+        if let Some(p)=&self.agent_permission{bytes=bytes.checked_add(p.heap()?)?;}
+        if let Some(r)=&self.agent_records{bytes=bytes.checked_add(r.heap()?)?;}
         if let Some(consent) = &self.consent {
             // This is a separate owned Prepared, not an alias of view.prepared.
-            bytes = bytes.checked_add(consent.prepared.retained_heap_bytes()?)?
+            bytes = bytes.checked_add(2*std::mem::size_of::<usize>())?.checked_add(consent.producer.as_ref().map_or(0,delegation::Producer::heap))?.checked_add(consent.prepared.retained_heap_bytes()?)?
                 .checked_add(consent.session_id.capacity())?.checked_add(consent.project_id.capacity())?
                 .checked_add(consent.root.path.capacity())?;
         }
@@ -160,11 +168,11 @@ mod installation_memory_capacity_tests {
     fn consent_journal_and_run_all_keep_their_distinct_capacity_charges() {
         let mut state = State::new(); state.view.prepared = Some(prepared(17));
         let before = state.retained_heap_bytes_if_quiescent().unwrap();
-        let consent = Consent { prepared: prepared(29), end: Instant::now(),
+        let consent = Consent { identity:Arc::new(()),agent:None,producer:None,prepared: prepared(29), end: Instant::now(),
             session_id: String::with_capacity(91), project_id: String::with_capacity(93), generation: 0,
             root: RegisteredRoot { path: std::path::PathBuf::with_capacity(4097),
                 identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } };
-        let consent_bytes = consent.prepared.retained_heap_bytes().unwrap() + consent.session_id.capacity()
+        let consent_bytes = 2*std::mem::size_of::<usize>() + consent.prepared.retained_heap_bytes().unwrap() + consent.session_id.capacity()
             + consent.project_id.capacity() + consent.root.path.capacity();
         state.consent = Some(consent);
         assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + consent_bytes));

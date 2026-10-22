@@ -496,7 +496,7 @@ fn upload_terminal_value(c: &execute_wire::Context) -> serde_json::Value {
         "operationId":c.candidate_operation_id,"candidateSha256":c.candidate_sha256,"intentSha256":c.intent_sha256,
         "receiptSha256":"f".repeat(64),"authorizationId":UPLOAD_AUTH,"sourceCommit":"a".repeat(40),"sourceTree":"b".repeat(40),
         "version":{"name":c.saved_version.name,"build":c.saved_version.build},"observedAt":"2026-10-17T00:00:00Z",
-        "result":"accepted","limitations":execute_wire::LIMITATIONS,
+        "result":"accepted","limitations":["internal-testing-only","not-public-release","prior-prepare-finality-not-established","saved-inputs-not-atomic"],
     });
     if ios {
         receipt["bundleId"] = "dev.example.app".into(); receipt["appStoreAppId"] = "0012345".into();
@@ -513,12 +513,13 @@ fn upload_terminal_value(c: &execute_wire::Context) -> serde_json::Value {
 // Original six-frame Execute decoder, not a synthetic native completion. The
 // separately generated authorization remains distinct from Prepared/candidate.
 fn upload_terminal(c: &execute_wire::Context, value: serde_json::Value) -> Result<execute_wire::Terminal, BridgeError> {
+    let before = c.later.as_ref().map_or(5, |later| later.stage.prepared_head());
     let rows = [
         ("accepted", serde_json::json!({"schemaVersion":1,"context":c})),
         ("lease-ready", serde_json::json!({})),
-        ("history-head", serde_json::json!({"sequence":5,"sha256":"a".repeat(64)})),
-        ("execute-pending", serde_json::json!({"sequence":6,"sha256":"b".repeat(64)})),
-        ("execute-settled", serde_json::json!({"head":{"sequence":7,"sha256":"c".repeat(64)},"phase":"settled-success"})),
+        ("history-head", serde_json::json!({"sequence":before,"sha256":"a".repeat(64)})),
+        ("execute-pending", serde_json::json!({"sequence":before+1,"sha256":"b".repeat(64)})),
+        ("execute-settled", serde_json::json!({"head":{"sequence":before+2,"sha256":"c".repeat(64)},"phase":"settled-success"})),
         ("terminal", value),
     ];
     let mut decoder = execute_wire::Decoder::new(UPLOAD_AUTH)?;
@@ -604,5 +605,174 @@ fn store_candidate_upload_link_rejects_losing_gui_start_without_retiring_prepare
         assert_eq!(f.link.entry.status().unwrap().phase, flow::Phase::Unknown);
         assert!(f.link.entry.pending());
         assert!(f.link.entry.allow_start(&f.link.review, id('6')).is_err());
+    }
+}
+
+const LIFECYCLE_KINDS: [flow::Kind; 8] = [
+    flow::Kind::AndroidExternalTestingExecute, flow::Kind::IosExternalTestingExecute,
+    flow::Kind::AndroidProductionSubmitExecute, flow::Kind::IosProductionSubmitExecute,
+    flow::Kind::AndroidCurrentInternal, flow::Kind::IosCurrentInternal,
+    flow::Kind::AndroidRecoverySettlement, flow::Kind::IosExternalReadiness,
+];
+fn lifecycle_input(kind: flow::Kind) -> Input {
+    let (domain, platform, mode) = kind.release_mode().unwrap();
+    let ios = platform == p::Platform::Ios;
+    let raw = if domain == p::Kind::Execute {
+        execute_wire::tests::stage_input(ios, mode == p::release::Mode::ProductionSubmit)
+    } else if mode == p::release::Mode::ExternalReadiness {
+        reconcile_wire::tests::readiness_input()
+    } else {
+        let mut value = reconcile_wire::tests::input();
+        if ios { value["platform"] = "ios".into(); value["confirmation"] = "candidate:ios:1.2.3:42".into(); }
+        if mode == p::release::Mode::RecoverySettlement { value["settlement"] = "record-current-target".into(); }
+        value
+    };
+    Input::parse(kind, &raw).unwrap()
+}
+fn reconcile_value(c: &reconcile_wire::Context) -> serde_json::Value {
+    if c.refreshing() { return reconcile_wire::tests::readiness_terminal(12); }
+    let mut value = reconcile_wire::tests::terminal(); value["context"] = serde_json::json!(c);
+    if c.settling() {
+        value["result"]["scope"] = "local-android-recovery-settlement".into(); value["result"]["headSequence"] = 7.into();
+    } else if c.platform == reconcile_wire::Platform::Ios {
+        value["lifetime"]["commands"] = 15.into(); value["result"]["scope"] = "local-ios-store-reconcile".into();
+        let receipt = value["result"]["reconciliationReceipt"].as_object_mut().unwrap();
+        receipt.remove("applicationId"); receipt.insert("bundleId".into(), "dev.example.ios-app".into());
+        receipt.insert("appStoreAppId".into(), "001234".into());
+        receipt.insert("destination".into(), serde_json::json!({"channel":"testflight-internal"}));
+        receipt.insert("observation".into(), "current-internal-build-only".into());
+    }
+    value
+}
+// The original Reconcile four/five frames and its authorization decoder only.
+// A decoded terminal is still DATA, not a native receipt or history return.
+fn reconcile_terminal(c: &reconcile_wire::Context, value: serde_json::Value, checkpoint: bool) -> Result<reconcile_wire::Terminal, BridgeError> {
+    let before = if c.refreshing() { 11 } else { 6 };
+    let mut rows = vec![
+        ("accepted", serde_json::json!({"schemaVersion":1,"context":c})),
+        ("lease-ready", serde_json::json!({})),
+        ("history-head", serde_json::json!({"sequence":before,"sha256":"a".repeat(64)})),
+    ];
+    if checkpoint { rows.push(if c.refreshing() {
+        ("external-ready", serde_json::json!({"head":{"sequence":before+1,"sha256":"b".repeat(64)},"phase":"external-ready"}))
+    } else {
+        ("recovery-settled", serde_json::json!({"head":{"sequence":before+1,"sha256":"b".repeat(64)},"phase":"target-reconciled"}))
+    }); }
+    rows.push(("terminal", value));
+    let mut decoder = reconcile_wire::Decoder::new(UPLOAD_AUTH)?; let mut terminal = None;
+    for (sequence, (kind, payload)) in rows.into_iter().enumerate() {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({"protocol":reconcile_wire::PROTOCOL,
+            "operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),
+            "requestSha256":"d".repeat(64),"sequence":sequence,"kind":kind,"payload":payload})).unwrap(); bytes.push(b'\n');
+        match decoder.decode(&bytes, &"a".repeat(32), &"b".repeat(32), c, &"c".repeat(32), &"d".repeat(64))? {
+            reconcile_wire::Frame::Accepted => assert_eq!(sequence, 0),
+            reconcile_wire::Frame::Event(_) => assert!((1..=3).contains(&sequence)),
+            reconcile_wire::Frame::Terminal(t) => { assert_eq!(sequence, if checkpoint { 4 } else { 3 }); terminal = Some(t); }
+        }
+    }
+    assert!(decoder.finish()); Ok(terminal.unwrap())
+}
+#[test]
+fn store_later_execute_prepare_reuses_original_decoder_authorization_and_exact_basis() {
+    for kind in LIFECYCLE_KINDS.into_iter().take(4) {
+        let input = lifecycle_input(kind); let context = input.context();
+        let Context::LocalStoreExecute(c) = &context else { unreachable!() };
+        assert_eq!(context.domain(), SavedCommandDomain::LocalStoreExecute);
+        assert!(c.toolchain_selection.is_none()); let selected = input.selection().unwrap();
+        assert_eq!(selected.release, release::details(&context));
+        let review = flow::Review { review_id: id('a'), operation: p::Operation {
+            operation_id: id('a'), owner_generation: id('b'), status_revision: 3,
+        }};
+        let native = flow::ordinary_review(&selected, &review).unwrap();
+        assert_eq!(native, release::review(&context, &"a".repeat(32), &"b".repeat(32), 3).unwrap());
+        let (domain, platform, mode) = kind.release_mode().unwrap(); assert_eq!(domain,p::Kind::Execute);
+        let start = |consent:&str| execute_wire::start(&serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent}));
+        assert!(start(c.consent()).unwrap().matches_context(c)); assert!(start(kind.consent()).is_err());
+        assert!(!start(execute_wire::CONSENT).unwrap().matches_context(c));
+        let value = execute_wire::tests::stage_complete(platform == p::Platform::Ios, mode == p::release::Mode::ProductionSubmit);
+        let terminal = Terminal::LocalStoreExecute(upload_terminal(c, value.clone()).unwrap());
+        let report = project_report(&terminal, &context, &selected, &review).unwrap();
+        assert!(report.valid_for(&selected, &review) && report.bounded_capacity());
+        let out = serde_json::to_value(&report).unwrap();
+        assert_eq!(out["report"]["kind"],"execute"); assert_eq!(out["report"]["release"]["basis"],serde_json::to_value(&native.release.as_ref().unwrap().basis).unwrap());
+        assert_ne!(out["report"]["release"]["operationId"].as_str().unwrap().replace('-',""), review.operation.operation_id.as_str());
+        for field in ["authorizationId","sourceCommit","sourceTree","context","lifetime","supplementalAssignments"] { assert!(!out.to_string().contains(field)); }
+        let mut wrong = selected.clone(); wrong.release.as_mut().unwrap().basis.as_mut().unwrap().receipt_sha256 = "0".repeat(64);
+        assert!(project_report(&terminal, &context, &wrong, &review).is_err());
+        for cut in 0..7 {
+            let mut bad = value.clone(); match cut {
+                0 => bad["result"]["executionReceipt"]["authorizationId"] = c.candidate_operation_id.clone().into(),
+                1 => bad["result"]["executionReceipt"]["predecessorReceiptSha256"] = "0".repeat(64).into(),
+                2 => bad["result"]["executionReceipt"]["operationId"] = c.candidate_operation_id.clone().into(),
+                3 => bad["lifetime"]["commandDispatched"] = false.into(),
+                4 => bad["lifetime"]["commands"] = 0.into(),
+                5 => bad["result"]["headSequence"] = 7.into(),
+                _ => bad["lifetime"]["inputClosed"] = false.into(),
+            }
+            assert!(upload_terminal(c, bad).is_err(),"{kind:?}/{cut}");
+        }
+    }
+}
+#[test]
+fn store_reconcile_prepare_reuses_original_decoder_and_checkpoint_never_repairs_old_finality() {
+    for kind in LIFECYCLE_KINDS.into_iter().skip(4) {
+        let input = lifecycle_input(kind); let context = input.context();
+        let Context::LocalStoreReconcile(c) = &context else { unreachable!() };
+        assert_eq!(context.domain(), SavedCommandDomain::LocalStoreReconcile);
+        let selected = input.selection().unwrap(); assert_eq!(selected.release, release::details(&context));
+        let review = flow::Review { review_id: id('a'), operation: p::Operation { operation_id:id('a'),owner_generation:id('b'),status_revision:3 }};
+        let native = flow::ordinary_review(&selected, &review).unwrap();
+        assert_eq!(native, release::review(&context, &"a".repeat(32), &"b".repeat(32),3).unwrap());
+        assert_eq!(native.consent(), Some(kind.consent()));
+        let args = |consent:&str| serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent});
+        assert!(reconcile_wire::start(&args(c.consent())).is_ok()); assert!(reconcile_wire::start(&args(kind.consent())).is_err());
+        let value = reconcile_value(c); let checkpoint = c.checkpointing();
+        let terminal = Terminal::LocalStoreReconcile(reconcile_terminal(c,value.clone(),checkpoint).unwrap());
+        let report = project_report(&terminal,&context,&selected,&review).unwrap();
+        assert!(report.valid_for(&selected,&review) && report.bounded_capacity());
+        let out = serde_json::to_value(report).unwrap();
+        assert_eq!(out["report"]["kind"],"reconcile");
+        assert!(out["report"]["release"]["limitations"].as_array().unwrap().iter().any(|v| v=="target-match-not-prior-finality"));
+        assert_eq!(out["report"]["release"]["limitations"].as_array().unwrap().iter().any(|v|v=="local-checkpoint-not-prior-finality"),checkpoint);
+        let key = if c.refreshing() { "readinessReceipt" } else { "reconciliationReceipt" };
+        for cut in 0..8 {
+            let mut bad = value.clone(); match cut {
+                0 => bad["result"][key]["authorizationId"] = c.candidate_operation_id.clone().into(),
+                1 => bad["result"][key]["intentSha256"] = "0".repeat(64).into(),
+                2 => bad["result"][key]["priorExecutionFinality"] = "established".into(),
+                3 => bad["lifetime"]["commandDispatched"] = false.into(),
+                4 => bad["lifetime"]["commands"] = 0.into(),
+                5 => bad["result"]["headSequence"] = 5.into(),
+                6 => bad["lifetime"]["inputClosed"] = false.into(),
+                _ => bad["result"][key]["operationId"] = UPLOAD_AUTH.into(),
+            }
+            assert!(reconcile_terminal(c,bad,checkpoint).is_err(),"{kind:?}/{cut}");
+        }
+        assert!(reconcile_terminal(c,value,!checkpoint).is_err()); // no synthetic checkpoint or omitted original publication
+    }
+}
+#[test]
+fn store_lifecycle_link_rejects_losing_gui_before_any_context_retirement_or_take() {
+    for kind in LIFECYCLE_KINDS {
+        let mut f = linked_input(Some(lifecycle_input(kind)));
+        let p = f.prepared.take().unwrap(); let original = p.projection.clone(); let end = p.expires;
+        assert_eq!(original.context.domain(), f.owner.inner.domain); f.owner.inner.lock().prepared = Some(p);
+        for pair in [(id('a'),id('b')),(id('c'),id('d'))] {
+            assert!(f.owner.ordinary_store_start_allowed(pair.0.as_str(),pair.1.as_str()).is_err());
+        }
+        {
+            let r = f.owner.inner.lock(); let p = r.prepared.as_ref().unwrap();
+            assert_eq!(p.projection.operation_id,original.operation_id);
+            assert_eq!(p.projection.owner_generation,original.owner_generation);
+            assert!(p.projection.context==original.context && p.projection.phase==original.phase && p.projection.intent_usable==original.intent_usable);
+            assert_eq!(p.expires,end);
+            assert!(Arc::ptr_eq(p.agent_store_preparation.as_ref().unwrap(),&f.link));
+            assert!(!start_matches(p,None)); assert!(!f.link.consumed.load(Ordering::Acquire));
+        }
+        // The installed fact persists even if this original Prepare caller is
+        // lost. No live material/native admission is fabricated by the fixture.
+        f.caller.take().unwrap().returned(false);
+        assert_eq!(f.link.entry.status().unwrap().phase,flow::Phase::Unknown);
+        assert!(f.link.entry.pending()); assert!(f.owner.ordinary_store_start_allowed(id('a').as_str(),id('b').as_str()).is_err());
     }
 }

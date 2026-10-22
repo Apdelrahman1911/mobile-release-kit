@@ -50,6 +50,7 @@ struct Active {
     agent: Option<Arc<crate::service_github_action_requests::Entry>>,
 }
 struct Consent {
+    producer:Option<action_delegation::dispatch::Producer>,
     identity: Arc<()>,
     agent: Option<std::sync::Weak<crate::service_github_action_requests::NativeScope>>,
     id: String,
@@ -63,6 +64,7 @@ struct Consent {
     stamp: SavedEditStamp,
 }
 pub(super) struct State {
+    agent_identity:Arc<()>,agent_permission:Option<action_delegation::dispatch::Permission>,
     view: p::Status,
     active: Option<Active>,
     consent: Option<Consent>,
@@ -73,6 +75,7 @@ impl State {
     pub(super) fn activity_review_conflict(&self) -> bool { self.consent.is_some() || self.pending_read.as_ref().is_some_and(|r| r.agent.is_some()) }
     pub(super) fn new() -> Self {
         Self {
+            agent_identity:Arc::new(()),agent_permission:None,
             view: p::Status {
                 schema_version: 1,
                 revision: 1,
@@ -109,6 +112,7 @@ impl State {
         }
     }
     pub(super) fn revoke_consent(&mut self) {
+        if let Some(p)=self.agent_permission.take(){p.close();}
         action_delegation::revoke(&self.consent.as_ref().and_then(|c| c.agent.clone()));
         action_delegation::revoke(&self.pending_read.as_ref().and_then(|r| r.agent.clone()));
         self.pending_read = None;
@@ -180,12 +184,14 @@ impl State {
         {
             return None;
         }
-        let mut n = self.view.heap()?;
+        let mut n = self.view.heap()?.checked_add(2*std::mem::size_of::<usize>())?;
+        if let Some(p)=&self.agent_permission{n=n.checked_add(p.heap()?)?;}
         if let Some(read) = &self.pending_read {
             n = n.checked_add(read.heap()?)?.checked_add(delegation::WORKING_BYTES)?;
         }
         if let Some(v) = &self.consent {
             n = n
+                .checked_add(v.producer.as_ref().map_or(0,action_delegation::dispatch::Producer::heap))?
                 .checked_add(v.id.capacity())?
                 .checked_add(2 * std::mem::size_of::<usize>())?
                 .checked_add(v.prepared.heap()?)?
@@ -625,7 +631,7 @@ impl ConnectionState {
         if !action_delegation::origin(&self.publication.consent.as_ref().and_then(|c| c.agent.clone()), gate.agent()) {
             return Err(refused(p::Reason::ConsentExpired));
         }
-        if !args.confirm
+        if !self.publication.consent.as_ref().is_some_and(|c|action_delegation::dispatch::producer_ready(&c.producer)) || !args.confirm
             || !self.publication.consent.as_ref().is_some_and(|v| {
                 v.id == args.consent_id
                     && v.session_id == args.session_id
@@ -989,7 +995,7 @@ impl ConnectionState {
                             .private
                             .as_ref()
                             .filter(|v| v.id == active.session_id && v.retirement.is_none())?;
-                        let end = (settled_at + Duration::from_secs(120)).min(private.clock.end);
+                        let end = (settled_at + Duration::from_secs(120)).min(private.clock.end).min(active.agent.as_ref().map_or(private.clock.end,|e|e.scope().read.end()));
                         if now >= end {
                             return None;
                         }
@@ -1006,7 +1012,7 @@ impl ConnectionState {
                             prepared: prepared.clone(),
                         });
                         self.publication.consent = Some(Consent {
-                            identity: Arc::new(()), agent: None,
+                            identity: Arc::new(()), agent: None,producer:active.agent.as_ref().map(|e|action_delegation::dispatch::Producer::new(e,active.ticket.operation_id())),
                             id: active.consent_id,
                             prepared,
                             counter_proof,
@@ -1068,7 +1074,9 @@ impl ConnectionState {
         // retirement reaches the shared row; not a raw Supervisor phase/event.
         if let Some(op) = &self.publication.view.operation {
             if op.id == agent_id && op.phase == p::Phase::Settled {
-                action_delegation::accepted(&agent, &agent_id, self.publication.view.reason, op.effect);
+                if let Some(entry)=agent.as_ref().filter(|e|e.scope().review.kind().dispatch_family()){
+                    self.counter_agent_return(entry,&agent_id,self.publication.view.reason,op.effect);
+                } else { action_delegation::accepted(&agent, &agent_id, self.publication.view.reason, op.effect); }
             } else { action_delegation::unknown(&agent); }
         } else { action_delegation::unknown(&agent); }
     }
@@ -1408,7 +1416,7 @@ mod tests {
                 .stamp()
                 .unwrap();
             state.publication.consent = Some(Consent {
-                identity: Arc::new(()), agent: None,
+                identity: Arc::new(()), agent: None, producer:None,
                 id: "c".repeat(32),
                 prepared: prepared.clone(),
                 counter_proof: None,

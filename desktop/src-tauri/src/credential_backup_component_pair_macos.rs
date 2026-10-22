@@ -38,6 +38,12 @@ impl ComponentPair {
             .checked_add(self.paths[1].capacity())
     }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn comparison_paths(&self) -> Result<[PathBuf; 2], Reason> {
+        if self.paths.iter().any(|p| p.capacity()>PATH_LIMIT) { return Err(Reason::Capacity); }
+        Ok(self.paths.clone())
+    }
+
     pub(in crate::asset_source) fn into_parts(self) -> ([PathBuf; 2], ComponentExpectedPair) {
         (self.paths, self.expected)
     }
@@ -68,6 +74,16 @@ impl BackupDestinations {
         if !self.component.admitted || !self.candidate_ready(owner) {
             return Err(Reason::SourceChanged);
         }
+        self.published_pair(owner)
+    }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn installed_picker_published_pair(&self, owner: &Arc<OriginalWork>) -> Result<ComponentPair, Reason> {
+        if self.component.admitted || !owner.installed_backup_export_scope() || !self.candidate_ready(owner) {
+            return Err(Reason::SourceChanged);
+        }
+        self.published_pair(owner)
+    }
+    fn published_pair(&self, owner: &Arc<OriginalWork>) -> Result<ComponentPair, Reason> {
         let parents = [
             self.book
                 .directory(self.outputs[0].parent.ok_or(Reason::CleanupUnknown)?)?,

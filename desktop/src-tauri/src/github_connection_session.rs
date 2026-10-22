@@ -1064,7 +1064,7 @@ impl ConnectionState {
         Ok((private.project_id.clone(), scope))
     }
     fn preflight_start(&mut self, request: crate::github_preflight_protocol::Request, root: crate::asset_source::RegisteredRoot,
-        gate: crate::asset_session::GitHubPreflightGoGate, supervisor: &Supervisor, now: Instant) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+        mut gate: crate::asset_session::GitHubPreflightGoGate, supervisor: &Supervisor, now: Instant) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
         use crate::{github_preflight_protocol as p, github_preflight_session as s};
         if !supervisor.github_preflight_profile_available() || !p::publisher_bound() { return Err(s::refused(p::Reason::Unqualified)); }
         if !request.valid() || self.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
@@ -1072,6 +1072,8 @@ impl ConnectionState {
         let (session_id, project_id, generation) = (private.id.clone(), private.project_id.clone(), private.generation);
         // Register the original owner synchronously before exposing its ticket.
         // Native final GO waits for this same document lock; no token is copied.
+        let agent=gate.agent().cloned();let stamp=gate.take_stamp();
+        gate.agent_entering()?;
         let ticket = supervisor.start_github_preflight(request.clone(), gate).map_err(|error|
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
@@ -1082,7 +1084,7 @@ impl ConnectionState {
         self.pull_request.context_changed();
         self.actions_retry.context_changed();self.play_cleanup.context_changed();
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
-        self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
+        self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root,agent,stamp });
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.preflight.snapshot())
     }
@@ -1106,7 +1108,7 @@ impl ConnectionState {
         let (project_id, scope) = self.preflight_context(&args.session_id, args.expected_revision, generation, project_binding, now)?;
         let valid = self.preflight.consent.as_ref().is_some_and(|v| v.session_id == args.session_id && v.project_id == project_id
             && v.generation == generation && v.root == root && now < v.end && v.prepared.target.marker == args.consent_id
-            && scope.matches(&v.prepared.target) && v.prepared.publisher_bound() && args.confirm);
+            && action_delegation::dispatch::producer_ready(&v.producer) && action_delegation::origin(&v.agent,gate.agent()) && scope.matches(&v.prepared.target) && v.prepared.publisher_bound() && args.confirm);
         if !valid { return Err(s::refused(p::Reason::ConsentExpired)); }
         let before = self.preflight.snapshot();
         let consent = self.preflight.consent.take().ok_or_else(|| s::refused(p::Reason::ConsentExpired))?;
@@ -1138,6 +1140,12 @@ impl ConnectionState {
     }
     pub(crate) fn preflight_active_registration(&self) -> Option<(&str, u32, &crate::asset_source::RegisteredRoot)> {
         self.preflight.active.as_ref().map(|v| (v.project_id.as_str(), v.generation, &v.root))
+    }
+    // GO borrows the same moved witness; accepted return later moves it into Records.
+    pub(crate) fn preflight_active_stamp(&self, id: &str, request: &crate::github_preflight_protocol::Request)
+        -> Option<&crate::edit_owner::SavedEditStamp> {
+        self.preflight.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request)
+            .and_then(|v| v.stamp.as_ref())
     }
     pub(crate) fn preflight_go(&self, id: &str, digest: &str, request: &crate::github_preflight_protocol::Request,
         now: Instant, claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
@@ -1187,7 +1195,7 @@ impl ConnectionState {
     fn accept_preflight(&mut self, result: Result<crate::github_preflight_protocol::Reply, BridgeError>, settled_at: Instant,
         was_unknown: bool, now: Instant) {
         use crate::{github_preflight_protocol as p, github_preflight_session as s};
-        let Some(active) = self.preflight.active.take() else { self.unknown_inner(); return; };
+        let Some(mut active) = self.preflight.active.take() else { self.unknown_inner(); return; };
         let kind = active.request.kind(); let go_claimed = active.ticket.go_claimed();
         let mut reason = result.as_ref().map_or_else(s::outcome_reason, |reply| reply.result.as_ref().map_or(p::Reason::None, |v| v.reason));
         if let Ok(reply) = &result {
@@ -1210,7 +1218,8 @@ impl ConnectionState {
         if unknown {
             self.unknown_inner();
             if let Some(op) = &mut self.preflight.view.operation { op.phase = p::Phase::CleanupUnknown; op.reason = p::Reason::CleanupUnknown; op.effect = effect; }
-            self.complete_retirement(); return;
+            self.complete_retirement();
+            self.preflight_agent_return(&mut active,p::Reason::CleanupUnknown,effect,settled_at,now); return;
         }
         if let Some(retired) = retirement { reason = s::connection_reason(retired); }
         else if let Ok(reply) = result {
@@ -1221,12 +1230,12 @@ impl ConnectionState {
                         effect = outcome.effect;
                         if let Some(prepared) = outcome.prepared {
                             let private = self.private.as_ref().ok_or_else(BridgeError::protocol)?;
-                            let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end);
+                            let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end).min(active.agent.as_ref().map_or(private.clock.end,|e|e.scope().read.end()));
                             if now >= end { return Err(s::refused(p::Reason::ConsentExpired)); }
                             let wall = private.clock.wall.checked_add(end.duration_since(private.clock.admitted)).ok_or_else(BridgeError::protocol)?;
                             self.preflight.view.consent_expires_at = Some(display_utc(wall).ok_or_else(BridgeError::protocol)?);
                             self.preflight.view.prepared = Some(prepared.clone());
-                            self.preflight.consent = Some(s::Consent { prepared, end, session_id: active.session_id.clone(),
+                            self.preflight.consent = Some(s::Consent { identity:std::sync::Arc::new(()),agent:None,producer:active.agent.as_ref().map(|e|action_delegation::dispatch::Producer::new(e,active.ticket.operation_id())),prepared, end, session_id: active.session_id.clone(),
                                 project_id: active.project_id.clone(), generation: active.generation, root: active.root.clone() });
                         }
                         if let Some(run_id) = outcome.run_id {
@@ -1253,6 +1262,7 @@ impl ConnectionState {
         };
         if let Some(reason) = retire { self.retire_inner(reason, false); }
         if retirement.is_some() { self.complete_retirement(); }
+        self.preflight_agent_return(&mut active,reason,effect,settled_at,now);
     }
 }
 
@@ -1305,7 +1315,7 @@ impl ConnectionState {
         Ok((private.project_id.clone(), scope))
     }
     fn release_start(&mut self, request: crate::github_release_protocol::Request, root: crate::asset_source::RegisteredRoot,
-        gate: crate::asset_session::GitHubReleaseGoGate, supervisor: &Supervisor, now: Instant) -> Result<crate::github_release_protocol::Status, BridgeError> {
+        mut gate: crate::asset_session::GitHubReleaseGoGate, supervisor: &Supervisor, now: Instant) -> Result<crate::github_release_protocol::Status, BridgeError> {
         use crate::{github_release_protocol as p, github_release_session as s};
         if !supervisor.github_release_profile_available() || !p::publisher_bound() { return Err(s::refused(p::Reason::Unqualified)); }
         if !request.valid() || self.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
@@ -1319,6 +1329,8 @@ impl ConnectionState {
         let (session_id, project_id, generation) = (private.id.clone(), private.project_id.clone(), private.generation);
         // Register the original owner synchronously before exposing its ticket.
         // Native final GO waits for this same document lock; no token is copied.
+        let agent=gate.agent().cloned();let stamp=gate.take_stamp();
+        gate.agent_entering()?;
         let ticket = supervisor.start_github_release(request.clone(), gate).map_err(|error|
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
@@ -1329,7 +1341,7 @@ impl ConnectionState {
         self.actions_retry.context_changed();self.play_cleanup.context_changed();
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
-        self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
+        self.release.start(s::Active { ticket, request, session_id, project_id, generation, root,agent,stamp });
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.release.snapshot())
     }
@@ -1353,7 +1365,7 @@ impl ConnectionState {
         let (project_id, scope) = self.release_context(&args.session_id, args.expected_revision, generation, project_binding, now)?;
         let valid = self.release.consent.as_ref().is_some_and(|v| v.session_id == args.session_id && v.project_id == project_id
             && v.generation == generation && v.root == root && now < v.end
-            && scope.matches(&v.prepared.target) && v.prepared.publisher_bound() && args.matches_review(&v.prepared));
+            && action_delegation::dispatch::producer_ready(&v.producer) && action_delegation::origin(&v.agent,gate.agent()) && scope.matches(&v.prepared.target) && v.prepared.publisher_bound() && args.matches_review(&v.prepared));
         if !valid { return Err(s::refused(p::Reason::ConsentExpired)); }
         let before = self.release.snapshot();
         let consent = self.release.consent.take().ok_or_else(|| s::refused(p::Reason::ConsentExpired))?;
@@ -1385,6 +1397,12 @@ impl ConnectionState {
     }
     pub(crate) fn release_active_registration(&self) -> Option<(&str, u32, &crate::asset_source::RegisteredRoot)> {
         self.release.active.as_ref().map(|v| (v.project_id.as_str(), v.generation, &v.root))
+    }
+    // GO borrows the same moved witness; accepted return later moves it into Records.
+    pub(crate) fn release_active_stamp(&self, id: &str, request: &crate::github_release_protocol::Request)
+        -> Option<&crate::edit_owner::SavedEditStamp> {
+        self.release.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request)
+            .and_then(|v| v.stamp.as_ref())
     }
     pub(crate) fn release_go(&self, id: &str, digest: &str, request: &crate::github_release_protocol::Request,
         now: Instant, claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
@@ -1434,7 +1452,7 @@ impl ConnectionState {
     fn accept_release(&mut self, result: Result<crate::github_release_protocol::Reply, BridgeError>, settled_at: Instant,
         was_unknown: bool, now: Instant) {
         use crate::{github_release_protocol as p, github_release_session as s};
-        let Some(active) = self.release.active.take() else { self.unknown_inner(); return; };
+        let Some(mut active) = self.release.active.take() else { self.unknown_inner(); return; };
         let kind = active.request.kind(); let go_claimed = active.ticket.go_claimed();
         let mut reason = result.as_ref().map_or_else(s::outcome_reason, |reply| reply.result.as_ref().map_or(p::Reason::None, |v| v.reason));
         if let Ok(reply) = &result {
@@ -1457,7 +1475,8 @@ impl ConnectionState {
         if unknown {
             self.unknown_inner();
             if let Some(op) = &mut self.release.view.operation { op.phase = p::Phase::CleanupUnknown; op.reason = p::Reason::CleanupUnknown; op.effect = effect; }
-            self.complete_retirement(); return;
+            self.complete_retirement();
+            self.release_agent_return(&mut active,p::Reason::CleanupUnknown,effect,settled_at,now); return;
         }
         if let Some(retired) = retirement { reason = s::connection_reason(retired); }
         else if let Ok(reply) = result {
@@ -1468,12 +1487,12 @@ impl ConnectionState {
                         effect = outcome.effect;
                         if let Some(prepared) = outcome.prepared {
                             let private = self.private.as_ref().ok_or_else(BridgeError::protocol)?;
-                            let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end);
+                            let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end).min(active.agent.as_ref().map_or(private.clock.end,|e|e.scope().read.end()));
                             if now >= end { return Err(s::refused(p::Reason::ConsentExpired)); }
                             let wall = private.clock.wall.checked_add(end.duration_since(private.clock.admitted)).ok_or_else(BridgeError::protocol)?;
                             self.release.view.consent_expires_at = Some(display_utc(wall).ok_or_else(BridgeError::protocol)?);
                             self.release.view.prepared = Some(prepared.clone());
-                            self.release.consent = Some(s::Consent { prepared, end, session_id: active.session_id.clone(),
+                            self.release.consent = Some(s::Consent { identity:std::sync::Arc::new(()),agent:None,producer:active.agent.as_ref().map(|e|action_delegation::dispatch::Producer::new(e,active.ticket.operation_id())),prepared, end, session_id: active.session_id.clone(),
                                 project_id: active.project_id.clone(), generation: active.generation, root: active.root.clone() });
                         }
                         if let Some(run_id) = outcome.run_id {
@@ -1500,6 +1519,7 @@ impl ConnectionState {
         };
         if let Some(reason) = retire { self.retire_inner(reason, false); }
         if retirement.is_some() { self.complete_retirement(); }
+        self.release_agent_return(&mut active,reason,effect,settled_at,now);
     }
 }
 

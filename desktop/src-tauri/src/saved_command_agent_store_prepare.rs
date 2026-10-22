@@ -8,15 +8,15 @@ pub(crate) enum Input {
     Access(store_wire::Context),
     Candidate(prepare_wire::Context),
     Execute(execute_wire::Context),
+    Reconcile(reconcile_wire::Context),
 }
 impl Input {
     pub fn parse(kind: flow::Kind, value: &serde_json::Value) -> Result<Self, BridgeError> {
-        let input = if kind.candidate_upload().is_some() {
-            Self::Execute(execute_wire::prepare(value)?.context())
-        } else if kind.prepares_intent() {
-            Self::Candidate(prepare_wire::prepare(value)?.context())
-        } else {
-            Self::Access(store_wire::prepare(value)?.context())
+        let input = match kind.native_kind() {
+            p::Kind::Execute => Self::Execute(execute_wire::prepare(value)?.context()),
+            p::Kind::Reconcile => Self::Reconcile(reconcile_wire::prepare(value)?.context()),
+            p::Kind::CandidatePrepare => Self::Candidate(prepare_wire::prepare(value)?.context()),
+            p::Kind::AccessCheck => Self::Access(store_wire::prepare(value)?.context()),
         };
         if input.selection()?.kind != kind {
             return Err(refused());
@@ -28,6 +28,7 @@ impl Input {
             Self::Access(c) => &c.project_id,
             Self::Candidate(c) => &c.project_id,
             Self::Execute(c) => &c.project_id,
+            Self::Reconcile(c) => &c.project_id,
         }
     }
     fn context(&self) -> Context {
@@ -35,15 +36,16 @@ impl Input {
             Self::Access(c) => Context::LocalStorePreflight(c.clone()),
             Self::Candidate(c) => Context::LocalStorePrepare(c.clone()),
             Self::Execute(c) => Context::LocalStoreExecute(c.clone()),
+            Self::Reconcile(c) => Context::LocalStoreReconcile(c.clone()),
         }
     }
     pub fn selection(&self) -> Result<flow::Selection, BridgeError> {
         selection(&self.context())
     }
 }
-fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
+fn selection(context: &Context) -> Result<flow::Selection, BridgeError> {
     use flow::Kind as K;
-    let (kind, config, v, candidate, later, execute) = match c {
+    let (kind, config, v, candidate, later, execute, release) = match context {
         Context::LocalStorePreflight(c) => {
             use store_wire::AccessPlatform as P;
             let kind = match (c.platform, c.query.is_none(), c.ios_record.is_some()) {
@@ -65,6 +67,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                     sha256: c.saved_config.sha256.clone(),
                 },
                 version(&c.saved_version),
+                None,
                 None,
                 None,
                 None,
@@ -97,6 +100,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                 predecessor_receipt_sha256: l.predecessor_receipt_sha256.clone(),
             }),
             None,
+            None,
         ),
         Context::LocalStoreExecute(c) if c.later.is_none() && c.stage_operation_id.is_none() => (
             match c.platform {
@@ -114,7 +118,34 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
             }),
             None,
             Some(flow::ExecuteSelection { intent_sha256: c.intent_sha256.clone() }),
+            None,
         ),
+        Context::LocalStoreExecute(c) if c.later.is_some() && c.stage_operation_id.is_some() => {
+            let release = release::details(context).ok_or_else(refused)?;
+            let kind = match (c.platform, release.mode) {
+                (execute_wire::Platform::Android, p::release::Mode::ExternalTesting) => K::AndroidExternalTestingExecute,
+                (execute_wire::Platform::Ios, p::release::Mode::ExternalTesting) => K::IosExternalTestingExecute,
+                (execute_wire::Platform::Android, p::release::Mode::ProductionSubmit) => K::AndroidProductionSubmitExecute,
+                (execute_wire::Platform::Ios, p::release::Mode::ProductionSubmit) => K::IosProductionSubmitExecute,
+                _ => return Err(refused()),
+            };
+            (kind, p::Content { bytes: c.saved_config.bytes, sha256: c.saved_config.sha256.clone() },
+                version(&c.saved_version), Some(p::Candidate { operation_id: c.candidate_operation_id.clone(), sha256: c.candidate_sha256.clone() }),
+                None, None, Some(release))
+        }
+        Context::LocalStoreReconcile(c) => {
+            let release = release::details(context).ok_or_else(refused)?;
+            let kind = match (c.platform, release.mode) {
+                (reconcile_wire::Platform::Android, p::release::Mode::CurrentInternal) => K::AndroidCurrentInternal,
+                (reconcile_wire::Platform::Ios, p::release::Mode::CurrentInternal) => K::IosCurrentInternal,
+                (reconcile_wire::Platform::Android, p::release::Mode::RecoverySettlement) => K::AndroidRecoverySettlement,
+                (reconcile_wire::Platform::Ios, p::release::Mode::ExternalReadiness) => K::IosExternalReadiness,
+                _ => return Err(refused()),
+            };
+            (kind, p::Content { bytes: c.saved_config.bytes, sha256: c.saved_config.sha256.clone() },
+                version(&c.saved_version), Some(p::Candidate { operation_id: c.candidate_operation_id.clone(), sha256: c.candidate_sha256.clone() }),
+                None, None, Some(release))
+        }
         _ => return Err(refused()),
     };
     let value = flow::Selection {
@@ -124,6 +155,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
         candidate,
         later,
         execute,
+        release,
     };
     if !value.bounded_capacity() {
         return Err(refused());
@@ -526,6 +558,9 @@ impl SavedCommandOwner {
             Input::Execute(_) => {
                 status.execute()?;
             }
+            Input::Reconcile(_) => {
+                status.reconcile()?;
+            }
         }
         Ok(())
     }
@@ -600,8 +635,8 @@ impl SavedCommandOwner {
                     p::Kind::AccessCheck,
                 ),
                 Context::LocalStorePrepare(c) if entry.scope.selection.kind.prepares_intent() => (c.consent(), p::Kind::CandidatePrepare),
-                Context::LocalStoreExecute(c) if entry.scope.selection.kind.candidate_upload().is_some()
-                    && c.later.is_none() && c.stage_operation_id.is_none() => (c.consent(), p::Kind::Execute),
+                Context::LocalStoreExecute(c) if entry.scope.selection.kind.native_kind() == p::Kind::Execute => (c.consent(), p::Kind::Execute),
+                Context::LocalStoreReconcile(c) if entry.scope.selection.kind.native_kind() == p::Kind::Reconcile => (c.consent(), p::Kind::Reconcile),
                 _ => return Err(refused()),
             }
         };
@@ -613,7 +648,10 @@ impl SavedCommandOwner {
             p::Kind::AccessCheck => material.accepts_access_consent(&store_wire::start(&args)?),
             p::Kind::CandidatePrepare => material.accepts_prepare_consent(&prepare_wire::start(&args)?),
             p::Kind::Execute => material.accepts_execute_consent(&execute_wire::start(&args)?),
-            p::Kind::Reconcile => false,
+            p::Kind::Reconcile => {
+                let _ = reconcile_wire::start(&args)?;
+                material.reconcile_accepts_consent(consent)
+            }
         };
         if !consent_matches { return Err(refused()); }
         let witness = if kind == p::Kind::AccessCheck {

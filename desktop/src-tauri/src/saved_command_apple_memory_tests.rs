@@ -157,7 +157,7 @@ fn prepared_and_consumed_review_keep_two_exact_inputs_after_registry_unlock() {
         projection.intent_usable = true;
         let old_review = registry.apple.review.clone();
         registry.prepared = Some(Prepared {
-            agent_history:None, agent_store_preparation: None,
+            agent_history_preparation:None, agent_history:None, agent_store_preparation: None,
             agent_store: None,
             store_witness: None,
             agent_build: None,

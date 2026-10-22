@@ -13,15 +13,15 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub(crate) struct Trace {
-    source: Option<StoredRef>,
-    generator: Weak<OriginalWork>,
-    export: Weak<OriginalWork>,
-    pair: Option<asset_source::ComponentPair>,
-    export_returned: bool,
-    import: Weak<OriginalWork>,
-    target: Option<StoredRef>,
-    load: Weak<OriginalWork>,
-    bound: Weak<OriginalWork>,
+    pub(in crate::asset_session) source: Option<StoredRef>,
+    pub(in crate::asset_session) generator: Weak<OriginalWork>,
+    pub(in crate::asset_session) export: Weak<OriginalWork>,
+    pub(in crate::asset_session) pair: Option<asset_source::ComponentPair>,
+    pub(in crate::asset_session) export_returned: bool,
+    pub(in crate::asset_session) import: Weak<OriginalWork>,
+    pub(in crate::asset_session) target: Option<StoredRef>,
+    pub(in crate::asset_session) load: Weak<OriginalWork>,
+    pub(in crate::asset_session) bound: Weak<OriginalWork>,
 }
 
 // Reserved for the full lifetime of this one fixed Control, including before
@@ -36,9 +36,12 @@ pub(in crate::asset_session) fn document_bytes(inner: &Arc<Inner>) -> Result<usi
     let selected = book
         .as_ref()
         .and_then(|book| book.vault.as_ref())
-        .is_some_and(|control| control.case == VaultCase::UploadKey(Case::BackupRoundTrip));
+        .is_some_and(|control| matches!(control.case, VaultCase::UploadKey(Case::BackupRoundTrip | Case::BackupCli)));
     if !selected {
         return Ok(0);
+    }
+    if book.as_ref().and_then(|b|b.vault.as_ref()).is_some_and(|c|c.case==VaultCase::UploadKey(Case::BackupCli)) {
+        return Ok(crate::shell::installed_observation::vault::upload_key::cli::BACKING);
     }
     std::mem::size_of::<crate::shell::installed_observation::vault::upload_key::backup::Flow>()
         .checked_add(std::mem::size_of::<asset_source::ComponentPair>())
@@ -46,7 +49,7 @@ pub(in crate::asset_session) fn document_bytes(inner: &Arc<Inner>) -> Result<usi
         .ok_or(Reason::Capacity)
 }
 
-fn folders(control: &Control) -> Result<[PathBuf; 2], Reason> {
+pub(in crate::asset_session) fn folders(control: &Control) -> Result<[PathBuf; 2], Reason> {
     let parent = control.root().parent().ok_or(Reason::SourceRefused)?;
     let paths = [parent.join("backup"), parent.join("recovery")];
     if paths
@@ -69,7 +72,7 @@ fn restored(control: &Control) -> Result<PathBuf, Reason> {
     }
     Ok(path)
 }
-fn fresh_reference(source: StoredRef, target: StoredRef) -> bool {
+pub(in crate::asset_session) fn fresh_reference(source: StoredRef, target: StoredRef) -> bool {
     source.identity.vault != target.identity.vault
         && source.identity.generation != target.identity.generation
         && source.record != target.record
@@ -78,7 +81,7 @@ fn fresh_reference(source: StoredRef, target: StoredRef) -> bool {
         && target.revision.counter == 1
         && source.original != target.original
 }
-fn good_slot(
+pub(in crate::asset_session) fn good_slot(
     state: &DocumentState,
     slot: &Slot,
     original: &Arc<OriginalWork>,
@@ -102,7 +105,7 @@ fn good_slot(
         && !slot.owner.stopped()
         && slot.settlement != Settlement::Unknown
 }
-fn joined(slot: &Slot) -> bool {
+pub(in crate::asset_session) fn joined(slot: &Slot) -> bool {
     slot.settlement == Settlement::Known
         && slot.owner.ended.load(Ordering::SeqCst)
         && slot.owner.resources_settled()
@@ -138,7 +141,7 @@ pub(in crate::asset_session) fn capture_export(
         let Some(control) = book.as_ref().and_then(|book| book.vault.as_ref()) else {
             return Ok(());
         };
-        if control.case != VaultCase::UploadKey(Case::BackupRoundTrip) {
+        if !matches!(control.case, VaultCase::UploadKey(Case::BackupRoundTrip | Case::BackupCli)) {
             return Ok(());
         }
         control.clone()
@@ -188,7 +191,11 @@ pub(in crate::asset_session) fn capture_export(
     if !same_reference(*held, reference) {
         return Err(Reason::SourceChanged);
     }
-    let pair = destination.component_published_pair(&slot.owner)?;
+    let pair = if control.case == VaultCase::UploadKey(Case::BackupCli) {
+        let pair = destination.installed_picker_published_pair(&slot.owner)?;
+        control.upload.cli.remember_targets(pair.comparison_paths()?)?;
+        pair
+    } else { destination.component_published_pair(&slot.owner)? };
     let paths = folders(&control)?;
     if !pair.matches_original(&slot.owner)
         || !pair.matches_folders([&paths[0], &paths[1]])
@@ -203,14 +210,14 @@ pub(in crate::asset_session) fn capture_export(
 }
 
 impl DocumentBinding {
-    fn installed_backup_control(&self) -> Result<Arc<Control>, AssetError> {
+    pub(in crate::asset_session) fn installed_backup_control(&self) -> Result<Arc<Control>, AssetError> {
         let control = self.installed_upload_control()?;
-        if control.case != VaultCase::UploadKey(Case::BackupRoundTrip) {
+        if !matches!(control.case, VaultCase::UploadKey(Case::BackupRoundTrip | Case::BackupCli)) {
             return Err(AssetError::invalid());
         }
         Ok(control)
     }
-    fn installed_backup_claim(&self, action: BackupAction) -> Result<Arc<Control>, AssetError> {
+    pub(in crate::asset_session) fn installed_backup_claim(&self, action: BackupAction) -> Result<Arc<Control>, AssetError> {
         let control = self.installed_backup_control()?;
         let state = self.lock();
         let selection = control
@@ -228,6 +235,7 @@ impl DocumentBinding {
             .ok_or_else(AssetError::invalid)
     }
     pub(crate) fn installed_generated_backup_export(&self) -> Result<(), AssetError> {
+        if self.installed_backup_control()?.case != VaultCase::UploadKey(Case::BackupRoundTrip) { return Err(AssetError::invalid()); }
         if !self
             .installed_upload_sample()
             .is_some_and(|sample| sample.positive())
@@ -461,11 +469,12 @@ impl DocumentBinding {
             platform: Platform::Android,
             stage: Stage::Candidate,
             purpose: Purpose::Signing,
-            execution_mode: commands::ExecutionMode::Github,
+            execution_mode: if control.case == VaultCase::UploadKey(Case::BackupCli) { commands::ExecutionMode::Local } else { commands::ExecutionMode::Github },
         })?;
         Ok(())
     }
     pub(crate) fn installed_generated_backup_import(&self) -> Result<(), AssetError> {
+        if self.installed_backup_control()?.case != VaultCase::UploadKey(Case::BackupRoundTrip) { return Err(AssetError::invalid()); }
         let control = self.installed_backup_claim(BackupAction::Import)?;
         self.reconcile();
         let mut state = self.lock();

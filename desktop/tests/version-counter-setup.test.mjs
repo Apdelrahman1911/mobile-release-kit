@@ -156,3 +156,6 @@ test('actual component has only explicit existing-owner actions and honest manua
   assert.match(ui, /not a verified Store floor/); assert.match(ui, /Protection and connection are still required/); assert.match(ui, /enforce administrators/);
   assert.match(ui, /CounterSetup|VersionCounterSetup/); assert.doesNotMatch(ui, /useEffect|fetch\(|\.enroll\(|\.connect\(|\.allocate\(|\.start\(/);
 });
+
+// Reuse the SAME inert fixture in the closed delegation tests; no extra runner.
+export {prepared,pending,connection,idle,operation,review,observed,fixture,ready,deferred,flush,marker,consentId};

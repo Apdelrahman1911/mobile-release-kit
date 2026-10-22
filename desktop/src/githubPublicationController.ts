@@ -1,3 +1,5 @@
+import { parseGithubDispatchSelection, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
+import type { GithubDispatchKind, GithubDispatchSelection } from './githubDispatchDelegation.ts';
 import { COUNTER_BRANCH, COUNTER_PURPOSE, counterPrepared, counterSummary, counterSourceMatches, publicationPurpose, sameCounterSaved, type CounterSavedWitness, type PublicationPurpose, type CounterSummary } from './versionCounterSetup.ts';
 // Coordinates the original native publication only: no token, HTTP, polling,
 // write retry, local Git mutation or renderer-created consent.
@@ -20,6 +22,9 @@ type Delegated = { observer: Observer; context: Context; epoch: object; selectio
   review: Review | null; read: PendingRead | null; row: PublicationPending | null; originalId: string;
   allowReturned: boolean; noAllow: boolean; unused: boolean; terminal: GithubActionStatus | null; unknown: boolean; released: boolean };
 type AgentCheck = { delegate: Delegated; allowed: boolean; noAllow: boolean; unused: boolean; terminal: GithubActionStatus | null; status: PublicationStatus | null };
+type DispatchAgent={observer:Observer;context:Context;epoch:object;selection:GithubDispatchSelection;review:Review|null;read:PendingRead|null;row:PublicationPending|null;saved:CounterSavedWitness|null;originalId:string|null;
+ allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean};
+type DispatchCheck={origin:DispatchAgent;allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;status:PublicationStatus|null};
 type Discard = { observer: Observer; session: string; consent: string; revision: number };
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); } return value;
@@ -63,6 +68,7 @@ export class GitHubPublicationController {
   private pendingRead: PendingRead | null = null;
   private agentPending: { read: PendingRead; row: PublicationPending } | null = null;
   private delegated: Delegated | null = null;
+  private dispatchAgent:DispatchAgent|null=null; private counterAgentRow:PublicationPending|null=null;
   private discard: Discard | null = null;
   private retired: { observer: Observer; session: string; consent: string } | null = null;
   private discardUnknown = false;
@@ -79,10 +85,10 @@ export class GitHubPublicationController {
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   private update(patch: Partial<PublicationView>): void {
     if (this.disposed) return;
-    this.state = freeze({ ...this.state, ...patch, delegating: this.delegated !== null }); this.listeners.forEach((fn) => fn());
+    this.state = freeze({ ...this.state, ...patch, delegating: this.delegated !== null || this.dispatchAgent!==null }); this.listeners.forEach((fn) => fn());
   }
   private invalidate(patch: Partial<PublicationView> = {}): void {
-    this.epoch = {}; this.review = null; this.pendingRead = null; this.agentPending = null;
+    this.epoch = {}; this.review = null; this.pendingRead = null; this.agentPending = null; this.counterAgentRow=null;
     if (this.pending && !this.pending.sent) { this.pending = null; patch.pending = false; }
     else if (this.pending) this.pending.cancelAfterAdmission = true;
     this.update({ confirmed: false, ...patch }); this.stopInvalidatedOriginal(); this.retireConsent();
@@ -101,7 +107,7 @@ export class GitHubPublicationController {
   // an automatic read/retry. Ordinary five-file reviews are unaffected.
   versionIntent(): void { if (!this.disposed && (this.state.purpose === COUNTER_PURPOSE || this.pending?.purpose === COUNTER_PURPOSE || this.review?.saved)) this.invalidate({ error: 'source-changed' }); }
   syncCounterSource = (): void => {
-    const saved = this.pending?.saved ?? this.review?.saved;
+    const saved = this.dispatchAgent?.saved ?? this.pending?.saved ?? this.review?.saved;
     if (!this.disposed && saved && !sameCounterSaved(saved, this.counterSource())) this.versionIntent();
   };
   setPurpose(purpose: PublicationPurpose): void {
@@ -116,9 +122,9 @@ export class GitHubPublicationController {
     if (this.disposed || typeof value !== 'string' || value.length > 200 || value === this.state.base) return;
     this.invalidate({ base: value, error: null });
   }
-  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && !this.delegated && this.currentConsent() !== null }); }
+  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && !this.delegated && !this.dispatchAgent && this.currentConsent() !== null }); }
   private needsOriginal(o: Observer): boolean {
-    return this.delegated?.observer === o || o.reading !== null || this.pending?.observer === o && this.pending.sent || this.cancelObserver === o || this.discard?.observer === o || this.retired?.observer === o ||
+    return this.dispatchAgent?.observer===o || this.delegated?.observer === o || o.reading !== null || this.pending?.observer === o && this.pending.sent || this.cancelObserver === o || this.discard?.observer === o || this.retired?.observer === o ||
       !!o.accepted?.operation && o.accepted.operation.phase !== 'settled';
   }
   private detach(o: Observer): void {
@@ -213,22 +219,23 @@ export class GitHubPublicationController {
   }
   private async read(o: Observer): Promise<void> {
     if (!o.active || o.reading) return o.reading ?? undefined;
-    let check: AgentCheck | null = null;
+    let check: AgentCheck | null = null; let dispatchCheck:DispatchCheck|null=null;
     const work = Promise.resolve().then(async () => {
       if (!o.active) return;
       try {
         const returnedOriginal = this.pending?.observer === o && this.pending.returned ? this.pending : null;
         // Snapshot facts BEFORE this exact Status call. Earlier reads/events
         // cannot become a post-Allow/history return merely by finishing later.
+        const other=this.dispatchAgent; if(other?.observer===o)dispatchCheck={origin:other,allowed:other.allowed,noAllow:other.noAllow,unused:other.unused,terminal:other.terminal,status:null};
         const d = this.delegated;
         if (d?.observer === o) check = { delegate: d, allowed: d.allowReturned, noAllow: d.noAllow,
           unused: d.unused, terminal: d.terminal, status: null };
         const seen = this.receive(o, await o.api.githubPublicationStatus(), returnedOriginal);
-        if (check) check.status = seen;
+        if (check) check.status = seen; if(dispatchCheck)dispatchCheck.status=seen;
       } catch { if (o.active) this.update({ error: 'response-invalid' }); }
     });
     o.reading = work; this.update({ observing: true });
-    try { await work; } finally { if (o.reading === work) { o.reading = null; if (check) this.settleDelegated(check); this.update({ observing: false }); this.maintain(); } }
+    try { await work; } finally { if (o.reading === work) { o.reading = null; if (check) this.settleDelegated(check); if(dispatchCheck)this.settleDispatchAgent(dispatchCheck); this.update({ observing: false }); this.maintain(); } }
   }
   checkStatus(): Promise<void> { const o = this.maintain(); return !this.disposed && o ? this.read(o) : Promise.resolve(); }
   currentConsent(): PublicationConsent | null {
@@ -262,7 +269,7 @@ export class GitHubPublicationController {
   }
   agentSelection(kind: GithubPublicationAction): GithubPublicationSelection | null {
     const o = this.observer, s = o?.accepted;
-    if (this.disposed || this.delegated || this.blocked || this.state.uncertain || this.pending || this.discard || this.retired || this.cancelObserver ||
+    if (this.disposed || this.dispatchAgent || this.delegated || this.blocked || this.state.uncertain || this.pending || this.discard || this.retired || this.cancelObserver ||
         !o?.active || o.api !== this.api || o.reading || !s?.available || s.reason !== 'none' || s.operation?.phase !== 'settled' || !s.sessionId) return null;
     if (kind === 'setup-publish') {
       const r = this.review, c = this.currentConsent();
@@ -276,6 +283,7 @@ export class GitHubPublicationController {
     return null;
   }
   agentSelected(selection: GithubActionSelection): boolean {
+    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.dispatchAgent?sameGithubActionSelection(this.dispatchAgent.selection,selection)&&this.dispatchCurrent(this.dispatchAgent):sameGithubActionSelection(this.dispatchSelection(selection.kind as GithubDispatchKind),selection);
     const d = this.delegated;
     return d ? sameGithubActionSelection(d.selection, selection) && this.delegatedCurrent(d) :
       (selection.kind === 'setup-publish' || selection.kind === 'setup-reconcile') && sameGithubActionSelection(this.agentSelection(selection.kind), selection);
@@ -288,6 +296,7 @@ export class GitHubPublicationController {
       this.pendingRead === d.read && !!d.row && this.selectedPendingForAgent() === d.row;
   }
   delegatePrepared(selection: GithubActionSelection): GithubActionDelegate | null {
+    if(['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(selection.kind))return this.delegateDispatch(selection);
     if (selection.kind !== 'setup-publish' && selection.kind !== 'setup-reconcile' ||
         !sameGithubActionSelection(this.agentSelection(selection.kind), selection)) return null;
     const o = this.observer!, r = selection.kind === 'setup-publish' ? this.review : null;
@@ -334,10 +343,78 @@ export class GitHubPublicationController {
     d.released = true; this.delegated = null; this.review = null; this.pendingRead = null; this.agentPending = null; this.epoch = {};
     // The old context may now detach; nothing mints a replacement Review.
   }
+
+  private currentCounterRecord(marker:string):PublicationPending|null {
+    const r=this.pendingRead,c=context(this.connection()),s=this.observer?.accepted;
+    if(!r||!c||r.observer!==this.observer||r.epoch!==this.epoch||!same(r.context,c)||!s||s.sessionId!==c.sessionId||s.operation?.id!==r.operationId||s.operation.kind!=='pending'||s.operation.phase!=='settled'||s.operation.reason!=='none'||!same(r.rows,s.pending))return null;
+    const rows=r.rows.filter(v=>v.summary.target.marker===marker&&counterSummary(v.summary)&&v.summary.target.repository===c.repository&&v.summary.target.accountId===c.accountId&&v.summary.target.repositoryId===c.repositoryId);return rows.length===1?rows[0]??null:null;
+  }
+  selectCounterRecordForAgent(marker:string):boolean {
+    if(this.startReason()||this.observer?.reading||this.currentConsent())return false;const row=this.currentCounterRecord(marker);if(!row)return false;
+    this.counterAgentRow=row;this.update({confirmed:false});return this.counterAgentRow===row&&this.currentCounterRecord(marker)===row;
+  }
+  dispatchSelection(kind:GithubDispatchKind):GithubDispatchSelection|null {
+    const o=this.observer,s=o?.accepted,c=context(this.connection());
+    if(!['counter-prepare','counter-create','publication-pending','counter-reconcile'].includes(kind)||this.disposed||this.delegated||this.dispatchAgent||this.blocked||this.state.uncertain||this.pending||this.discard||this.retired||this.cancelObserver||
+      !o?.active||o.api!==this.api||o.reading||!c||!s?.available||s.sessionId!==c.sessionId||s.reason!=='none'||s.operation&&s.operation.phase!=='settled')return null;
+    const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
+    if(kind==='counter-prepare')return !s.consent&&this.state.purpose===COUNTER_PURPOSE&&this.counterSource()&&this.state.base!==COUNTER_BRANCH?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,base:this.state.base,purpose:COUNTER_PURPOSE}):null;
+    if(kind==='publication-pending')return !s.consent?parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision}):null;
+    if(kind==='counter-create'){const consent=this.currentConsent();return consent&&counterPrepared(consent.prepared)&&this.state.confirmed?parseGithubDispatchSelection({...base,consentId:consent.id,confirm:true}):null;}
+    const row=this.counterAgentRow;return row&&this.currentCounterRecord(row.summary.target.marker)===row?parseGithubDispatchSelection({...base,marker:row.summary.target.marker}):null;
+  }
+  private dispatchCurrent(d:DispatchAgent):boolean {
+    if(this.dispatchAgent!==d||d.unknown||this.disposed||this.blocked||this.pending||this.delegated||this.discard||this.retired||this.cancelObserver||d.observer!==this.observer||!d.observer.active||d.observer.api!==this.api||d.observer.reading||
+      d.epoch!==this.epoch||!same(d.context,context(this.connection()))||d.observer.accepted?.revision!==d.selection.expectedRevision||d.saved&&!sameCounterSaved(d.saved,this.counterSource()))return false;
+    if(d.selection.kind==='counter-prepare')return this.state.purpose===COUNTER_PURPOSE&&this.state.base===d.selection.base&&!!d.saved&&!this.currentConsent();
+    if(d.selection.kind==='counter-create')return !!d.review&&this.review===d.review&&this.currentConsent()===d.review.consent;
+    if(d.selection.kind==='counter-reconcile')return !!d.row&&this.pendingRead===d.read&&this.currentCounterRecord(d.row.summary.target.marker)===d.row;
+    return d.selection.kind==='publication-pending'&&!this.currentConsent();
+  }
+  private delegateDispatch(raw:GithubActionSelection):GithubActionDelegate|null {
+    const selection=this.dispatchSelection(raw.kind as GithubDispatchKind);if(!selection||!sameGithubActionSelection(selection,raw))return null;
+    const o=this.observer!,saved=selection.kind==='counter-prepare'||selection.kind==='counter-create'?this.counterSource():null;
+    const d:DispatchAgent={observer:o,context:context(this.connection())!,epoch:this.epoch,selection,review:this.review,read:this.pendingRead,row:this.counterAgentRow,saved,originalId:o.accepted?.operation?.id??null,
+      allowed:false,noAllow:false,unused:false,terminal:null,unknown:false,released:false};
+    this.dispatchAgent=d;this.update({confirmed:false,originalTarget:{repository:d.context.repository,accountId:d.context.accountId,repositoryId:d.context.repositoryId,base:this.state.base}});
+    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
+    return Object.freeze({current:()=>this.dispatchCurrent(d),released:()=>d.released,
+      allowReturned:()=>{if(this.dispatchAgent===d&&!d.unknown){d.allowed=true;this.update({});}},
+      observe:(raw:GithubActionStatus)=>{if(this.dispatchAgent!==d||d.unknown)return;const s=parseGithubActionStatus(raw);if(!s||!sameGithubActionSelection(s.review,d.selection)||s.settlement==='unknown'){uncertain();return;}if(s.settlement==='settled'){d.terminal=s;this.update({});}},
+      unusedReturned:()=>{if(this.dispatchAgent===d&&!d.unknown){d.unused=true;this.update({});}},
+      notSubmitted:()=>{if(this.dispatchAgent===d&&!d.unknown){d.noAllow=true;d.unused=true;this.update({});}},uncertain});
+  }
+  private settleDispatchAgent(check:DispatchCheck):void {
+    const d=check.origin,s=check.status,f=check.terminal;
+    if(this.dispatchAgent!==d||!s||d.unknown||this.blocked||!(check.allowed||check.noAllow)||this.pending||this.delegated||this.discard||this.retired||this.cancelObserver||d.observer.reading||!d.observer.active||d.observer!==this.observer||
+      !same(s,d.observer.accepted)||s.sessionId!==d.selection.sessionId||s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
+    let adopt=false,loaded=false;
+    if(f?.settlement==='settled'&&!f.neverAdmitted){
+      const kind=d.selection.kind==='counter-prepare'?'prepare':d.selection.kind==='counter-create'?'publish':d.selection.kind==='publication-pending'?'pending':'reconcile',op=s.operation;
+      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect||op.purpose!==(kind==='pending'?undefined:COUNTER_PURPOSE))return;
+      if(f.state==='complete'){
+        if(op.reason!=='none')return;const result=f.result;
+        if(d.selection.kind==='counter-prepare'){const c=s.consent;if(!c||!counterPrepared(c.prepared)||!result||result.type!=='prepared'||!inContext(c,d.context,d.selection.base)||!d.saved||!counterSourceMatches(c.prepared,d.saved)||
+          result.marker!==c.id||result.preparedSha256!==githubDispatchPreparedHash(c.prepared)||result.sourceSha!==c.prepared.baseCommit)return;adopt=true;}
+        else if(d.selection.kind==='publication-pending'){if(!result||result.type!=='pending'||!same(result.rows,s.pending.map(r=>({marker:r.summary.target.marker,runId:null,purpose:counterSummary(r.summary)?'counter':'setup'}))))return;loaded=true;}
+        else {const counter=s.counter,original=d.selection.kind==='counter-create'?d.review?.consent.prepared:d.row?.summary;
+          if(!counter||!original||!counterSummary(original)&&!counterPrepared(original)||!result||result.type!=='counter'||result.marker!==('consentId'in d.selection?d.selection.consentId:'marker'in d.selection?d.selection.marker:null)||result.commitSha!==counter.commit||result.ledgerId!==counter.ledgerId||result.genesisSha256!==counter.genesisSha256||counter.ledgerId!==original.target.ledgerId||counter.genesisSha256!==original.genesisSha256)return;
+          if(d.selection.kind==='counter-create'){if(!d.review||!counterPrepared(d.review.consent.prepared)||!('preparedSha256'in f.review)||f.review.preparedSha256!==githubDispatchPreparedHash(d.review.consent.prepared))return;}
+          else if(!d.row||!('recordSha256'in f.review)||f.review.recordSha256!==githubDispatchRecordHash(d.row))return;
+        }
+      }
+    }else if(check.unused||f?.neverAdmitted){if((s.operation?.id??null)!==d.originalId||s.revision<d.selection.expectedRevision)return;}
+    else return;
+    d.released=true;this.dispatchAgent=null;this.review=null;this.pendingRead=null;this.agentPending=null;this.counterAgentRow=null;
+    const current=d.epoch===this.epoch&&d.observer.api===this.api&&same(d.context,context(this.connection()));
+    if(current&&adopt&&s.consent&&d.saved&&sameCounterSaved(d.saved,this.counterSource()))this.review={observer:d.observer,context:d.context,epoch:d.epoch,saved:d.saved,consent:s.consent};
+    if(current&&loaded&&s.operation)this.pendingRead={observer:d.observer,context:d.context,epoch:d.epoch,operationId:s.operation.id,rows:s.pending};
+    this.update({confirmed:false});this.retireConsent();
+  }
   // Discard is local native grant retirement, never a remote write or retry.
   private retireConsent(): void {
     const o = this.observer, s = o?.accepted;
-    if (!o || !s?.consent || !s.sessionId || s.operation?.phase !== 'settled' || this.review || this.pending || this.discard || this.retired) return;
+    if (!o || !s?.consent || !s.sessionId || s.operation?.phase !== 'settled' || this.review || this.pending || this.discard || this.retired || this.dispatchAgent) return;
     this.retired = { observer: o, session: s.sessionId, consent: s.consent.id }; this.sendDiscard(o, s);
   }
   private sendDiscard(o: Observer, s: PublicationStatus): void {
@@ -358,7 +435,7 @@ export class GitHubPublicationController {
   }
   startReason(): string | null {
     if (this.disposed || this.state.mode !== 'native' || !this.api || this.observer?.api !== this.api) return 'A current native GitHub session is required. Browser preview never changes repository files.';
-    if (this.delegated) return 'The original CLI publication permission is retained. Check or Revoke it, then read local Status here; do not Publish or reconcile again.';
+    if (this.delegated || this.dispatchAgent) return 'The original CLI publication permission is retained. Check or Revoke it, then read local Status here; do not Publish or reconcile again.';
     if (this.blocked || this.state.uncertain) return 'Original acknowledgement or cleanup is unconfirmed. Read local Status; do not repeat Publish.';
     if (this.pending || this.discard || this.retired || this.state.cancelling || this.state.status?.operation && this.state.status.operation.phase !== 'settled') return 'Wait for the original action or consent retirement. Status and Stop original remain available.';
     const c = context(this.connection()), s = this.state.status;

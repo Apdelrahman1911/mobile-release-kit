@@ -307,14 +307,18 @@ impl DocumentBinding {
     pub(crate) fn revoke_agent_store(&self, window:&str)->Result<MainAccess<p::Access>,BridgeError>{
         if window!=MAIN{return Err(BridgeError::invalid());}
         let at=Instant::now(); // Original invocation, not time spent waiting for Doc.
+        let listening=self.history_listening_service(); // OFF Doc; errors must not skip STOP/epoch.
         let state=self.lock();let mut result=Ok(p::Access::empty());
         let revision=permission::revoke(&self.inner.agent_store_revoke_epoch,at,|at|{
+            if let Some(link)=self.inner.bridge.local_history.agent_original().history_preparation_link(){
+                self.inner.bridge.local_history.agent_original().stop_history_preparation(&link.entry,p::Reason::PermissionRevoked,at);
+            }
             if let Some(g)=&state.agent_store_grant{self.store_delegate_owner(g.scope.review.kind).stop_agent_store(&g.binding,p::Reason::PermissionRevoked,at);}
             if let Some(g)=&state.agent_local_history{self.stop_history_grant(g,p::Reason::PermissionRevoked,at);}
             if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::PermissionRevoked,at);}
             result=match self.agent_store_service(){Ok(Some(s))=>s.store_requests().revoke(p::Reason::PermissionRevoked,at).map_err(public),Ok(None)=>Ok(p::Access::empty()),Err(e)=>Err(e)};
         }).map_err(public);
-        revision.and_then(|revision|result.map(|access|MainAccess::new(access,revision)))
+        revision.and_then(|revision|listening.and_then(|_|result.map(|access|MainAccess::new(access,revision))))
     }
     fn admit_agent_store(
         &self,
@@ -429,7 +433,8 @@ impl DocumentBinding {
         }
     }
     pub(crate) fn service_store_tick(&self) {
-        let Ok(Some(service)) = self.agent_store_service() else {
+        let Ok(Some(service)) = self.history_listening_service() else {
+            self.stop_history_preparation_for_host();
             return;
         };
         self.check_agent_store_original();
@@ -446,6 +451,7 @@ impl DocumentBinding {
             Err(_) => service.store_requests().fence(),
         }
         self.tick_store_preparation(&service);
+        self.tick_history_preparation(&service);
         self.tick_agent_local_history(&service);
         let _ = flush(&service);
     }
@@ -509,6 +515,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
     }
     preparation::flush_preparation(service)?;
     super::agent_local_history::flush(service)?;
+    super::agent_local_history::preparation::flush(service)?;
     service.native_history_current()?;
     returned.known = true;
     Ok(())

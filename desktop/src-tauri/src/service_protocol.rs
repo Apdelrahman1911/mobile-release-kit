@@ -100,7 +100,20 @@ impl CredentialReference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Action { LocalHistoryEnroll, LocalHistoryReview,
-    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview, GitStage, GitUnstage,
+    ObserveProject, EditConfiguration, EditMetadataText, EditMetadataImages, EditProjectIdentity, GitHubRepositoryCreate, GitHubDraftPrCreate, GitHubPrCreate, GitHubFailedJobsRetry, GitHubSetupPublish, GitHubSetupReconcile, GitHubActivityOverview,
+    GitHubPreflightPrepare,
+    GitHubPreflightDispatch,
+    GitHubPreflightPending,
+    GitHubPreflightObserve,
+    GitHubReleasePrepare,
+    GitHubReleaseDispatch,
+    GitHubReleasePending,
+    GitHubReleaseObserve,
+    GitHubCounterPrepare,
+    GitHubCounterCreate,
+    GitHubPublicationPending,
+    GitHubCounterReconcile,
+ GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }
 
@@ -210,6 +223,7 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="local-history.prepare")] LocalHistoryPrepare(crate::service_local_history_prepare_protocol::Request),
     #[serde(rename="local-history.scope")] LocalHistoryScope(ProjectQuery),
     #[serde(rename="local-history.submit")] LocalHistorySubmit(crate::service_local_history_protocol::Submit),
     #[serde(rename="local-history.status")] LocalHistoryStatus(crate::service_local_history_protocol::Query),
@@ -321,6 +335,7 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    LocalHistoryPreparation(Box<crate::service_local_history_prepare_protocol::Status>),
     LocalHistoryAccess(Box<crate::service_local_history_protocol::Access>),
     LocalHistoryRequest(Box<crate::service_local_history_protocol::Status>),
     GitHubActionRequest(crate::service_github_action_protocol::Status),
@@ -411,11 +426,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
         && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
-    if matches!(&request.request,RequestBody::LocalHistoryScope(_)|RequestBody::LocalHistorySubmit(_)|RequestBody::LocalHistoryStatus(_)|RequestBody::LocalHistoryCancel(_)) && bytes.len()>crate::service_local_history_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+    if matches!(&request.request,RequestBody::LocalHistoryPrepare(_)|RequestBody::LocalHistoryScope(_)|RequestBody::LocalHistorySubmit(_)|RequestBody::LocalHistoryStatus(_)|RequestBody::LocalHistoryCancel(_)) && bytes.len()>crate::service_local_history_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request,RequestBody::StorePrepare(_)|RequestBody::StoreStart(_)|RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
     if matches!(&request.request,RequestBody::AppleProvisioningPrepare(_)|RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+    if let RequestBody::LocalHistoryPrepare(v)=&request.request{v.validate()?;}
     if let RequestBody::VersionReserveReview(v)=&request.request{if bytes.len()>crate::service_version_reserve_review_protocol::REQUEST_BYTES{return Err(Error::InvalidRequest)}v.validate()?;}
     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
@@ -542,6 +558,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             row.validate()?;
             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
         },
+        ResponseBody::LocalHistoryPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
         ResponseBody::LocalHistoryAccess(row)=>{row.validate()?;if row.service_instance.as_ref().is_some_and(|id|id!=&response.service_instance)||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
         ResponseBody::LocalHistoryRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
         ResponseBody::StorePreparation(row)=>{

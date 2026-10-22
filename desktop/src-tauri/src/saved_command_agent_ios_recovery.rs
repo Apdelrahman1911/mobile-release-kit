@@ -717,7 +717,7 @@ mod tests {
             .bind(agent::FAMILY, id('a'), id('b'), 1, expires)
             .unwrap();
         let prepared = Prepared {
-            agent_history: None,
+            agent_history_preparation:None, agent_history: None,
             agent_store_preparation: None,
             agent_store: None,
             store_witness: None,

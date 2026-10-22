@@ -58,6 +58,21 @@ pub(in crate::asset_session) fn original_allowed(
             Prepare,
             Bind,
         ],
+        Case::BackupCli => &[
+            ChooseProject,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            GenerateUploadKey,
+            PrepareBackupExport,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            ImportBackup,
+            Prepare,
+            Bind,
+            ImportBackup,
+        ],
     };
     // None is the existing ordinary Quit original, including known-safe early
     // Quit after a refused journey. It is never a new execution/cleanup right;
@@ -122,6 +137,25 @@ mod tests {
         }
         // Comparison DATA cannot register an original or supply any close,
         // picker, write, Load or Bind receipt. Actual SessionBook gates remain.
+    }
+
+    #[test]
+    fn picker_cli_reuses_one_backup_prefix_and_only_adds_cancelled_import_then_quit() {
+        for id in 1..=12 {
+            for operation in [ChooseProject, OpenVault, PrepareInitialize, Initialize,
+                GenerateUploadKey, PrepareBackupExport, ImportBackup, Prepare, Bind] {
+                assert_eq!(original_allowed(Case::BackupCli,id,Some(operation)),
+                    original_allowed(Case::BackupRoundTrip,id,Some(operation)));
+            }
+        }
+        assert!(original_allowed(Case::BackupCli,13,Some(ImportBackup)));
+        assert!(!original_allowed(Case::BackupRoundTrip,13,Some(ImportBackup)));
+        assert!(original_allowed(Case::BackupCli,14,None));
+        assert!(!original_allowed(Case::BackupRoundTrip,14,None));
+        for id in 6..=15 { assert!(!original_allowed(Case::BackupCli,id,Some(GenerateUploadKey))); }
+        for operation in [ChooseFile,Unlock,Commit,RecoverUploadKey] {
+            for id in 1..=15 { assert!(!original_allowed(Case::BackupCli,id,Some(operation))); }
+        }
     }
 
     #[test]

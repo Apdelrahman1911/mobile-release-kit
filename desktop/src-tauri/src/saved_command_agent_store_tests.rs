@@ -177,7 +177,7 @@ fn binding_with_read_end(
         consumed: AtomicBool::new(false),
     });
     let prepared = Prepared {
-        agent_history:None, agent_store_preparation: None,
+        agent_history_preparation:None, agent_history:None, agent_store_preparation: None,
         agent_store: Some(link.clone()),
         store_witness: Some(witness),
         agent_build: None,

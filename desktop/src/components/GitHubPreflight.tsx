@@ -108,6 +108,7 @@ export function GitHubPreflight({ state, controller, onHelp, compact = false, on
           Run {record.runId ?? 'not yet resolved'} · original attempt 1 only.</p>
         <button type="button" className="button small secondary" disabled={controller.recordReason(record) !== null}
           onClick={() => controller.observe(record)}>{record.runId === null ? 'Reconcile exact request · read GitHub' : 'Track this run · read GitHub'}</button>
+        <details><summary>Advanced CLI observation</summary><button type="button" className="button small secondary" disabled={controller.recordReason(record)!==null||state.observing} onClick={()=>controller.selectRecordForAgent(record.prepared.target.marker)}>Select this original for one CLI Track/Reconcile</button><p>This only selects a genuinely returned record. Check and Allow the distinct observation permission in the GitHub Advanced panel; no read or dispatch is submitted here.</p></details>
         {controller.recordReason(record) && <p className="save-note">{controller.recordReason(record)}</p>}
       </article>)}
       {status?.run && <article className="github-environment" aria-label="Original workflow run observation">

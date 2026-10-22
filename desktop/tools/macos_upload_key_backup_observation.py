@@ -14,6 +14,8 @@ import stat
 
 SCOPE = "upload-key-backup-roundtrip"
 CASES = (SCOPE,)
+CLI_SCOPE = "upload-key-backup-cli"
+CLI_CASES = (CLI_SCOPE,)
 APP = "dev.mobile-release-kit.desktop"
 PARENTS = ("backup", "recovery", "restored")
 RECORD_LIMIT = 248 + 4096 + 8 + 128 * 1024 + 64 * 1024
@@ -61,8 +63,9 @@ def report(value, upload):
     return value
 
 
-def fixture_path(binding, native_home):
+def fixture_path(binding, native_home, *, case=SCOPE):
     """Compiled fixed Control ABI, not a path accepted from an output report."""
+    need(case in (SCOPE, CLI_SCOPE))
     need(type(native_home) is str and native_home.startswith("/") and native_home != "/"
          and len(native_home.encode("utf-8")) <= 4096 and "\x00" not in native_home
          and all(part not in ("", ".", "..") for part in native_home.split("/")[1:]))
@@ -70,20 +73,25 @@ def fixture_path(binding, native_home):
          and all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v)
                  for v in (binding.run, binding.attempt)))
     return Path(native_home) / "Library/Application Support" / (
-        f"mrk-macos-aqua-upload-key-{binding.source}-{binding.run}-{binding.attempt}-{SCOPE}") / SCOPE / APP
+        f"mrk-macos-aqua-upload-key-{binding.source}-{binding.run}-{binding.attempt}-{case}") / case / APP
+
+
+def _case(fixtures):
+    need(fixtures.cases in (CASES, CLI_CASES), "upload-key-backup-case")
+    return fixtures.cases[0]
 
 
 def _original(fixtures):
-    need(fixtures.cases == CASES and set(fixtures.upload_backup_parents) == set(PARENTS)
+    need(fixtures.cases in (CASES, CLI_CASES) and set(fixtures.upload_backup_parents) == set(PARENTS)
          and not fixtures.inflight and fixtures.close_errors == 0
          and fixtures.first_close_error is None, "upload-key-backup-original")
 
 
 def prepare(fixtures):
-    need(fixtures.cases == CASES and not fixtures.upload_backup_parents
+    need(fixtures.cases in (CASES, CLI_CASES) and not fixtures.upload_backup_parents
          and not fixtures.upload_backup_entered and not fixtures.vault_completed
          and not fixtures.inflight, "upload-key-backup-prepare")
-    parent = fixtures.vault_parents[SCOPE]
+    parent = fixtures.vault_parents[_case(fixtures)]
     fixtures._roster(parent, (), "upload-key-backup-collision")
     for name in PARENTS:
         # The existing owner creates/retains these exact empty parents ONCE.
@@ -93,9 +101,9 @@ def prepare(fixtures):
 
 def namespace_current(fixtures):
     _original(fixtures)
-    parent = fixtures.vault_parents[SCOPE]
-    fixtures._named(fixtures.vault_namespace, SCOPE, parent, 0o700)
-    fixtures._roster(parent, (*PARENTS, APP) if SCOPE in fixtures.vault_completed else PARENTS,
+    parent = fixtures.vault_parents[_case(fixtures)]
+    fixtures._named(fixtures.vault_namespace, _case(fixtures), parent, 0o700)
+    fixtures._roster(parent, (*PARENTS, APP) if _case(fixtures) in fixtures.vault_completed else PARENTS,
                      "upload-key-backup-case-roster")
     for name in PARENTS:
         fd = fixtures.upload_backup_parents[name]
@@ -173,13 +181,13 @@ def _vault(fixtures, app, *, initialized, record, upload):
 
 
 def _source(fixtures, initialized, generated, upload):
-    parent = fixtures.vault_parents[SCOPE]
-    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if generated else ("credential-vault-v1",)
+    parent = fixtures.vault_parents[_case(fixtures)]
+    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if generated and _case(fixtures) == SCOPE else ("credential-vault-v1",)
     with fixtures._temporary(fixtures._open(APP, parent, directory=True)) as app:
         fixtures._named(parent, APP, app, 0o700)
         fixtures._roster(app, app_names, "upload-key-backup-source-roster")
         total, record = _vault(fixtures, app, initialized=initialized, record=generated, upload=upload)
-        if generated:
+        if generated and _case(fixtures) == SCOPE:
             # Same closed ordinary Host reference namespace as the producer;
             # no additional service is initialized in the restored vault.
             with ExitStack() as stack:
@@ -206,15 +214,25 @@ def _source(fixtures, initialized, generated, upload):
 
 def readback(fixtures, value, upload):
     report(value, upload)
+    need(fixtures.cases == CASES)
+    return _readback_records(fixtures, upload, executed=value["execution"] == "executed",
+                             initialized=value["storage"]["header"] == [True, True])
+
+
+def readback_cli(fixtures, value, upload, cli):
+    cli.report(value)
+    need(fixtures.cases == CLI_CASES)
+    return _readback_records(fixtures, upload, executed=True, initialized=True)
+
+
+def _readback_records(fixtures, upload, *, executed, initialized):
     _original(fixtures)
     need(fixtures.upload_backup_entered and fixtures.last_returned and not fixtures.vault_completed,
          "upload-key-backup-readback-order")
-    source = fixtures.readback(SCOPE)  # Existing source-reader originals.
-    executed = value["execution"] == "executed"
-    initialized = value["storage"]["header"] == [True, True]
+    source = fixtures.readback(_case(fixtures))  # Existing source-reader originals.
     total, original = _source(fixtures, initialized, executed, upload)
     for name in PARENTS:
-        fixtures._named(fixtures.vault_parents[SCOPE], name, fixtures.upload_backup_parents[name], 0o700)
+        fixtures._named(fixtures.vault_parents[_case(fixtures)], name, fixtures.upload_backup_parents[name], 0o700)
     if executed:
         left, right = (fixtures.upload_backup_parents[name] for name in PARENTS[:2])
         backup_name, code_name = pair_names(_names(fixtures, left), _names(fixtures, right))
@@ -236,7 +254,7 @@ def readback(fixtures, value, upload):
             fixtures._roster(fd, (), "upload-key-backup-unexecuted-output")
     need(fixtures.close_errors == 0 and fixtures.first_close_error is None,
          "upload-key-backup-close-unknown")
-    fixtures.vault_completed.add(SCOPE)
+    fixtures.vault_completed.add(_case(fixtures))
     fixtures._vault_namespace_current()
     return {**source, "uploadKeyGeneratedBackup": {
         "nativeFixtureRootObserved": True, "privatePairMetadataObserved": executed,

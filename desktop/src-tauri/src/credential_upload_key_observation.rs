@@ -157,7 +157,7 @@ impl Sample {
     /// Even an exact checkpoint cannot turn a lost join into a successful test.
     pub(crate) fn stopped_observed(self, case: Case) -> bool {
         let cut = match case {
-            Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => return false,
+            Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip | Case::BackupCli => return false,
             Case::StopBeforeGo => "before-go",
             Case::StopAfterNew => "after-new-before-journal",
         };
@@ -184,7 +184,7 @@ impl Sample {
                 Case::StopAfterNew => {
                     self.authenticated_new && self.producer.is_some_and(ProducerSample::generated)
                 }
-                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => false,
+                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip | Case::BackupCli => false,
             }
     }
 }
@@ -447,7 +447,7 @@ impl DocumentBinding {
             platform: Platform::Android,
             stage: Stage::Candidate,
             purpose: Purpose::Signing,
-            execution_mode: commands::ExecutionMode::Github,
+            execution_mode: if control.case == VaultCase::UploadKey(Case::BackupCli) { commands::ExecutionMode::Local } else { commands::ExecutionMode::Github },
         })?;
         Ok(())
     }
@@ -498,9 +498,14 @@ impl DocumentBinding {
                 .revision,
         };
         let selection = self.installed_upload_select(Action::Prepare)?;
+        // This sibling shares the existing CLI's original short service home;
+        // the encrypted vault remains at Control.root(), as in B.
+        let application=if control.case==VaultCase::UploadKey(Case::BackupCli) {
+            control.upload.cli.application().ok_or_else(AssetError::invalid)?
+        }else{control.root()};
         self.prepare_upload_key_setup_selected(
             request,
-            control.root(),
+            application,
             controls::Qualification::Installed(selection),
         )
         .await?;

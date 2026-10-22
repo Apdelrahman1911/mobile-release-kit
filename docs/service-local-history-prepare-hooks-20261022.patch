@@ -1,0 +1,1976 @@
+diff --git a/desktop/src-tauri/src/service_local_history_protocol.rs b/desktop/src-tauri/src/service_local_history_protocol.rs
+--- a/desktop/src-tauri/src/service_local_history_protocol.rs
++++ b/desktop/src-tauri/src/service_local_history_protocol.rs
+@@ -1,4 +1,4 @@
+-//! Closed DATA for the three already Desktop-prepared local history steps.
++//! Closed DATA for the sixteen non-destructive local history contexts.
+ //! No config/Store requirement, key, journal parser, native consent or file bytes.
+ use crate::service_protocol::{Error, Id, Settlement};
+ pub(crate) use crate::service_store_protocol::{Outcome, Query, Reason, State, Submit};
+@@ -19,11 +19,35 @@
+     Enroll,
+     Verify,
+     ReviewInputs,
++    ReviewPrepared,
++    ReviewExecution,
++    ReviewReconcile,
++    ReviewRecovery,
++    ReviewStagePrepared,
++    ReviewStageExecution,
++    ReviewExternalReadiness,
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "lowercase")]
+ pub(crate) enum Platform {
++    Android,
+     Ios,
++}
++impl Kind {
++    pub(crate) fn stage(self) -> bool {
++        matches!(self, Self::ReviewStagePrepared | Self::ReviewStageExecution | Self::ReviewExternalReadiness)
++    }
++}
++pub(crate) fn selection_valid(kind: Kind, platform: Option<Platform>, candidate: Option<&str>, stage: Option<&str>) -> bool {
++    match kind {
++        Kind::Enroll | Kind::Verify => platform.is_none() && candidate.is_none() && stage.is_none(),
++        Kind::ReviewInputs | Kind::ReviewPrepared | Kind::ReviewExecution | Kind::ReviewReconcile =>
++            platform != Some(Platform::Android) && candidate.is_some_and(uuid) && stage.is_none(),
++        Kind::ReviewRecovery => platform.is_none() && candidate.is_some_and(uuid) && stage.is_none(),
++        Kind::ReviewStagePrepared | Kind::ReviewStageExecution =>
++            platform.is_some() && candidate.is_none() && stage.is_some_and(uuid),
++        Kind::ReviewExternalReadiness => platform == Some(Platform::Ios) && candidate.is_none() && stage.is_some_and(uuid),
++    }
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -45,39 +69,48 @@
+         skip_serializing_if = "Option::is_none"
+     )]
+     pub candidate_operation_id: Option<String>,
++    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
++    pub stage_operation_id: Option<String>,
+ }
+ impl Review {
+     pub fn valid(&self) -> bool {
+         (1..u32::MAX).contains(&self.status_revision)
+-            && match self.kind {
+-                Kind::Enroll | Kind::Verify => {
+-                    self.platform.is_none() && self.candidate_operation_id.is_none()
+-                }
+-                Kind::ReviewInputs => self.candidate_operation_id.as_deref().is_some_and(uuid),
+-            }
++            && selection_valid(self.kind, self.platform, self.candidate_operation_id.as_deref(), self.stage_operation_id.as_deref())
++    }
++    pub(crate) fn selected_id(&self) -> Option<&str> {
++        if self.kind.stage() { self.stage_operation_id.as_deref() } else { self.candidate_operation_id.as_deref() }
+     }
+     pub fn consent(&self) -> &'static str {
+         match (self.kind, self.platform) {
+-            (Kind::Enroll, _) => "agent-local-history-enroll-once-v1",
+-            (Kind::Verify, _) => "agent-local-history-verify-once-v1",
++            (Kind::Enroll, None) => "agent-local-history-enroll-once-v1",
++            (Kind::Verify, None) => "agent-local-history-verify-once-v1",
+             (Kind::ReviewInputs, None) => "agent-local-history-android-inputs-once-v1",
+             (Kind::ReviewInputs, Some(Platform::Ios)) => "agent-local-history-ios-inputs-once-v1",
++            (Kind::ReviewPrepared, None) => "agent-local-history-android-prepared-once-v1",
++            (Kind::ReviewPrepared, Some(Platform::Ios)) => "agent-local-history-ios-prepared-once-v1",
++            (Kind::ReviewExecution, None) => "agent-local-history-android-execution-once-v1",
++            (Kind::ReviewExecution, Some(Platform::Ios)) => "agent-local-history-ios-execution-once-v1",
++            (Kind::ReviewReconcile, None) => "agent-local-history-android-reconcile-files-once-v1",
++            (Kind::ReviewReconcile, Some(Platform::Ios)) => "agent-local-history-ios-reconcile-files-once-v1",
++            (Kind::ReviewRecovery, None) => "agent-local-history-android-recovery-files-once-v1",
++            (Kind::ReviewStagePrepared, Some(Platform::Android)) => "agent-local-history-android-stage-prepared-once-v1",
++            (Kind::ReviewStagePrepared, Some(Platform::Ios)) => "agent-local-history-ios-stage-prepared-once-v1",
++            (Kind::ReviewStageExecution, Some(Platform::Android)) => "agent-local-history-android-stage-execution-once-v1",
++            (Kind::ReviewStageExecution, Some(Platform::Ios)) => "agent-local-history-ios-stage-execution-once-v1",
++            (Kind::ReviewExternalReadiness, Some(Platform::Ios)) => "agent-local-history-ios-readiness-files-once-v1",
++            _ => "unsupported-local-history-context",
+         }
+     }
+     pub fn action(&self) -> crate::service_protocol::Action {
+-        match self.kind {
+-            Kind::Enroll => crate::service_protocol::Action::LocalHistoryEnroll,
+-            Kind::Verify | Kind::ReviewInputs => {
+-                crate::service_protocol::Action::LocalHistoryReview
+-            }
+-        }
++        if self.kind == Kind::Enroll { crate::service_protocol::Action::LocalHistoryEnroll }
++        else { crate::service_protocol::Action::LocalHistoryReview }
+     }
+     pub fn heap(&self) -> usize {
+-        self.candidate_operation_id
+-            .as_ref()
+-            .map_or(0, String::capacity)
+-    }
+-}
++        self.candidate_operation_id.as_ref().map_or(0, String::capacity)
++            .saturating_add(self.stage_operation_id.as_ref().map_or(0, String::capacity))
++    }
++}
++
+ pub(crate) fn uuid(v: &str) -> bool {
+     crate::service_store_protocol::uuid(v)
+         && v.as_bytes().get(14) == Some(&b'4')
+@@ -224,6 +257,8 @@
+     pub history: Vec<HistoryRow>,
+     #[serde(deserialize_with = "nullable")]
+     pub candidate_inputs: Option<Inputs>,
++    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
++    pub reviewed_files: Option<Box<crate::service_local_history_prepare_protocol::ReviewedFiles>>,
+     pub limitations: [Limitation; 3],
+ }
+ impl Report {
+@@ -253,9 +288,26 @@
+         }) {
+             return false;
+         }
++        if matches!(r.kind, Kind::Enroll | Kind::Verify) {
++            return self.candidate_inputs.is_none() && self.reviewed_files.is_none();
++        }
+         if r.kind != Kind::ReviewInputs {
+-            return self.candidate_inputs.is_none();
+-        }
++            if self.candidate_inputs.is_some() { return false; }
++            let Some(files) = &self.reviewed_files else { return false; };
++            let Some(row) = self.history.iter().find(|v| Some(v.operation_id.as_str()) == r.selected_id()) else { return false; };
++            let (head, phase) = match r.kind {
++                Kind::ReviewPrepared => (5, row.phase == HistoryPhase::Prepared),
++                Kind::ReviewExecution => (7, row.phase == HistoryPhase::SettledSuccess),
++                Kind::ReviewReconcile => (6, self.history.last()==Some(row) && matches!(row.phase, HistoryPhase::ExecutePending | HistoryPhase::SettledSuccess | HistoryPhase::SettledFailure | HistoryPhase::ReconciliationRequired)),
++                Kind::ReviewRecovery => (7, row.phase == HistoryPhase::TargetReconciled),
++                Kind::ReviewStagePrepared => (if files.stage==Some(crate::service_local_history_prepare_protocol::Stage::ProductionSubmit){13}else{9}, row.phase == HistoryPhase::Prepared),
++                Kind::ReviewStageExecution => (if files.stage==Some(crate::service_local_history_prepare_protocol::Stage::ProductionSubmit){15}else{11}, row.phase == HistoryPhase::SettledSuccess),
++                Kind::ReviewExternalReadiness => (12, row.phase == HistoryPhase::ExternalReady),
++                _ => return false,
++            };
++            return self.head_sequence >= head && phase && files.bounded(r);
++        }
++        if self.reviewed_files.is_some() { return false; }
+         match self
+             .history
+             .iter()
+@@ -300,6 +352,9 @@
+                     .checked_add(a.directory.capacity())?
+                     .checked_add(a.sha256.capacity())?;
+             }
++        }
++        if let Some(files) = &self.reviewed_files {
++            n = n.checked_add(std::mem::size_of_val(files.as_ref()))?.checked_add(files.heap()?)?;
+         }
+         Some(n)
+     }
+@@ -485,6 +540,7 @@
+     fn review() -> Review {
+         Review {
+             kind: Kind::ReviewInputs,
++            stage_operation_id: None,
+             operation_id: id('a'),
+             owner_generation: id('b'),
+             status_revision: 1,
+@@ -542,6 +598,7 @@
+         }
+         let report = Report {
+             enrolled: true,
++            reviewed_files: None,
+             head_sequence: 513,
+             history,
+             candidate_inputs: Some(Inputs {
+@@ -679,6 +736,7 @@
+         s.validate().unwrap();
+         s.result = Some(Report {
+             enrolled: true,
++            reviewed_files: None,
+             head_sequence: 1,
+             history: vec![],
+             candidate_inputs: None,
+diff --git a/desktop/src-tauri/src/service_local_history_requests.rs b/desktop/src-tauri/src/service_local_history_requests.rs
+--- a/desktop/src-tauri/src/service_local_history_requests.rs
++++ b/desktop/src-tauri/src/service_local_history_requests.rs
+@@ -14,7 +14,19 @@
+     },
+     time::Instant,
+ };
++#[path = "service_local_history_prepare_requests.rs"]
++pub(crate) mod preparation;
++pub(super) enum Allowed {
++    Start(Arc<Lease>),
++    Preparation(Arc<preparation::Entry>),
++}
++impl Allowed {
++    pub(super) fn occupied(&self) -> bool {match self {Self::Start(l)=>l.occupied(),Self::Preparation(e)=>e.pending()}}
++    pub(super) fn stop(&self, reason:p::Reason, at:Instant) {match self {Self::Start(l)=>l.scope.control.stop(reason,at),Self::Preparation(e)=>e.cancel(reason,at)}}
++    pub(super) fn fence(&self, at:Instant) {match self {Self::Start(l)=>l.scope.control.unknown(at),Self::Preparation(e)=>e.unknown(p::Reason::HistoryUnavailable)}}
++}
+ pub(crate) struct Scope {
++    pub(crate) preparation: Option<Weak<preparation::Entry>>,
+     pub(crate) project_id: Id,
+     pub(crate) runtime_id: String,
+     pub(crate) review_id: Id,
+@@ -468,59 +480,33 @@
+ }
+ 
+ impl Inbox {
+-    pub(crate) fn can_allow_history(&self) -> Result<(), Error> {
+-        let b = self.lock()?;
+-        if b.closed {
+-            return Err(Error::Unavailable);
+-        }
+-        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) {
+-            return Err(Error::Busy);
+-        }
+-        if b.lease.as_ref().is_some_and(|l| {
+-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
+-        }) {
+-            return Err(Error::Busy);
+-        }
+-        if b.entries.len() >= super::p::REQUEST_LIMIT
+-            || b.entries.iter().any(|e| e.pending())
+-            || b.history.as_ref().is_some_and(|l| {
+-                !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
+-            })
+-        {
+-            return Err(Error::Busy);
+-        }
++    pub(crate) fn can_allow_history(&self) -> Result<(),Error> {self.can_allow_history_from(None)}
++    pub(crate) fn can_allow_history_from(&self, preparation:Option<&Arc<preparation::Entry>>) -> Result<(), Error> {
++        let b=self.lock()?;
++        if b.closed{return Err(Error::Unavailable);}
++        let except=preparation.filter(|e|preparation::excludes(&b,e,false));
++        if preparation.is_some() && except.is_none(){return Err(Error::AccessDenied);}
++        if b.preparation.as_ref().is_some_and(|l|l.scope.occupied())
++            || b.lease.as_ref().is_some_and(|l|!l.scope.retired.load(Ordering::Acquire)||l.scope.control.first().is_err())
++            || b.entries.len()>=super::p::REQUEST_LIMIT
++            || b.entries.iter().any(|e|e.pending() && !except.is_some_and(|old|e.history_preparation().is_some_and(|e|Arc::ptr_eq(e,old))))
++            || b.history.as_ref().is_some_and(|l|l.occupied())&&except.is_none(){return Err(Error::Busy);}
+         Ok(())
+     }
+-    pub(crate) fn allow_history(&self, scope: Arc<Scope>, id: Id) -> Result<p::Access, Error> {
+-        let now = Instant::now();
+-        if !scope.valid(now) {
+-            return Err(Error::Conflict);
+-        }
+-        let mut b = self.lock()?;
+-        if b.closed {
+-            return Err(Error::Unavailable);
+-        }
+-        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) {
+-            return Err(Error::Busy);
+-        }
+-        if b.lease.as_ref().is_some_and(|l| {
+-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
+-        }) {
+-            return Err(Error::Busy);
+-        }
+-        if b.entries.len() >= super::p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
+-            return Err(Error::Busy);
+-        }
+-        if b.history.as_ref().is_some_and(|l| {
+-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
+-        }) {
+-            return Err(Error::Busy);
+-        }
+-        b.history = Some(Arc::new(Lease {
+-            id,
+-            scope,
+-            entry: Mutex::new(None),
+-        }));
++    pub(crate) fn allow_history(&self,scope:Arc<Scope>,id:Id)->Result<p::Access,Error>{
++        if !scope.valid(Instant::now()){return Err(Error::Conflict);}
++        let original=scope.preparation.as_ref().map(|e|e.upgrade().ok_or(Error::Conflict)).transpose()?;
++        let mut b=self.lock()?;
++        if b.closed{return Err(Error::Unavailable);}
++        let except=original.as_ref().filter(|e|preparation::excludes(&b,e,true));
++        if original.is_some()&&except.is_none(){return Err(Error::AccessDenied);}
++        if b.preparation.as_ref().is_some_and(|l|l.scope.occupied())
++            ||b.lease.as_ref().is_some_and(|l|!l.scope.retired.load(Ordering::Acquire)||l.scope.control.first().is_err())
++            ||b.entries.len()>=super::p::REQUEST_LIMIT
++            ||b.entries.iter().any(|e|e.pending()&&!except.is_some_and(|old|e.history_preparation().is_some_and(|e|Arc::ptr_eq(e,old))))
++            ||b.history.as_ref().is_some_and(Allowed::occupied)&&except.is_none(){return Err(Error::Busy);}
++        if let Some(e)=except {e.finish_handoff()?;}
++        b.history=Some(Allowed::Start(Arc::new(Lease{id,scope,entry:Mutex::new(None)})));
+         self.history_access_locked(&b)
+     }
+     pub(crate) fn submit_history(
+@@ -545,7 +531,7 @@
+                 _ => Err(Error::Conflict),
+             };
+         }
+-        let lease = b.history.as_ref().ok_or(Error::AccessDenied)?.clone();
++        let lease = match &b.history {Some(Allowed::Start(l))=>l.clone(),_=>return Err(Error::AccessDenied)};
+         if lease.id != input.grant_id
+             || lease.scope.review_id != input.review_id
+             || lease.scope.project_id != input.origin.project_id
+@@ -639,7 +625,7 @@
+         self.history_access_locked(&b)
+     }
+     fn history_access_locked(&self, b: &Book) -> Result<p::Access, Error> {
+-        let Some(l) = &b.history else {
++        let Some(Allowed::Start(l)) = &b.history else {
+             return Ok(p::Access::empty());
+         };
+         let entry = l
+@@ -731,11 +717,13 @@
+     // History's extra term includes two weak native grants (64KiB), three
+     // public-return trees (<=384 typed nodes,256 bytes/node plus all24KiB text
+     // and one8KiB report), and all three32-node RAW decode/validation copies.
+-    let history = 64 * 1024 + 3 * (384 * 256 + p::STATUS_LIMIT + 8192) + 3 * p::RAW_NODES * 512;
++    let history = 64 * 1024 + 3 * (384 * 256 + p::STATUS_LIMIT + 8192)
++        + 3 * p::RAW_NODES * 512 + 3 * crate::service_local_history_prepare_protocol::COMPARISON_BYTES;
+     (history <= HISTORY_EXTRA && total <= super::p::DOCUMENT_BACKING)
+         .then_some(super::p::DOCUMENT_BACKING)
+ }
+ pub(crate) fn retained_document_backing() -> Option<usize> {
++    preparation::cell_backing()?;
+     quoted_backing(
+         std::mem::size_of::<Entry>(),
+         std::mem::size_of::<Scope>(),
+diff --git a/desktop/src-tauri/src/service_local_history_application.rs b/desktop/src-tauri/src/service_local_history_application.rs
+--- a/desktop/src-tauri/src/service_local_history_application.rs
++++ b/desktop/src-tauri/src/service_local_history_application.rs
+@@ -14,6 +14,15 @@
+             return Err(Error::Conflict);
+         }
+         Ok(p::ResponseBody::LocalHistoryAccess(Box::new(access)))
++    }
++    pub(super) fn service_local_history_prepare(&self,client:&ClientSession,input:crate::service_local_history_prepare_protocol::Request)->Result<p::ResponseBody,Error>{
++        let at=Instant::now();input.validate()?;
++        let state=self.lock()?;
++        self.authorize_build_client(&state,client,&input.origin.project_id)?;
++        let saved=Self::identity_point(&state,&input.origin.project_id)?;
++        let read=live_grant(&state)?.reserve_read.clone();
++        self.store_requests.prepare_history(input,crate::service_store_requests::history::preparation::Scope{saved,read},at)
++            .map(|s|p::ResponseBody::LocalHistoryPreparation(Box::new(s)))
+     }
+     pub(super) fn service_local_history_submit(
+         &self,
+@@ -35,6 +44,11 @@
+     ) -> Result<p::ResponseBody, Error> {
+         let state = self.lock()?;
+         self.authorize_build_client(&state, client, &q.project_id)?;
++        if self.store_requests.is_history_preparation(q)? {
++            let entry=self.store_requests.history_preparation(q)?;
++            if cancel {entry.cancel(wire::Reason::UserCancelled,Instant::now());}
++            return entry.status().map(|s|p::ResponseBody::LocalHistoryPreparation(Box::new(s)));
++        }
+         self.store_requests
+             .query_history(q, cancel)
+             .map(|s| p::ResponseBody::LocalHistoryRequest(Box::new(s)))
+diff --git a/desktop/src-tauri/src/service_store_requests.rs b/desktop/src-tauri/src/service_store_requests.rs
+--- a/desktop/src-tauri/src/service_store_requests.rs
++++ b/desktop/src-tauri/src/service_store_requests.rs
+@@ -165,7 +165,7 @@
+     lease: Option<Arc<Lease>>,
+     entries: Vec<StoredEntry>,
+     preparation: Option<Arc<PreparationLease>>,
+-    history: Option<Arc<history::Lease>>,
++    history: Option<history::Allowed>,
+     closed: bool,
+ }
+ pub(crate) struct Inbox {
+@@ -773,7 +773,7 @@
+             l.scope.control.stop(reason, at);
+         }
+         if let Some(l) = &b.preparation { l.scope.control.stop(reason, at); }
+-        if let Some(l)=&b.history{l.scope.control.stop(reason,at);}
++        if let Some(l)=&b.history{l.stop(reason,at);}
+         for e in &b.entries {
+             if e.pending() {
+                 e.cancel(reason, at);
+@@ -800,7 +800,7 @@
+             l.scope.control.unknown(at);
+         }
+         if let Some(l) = &b.preparation { l.scope.control.unknown(at); }
+-        if let Some(l)=&b.history{l.scope.control.unknown(at);}
++        if let Some(l)=&b.history{l.fence(at);}
+         for e in &b.entries {
+             e.unknown(p::Reason::HistoryUnavailable);
+         }
+@@ -818,7 +818,7 @@
+             .iter()
+             .filter(|e| &e.origin().project_id == project)
+             .map(|e| crate::service_request_catalogue::AdditionalRequest {
+-                family: if matches!(e,StoredEntry::LocalHistory(_)){crate::service_request_catalogue::AdditionalFamily::LocalHistory}else{crate::service_request_catalogue::AdditionalFamily::Store},
++                family: if matches!(e,StoredEntry::LocalHistory(_) | StoredEntry::LocalHistoryPreparation(_)){crate::service_request_catalogue::AdditionalFamily::LocalHistory}else{crate::service_request_catalogue::AdditionalFamily::Store},
+                 request_id: e.origin().request_id.clone(),
+             })
+             .collect())
+diff --git a/desktop/src-tauri/src/service_store_prepare_requests.rs b/desktop/src-tauri/src/service_store_prepare_requests.rs
+--- a/desktop/src-tauri/src/service_store_prepare_requests.rs
++++ b/desktop/src-tauri/src/service_store_prepare_requests.rs
+@@ -645,6 +645,7 @@
+     Original(Arc<Entry>),
+     Preparation(Arc<PrepareEntry>),
+     LocalHistory(Arc<super::history::Entry>),
++    LocalHistoryPreparation(Arc<super::history::preparation::Entry>),
+ }
+ impl StoredEntry {
+     pub fn origin(&self) -> &p::Query {
+@@ -652,6 +653,7 @@
+             Self::Original(e) => e.origin(),
+             Self::Preparation(e) => e.origin(),
+             Self::LocalHistory(e) => e.origin(),
++            Self::LocalHistoryPreparation(e) => e.origin(),
+         }
+     }
+     pub fn pending(&self) -> bool {
+@@ -659,6 +661,7 @@
+             Self::Original(e) => e.pending(),
+             Self::Preparation(e) => e.pending(),
+             Self::LocalHistory(e) => e.pending(),
++            Self::LocalHistoryPreparation(e) => e.pending(),
+         }
+     }
+     pub fn cancel(&self, reason: p::Reason, at: Instant) {
+@@ -666,6 +669,7 @@
+             Self::Original(e) => e.cancel(reason, at),
+             Self::Preparation(e) => e.cancel(reason, at),
+             Self::LocalHistory(e) => e.cancel(reason, at),
++            Self::LocalHistoryPreparation(e) => e.cancel(reason, at),
+         }
+     }
+     pub fn unknown(&self, reason: p::Reason) {
+@@ -673,8 +677,10 @@
+             Self::Original(e) => e.unknown(reason),
+             Self::Preparation(e) => e.unknown(reason),
+             Self::LocalHistory(e) => e.unknown(reason),
+-        }
+-    }
++            Self::LocalHistoryPreparation(e) => e.unknown(reason),
++        }
++    }
++    pub fn history_preparation(&self)->Option<&Arc<super::history::preparation::Entry>> {if let Self::LocalHistoryPreparation(e)=self{Some(e)}else{None}}
+     pub fn history(&self)->Option<&Arc<super::history::Entry>>{if let Self::LocalHistory(e)=self{Some(e)}else{None}}
+     pub fn original(&self) -> Option<&Arc<Entry>> {
+         if let Self::Original(e) = self {
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1283,8 +1283,11 @@
+ mod agent_store;
+ #[path="saved_command_agent_local_history.rs"]
+ mod agent_history;
++#[path="saved_command_agent_local_history_prepare.rs"]
++mod history_preparation;
++pub(crate) use history_preparation::Link as HistoryPreparationLink;
+ pub(crate) use agent_history::{Approval as AgentHistoryApproval,Binding as AgentHistoryBinding};
+-pub(crate) fn agent_history_backing_bytes()->Option<usize>{agent_history::backing_bytes()}
++pub(crate) fn agent_history_backing_bytes()->Option<usize>{agent_history::backing_bytes()?.checked_add(history_preparation::backing_bytes()?)}
+ pub(crate) fn agent_apple_mode(mode:crate::apple_provisioning_protocol::Mode)->Result<crate::service_apple_provisioning_protocol::Mode,BridgeError>{apple_provisioning::agent::mode(mode)}
+ pub(crate) use apple_provisioning::preparation::{Link as AgentApplePrepareLink,Selection as AgentApplePrepareSelection};
+ pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
+@@ -1292,7 +1295,7 @@
+ pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
+ pub(crate) use tool_acquisition::{AgentToolAcquisitionApproval,AgentToolAcquisitionBinding,AgentToolInspectApproval,AgentToolInspectBinding};
+ 
+-struct Prepared { agent_history:Option<Arc<agent_history::Binding>>, agent_store_preparation:Option<Arc<agent_store::preparation::Binding>>, agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
++struct Prepared { agent_history_preparation:Option<Arc<history_preparation::Link>>, agent_history:Option<Arc<agent_history::Binding>>, agent_store_preparation:Option<Arc<agent_store::preparation::Binding>>, agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
+ struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
+@@ -2352,11 +2355,19 @@
+         tools: Option<tool_acquisition::agent::inspect::Preparation>, apple: Option<apple_provisioning::preparation::Commit>) -> Result<Status, BridgeError> {
+         self.prepare_bound_preparations(context,registration,project,gate,material,artifact_tools,agent_entry,agent_build,tools,None,apple)
+     }
+-    fn prepare_bound_preparations(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
++    fn prepare_bound_preparations(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+         material: Option<PrivateSigningMaterial>, artifact_tools: Option<Arc<ArtifactToolLoan>>,
+         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>,
+         tools: Option<tool_acquisition::agent::inspect::Preparation>, store_preparation: Option<Arc<crate::service_store_requests::preparation::PrepareEntry>>,
+         apple: Option<apple_provisioning::preparation::Commit>) -> Result<Status, BridgeError> {
++        self.prepare_bound_preparations_history(context,registration,project,gate,material,artifact_tools,agent_entry,agent_build,tools,store_preparation,apple,None)
++    }
++    fn prepare_bound_preparations_history(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
++        material: Option<PrivateSigningMaterial>, artifact_tools: Option<Arc<ArtifactToolLoan>>,
++        agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>,
++        tools: Option<tool_acquisition::agent::inspect::Preparation>, store_preparation: Option<Arc<crate::service_store_requests::preparation::PrepareEntry>>,
++        apple: Option<apple_provisioning::preparation::Commit>, history:Option<history_preparation::Commit>) -> Result<Status, BridgeError> {
++        if history.is_some() && (store_preparation.is_some() || apple.is_some() || agent_entry.is_some() || agent_build.is_some() || tools.is_some()) { return Err(self.inner.domain.invalid_owner()); }
+         if store_preparation.is_some() && apple.is_some() { return Err(self.inner.domain.invalid_owner()); }
+         if artifact_tools.is_some()&&!matches!(&context,Context::ArtifactInspection(c) if c.format==artifact_wire::Format::Aab){return Err(self.inner.domain.invalid_owner());}
+         if artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(self.inner.domain.unavailable());}
+@@ -2439,12 +2450,14 @@
+         if let Some(original) = &tools { expires = original.clip_expiry(expires)?; }
+         let tools = tools.map(|original| original.link(&self.inner, &r, &context, registration, &project, &id, &generation, expires)).transpose()?;
+         if let Some(commit)=&apple{expires=commit.admit(&context,registration,&project,expires)?;}
++        if let Some(commit)=&history{expires=commit.admit(&context,registration,&project,expires)?;}
+         let projection = RunProjection { agent_build: agent_build.as_ref().map(|link| link.projection_origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
+-            phase: Phase::AwaitingConsent, intent_usable: apple.is_none(), outcome: None, reason: Reason::None, result: None, stage: None };
++            phase: Phase::AwaitingConsent, intent_usable: apple.is_none() && history.as_ref().is_none_or(|h|h.link.is_none()), outcome: None, reason: Reason::None, result: None, stage: None };
+         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
+         let android_selection = r.android_catalog.selection().cloned();
+-        let prepared = Prepared { agent_history:None, agent_store_preparation, agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:apple.as_ref().map(|v|v.intent.clone()), tools, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools };
++        let prepared = Prepared { agent_history_preparation:history.as_ref().and_then(|h|h.link.clone()), agent_history:None, agent_store_preparation, agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:apple.as_ref().map(|v|v.intent.clone()), tools, local_history:history.as_ref().map(|h|h.consent.clone()), projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools };
+         apple_provisioning::preparation::commit_prepared(&self.inner,&mut r,prepared,apple.as_ref())?;
++        history_preparation::committed(&self.inner,&mut r)?;
+         agent_store::preparation::installed(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
+         if r.prepared.as_ref().is_some_and(|p| p.tools.is_some()) { r.tool_acquisition.clear_completed_sources(); }
+         self.inner.bump(&mut r);
+@@ -3302,6 +3315,7 @@
+         }
+     }
+     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
++        if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_history_preparation.as_ref()).and_then(|l|l.stop_at(now)){self.retire_prepared(r,reason);}
+         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|tool_acquisition::agent::stop_prepared(p,now)){self.retire_prepared(r,reason);}
+         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref().and_then(|link|link.stop_at(now)).or_else(||p.agent_store_preparation.as_ref().and_then(|link|link.stop_at(now))).or_else(||p.agent_history.as_ref().and_then(|link|link.stop_at(now)))){self.retire_prepared(r,reason);}
+         if let Some((reason,_))=r.prepared.as_ref().and_then(apple_provisioning::agent::prepared_binding).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+@@ -5914,7 +5928,7 @@
+     let expiry = SavedCommandOwner::project_recovery(runtime);
+     {
+         let mut r = expiry.inner.lock(); let expires = t + INTENT;
+-        r.prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
++        r.prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
+             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
+             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+diff --git a/desktop/src-tauri/src/saved_command_local_history.rs b/desktop/src-tauri/src/saved_command_local_history.rs
+--- a/desktop/src-tauri/src/saved_command_local_history.rs
++++ b/desktop/src-tauri/src/saved_command_local_history.rs
+@@ -13,11 +13,9 @@
+     pub(crate) fn prepare_history(&self,input:history_wire::Prepare,registration:u32,root:RegisteredRoot,gate:history_wire::Availability,
+         consent:Arc<crate::asset_session::LocalHistoryConsent>)->Result<history_wire::Status,BridgeError>{
+         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
+-        let status=self.prepare(Context::LocalReleaseHistory(input.context()),registration,root,Availability::from_history(gate))?;
+-        let mut r=self.inner.lock();
+-        let p=r.prepared.as_mut().ok_or_else(||self.inner.domain.invalid_owner())?;
+-        if p.local_history.is_some(){return Err(self.inner.domain.invalid_owner());}
+-        p.local_history=Some(consent);status.history()
++        self.prepare_bound_preparations_history(Context::LocalReleaseHistory(input.context()),registration,root,
++            Availability::from_history(gate),None,None,None,None,None,None,None,
++            Some(history_preparation::Commit{consent,link:None}))?.history()
+     }
+     pub(crate) fn prepared_history_consent(&self,operation:&str,generation:&str)->Result<Arc<crate::asset_session::LocalHistoryConsent>,BridgeError>{
+         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
+diff --git a/desktop/src-tauri/src/saved_command_agent_local_history.rs b/desktop/src-tauri/src/saved_command_agent_local_history.rs
+--- a/desktop/src-tauri/src/saved_command_agent_local_history.rs
++++ b/desktop/src-tauri/src/saved_command_agent_local_history.rs
+@@ -6,10 +6,11 @@
+     service_store_requests::history as requests,
+ };
+ use std::sync::{OnceLock, Weak};
++use serde::Deserialize;
+ fn refused() -> BridgeError {
+     crate::local_release_history_owner::unavailable()
+ }
+-fn review(
++pub(super) fn review(
+     c: &Context,
+     id: &str,
+     generation: &str,
+@@ -22,22 +23,30 @@
+         history_wire::Action::Enroll => p::Kind::Enroll,
+         history_wire::Action::Verify => p::Kind::Verify,
+         history_wire::Action::ReviewInputs => p::Kind::ReviewInputs,
+-        _ => return Err(refused()),
++        history_wire::Action::ReviewPrepared => p::Kind::ReviewPrepared,
++        history_wire::Action::ReviewExecution => p::Kind::ReviewExecution,
++        history_wire::Action::ReviewReconcile => p::Kind::ReviewReconcile,
++        history_wire::Action::ReviewRecovery => p::Kind::ReviewRecovery,
++        history_wire::Action::ReviewStagePrepared => p::Kind::ReviewStagePrepared,
++        history_wire::Action::ReviewStageExecution => p::Kind::ReviewStageExecution,
++        history_wire::Action::ReviewExternalReadiness => p::Kind::ReviewExternalReadiness,
++        history_wire::Action::AbandonInputs => return Err(refused()),
+     };
+     let platform = match c.platform {
+         None => None,
+         Some(history_wire::CandidatePlatform::Ios) => Some(p::Platform::Ios),
+-        _ => return Err(refused()),
++        Some(history_wire::CandidatePlatform::Android) => Some(p::Platform::Android),
+     };
+     let r = p::Review {
+         kind,
+         platform,
+         candidate_operation_id: c.candidate_operation_id.clone(),
++        stage_operation_id: c.stage_operation_id.clone(),
+         operation_id: s::Id::parse(id).map_err(|_| refused())?,
+         owner_generation: s::Id::parse(generation).map_err(|_| refused())?,
+         status_revision: revision,
+     };
+-    if c.stage_operation_id.is_some() || !r.valid() {
++    if !r.valid() {
+         return Err(refused());
+     }
+     Ok(r)
+@@ -52,8 +61,10 @@
+     root: RegisteredRoot,
+     expires: Instant,
+     review: p::Review,
++    preparation: Option<Weak<requests::preparation::Entry>>,
+ }
+ impl Approval {
++    pub(crate) fn preparation(&self)->Option<Arc<requests::preparation::Entry>> {self.preparation.as_ref().and_then(Weak::upgrade)}
+     pub(crate) fn review(&self) -> &p::Review {
+         &self.review
+     }
+@@ -192,7 +203,7 @@
+         }
+     }
+ }
+-fn native_reason(r: p::Reason) -> Reason {
++pub(super) fn native_reason(r: p::Reason) -> Reason {
+     match r {
+         p::Reason::Expired => Reason::IntentExpired,
+         p::Reason::ContextChanged => Reason::ContextChanged,
+@@ -202,7 +213,7 @@
+         _ => Reason::Cancelled,
+     }
+ }
+-fn reason(r: Reason, control: &requests::Control) -> p::Reason {
++pub(super) fn reason(r: Reason, control: &requests::Control) -> p::Reason {
+     match r {
+         Reason::None => p::Reason::None,
+         Reason::Cancelled => control
+@@ -236,6 +247,10 @@
+     limitations: [p::Limitation; 3],
+     #[serde(default)]
+     candidate_inputs: Option<ReturnedInputs>,
++    #[serde(default)] prepared_intent: Option<serde_json::Value>,
++    #[serde(default)] execution_receipt: Option<serde_json::Value>,
++    #[serde(default)] reconciliation_receipt: Option<serde_json::Value>,
++    #[serde(default)] readiness_receipt: Option<serde_json::Value>,
+ }
+ #[derive(serde::Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -255,6 +270,40 @@
+     observation: String,
+     prior_create_finality: String,
+ }
++fn reviewed_files(native:&ReturnedResult,r:&p::Review)->Result<Option<Box<crate::service_local_history_prepare_protocol::ReviewedFiles>>,BridgeError>{
++    use crate::service_local_history_prepare_protocol::{ReviewedFiles,FilesKind,FilesObservation,Stage,PriorFinality,Destination};
++    let options=[&native.prepared_intent,&native.execution_receipt,&native.reconciliation_receipt,&native.readiness_receipt];
++    let (index,kind,observation,finality)=match r.kind {
++        p::Kind::ReviewPrepared|p::Kind::ReviewReconcile|p::Kind::ReviewStagePrepared=>(0,FilesKind::Prepared,FilesObservation::Prepared,"priorPrepareFinality"),
++        p::Kind::ReviewExecution|p::Kind::ReviewStageExecution=>(1,FilesKind::Execution,FilesObservation::Execution,"priorExecutionFinality"),
++        p::Kind::ReviewRecovery=>(2,FilesKind::Reconciliation,FilesObservation::Reconciliation,"priorExecutionFinality"),
++        p::Kind::ReviewExternalReadiness=>(3,FilesKind::ExternalReadiness,FilesObservation::ExternalReadiness,"priorExecutionFinality"),
++        _=>return if options.iter().all(|v|v.is_none()){Ok(None)}else{Err(refused())},
++    };
++    if options.iter().enumerate().any(|(i,v)|i!=index&&v.is_some()){return Err(refused());}
++    let v=options[index].as_ref().ok_or_else(refused)?;
++    let text=|key:&str|v.get(key).and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(refused);
++    let optional=|key:&str|->Result<Option<String>,BridgeError>{v.get(key).map(|v|v.as_str().map(str::to_owned).ok_or_else(refused)).transpose()};
++    if v.get(finality).and_then(serde_json::Value::as_str)!=Some("not-established")
++        ||v.get("observation").and_then(serde_json::Value::as_str)!=Some(match observation {
++            FilesObservation::Prepared=>"current-prepared-files-only",FilesObservation::Execution=>"current-execution-files-only",
++            FilesObservation::Reconciliation=>"current-recovery-files-only",FilesObservation::ExternalReadiness=>"current-external-readiness-files-only"}) {return Err(refused());}
++    let d=v.get("destination").ok_or_else(refused)?;
++    let stage=if kind==FilesKind::ExternalReadiness {Some(Stage::ExternalTesting)} else {
++        v.get("stage").map(|v|Stage::deserialize(v).map_err(|_|refused())).transpose()?
++    };
++    let out=ReviewedFiles{kind,operation_id:text("operationId")?,candidate_sha256:text("candidateSha256")?,intent_sha256:text("intentSha256")?,
++        receipt_sha256:optional("receiptSha256")?,source_commit:text("sourceCommit")?,source_tree:text("sourceTree")?,
++        application:text(if r.platform==Some(p::Platform::Ios){"bundleId"}else{"applicationId"})?,
++        version:p::Version::deserialize(v.get("version").ok_or_else(refused)?).map_err(|_|refused())?,
++        destination:Destination{channel:d.get("channel").and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(refused)?,
++            release_status:d.get("releaseStatus").map(|v|v.as_str().map(str::to_owned).ok_or_else(refused)).transpose()?,
++            automatic_release:d.get("automaticRelease").map(|v|v.as_bool().ok_or_else(refused)).transpose()?},
++        stage,candidate_operation_id:optional("candidateOperationId")?,predecessor_operation_id:optional("predecessorOperationId")?,
++        predecessor_receipt_sha256:optional("predecessorReceiptSha256")?,execution_receipt_sha256:optional("executionReceiptSha256")?,
++        observation,prior_finality:PriorFinality::NotEstablished};
++    if !out.bounded(r){return Err(refused());}Ok(Some(Box::new(out)))
++}
+ fn report(t: &Terminal, r: &p::Review) -> Result<p::Report, BridgeError> {
+     let Terminal::LocalReleaseHistory(t) = t else {
+         return Err(refused());
+@@ -269,6 +318,7 @@
+     if native.schema_version != 1 || native.scope != "local-release-history" {
+         return Err(refused());
+     }
++    let reviewed_files=reviewed_files(&native,r)?;
+     let candidate_inputs = match native.candidate_inputs {
+         None => None,
+         Some(c) => {
+@@ -296,6 +346,7 @@
+         head_sequence: native.head_sequence,
+         history: native.history,
+         candidate_inputs,
++        reviewed_files,
+         limitations: native.limitations,
+     };
+     if !result.bounded(r) {
+@@ -370,7 +421,7 @@
+ }
+ pub(super) fn start_matches(p: &Prepared, entry: Option<&Arc<requests::Entry>>) -> bool {
+     match (&p.agent_history, entry) {
+-        (None, None) => true,
++        (None, None) => p.agent_history_preparation.is_none(),
+         (Some(link), Some(entry)) => {
+             link.entry.get().is_some_and(|e| Arc::ptr_eq(e, entry))
+                 && Arc::ptr_eq(link.scope(), entry.scope())
+@@ -404,6 +455,7 @@
+     }
+ }
+ pub(super) fn retired_prepared(p: &Prepared, reason: Reason, revision: u32) {
++    history_preparation::retired(p,reason);
+     if let Some(b) = &p.agent_history {
+         b.publish(&retire(p.projection.clone(), reason), revision, true);
+     }
+@@ -421,6 +473,10 @@
+         generation: &s::Id,
+         revision: u32,
+     ) -> Result<Arc<Approval>, BridgeError> {
++        self.history_approval_from(kind,operation,generation,revision,None)
++    }
++    pub(crate) fn history_approval_from(&self,kind:p::Kind,operation:&s::Id,generation:&s::Id,revision:u32,
++        original:Option<&Arc<requests::preparation::Entry>>)->Result<Arc<Approval>,BridgeError>{
+         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
+         let mut r = self.inner.lock();
+         self.inner.expire_prepared(&mut r, Instant::now());
+@@ -429,6 +485,11 @@
+             .as_ref()
+             .filter(|p| {
+                 p.agent_history.is_none()
++                    && match (&p.agent_history_preparation,original) {
++                        (None,None)=>true,
++                        (Some(l),Some(e))=>Arc::ptr_eq(&l.entry,e)&&e.ready(),
++                        _=>false,
++                    }
+                     && p.projection.phase == Phase::AwaitingConsent
+                     && p.projection.intent_usable
+                     && r.revision == revision
+@@ -458,6 +519,7 @@
+             registration: p.registration,
+             root: p.project.clone(),
+             expires: p.expires,
++            preparation:original.map(Arc::downgrade),
+             review,
+         }))
+     }
+@@ -496,6 +558,14 @@
+             .as_mut()
+             .filter(|p| p.agent_history.is_none() && approval.matches(&self.inner, p))
+             .ok_or_else(refused)?;
++        match (&p.agent_history_preparation,approval.preparation.as_ref(),scope.preparation.as_ref()) {
++            (None,None,None)=>{},
++            (Some(l),Some(a),Some(b)) if a.as_ptr()==Arc::as_ptr(&l.entry)&&b.as_ptr()==Arc::as_ptr(&l.entry)
++                && Arc::ptr_eq(&scope.read,&l.entry.scope().read)=>{
++                l.entry.begin_handoff(&scope.review).map_err(|_|refused())?;
++            },
++            _=>return Err(refused()),
++        }
+         let link = Arc::new(Binding {
+             _witness: approval.witness.clone(),
+             approval,
+@@ -648,25 +718,25 @@
+             .platform,
+             Some(p::Platform::Ios)
+         );
+-        for action in [
+-            history_wire::Action::AbandonInputs,
+-            history_wire::Action::ReviewPrepared,
+-            history_wire::Action::ReviewExecution,
+-            history_wire::Action::ReviewReconcile,
+-            history_wire::Action::ReviewRecovery,
+-            history_wire::Action::ReviewStagePrepared,
+-            history_wire::Action::ReviewStageExecution,
+-            history_wire::Action::ReviewExternalReadiness,
+-        ] {
+-            c.action = action;
+-            assert!(review(
+-                &Context::LocalReleaseHistory(c.clone()),
+-                &"a".repeat(32),
+-                &"b".repeat(32),
+-                1
+-            )
+-            .is_err());
+-        }
++        for action in [history_wire::Action::ReviewPrepared,history_wire::Action::ReviewExecution,history_wire::Action::ReviewReconcile]{
++            c.action=action;assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok());
++        }
++        c.action=history_wire::Action::ReviewRecovery;
++        assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_err());
++        c.platform=None;assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok());
++        c.action=history_wire::Action::AbandonInputs;
++        assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_err());
++        c.candidate_operation_id=None;c.stage_operation_id=Some("12345678-1234-4234-8234-123456789abc".into());
++        for platform in [history_wire::CandidatePlatform::Android,history_wire::CandidatePlatform::Ios]{
++            c.platform=Some(platform);
++            for action in [history_wire::Action::ReviewStagePrepared,history_wire::Action::ReviewStageExecution]{
++                c.action=action;let r=review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).unwrap();
++                assert!(r.stage_operation_id.is_some()&&r.candidate_operation_id.is_none());
++            }
++            c.action=history_wire::Action::ReviewExternalReadiness;
++            assert_eq!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok(),platform==history_wire::CandidatePlatform::Ios);
++        }
++
+     }
+     #[test]
+     fn local_history_terminal_projection_requires_actual_retirement_and_original_ids() {
+@@ -742,4 +812,22 @@
+         assert!(value["candidateInputs"].is_null());
+         assert!(backing_bytes().is_some());
+     }
+-}
++    #[test]
++    fn actual_native_prepared_file_decoder_projects_only_bounded_current_file_summary(){
++        use serde_json::json;
++        let id="12345678-1234-4234-8234-123456789abc";
++        let c=history_wire::Context{project_id:"runtime-p1".into(),execution_mode:history_wire::ExecutionMode::Local,action:history_wire::Action::ReviewPrepared,platform:None,candidate_operation_id:Some(id.into()),stage_operation_id:None};
++        let summary=json!({"operationId":id,"candidateSha256":"a".repeat(64),"intentSha256":"b".repeat(64),"storePreconditionSha256":"c".repeat(64),"sourceCommit":"d".repeat(40),"sourceTree":"e".repeat(40),"applicationId":"dev.example.app","version":{"name":"1.2","build":12},"destination":{"channel":"internal","releaseStatus":"completed"},"observedAt":"2026-10-16T20:00:00Z","limitations":["non-publishing","prepare-not-execute","temporary-edit-may-expire","current-bundle-not-historical-finality","saved-inputs-not-atomic"],"observation":"current-prepared-files-only","priorPrepareFinality":"not-established"});
++        let raw=json!({"schemaVersion":1,"context":c,"outcome":"complete","reason":"none","result":{"schemaVersion":1,"scope":"local-release-history","enrolled":true,"headSequence":5,"history":[{"operationId":id,"phase":"prepared","recoveryRequired":true}],"preparedIntent":summary,"limitations":p::LIMITATIONS},"lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":false,"commands":0,"profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}});
++        let mut decoder=history_wire::Decoder::new();let mut frame=|sequence:u32,kind:&str,payload:serde_json::Value|{
++            let mut bytes=serde_json::to_vec(&json!({"protocol":history_wire::PROTOCOL,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),"requestSha256":"d".repeat(64),"sequence":sequence,"kind":kind,"payload":payload})).unwrap();bytes.push(b'\n');
++            decoder.decode(&bytes,&"a".repeat(32),&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64))};
++        frame(0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();frame(1,"lease-ready",json!({})).unwrap();frame(2,"history-head",json!({"sequence":5,"sha256":"e".repeat(64)})).unwrap();
++        let t=match frame(3,"terminal",raw).unwrap(){history_wire::Frame::Terminal(t)=>t,_=>panic!("terminal")};assert!(decoder.finish());
++        let selected=review(&Context::LocalReleaseHistory(c),&"a".repeat(32),&"b".repeat(32),1).unwrap();let mut public=report(&Terminal::LocalReleaseHistory(t),&selected).unwrap();assert!(public.bounded(&selected));
++        let value=serde_json::to_value(&public).unwrap();assert_eq!(value["reviewedFiles"]["application"],"dev.example.app");assert_eq!(value["reviewedFiles"]["priorFinality"],"not-established");assert!(value["candidateInputs"].is_null());
++        for field in ["storePreconditionSha256","observedAt","authorizationId","appStoreAppId","rawJournal"]{assert!(value["reviewedFiles"].get(field).is_none());}
++        let files=public.reviewed_files.as_mut().unwrap();let original=files.application.clone();files.application.reserve(4096);assert_eq!(files.application,original);assert!(!public.bounded(&selected));
++    }
++
++}
+diff --git a/desktop/src-tauri/src/asset_session_local_history.rs b/desktop/src-tauri/src/asset_session_local_history.rs
+--- a/desktop/src-tauri/src/asset_session_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_local_history.rs
+@@ -9,6 +9,13 @@
+     pub(super) project_id:String,pub(super) candidate_operation_id:Option<String>,pub(super) stage_operation_id:Option<String>,registration:u32,pub(super) root:asset_source::RegisteredRoot,
+ }
+ impl LocalHistoryConsent {
++    #[cfg(test)]
++    pub(crate) fn unbound_preparation_data(context:&wire::Context,registration:u32,root:asset_source::RegisteredRoot)->Arc<Self>{
++        // Only bounded DATA for the common commit/retirement tests. No original
++        // Document, asset context, key, native currentness or runtime is minted.
++        Arc::new(Self{document:std::sync::Weak::new(),context:None,action:context.action,platform:context.platform,
++            project_id:context.project_id.clone(),candidate_operation_id:context.candidate_operation_id.clone(),stage_operation_id:context.stage_operation_id.clone(),registration,root})
++    }
+     pub(crate) fn action(&self)->wire::Action{self.action}
+     pub(crate) fn consent(&self)->&'static str{if self.platform==Some(wire::CandidatePlatform::Ios){wire::IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
+     fn matches_context(&self,context:&wire::Context)->bool{
+@@ -23,6 +30,9 @@
+             && self.registration==registration && self.root==*root
+             && state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+             && !state.stopping && !state.quit_pending && !state.retiring && !state.lock_pending
++    }
++    pub(crate) fn bound_to(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
++        self.matches_context(context) && self.registration==registration && self.root==*root
+     }
+     pub(crate) fn current(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool{
+         let Some(document)=self.document.upgrade() else{return false;};
+@@ -49,13 +59,18 @@
+         let(registration,root)=selected.map_err(|_|crate::local_release_history_owner::unavailable())?;
+         // Enrollment has no asset draft/credential prerequisite. An optional
+         // existing asset context is only a change snapshot, never local authority.
+-        let consent=Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),
+-            action:args.action,platform:args.platform,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),stage_operation_id:args.stage_operation_id.clone(),registration,root:root.clone()});
++        let consent=self.capture_history_consent(&state,&args,registration,&root);
+         self.inner.bridge.local_history.prepare(args,registration,root,gate,consent)
++    }
++    pub(in crate::asset_session) fn capture_history_consent(&self,state:&DocumentState,args:&wire::Prepare,registration:u32,root:&asset_source::RegisteredRoot)->Arc<LocalHistoryConsent>{
++        Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),action:args.action,
++            platform:args.platform,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),
++            stage_operation_id:args.stage_operation_id.clone(),registration,root:root.clone()})
+     }
+     pub(crate) fn start_local_release_history(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
+         let admitted_at=Instant::now();
+         let mut state=self.lock();
++        if !self.inner.bridge.local_history.agent_original().ordinary_history_start(&args.operation_id,&args.owner_generation){return Err(crate::local_release_history_owner::unavailable());}
+         let original=self.inner.bridge.local_history.prepared_consent(&args.operation_id,&args.owner_generation)?;
+         let project=self.inner.bridge.local_history.prepared_project(&args.operation_id,&args.owner_generation)?;
+         let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();
+diff --git a/desktop/src-tauri/src/asset_session_agent_local_history.rs b/desktop/src-tauri/src/asset_session_agent_local_history.rs
+--- a/desktop/src-tauri/src/asset_session_agent_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_agent_local_history.rs
+@@ -1,6 +1,9 @@
+ //! MAIN-only explicit one-use delegation of the SAME prepared History intent.
+ //! Off-Doc service lookup uses the genuine READ facet, not saved Store inputs.
+-use super::agent_store::permission::{self, MainAccess};
++use super::agent_store::permission;
++use crate::service_local_history_prepare_protocol::{MainAccess,Comparison};
++#[path="asset_session_agent_local_history_prepare.rs"]
++pub(crate) mod preparation;
+ use super::*;
+ use crate::{
+     application_service::ApplicationService,
+@@ -39,7 +42,14 @@
+     owner_generation: Id,
+     expected_status_revision: u32,
+     consent_version: String,
+-}
++    #[serde(default,deserialize_with="present")]
++    preparation_origin:Option<p::Query>,
++}
++fn present<'de,D:serde::Deserializer<'de>,T:serde::Deserialize<'de>>(d:D)->Result<Option<T>,D::Error>{T::deserialize(d).map(Some)}
++#[derive(Deserialize)]
++#[serde(untagged)]
++pub(crate) enum AccessQuery { Exact(p::Query), Empty(crate::asset_session::agent_identity::Empty) }
++impl AccessQuery {pub(crate) fn exact(&self)->Option<&p::Query>{match self{Self::Exact(q)=>Some(q),Self::Empty(_)=>None}}}
+ pub(super) struct Grant {
+     pub(in crate::asset_session) scope: Arc<requests::Scope>,
+     binding: Arc<AgentHistoryBinding>,
+@@ -98,30 +108,32 @@
+         }
+         Ok(())
+     }
+-    pub(crate) fn agent_local_history_access(
++    pub(crate) fn agent_local_history_access(&self,window:&str,query:Option<&p::Query>)->Result<MainAccess,BridgeError>{
++        if window!=MAIN{return Err(BridgeError::invalid());}
++        let service=self.history_listening_service()?;
++        let entry=service.as_ref().map(|s|s.store_requests().selected_history_preparation(query)).transpose().map_err(public)?.flatten();
++        if query.is_some()&&entry.is_none(){return Err(public(Error::Conflict));}
++        let current=match (&service,&entry){(Some(s),Some(e))=>s.version_reserve_point(&e.scope().saved.runtime_id)
++            .is_ok_and(|p|e.scope().matches(&p.saved,&p.read)),_=>false};
++        let mut state=self.lock();
++        let revision=self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
++        let access=match service{Some(s)=>s.store_requests().history_access().map_err(public)?,None=>p::Access::empty()};
++        let preparation=entry.map(|e|self.history_comparison(&mut state,e,current)).transpose()?;
++        Ok(MainAccess::new(access,revision,preparation))
++    }
++    pub(crate) fn allow_agent_local_history(
+         &self,
+         window: &str,
+-    ) -> Result<MainAccess<p::Access>, BridgeError> {
++        args: Allow,
++    ) -> Result<MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        let _state = self.lock();
+-        let revision = self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
+-        let access = match self.agent_history_service()? {
+-            Some(s) => s.store_requests().history_access().map_err(public)?,
+-            None => p::Access::empty(),
+-        };
+-        Ok(MainAccess::new(access, revision))
+-    }
+-    pub(crate) fn allow_agent_local_history(
+-        &self,
+-        window: &str,
+-        args: Allow,
+-    ) -> Result<MainAccess<p::Access>, BridgeError> {
+-        if window != MAIN {
+-            return Err(BridgeError::invalid());
+-        }
+         let expected = permission::parse(&args.expected_permission_revision).map_err(public)?;
++        // First-use lookup is OFF Doc and grants no permission.
++        let listening=self.history_listening_service()?;
++        let preparation=args.preparation_origin.as_ref().map(|q|listening.as_ref().ok_or_else(||public(Error::Unavailable))?
++            .store_requests().history_preparation(q).map_err(public)).transpose()?;
+         let (native, stamp, approval, epoch) = {
+             let mut state = self.lock();
+             permission::next(&self.inner.agent_store_revoke_epoch, expected).map_err(public)?;
+@@ -141,11 +153,13 @@
+             {
+                 return Err(public(Error::Busy));
+             }
+-            let approval = self.history_delegate_owner().history_approval(
++            if let Some(s)=&listening{s.store_requests().can_allow_history_from(preparation.as_ref()).map_err(public)?;}
++            let approval = self.history_delegate_owner().history_approval_from(
+                 args.kind,
+                 &args.operation_id,
+                 &args.owner_generation,
+                 args.expected_status_revision,
++                preparation.as_ref(),
+             )?;
+             if args.consent_version.as_str() != approval.review().consent() {
+                 return Err(BridgeError::invalid());
+@@ -182,7 +196,9 @@
+         let point = service
+             .version_reserve_point(&native.runtime_id)
+             .map_err(public)?;
++        if preparation.as_ref().is_some_and(|e|!e.scope().matches(&point.saved,&point.read)) {return Err(public(Error::Conflict));}
+         let scope = Arc::new(requests::Scope {
++            preparation:preparation.as_ref().map(Arc::downgrade),
+             project_id: point.saved.project_id.clone(),
+             runtime_id: native.runtime_id.clone(),
+             review_id: Id::random().map_err(public)?,
+@@ -251,7 +267,7 @@
+         }
+         service
+             .store_requests()
+-            .can_allow_history()
++            .can_allow_history_from(preparation.as_ref())
+             .map_err(public)?;
+         if let Some(old) = self.inner.agent_store_service.get() {
+             if old.as_ptr() != Arc::as_ptr(&service) {
+@@ -279,7 +295,7 @@
+         });
+         state.agent_local_history = Some(grant.clone());
+         match service.store_requests().allow_history(scope, grant_id) {
+-            Ok(access) => Ok(MainAccess::new(access, revision)),
++            Ok(access) => Ok(MainAccess::new(access, revision,None)),
+             Err(e) => {
+                 self.history_delegate_owner().stop_agent_history(
+                     &grant.binding,
+@@ -293,11 +309,11 @@
+     pub(crate) fn revoke_agent_local_history(
+         &self,
+         window: &str,
+-    ) -> Result<MainAccess<p::Access>, BridgeError> {
++    ) -> Result<MainAccess, BridgeError> {
+         // Same shared epoch/revoke stops all three Store-book families, including
+         // an in-flight first Allow before it can attach. No new permission owner.
+         self.revoke_agent_store(window)?;
+-        self.agent_local_history_access(window)
++        self.agent_local_history_access(window,None)
+     }
+     pub(in crate::asset_session) fn stop_history_grant(
+         &self,
+diff --git a/desktop/src-tauri/src/asset_session_agent_store.rs b/desktop/src-tauri/src/asset_session_agent_store.rs
+--- a/desktop/src-tauri/src/asset_session_agent_store.rs
++++ b/desktop/src-tauri/src/asset_session_agent_store.rs
+@@ -307,14 +307,18 @@
+     pub(crate) fn revoke_agent_store(&self, window:&str)->Result<MainAccess<p::Access>,BridgeError>{
+         if window!=MAIN{return Err(BridgeError::invalid());}
+         let at=Instant::now(); // Original invocation, not time spent waiting for Doc.
++        let listening=self.history_listening_service(); // OFF Doc; errors must not skip STOP/epoch.
+         let state=self.lock();let mut result=Ok(p::Access::empty());
+         let revision=permission::revoke(&self.inner.agent_store_revoke_epoch,at,|at|{
++            if let Some(link)=self.inner.bridge.local_history.agent_original().history_preparation_link(){
++                self.inner.bridge.local_history.agent_original().stop_history_preparation(&link.entry,p::Reason::PermissionRevoked,at);
++            }
+             if let Some(g)=&state.agent_store_grant{self.store_delegate_owner(g.scope.review.kind).stop_agent_store(&g.binding,p::Reason::PermissionRevoked,at);}
+             if let Some(g)=&state.agent_local_history{self.stop_history_grant(g,p::Reason::PermissionRevoked,at);}
+             if let Some(g)=&state.agent_store_preparation{self.stop_preparation_grant(g,p::Reason::PermissionRevoked,at);}
+             result=match self.agent_store_service(){Ok(Some(s))=>s.store_requests().revoke(p::Reason::PermissionRevoked,at).map_err(public),Ok(None)=>Ok(p::Access::empty()),Err(e)=>Err(e)};
+         }).map_err(public);
+-        revision.and_then(|revision|result.map(|access|MainAccess::new(access,revision)))
++        revision.and_then(|revision|listening.and_then(|_|result.map(|access|MainAccess::new(access,revision))))
+     }
+     fn admit_agent_store(
+         &self,
+@@ -429,7 +433,8 @@
+         }
+     }
+     pub(crate) fn service_store_tick(&self) {
+-        let Ok(Some(service)) = self.agent_store_service() else {
++        let Ok(Some(service)) = self.history_listening_service() else {
++            self.stop_history_preparation_for_host();
+             return;
+         };
+         self.check_agent_store_original();
+@@ -446,6 +451,7 @@
+             Err(_) => service.store_requests().fence(),
+         }
+         self.tick_store_preparation(&service);
++        self.tick_history_preparation(&service);
+         self.tick_agent_local_history(&service);
+         let _ = flush(&service);
+     }
+@@ -509,6 +515,7 @@
+     }
+     preparation::flush_preparation(service)?;
+     super::agent_local_history::flush(service)?;
++    super::agent_local_history::preparation::flush(service)?;
+     service.native_history_current()?;
+     returned.known = true;
+     Ok(())
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -210,6 +210,7 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "method", content = "params", deny_unknown_fields)]
+ pub enum RequestBody {
++    #[serde(rename="local-history.prepare")] LocalHistoryPrepare(crate::service_local_history_prepare_protocol::Request),
+     #[serde(rename="local-history.scope")] LocalHistoryScope(ProjectQuery),
+     #[serde(rename="local-history.submit")] LocalHistorySubmit(crate::service_local_history_protocol::Submit),
+     #[serde(rename="local-history.status")] LocalHistoryStatus(crate::service_local_history_protocol::Query),
+@@ -321,6 +322,7 @@
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+ pub enum ResponseBody {
++    LocalHistoryPreparation(Box<crate::service_local_history_prepare_protocol::Status>),
+     LocalHistoryAccess(Box<crate::service_local_history_protocol::Access>),
+     LocalHistoryRequest(Box<crate::service_local_history_protocol::Status>),
+     GitHubActionRequest(crate::service_github_action_protocol::Status),
+@@ -411,11 +413,12 @@
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::UploadKeyScope(_) | RequestBody::UploadKeySubmit(_) | RequestBody::UploadKeyStatus(_) | RequestBody::UploadKeyCancel(_))
+         && bytes.len() > crate::service_upload_key_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+-    if matches!(&request.request,RequestBody::LocalHistoryScope(_)|RequestBody::LocalHistorySubmit(_)|RequestBody::LocalHistoryStatus(_)|RequestBody::LocalHistoryCancel(_)) && bytes.len()>crate::service_local_history_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
++    if matches!(&request.request,RequestBody::LocalHistoryPrepare(_)|RequestBody::LocalHistoryScope(_)|RequestBody::LocalHistorySubmit(_)|RequestBody::LocalHistoryStatus(_)|RequestBody::LocalHistoryCancel(_)) && bytes.len()>crate::service_local_history_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request,RequestBody::StorePrepare(_)|RequestBody::StoreStart(_)|RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
+         &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request,RequestBody::AppleProvisioningPrepare(_)|RequestBody::AppleProvisioningSubmit(_)|RequestBody::AppleProvisioningStatus(_)|RequestBody::AppleProvisioningCancel(_))
+         &&bytes.len()>crate::service_apple_provisioning_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
++    if let RequestBody::LocalHistoryPrepare(v)=&request.request{v.validate()?;}
+     if let RequestBody::VersionReserveReview(v)=&request.request{if bytes.len()>crate::service_version_reserve_review_protocol::REQUEST_BYTES{return Err(Error::InvalidRequest)}v.validate()?;}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+@@ -542,6 +545,7 @@
+             row.validate()?;
+             if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_tool_setup_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
+         },
++        ResponseBody::LocalHistoryPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
+         ResponseBody::LocalHistoryAccess(row)=>{row.validate()?;if row.service_instance.as_ref().is_some_and(|id|id!=&response.service_instance)||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
+         ResponseBody::LocalHistoryRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance||crate::service_metadata_text_protocol::encoded(response,crate::service_local_history_protocol::STATUS_LIMIT).is_err(){return Err(Error::InvalidRequest);}},
+         ResponseBody::StorePreparation(row)=>{
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -469,6 +469,7 @@
+                 p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
+                 p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
+                 p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
++                p::RequestBody::LocalHistoryPrepare(v)=>return self.service_local_history_prepare(client,v.clone()),
+                 p::RequestBody::LocalHistoryScope(q)=>return self.service_local_history_scope(client,&q.project_id),
+                 p::RequestBody::LocalHistorySubmit(v)=>return self.service_local_history_submit(client,v.clone()),
+                 p::RequestBody::LocalHistoryStatus(q)=>return self.service_local_history_query(client,q,false),
+@@ -561,7 +562,7 @@
+                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
+-                p::RequestBody::LocalHistoryScope(_)|p::RequestBody::LocalHistorySubmit(_)|p::RequestBody::LocalHistoryStatus(_)|p::RequestBody::LocalHistoryCancel(_)|
++                p::RequestBody::LocalHistoryPrepare(_)|p::RequestBody::LocalHistoryScope(_)|p::RequestBody::LocalHistorySubmit(_)|p::RequestBody::LocalHistoryStatus(_)|p::RequestBody::LocalHistoryCancel(_)|
+                 p::RequestBody::StorePrepare(_) | p::RequestBody::StoreStart(_) |
+                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::AppleProvisioningPrepare(_) | p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -302,6 +302,7 @@
+         p::ResponseBody::GitHubActionRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::AndroidBuildRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
+         p::ResponseBody::IosArchiveRequest(view) => service.android_tools_client_current(&client, &view.origin().project_id)?,
++        p::ResponseBody::LocalHistoryPreparation(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -28,6 +28,8 @@
+ mod service_store_protocol;
+ #[path="service_local_history_protocol.rs"]
+ mod service_local_history_protocol;
++#[path="service_local_history_prepare_protocol.rs"]
++mod service_local_history_prepare_protocol;
+ #[path="service_store_prepare_protocol.rs"]
+ mod service_store_prepare_protocol;
+ #[path="service_store_inventory_protocol.rs"]
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -144,6 +144,8 @@
+ mod service_store_protocol;
+ #[path="service_local_history_protocol.rs"]
+ mod service_local_history_protocol;
++#[path="service_local_history_prepare_protocol.rs"]
++mod service_local_history_prepare_protocol;
+ #[path="service_store_prepare_protocol.rs"]
+ mod service_store_prepare_protocol;
+ #[path="service_store_inventory_protocol.rs"]
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -128,6 +128,7 @@
+   mrk git-remote-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
+   mrk git-remote-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk git-remote-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk local-history-prepare PROJECT_ID SERVICE_INSTANCE KIND [UUID [--android|--ios]] [--json]\n\
+   mrk local-history-scope PROJECT_ID [--json]\n\
+   mrk local-history-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk local-history-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -360,7 +361,7 @@
+                 "kinds":["doctor","inspect-requirements","acquire-missing","inspect-picked-sources","register-reviewed-sources","inspect-saved-requirements","acquire-reviewed-missing"],
+                 "readGrantRequired":true,"oneUseApprovalRequired":true,"requiresRunningDesktop":true,
+                 "cliPrepare":false,"prepareSavedInspectOnSubmit":true,"prepareReviewedAcquireOnSubmit":true,"privateArguments":false,"automaticNextStep":false,"publicationIsSelection":false},
+-            "localHistory":{"scope":"desktop-prepared-local-history","commands":local_history::COMMANDS,"actions":["enroll","verify","review-inputs"],"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"storeAuthority":false,"savedConfigRequired":false,"maxRetainedRequestsSharedWithStore":32,"nativeAvailabilityChecked":false},
++            "localHistory":{"scope":"local-history-prepare-and-separately-approved-start","commands":local_history::COMMANDS,"actions":["enroll","verify","review-inputs","review-prepared","review-execution","review-reconcile","review-recovery","review-stage-prepared","review-stage-execution","review-external-readiness"],"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":true,"prepareIsStart":false,"abandonInputs":false,"contextCount":16,"storeAuthority":false,"savedConfigRequired":false,"maxRetainedRequestsSharedWithStore":32,"nativeAvailabilityChecked":false},
+             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
+                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
+                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
+@@ -387,7 +388,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","metadata-text","metadata-images","store","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","metadata-text","metadata-images","store","local-history","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -525,6 +526,7 @@
+         p::ResponseBody::MetadataImagesAccess(_)=>"Prepared image-copy permission DATA; review the full preview in Desktop. No Store upload.\n".into(),
+         p::ResponseBody::MetadataTextRequest(s)=>metadata_text::human(s),
+         p::ResponseBody::ToolSetupRequest(_)=>"Use tool-setup-status with the same original request IDs; never replay.\n".into(),
++        p::ResponseBody::LocalHistoryPreparation(_)=>"Use local-history-status; Prepare is comparison only. Review and separately approve Start in Desktop.\n".into(),
+         p::ResponseBody::LocalHistoryAccess(_)=>"Use local-history-scope; Desktop must prepare and allow the exact action.\n".into(),
+         p::ResponseBody::LocalHistoryRequest(_)=>"Use local-history-status with the original IDs; never replay an uncertain request.\n".into(),
+         p::ResponseBody::StorePreparation(_)=>"Use store-status with the original request; Prepare never authorizes Start.\n".into(),
+diff --git a/desktop/src-tauri/src/installed_cli_local_history.rs b/desktop/src-tauri/src/installed_cli_local_history.rs
+--- a/desktop/src-tauri/src/installed_cli_local_history.rs
++++ b/desktop/src-tauri/src/installed_cli_local_history.rs
+@@ -1,9 +1,12 @@
+-//! Four fixed calls to the already-open Desktop. No provider, candidate,
++//! Five fixed calls to the already-open Desktop. No provider, candidate,
+ //! credential, prepared material or release executor exists in this client.
+ use super::*;
+ use crate::service_local_history_protocol as store;
++use crate::service_local_history_prepare_protocol as prepare;
+ 
+-pub(super) const COMMANDS: [CommandCapability; 4] = [
++pub(super) const COMMANDS: [CommandCapability; 5] = [
++    CommandCapability {command:"local-history-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","KIND","[UUID [--android|--ios]]"],
++        description:"Request read-only native History preparation; separately approve Start in Desktop. No Abandon or Store authority."},
+     CommandCapability {
+         command: "local-history-scope",
+         arguments: &["PROJECT_ID"],
+@@ -19,7 +22,7 @@
+             "REVIEW_ID",
+             "--reviewed",
+         ],
+-        description: "Run the exact Desktop-prepared Enroll, Verify or input review once.",
++        description: "Start the exact Desktop-approved enrollment or local file review once.",
+     },
+     CommandCapability {
+         command: "local-history-status",
+@@ -34,6 +37,7 @@
+     },
+ ];
+ enum Command {
++    Prepare {project:Id,instance:Id,selection:prepare::Selection},
+     Scope(Id),
+     Submit {
+         project: Id,
+@@ -69,6 +73,24 @@
+         words.pop();
+     }
+     let command = match words.as_slice() {
++        ["local-history-prepare",project,instance,kind,tail @ ..]=>{
++            let kind=match *kind {
++                "enroll"=>store::Kind::Enroll,"verify"=>store::Kind::Verify,"review-inputs"=>store::Kind::ReviewInputs,
++                "review-prepared"=>store::Kind::ReviewPrepared,"review-execution"=>store::Kind::ReviewExecution,
++                "review-reconcile"=>store::Kind::ReviewReconcile,"review-recovery"=>store::Kind::ReviewRecovery,
++                "review-stage-prepared"=>store::Kind::ReviewStagePrepared,"review-stage-execution"=>store::Kind::ReviewStageExecution,
++                "review-external-readiness"=>store::Kind::ReviewExternalReadiness,_=>return Err(Error::InvalidRequest),
++            };
++            let (selected,platform)=match tail {
++                []=>(None,None),[id]=>(Some((*id).to_owned()),None),
++                [id,"--ios"]=>(Some((*id).to_owned()),Some(store::Platform::Ios)),
++                [id,"--android"]=>(Some((*id).to_owned()),Some(store::Platform::Android)),_=>return Err(Error::InvalidRequest),
++            };
++            let selection=prepare::Selection{kind,platform,candidate_operation_id:if kind.stage(){None}else{selected.clone()},
++                stage_operation_id:if kind.stage(){selected}else{None}};
++            if !selection.valid(){return Err(Error::InvalidRequest);}
++            Command::Prepare{project:Id::parse(project)?,instance:Id::parse(instance)?,selection}
++        }
+         ["local-history-submit", project, instance, grant, review, "--reviewed"] => {
+             Command::Submit {
+                 project: Id::parse(project)?,
+@@ -123,6 +145,14 @@
+ ) -> Result<(u8, Vec<u8>), Error> {
+     if let p::ResponseBody::Error(e) = response.response {
+         return Err(e);
++    }
++    if let p::ResponseBody::LocalHistoryPreparation(status)=&response.response {
++        status.validate()?;
++        if submitted.is_some()||status.origin!=*q||response.service_instance!=q.service_instance{return Err(Error::StateUnknown);}
++        let code=match status.phase {prepare::Phase::Unknown=>6,prepare::Phase::Refused|prepare::Phase::Cancelled|prepare::Phase::Expired=>5,_=>0};
++        let bytes=if json {let mut b=p::encode_response(response)?;b.push(b'\n');b}
++            else{format!("Local History preparation: {:?}; {:?}.\n{}Comparison only. Use Desktop Check, then separate one-use Start approval. No native execution or enrollment has been authorized.\n",status.phase,status.settlement,receipt(q)).into_bytes()};
++        return Ok((code,bytes));
+     }
+     let p::ResponseBody::LocalHistoryRequest(status) = &response.response else {
+         return Err(Error::StateUnknown);
+@@ -154,7 +184,7 @@
+             status.settlement,
+             receipt(q)
+         );
+-        text.push_str("Desktop approved only this Enroll, Verify or current input review. Enrollment creates original local history and Keychain items; it never replaces them. Read results do not establish Store authority or earlier build finality. Keep unknown requests and history intact; do not replay.\n");
++        text.push_str("Desktop approved only this enrollment or current local file review. Enrollment creates original local history and Keychain items; it never replaces them. Read results do not establish Store authority or earlier build finality. Keep unknown requests and history intact; do not replay.\n");
+         if let Some(result) = &status.result {
+             text.push_str(
+                 &String::from_utf8(
+@@ -220,6 +250,11 @@
+                 };
+                 return Ok((0, bytes));
+             }
++            Command::Prepare{project,instance,selection}=>{
++                let q=store::Query{project_id:project,service_instance:instance,request_id:Id::random()?};
++                std::io::stderr().write_all(receipt(&q).as_bytes()).map_err(|_|Error::Unavailable)?;
++                (q.clone(),None,p::RequestBody::LocalHistoryPrepare(prepare::Request{origin:q,selection}))
++            }
+             Command::Submit {
+                 project,
+                 instance,
+@@ -255,12 +290,14 @@
+                 .enable_all()
+                 .build()
+                 .map_err(|_| Error::Unavailable)?;
++            let selected=if let p::RequestBody::LocalHistoryPrepare(v)=&body{Some(v.selection.clone())}else{None};
+             let request = p::Request {
+                 version: p::VERSION,
+                 request_id: Id::random()?,
+                 request: body,
+             };
+             let response = rt.block_on(crate::installed_cli_ipc::request(&path, &request))?;
++            if selected.as_ref().is_some_and(|selected|!matches!(&response.response,p::ResponseBody::LocalHistoryPreparation(s) if &s.selection==selected)) {return Err(Error::StateUnknown);}
+             output(
+                 &response,
+                 &q,
+@@ -338,7 +375,9 @@
+         assert!(caps.len() <= CAPABILITIES_BYTES);
+         let value: serde_json::Value = serde_json::from_slice(&caps).unwrap();
+         assert_eq!(value["localHistory"]["savedConfigRequired"], false);
+-        assert_eq!(value["localHistory"]["cliPrepare"], false);
++        assert_eq!(value["localHistory"]["cliPrepare"], true);
++        assert_eq!(value["localHistory"]["prepareIsStart"], false);
++        assert!(value["requestDiscovery"]["families"].as_array().unwrap().iter().any(|v|v=="local-history"));
+         assert!(HELP.contains("local-history-submit"));
+     }
+     #[test]
+@@ -360,6 +399,7 @@
+                 status_revision: 3,
+                 platform: None,
+                 candidate_operation_id: None,
++                stage_operation_id: None,
+             },
+             state: store::State::Queued,
+             settlement: p::Settlement::Pending,
+@@ -383,4 +423,31 @@
+         r.response = p::ResponseBody::LocalHistoryAccess(Box::new(store::Access::empty()));
+         assert!(output(&r, &q, None, false).is_err());
+     }
+-}
++    #[test]
++    fn local_history_prepare_cli_has_sixteen_closed_contexts_and_no_start_or_origin_fallback(){
++        let uuid="12345678-1234-4234-8234-123456789abc";let mut count=0;
++        for (kind,suffixes) in [
++            ("enroll",vec!["".to_owned()]),("verify",vec!["".to_owned()]),
++            ("review-inputs",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
++            ("review-prepared",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
++            ("review-execution",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
++            ("review-reconcile",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
++            ("review-recovery",vec![format!(" {uuid}")]),
++            ("review-stage-prepared",vec![format!(" {uuid} --android"),format!(" {uuid} --ios")]),
++            ("review-stage-execution",vec![format!(" {uuid} --android"),format!(" {uuid} --ios")]),
++            ("review-external-readiness",vec![format!(" {uuid} --ios")])]{
++            for suffix in suffixes{let command=format!("local-history-prepare {} {} {kind}{suffix} --json",id(1).as_str(),id(2).as_str());
++                let parsed=parse(&args(&command)).unwrap();assert!(parsed.json);let Command::Prepare{project,instance,selection}=parsed.command else{panic!("not Prepare")};
++                assert_eq!(project,id(1));assert_eq!(instance,id(2));assert!(selection.valid());count+=1;}
++        }assert_eq!(count,16);
++        for tail in [format!("abandon-inputs {uuid}"),format!("review-recovery {uuid} --ios"),format!("review-inputs {uuid} --android"),format!("review-stage-prepared {uuid}"),"verify --ios".into(),"verify --reviewed".into(),"verify --root /inert".into()]{assert!(parse(&args(&format!("local-history-prepare {} {} {tail}",id(1).as_str(),id(2).as_str()))).is_err());}
++        let q=store::Query{project_id:id(1),service_instance:id(2),request_id:id(5)};
++        let status=prepare::Status{origin:q.clone(),selection:prepare::Selection{kind:store::Kind::Verify,platform:None,candidate_operation_id:None,stage_operation_id:None},revision:1,phase:prepare::Phase::Queued,settlement:p::Settlement::Pending,reason:store::Reason::None,review:None,remaining_ms:0};
++        let mut response=p::Response{version:p::VERSION,service_instance:id(2),request_id:id(6),client_id:id(8),session_id:id(9),response:p::ResponseBody::LocalHistoryPreparation(Box::new(status))};
++        let (code,bytes)=output(&response,&q,None,false).unwrap();assert_eq!(code,0);assert!(String::from_utf8(bytes).unwrap().contains("separate one-use Start"));
++        assert!(output(&response,&q,Some((&id(3),&id(4))),false).is_err());
++        if let p::ResponseBody::LocalHistoryPreparation(s)=&mut response.response{s.origin.request_id=id(7);}
++        assert!(output(&response,&q,None,true).is_err());
++    }
++
++}
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2217,8 +2217,8 @@
+     let window = edit_window(&webview)?;
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     {
+-        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
+-        serde_json::to_value(state.document.agent_local_history_access(window)?).map_err(|_| BridgeError::protocol())
++        let args: crate::asset_session::agent_local_history::AccessQuery = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_local_history_access(window,args.exact())?).map_err(|_| BridgeError::protocol())
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Local history delegation is not supported on this platform.")) }
+diff --git a/desktop/src/agentLocalHistoryProtocol.ts b/desktop/src/agentLocalHistoryProtocol.ts
+--- a/desktop/src/agentLocalHistoryProtocol.ts
++++ b/desktop/src/agentLocalHistoryProtocol.ts
+@@ -1,7 +1,8 @@
+ import { validStorePermissionRevision } from './agentStorePermissionRevision.ts';
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+-export type LocalHistoryKind='enroll'|'verify'|'review-inputs';
+-export interface LocalHistoryReview {readonly kind:LocalHistoryKind;readonly operationId:string;readonly ownerGeneration:string;readonly statusRevision:number;readonly platform?:'ios';readonly candidateOperationId?:string}
++import { validLocalHistoryReview as review, sameLocalHistoryOriginal, validLocalHistoryComparison, parseLocalHistoryOrigin, validLocalHistoryReviewedFiles } from './agentLocalHistoryPreparation.ts';
++import type { LocalHistoryReview, LocalHistoryPreparationComparison, LocalHistoryOrigin } from './agentLocalHistoryPreparation.ts';
++export type { LocalHistoryKind, LocalHistoryReview } from './agentLocalHistoryPreparation.ts';
+ export interface LocalHistoryRequestStatus {
+   readonly origin: { readonly projectId: string; readonly serviceInstance: string; readonly requestId: string };
+   readonly grantId: string; readonly reviewId: string; readonly revision: number; readonly review: LocalHistoryReview;
+@@ -13,11 +14,12 @@
+ }
+ export interface AgentLocalHistoryAccess {
+   readonly permissionRevision:string; // MAIN comparison only; not CLI request authority.
++  readonly preparation:LocalHistoryPreparationComparison|null;
+   readonly serviceInstance: string | null; readonly projectId: string | null; readonly grantId: string | null; readonly reviewId: string | null;
+   readonly review: LocalHistoryReview | null; readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
+   readonly pending: boolean; readonly unknown: boolean; readonly requestId: string | null; readonly status: LocalHistoryRequestStatus | null;
+ }
+-export interface AgentLocalHistoryPort { status(): Promise<unknown>; allow(review: LocalHistoryReview, expectedPermissionRevision:string): Promise<unknown>; revoke(): Promise<unknown> }
++export interface AgentLocalHistoryPort { status(origin?:LocalHistoryOrigin): Promise<unknown>; allow(review: LocalHistoryReview, expectedPermissionRevision:string, preparationOrigin?:LocalHistoryOrigin): Promise<unknown>; revoke(): Promise<unknown> }
+ const id = (v: unknown): v is string => typeof v === 'string' && v.length === 32 && /^[a-f0-9]{32}$/.test(v) && v !== '0'.repeat(32);
+ const sha = (v: unknown): v is string => typeof v === 'string' && v.length === 64 && /^[a-f0-9]{64}$/.test(v);
+ const uuid = (v: unknown) => typeof v === 'string' && v.length === 36 && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v) && v !== '00000000-0000-0000-0000-000000000000';
+@@ -25,23 +27,36 @@
+ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+ const keys = (v: unknown, names: readonly string[]): v is Record<string, unknown> => record(v) && Object.keys(v).length === names.length && names.every(k => Object.hasOwn(v, k));
+ const oneOf = (v: unknown, a: readonly string[]) => typeof v === 'string' && a.includes(v);
+-export const localHistoryDelegateConsent=(r:LocalHistoryReview):string=>r.kind==='review-inputs'?`agent-local-history-${r.platform==='ios'?'ios':'android'}-inputs-once-v1`:`agent-local-history-${r.kind}-once-v1`;
+-function review(v:unknown):v is LocalHistoryReview{
+- if(!record(v)||!oneOf(v.kind,['enroll','verify','review-inputs']))return false;
+- const input=v.kind==='review-inputs';
+- return keys(v,['kind','operationId','ownerGeneration','statusRevision',...(input?['candidateOperationId']:[]),...(input&&v.platform==='ios'?['platform']:[])])&&
+-  id(v.operationId)&&id(v.ownerGeneration)&&number(v.statusRevision,1,0xffff_fffe)&&(!input||uuid(v.candidateOperationId));
+-}
++export const localHistoryDelegateConsent=(r:LocalHistoryReview):string=>{
++ if(r.kind==='enroll'||r.kind==='verify')return `agent-local-history-${r.kind}-once-v1`;
++ const suffix=r.kind==='review-reconcile'?'reconcile-files':r.kind==='review-recovery'?'recovery-files':r.kind==='review-external-readiness'?'readiness-files':r.kind.slice('review-'.length);
++ return `agent-local-history-${r.platform==='ios'?'ios':'android'}-${suffix}-once-v1`;
++};
+ // Only after the bounded copy has removed accessors/prototypes/cycles.
+ function freeze<T>(v:T):T {if(v&&typeof v==='object'){for(const item of Object.values(v))freeze(item);Object.freeze(v);}return v;}
+ export function parseLocalHistoryReview(raw: unknown): LocalHistoryReview | null { try { const v=copyBoundedComparisonData(raw,1024,24); return review(v) ? freeze(v) : null; } catch { return null; } }
+-export const sameLocalHistoryReview = (a: LocalHistoryReview | null, b: LocalHistoryReview | null) => !!a && !!b && a.kind===b.kind && a.operationId===b.operationId && a.ownerGeneration===b.ownerGeneration && a.statusRevision===b.statusRevision && a.platform===b.platform && a.candidateOperationId===b.candidateOperationId;
++export const sameLocalHistoryReview = (a:LocalHistoryReview|null,b:LocalHistoryReview|null)=>sameLocalHistoryOriginal(a,b)&&a!.statusRevision===b!.statusRevision;
+ const historyPhases=['inputs-pending','inputs-ready','prepare-pending','promotion-pending','prepared','execute-pending','settled-success','settled-failure','reconciliation-required','target-reconciled','external-ready'];
+ const limits=['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'];
+ function result(v:unknown,r:LocalHistoryReview):boolean{
+- if(!keys(v,['enrolled','headSequence','history','candidateInputs','limitations'])||v.enrolled!==true||!number(v.headSequence,1,513)||!Array.isArray(v.history)||v.history.length>64||v.history.length>=v.headSequence||JSON.stringify(v.limitations)!==JSON.stringify(limits))return false;
++ if(!keys(v,['enrolled','headSequence','history','candidateInputs','limitations',...(!['enroll','verify','review-inputs'].includes(r.kind)?['reviewedFiles']:[])])||v.enrolled!==true||!number(v.headSequence,1,513)||!Array.isArray(v.history)||v.history.length>64||v.history.length>=v.headSequence||JSON.stringify(v.limitations)!==JSON.stringify(limits))return false;
+  if(!v.history.every(row=>keys(row,['operationId','phase','recoveryRequired'])&&uuid(row.operationId)&&oneOf(row.phase,historyPhases)&&typeof row.recoveryRequired==='boolean'&&row.recoveryRequired!==oneOf(row.phase,['settled-success','settled-failure','target-reconciled','external-ready']))||new Set(v.history.map(row=>row.operationId)).size!==v.history.length)return false;
+- if(r.kind!=='review-inputs')return v.candidateInputs===null;
++ if(r.kind==='enroll'||r.kind==='verify')return v.candidateInputs===null;
++ if(r.kind!=='review-inputs'){
++  if(v.candidateInputs!==null||!validLocalHistoryReviewedFiles(v.reviewedFiles,r))return false;
++  const selected=r.stageOperationId??r.candidateOperationId,row=v.history.find(row=>row.operationId===selected),stage=(v.reviewedFiles as Record<string,unknown>).stage;
++  if(!row)return false;
++  switch(r.kind){
++   case 'review-prepared':return v.headSequence>=5&&row.phase==='prepared';
++   case 'review-execution':return v.headSequence>=7&&row.phase==='settled-success';
++   case 'review-reconcile':return v.headSequence>=6&&v.history.at(-1)===row&&oneOf(row.phase,['execute-pending','settled-success','settled-failure','reconciliation-required']);
++   case 'review-recovery':return v.headSequence>=7&&row.phase==='target-reconciled';
++   case 'review-stage-prepared':return v.headSequence>=(stage==='external-testing'?9:13)&&row.phase==='prepared';
++   case 'review-stage-execution':return v.headSequence>=(stage==='external-testing'?11:15)&&row.phase==='settled-success';
++   case 'review-external-readiness':return v.headSequence>=12&&row.phase==='external-ready';
++  }
++ }
++
+  const row=v.history.find(row=>row.operationId===r.candidateOperationId);if(!row)return false;
+  if(['inputs-pending','settled-failure'].includes(row.phase))return v.candidateInputs===null;
+  const c=v.candidateInputs,ios=r.platform==='ios';
+@@ -69,8 +84,8 @@
+ export function parseAgentLocalHistoryAccess(raw: unknown): AgentLocalHistoryAccess | null {
+   try {
+     const v=copyBoundedComparisonData(raw,24576,1024);
+-    if(!keys(v,['permissionRevision','serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status']) ||
+-      !validStorePermissionRevision(v.permissionRevision) || !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
++    if(!keys(v,['permissionRevision','serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status','preparation']) ||
++      !validStorePermissionRevision(v.permissionRevision) || !(v.preparation===null||validLocalHistoryComparison(v.preparation)) || !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
+     const present=['serviceInstance','projectId','grantId','reviewId'].every(k=>id(v[k])) && review(v.review);
+     if(!present && !['serviceInstance','projectId','grantId','reviewId','review'].every(k=>v[k]===null))return null;
+     if(v.enabled!==(present&&!v.consumed&&!v.pending&&!v.unknown&&v.remainingMs>0)||!v.enabled&&v.remainingMs!==0||v.consumed!==(v.requestId!==null)||v.consumed!==(v.status!==null)||!present&&(v.pending||v.unknown||v.consumed))return null;
+@@ -84,10 +99,14 @@
+ }
+ export function createAgentLocalHistoryPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentLocalHistoryPort {
+   const send=(name:string,body:object)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));return bytes.length<=1024?invoke(name,bytes):Promise.reject({code:'agent_local_history_invalid'});};
+-  return Object.freeze({status:()=>send('agent_local_history_access',{}),revoke:()=>send('revoke_agent_local_history',{}),allow:(raw:LocalHistoryReview,expectedPermissionRevision:string)=>{
+-    const r=parseLocalHistoryReview(raw);return r&&validStorePermissionRevision(expectedPermissionRevision)?send('allow_agent_local_history',{expectedPermissionRevision,kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:localHistoryDelegateConsent(r)}):Promise.reject({code:'agent_local_history_invalid'});
++  return Object.freeze({status:(origin?:LocalHistoryOrigin)=>{
++    if(origin===undefined)return send('agent_local_history_access',{});
++    const query=parseLocalHistoryOrigin(origin);return query?send('agent_local_history_access',query):Promise.reject({code:'agent_local_history_invalid'});
++   },revoke:()=>send('revoke_agent_local_history',{}),allow:(raw:LocalHistoryReview,expectedPermissionRevision:string,preparationOrigin?:LocalHistoryOrigin)=>{
++    const r=parseLocalHistoryReview(raw),query=preparationOrigin===undefined?undefined:parseLocalHistoryOrigin(preparationOrigin);
++    return r&&validStorePermissionRevision(expectedPermissionRevision)&&query!==null?send('allow_agent_local_history',{expectedPermissionRevision,kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:localHistoryDelegateConsent(r),...(query===undefined?{}:{preparationOrigin:query})}):Promise.reject({code:'agent_local_history_invalid'});
+   }});
+ }
+-export function localHistoryCommands(raw:AgentLocalHistoryAccess|null):readonly string[]{const s=parseAgentLocalHistoryAccess(raw);if(!s?.grantId)return [];
++export function localHistoryCommands(raw:AgentLocalHistoryAccess|null):readonly string[]{const s=parseAgentLocalHistoryAccess(raw);if(!s)return [];if(!s.grantId){const o=s.preparation?.request.origin;return o?[`mrk local-history-status ${o.projectId} ${o.serviceInstance} ${o.requestId}`,`mrk local-history-cancel ${o.projectId} ${o.serviceInstance} ${o.requestId}`]:[];}
+   const ids=`${s.projectId} ${s.serviceInstance}`;return s.requestId?[`mrk local-history-status ${ids} ${s.requestId}`,`mrk local-history-cancel ${ids} ${s.requestId}`]:s.enabled?[`mrk local-history-submit ${ids} ${s.grantId} ${s.reviewId} --reviewed`]:[];
+ }
+diff --git a/desktop/src/agentLocalHistoryController.ts b/desktop/src/agentLocalHistoryController.ts
+--- a/desktop/src/agentLocalHistoryController.ts
++++ b/desktop/src/agentLocalHistoryController.ts
+@@ -1,12 +1,15 @@
++import { localHistoryPreparationHeld, sameLocalHistoryOrigin, sameLocalHistoryOriginal, sameLocalHistorySelection } from './agentLocalHistoryPreparation.ts';
++import type { LocalHistoryPreparationComparison, LocalHistoryOrigin } from './agentLocalHistoryPreparation.ts';
+ import { nextStorePermissionRevision } from './agentStorePermissionRevision.ts';
+ import { parseAgentLocalHistoryAccess, parseLocalHistoryReview, sameLocalHistoryReview } from './agentLocalHistoryProtocol.ts';
+ import type { AgentLocalHistoryAccess, AgentLocalHistoryPort, LocalHistoryKind, LocalHistoryReview } from './agentLocalHistoryProtocol.ts';
+ export interface AgentLocalHistoryContext { port:AgentLocalHistoryPort|null; nativeSession:object|null; projectId:string|null; epoch:object; preview:boolean;
+   reviews:readonly LocalHistoryReview[]; blockedReason:string|null }
+-export interface AgentLocalHistoryView { readonly access:AgentLocalHistoryAccess|null; readonly selected:LocalHistoryKind; readonly review:LocalHistoryReview|null;
++export interface AgentLocalHistoryView { readonly access:AgentLocalHistoryAccess|null; readonly preparation:LocalHistoryPreparationComparison|null; readonly selected:LocalHistoryKind; readonly review:LocalHistoryReview|null;
+   readonly acknowledged:boolean; readonly stale:boolean; readonly unknown:boolean; readonly issue:string|null; readonly pending:'status'|'allow'|null; readonly revoking:boolean }
+ interface Work {kind:'status'|'allow'|'revoke';context:AgentLocalHistoryContext;review:LocalHistoryReview|null;generation:object;original:Promise<unknown>|null;
+-  completion:Promise<void>;finish():void;startedAt:number|null;expectedPermissionRevision:string|null}
++  completion:Promise<void>;finish():void;startedAt:number|null;expectedPermissionRevision:string|null;query:LocalHistoryOrigin|undefined}
++interface HeldPreparation {context:AgentLocalHistoryContext;comparison:LocalHistoryPreparationComparison;until:number|null;firstCheck:number|null}
+ const missing={};
+ const absent=():AgentLocalHistoryContext=>({port:null,nativeSession:null,projectId:null,epoch:missing,preview:false,reviews:[],blockedReason:null});
+ const uncertain='The original local-history permission or request is unconfirmed. Keep its IDs, check status or revoke permission and request Stop. Do not submit again.';
+@@ -18,13 +21,13 @@
+ export class AgentLocalHistoryController {
+   private context=absent(); private original:AgentLocalHistoryContext|null=null; private generation:object={};
+   private normal:Work|null=null; private revokeWork:Work|null=null; private disposed=false;
+-  private consent:{context:AgentLocalHistoryContext;review:LocalHistoryReview;permissionRevision:string}|null=null;
++  private consent:{context:AgentLocalHistoryContext;review:LocalHistoryReview;permissionRevision:string;preparation:HeldPreparation|null}|null=null;
+   private permission:{context:AgentLocalHistoryContext;revision:string}|null=null;
+-  private attempted:LocalHistoryReview|null=null; private observedAt:number|null=null; private end:number|null=null;
++  private preparation:HeldPreparation|null=null; private attempted:LocalHistoryReview|null=null; private observedAt:number|null=null; private end:number|null=null;
+   private readonly listeners=new Set<()=>void>();
+-  private readonly source:{current():AgentLocalHistoryContext;delegate(review:LocalHistoryReview):(()=>boolean)|null;now?():number};
+-  private state:AgentLocalHistoryView=Object.freeze({access:null,selected:'verify',review:null,acknowledged:false,stale:true,unknown:false,issue:null,pending:null,revoking:false});
+-  constructor(source:{current():AgentLocalHistoryContext;delegate(review:LocalHistoryReview):(()=>boolean)|null;now?():number}){this.source=source;this.syncContext();}
++  private readonly source:{current():AgentLocalHistoryContext;delegate(review:LocalHistoryReview):(()=>boolean)|null;preparationReason?(review:LocalHistoryReview):string|null;now?():number};
++  private state:AgentLocalHistoryView=Object.freeze({access:null,preparation:null,selected:'verify',review:null,acknowledged:false,stale:true,unknown:false,issue:null,pending:null,revoking:false});
++  constructor(source:{current():AgentLocalHistoryContext;delegate(review:LocalHistoryReview):(()=>boolean)|null;preparationReason?(review:LocalHistoryReview):string|null;now?():number}){this.source=source;this.syncContext();}
+   getSnapshot=():AgentLocalHistoryView=>this.state;
+   subscribe=(fn:()=>void)=>{this.listeners.add(fn);return()=>{this.listeners.delete(fn);};};
+   whenSettled=():Promise<void>=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
+@@ -38,19 +41,30 @@
+     }catch{return absent();}
+   }
+   private patch(v:Partial<AgentLocalHistoryView>={}):void {
+-    this.state=Object.freeze({...this.state,...v,pending:this.normal?.kind==='allow'?'allow':this.normal?'status':null,revoking:this.revokeWork!==null});
++    this.state=Object.freeze({...this.state,...v,preparation:this.preparation?.comparison??null,pending:this.normal?.kind==='allow'?'allow':this.normal?'status':null,revoking:this.revokeWork!==null});
+     if(!this.disposed)for(const l of [...this.listeners]){try{l();}catch{/* Rendering cannot free the original. */}}
+   }
+   syncContext():void {
+-    if(this.disposed)return;const c=this.read(),r=c.reviews[0]??null;
++    if(this.disposed)return;const c=this.read(),r=this.selectedReview(c);
+     const changed=!same(c,this.context),changedReview=!sameLocalHistoryReview(r,this.state.review)&&!(r===null&&this.state.review===null);
+     this.context=c;
+     if(changed)this.permission=null;
+     if(changed||changedReview)this.consent=null;
+     if(changed||changedReview)this.patch({review:r,selected:r?.kind??this.state.selected,acknowledged:false,...(changed?{stale:true}:{})});
+   }
+-  ownerReason=():string|null=>this.state.unknown?uncertain:this.normal||this.revokeWork?'The original local-history permission call is still returning. Check or revoke that original.':
+-    this.state.access?.pending?'The original delegated local-history request is not yet retired by all owners.':this.state.access?.enabled?'A local CLI has one-use permission for this local-history review. Revoke it before different work.':null;
++  private selectedReview(c:AgentLocalHistoryContext):LocalHistoryReview|null {
++    const p=this.preparation;
++    return c.reviews[0]??(p&&same(c,p.context)&&p.comparison.runtimeProjectId===c.projectId?p.comparison.live:null);
++  }
++  private baseOwnerReason():string|null{return this.state.unknown?uncertain:this.normal||this.revokeWork?'The original local-history permission call is still returning. Check or revoke that original.':
++    this.state.access?.pending?'The original delegated local-history request is not yet retired by all owners.':this.state.access?.enabled?'A local CLI has one-use permission for this local-history review. Revoke it before different work.':null;}
++  ownerReason=():string|null=>this.baseOwnerReason()??(this.preparation&&localHistoryPreparationHeld(this.preparation.comparison)?'A CLI-proposed history intent is retained. Check this original, then separately approve Start or revoke it.':null);
++  private preparationReason(c:AgentLocalHistoryContext,r:LocalHistoryReview):string|null {
++    const p=this.preparation,now=this.now();
++    if(!p||!same(p.context,c)||p.comparison.runtimeProjectId!==c.projectId||p.comparison.request.phase!=='prepared'||!sameLocalHistoryReview(p.comparison.live,r))return 'Check this exact CLI-proposed history intent in its original Desktop/project first.';
++    if(p.until===null||p.firstCheck===null||now===null||now<p.firstCheck||now>=p.until)return 'This original comparison window expired. Revoke it; another Check cannot renew approval.';
++    return this.source.preparationReason?.(r)??null;
++  }
+   // DATA pin for App's peer check. Only the selected exact original may be
+   // excluded; each local controller independently rematches its private Attempt.
+   // During delegation the Work keeps this pin after GUI consent disappears.
+@@ -65,26 +79,49 @@
+       nextStorePermissionRevision(this.permission.revision)===null?'Permission cannot be renewed in this Desktop session. Keep the original Stop controls.':null;
+   }
+   consentReason():string|null {
+-    const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected);
+-    return this.disposed?'This permission controller is retired.':this.ownerReason()??nativeReason(c)??c.blockedReason??this.permissionReason(c)??
+-      (!c.projectId||!r?'Use the original Release History panel to review this exact mode in Desktop first.':sameLocalHistoryReview(r,this.attempted)?'This review was already used for an Allow attempt. Check or revoke it; never replay.':null);
++    const c=this.read(),r=this.selectedReview(c),gui=c.reviews[0]??null;
++    return this.disposed?'This permission controller is retired.':this.baseOwnerReason()??nativeReason(c)??c.blockedReason??this.permissionReason(c)??
++      (!c.projectId||!r?'Prepare this mode in Release History or request local-history-prepare, then explicitly Check it here.':
++       sameLocalHistoryOriginal(r,this.attempted)?'This original review was already used for an Allow attempt. Check or revoke it; never replay.':
++       gui?(this.preparation&&localHistoryPreparationHeld(this.preparation.comparison)?'A different CLI preparation is retained. Check or revoke that original.':null):this.preparationReason(c,r));
+   }
+-  allowReason():string|null {const c=this.read(),r=c.reviews[0]??null;
+-    return this.consentReason()??(!this.consent||!same(c,this.consent.context)||this.consent.permissionRevision!==this.permission?.revision||!sameLocalHistoryReview(r,this.consent.review)?'Confirm permission for this one exact local-history review.':null);}
++  allowReason():string|null {const c=this.read(),r=this.selectedReview(c);
++    return this.consentReason()??(!this.consent||!same(c,this.consent.context)||this.consent.permissionRevision!==this.permission?.revision||!sameLocalHistoryReview(r,this.consent.review)||this.consent.preparation!==(!c.reviews.length?this.preparation:null)?'Confirm permission for this one exact local-history review.':null);}
+   acknowledge(v:boolean):boolean {this.syncContext();if(typeof v!=='boolean'||this.disposed||this.normal||this.revokeWork||v&&this.consentReason())return false;
+-    const c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected);this.consent=v&&r&&this.permission?{context:c,review:r,permissionRevision:this.permission.revision}:null;this.patch({acknowledged:!!this.consent});return true;}
++    const c=this.read(),r=this.selectedReview(c);this.consent=v&&r&&this.permission?{context:c,review:r,permissionRevision:this.permission.revision,preparation:c.reviews.length?null:this.preparation}:null;this.patch({acknowledged:!!this.consent});return true;}
+   statusReason():string|null{return this.disposed?'This permission controller is retired.':nativeReason(this.controls())??(this.normal||this.revokeWork?'Wait for the original permission reply; revoke remains available.':null);}
+   revokeReason():string|null{return this.disposed?'This permission controller is retired.':nativeReason(this.controls())??(this.revokeWork?'Revocation and Stop are already requested.':null);}
+   private now():number|null{try{const n=this.source.now?this.source.now():performance.now();return Number.isFinite(n)&&n>=0?n:null;}catch{return null;}}
+   remainingSeconds():number|null{const now=this.now();return !this.state.access?.enabled||this.state.stale||this.observedAt===null||now===null||now<this.observedAt?null:Math.max(0,Math.ceil(((this.end??this.observedAt)-now)/1000));}
+-  private begin(kind:Work['kind'],context:AgentLocalHistoryContext,review:LocalHistoryReview|null,expectedPermissionRevision:string|null=null):Work {
++  private begin(kind:Work['kind'],context:AgentLocalHistoryContext,review:LocalHistoryReview|null,expectedPermissionRevision:string|null=null,query:LocalHistoryOrigin|undefined=undefined):Work {
+     if(kind==='revoke'){this.generation={};this.permission=null;} // Fence late Allow BEFORE native call.
+     let finish!:()=>void;const completion=new Promise<void>(r=>{finish=r;});
+-    const w:Work={kind,context,review,generation:this.generation,original:null,completion,finish,startedAt:this.now(),expectedPermissionRevision};
++    const w:Work={kind,context,review,generation:this.generation,original:null,completion,finish,startedAt:this.now(),expectedPermissionRevision,query};
+     this.original=context;if(kind==='revoke')this.revokeWork=w;else this.normal=w;
+     this.consent=null;this.patch({acknowledged:false,stale:true});return w;
+   }
+   private unknown():void{this.consent=null;this.patch({unknown:true,stale:true,acknowledged:false,issue:uncertain});}
++  private acceptPreparation(w:Work,a:AgentLocalHistoryAccess):boolean {
++    if(w.kind!=='status')return true;
++    const next=a.preparation,old=this.preparation;
++    if(w.query&&(!next||!sameLocalHistoryOrigin(w.query,next.request.origin)))return false;
++    if(!next){if(old&&localHistoryPreparationHeld(old.comparison))return false;return true;}
++    const sameOriginal=!!old&&sameLocalHistoryOrigin(old.comparison.request.origin,next.request.origin);
++    if(old&&localHistoryPreparationHeld(old.comparison)&&!sameOriginal)return false;
++    if(sameOriginal&&old){
++      const before=old.comparison.request,after=next.request;
++      if(old.comparison.runtimeProjectId!==next.runtimeProjectId||!sameLocalHistorySelection(before.selection,after.selection)||after.revision<before.revision||before.review&&(!after.review||!sameLocalHistoryOriginal(before.review,after.review)||after.review.statusRevision<before.review.statusRevision)||before.phase==='handed-off'&&after.phase!=='handed-off'||['refused','cancelled','expired'].includes(before.phase)&&after.phase!==before.phase||old.comparison.live&&next.live&&next.live.statusRevision<old.comparison.live.statusRevision)return false;
++    }
++    const usable=next.request.phase==='prepared'&&next.live!==null;
++    const start=sameOriginal&&old!.firstCheck!==null?old!.firstCheck:usable?w.startedAt:null;
++    // The first actual Check start, original native remainder, and every prior
++    // observed ceiling. A delayed reply or a later Check can never renew it.
++    const candidate=!usable||w.startedAt===null?null:w.startedAt+Math.min(60000,next.request.remainingMs);
++    const ceiling=start===null||candidate===null?null:Math.min(start+60000,candidate);
++    const until=sameOriginal&&old!.until!==null?(ceiling===null?old!.until:Math.min(old!.until,ceiling)):ceiling;
++    this.preparation={context:w.context,comparison:next,firstCheck:start,until};
++    return next.request.phase!=='unknown';
++  }
+   private accept(w:Work,raw:unknown):void {
+     if(this.disposed||w.generation!==this.generation)return;
+     const a=parseAgentLocalHistoryAccess(raw);
+@@ -97,13 +134,14 @@
+       old.status&&a.status&&a.status.revision<old.status.revision)){this.unknown();return;}
+     // Unknown never becomes a new lease or completion on a later public read.
+     if(this.state.unknown)return;
++    if(!this.acceptPreparation(w,a)){this.unknown();return;}
+     const current=same(w.context,this.read());
+     this.permission=current?{context:w.context,revision:a.permissionRevision}:null;
+     const candidateEnd=w.startedAt===null?null:w.startedAt+a.remainingMs;
+     const existing=!!old?.grantId&&sameGrant(old,a);
+     this.end=candidateEnd===null?null:existing&&this.end!==null?Math.min(this.end,candidateEnd):candidateEnd;
+     this.observedAt=existing?this.observedAt:w.startedAt;
+-    this.patch({access:a,stale:!current,unknown:a.unknown,issue:a.unknown?uncertain:null});
++    this.consent=null;this.patch({access:a,review:this.selectedReview(this.read()),acknowledged:false,stale:!current,unknown:a.unknown,issue:a.unknown?uncertain:null});
+   }
+   private async run(w:Work,send:()=>Promise<unknown>,admit:()=>boolean=()=>true):Promise<void>{
+     try {if(!admit())return;const p=send();w.original=p;const raw=await p;this.accept(w,raw);}
+@@ -111,17 +149,20 @@
+       if(!this.disposed&&w.generation===this.generation)this.unknown();
+     }finally{if(this.normal===w)this.normal=null;if(this.revokeWork===w)this.revokeWork=null;this.patch();w.finish();}
+   }
+-  async status():Promise<boolean>{this.syncContext();if(this.statusReason())return false;const c=this.controls(),w=this.begin('status',c,null);await this.run(w,()=>c.port!.status());return true;}
+-  async allow():Promise<boolean>{this.syncContext();if(this.allowReason())return false;const consent=this.consent,c=this.read(),r=c.reviews.find(r=>r.kind===this.state.selected);
++  async status():Promise<boolean>{this.syncContext();if(this.statusReason())return false;const c=this.controls(),query=this.preparation&&localHistoryPreparationHeld(this.preparation.comparison)?this.preparation.comparison.request.origin:undefined,w=this.begin('status',c,null,null,query);
++    await this.run(w,()=>c.port!.status(query));return true;}
++  async allow():Promise<boolean>{this.syncContext();if(this.allowReason())return false;const consent=this.consent,c=this.read(),r=this.selectedReview(c);
+     if(!consent||this.consent!==consent||!r||!same(c,consent.context)||!sameLocalHistoryReview(r,consent.review)||consent.permissionRevision!==this.permission?.revision)return false;
+-    // Pin the ACTUALLY returned revision before begin publishes to listeners.
+-    const expected=consent.permissionRevision;
++    // Pin the ACTUALLY returned revision and native preparation comparison
++    // before Work publication; neither is recomputed from a later response.
++    const expected=consent.permissionRevision,preparation=consent.preparation;
+     this.attempted=r;const w=this.begin('allow',c,r,expected);let sent=false;
+-    await this.run(w,()=>{sent=true;return c.port!.allow(r,expected);},()=>{
++    await this.run(w,()=>{sent=true;return c.port!.allow(r,expected,preparation?.comparison.request.origin);},()=>{
+       const current=()=>{const live=this.read();return !this.disposed&&this.normal===w&&w.generation===this.generation&&!this.revokeWork&&same(c,live)&&this.permission?.revision===expected&&same(this.permission.context,c)&&!live.blockedReason;};
+-      const live=this.read();if(!current()||!sameLocalHistoryReview(live.reviews.find(v=>v.kind===r.kind)??null,r))return false;
+-      // This removes only the original GUI timer/Start choice. The actual
+-      // native Prepared/expiry is unchanged; failed or lost Allow cannot undo it.
++      const live=this.read();if(!current()||!sameLocalHistoryReview(this.selectedReview(live),r))return false;
++      if(preparation){return this.preparation===preparation&&!live.reviews.length&&!this.preparationReason(live,r)&&current()&&this.preparation===preparation;}
++      // Ordinary GUI Prepare alone has this Attempt-owned one-use handoff.
++      // A CLI comparison never constructs or pretends to join such an Attempt.
+       const pin=this.source.delegate(r);return !!pin&&pin()&&current();
+     });return sent;}
+   async revoke():Promise<boolean>{if(this.revokeReason())return false;const c=this.controls(),w=this.begin('revoke',c,null);await this.run(w,()=>c.port!.revoke());return true;}
+diff --git a/desktop/src/localReleaseHistory.ts b/desktop/src/localReleaseHistory.ts
+--- a/desktop/src/localReleaseHistory.ts
++++ b/desktop/src/localReleaseHistory.ts
+@@ -94,8 +94,16 @@
+  delegationReview():LocalHistoryReview|null{
+   const a=this.attempt,api=this.api,s=this.state,op=s.status?.operation;
+   if(!a||!api||a.retired||a.started||a.delegated||!a.id||a.epoch!==this.epoch||s.pending||this.reading||this.hasPendingGuiSubmission()||s.blocked||s.unconfirmed||s.historical||s.status?.availability!=='available'||op?.phase!=='awaiting-consent'||!op.intentUsable||!sameId(a.id,op)||!sameOfflineData(op.context,a.request)||s.consentUntil===null||!Number.isFinite(this.now())||this.now()>=s.consentUntil||!this.invocationCurrent(api,a))return null;
+-  const r=a.request;if(!['enroll','verify','review-inputs'].includes(r.action))return null;
+-  return parseLocalHistoryReview({kind:r.action,...a.id,statusRevision:s.status.statusRevision,...(r.platform==='ios'?{platform:'ios'}:{}),...(r.action==='review-inputs'?{candidateOperationId:r.candidateOperationId}:{})});
++  const r=a.request;if(r.action==='abandon-inputs')return null;
++  return parseLocalHistoryReview({kind:r.action,...a.id,statusRevision:s.status.statusRevision,...(r.platform!==undefined?{platform:r.platform}:{}),...(r.candidateOperationId!==undefined?{candidateOperationId:r.candidateOperationId}:{}),...(r.stageOperationId!==undefined?{stageOperationId:r.stageOperationId}:{})});
++ }
++ // Only a peer/currentness gate for a genuine MAIN comparison. This does not
++ // install an Attempt, infer a return, or grant ordinary GUI Start.
++ cliPreparationReason(review:LocalHistoryReview):string|null {
++  const s=this.state,op=s.status?.operation,a=this.attempt;
++  if(this.disposed||s.blocked||s.unconfirmed||s.pending||this.reading||this.hasPendingGuiSubmission())return 'The original Desktop history caller is still pending or unconfirmed.';
++  if(active(s.status)&&(!sameId(review,op)||a?.id&&sameId(a.id,op)))return 'A different or GUI-owned history intent is retained.';
++  return null;
+  }
+  delegatePrepared(review:LocalHistoryReview):(()=>boolean)|null{
+   const r=this.delegationReview(),a=this.attempt,api=this.api,status=this.state.status;
+diff --git a/desktop/src/components/AgentLocalHistory.tsx b/desktop/src/components/AgentLocalHistory.tsx
+--- a/desktop/src/components/AgentLocalHistory.tsx
++++ b/desktop/src/components/AgentLocalHistory.tsx
+@@ -3,23 +3,24 @@
+ import { localHistoryCommands } from '../agentLocalHistoryProtocol.ts';
+ export function AgentLocalHistory({controller,onShow}:{controller:AgentLocalHistoryController;onShow:()=>void}) {
+  const s=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot),r=s.review,a=s.access,seconds=controller.remainingSeconds(),commands=localHistoryCommands(a);
+- const label=r?.kind==='enroll'?'Enroll this project':r?.kind==='verify'?'Verify existing history':r?.kind==='review-inputs'?`Review ${r.platform==='ios'?'iOS':'Android'} candidate inputs`:null;
++ const label=r?.kind==='enroll'?'Enroll this project':r?.kind==='verify'?'Verify existing history':r?`${r.platform==='ios'?'iOS':'Android'} · ${r.kind.replaceAll('-',' ')}`:null;
+  return <details className="card"><summary>Advanced: let a local CLI run one reviewed history step</summary>
+-  <p>First review Enrollment, Verify, or candidate inputs in Release history. Then approve that exact step here. No Store credentials, saved version or network access is required. Desktop must stay open.</p>
++  <p>Prepare a non-destructive review in Release history, or run local-history-prepare with the current CLI project/service IDs and Check it here. Then separately approve that exact step. No Store credentials, saved version or network access is required. Desktop must stay open.</p>
+   <button onClick={onShow}>Show Release history</button>
+   {r&&<><h3>{label}</h3>{r.kind==='enroll'?<p>Creates this project's local journal and private Mac Keychain items only if genuine enrollment is absent. Never deletes or replaces existing history to clear an error.</p>:<p>Reads the selected project's existing local history and Keychain. Candidate review checks current files only, not the earlier build's finality or any Store state.</p>}
+-   {r.candidateOperationId&&<p>Selected candidate: <code>{r.candidateOperationId}</code>.</p>}
++   {(r.candidateOperationId||r.stageOperationId)&&<p>Selected {r.stageOperationId?'stage':'candidate'}: <code>{r.stageOperationId??r.candidateOperationId}</code>.</p>}
+   </>}
+-  <p>Allow does not start work. The CLI can submit once before the original permission expires. It cannot select another project, candidate or action, build, publish, repair history or repeat an uncertain operation.</p>
++  {s.preparation&&<p>CLI preparation: {s.preparation.request.phase}. Prepared is comparison DATA only—not enrollment, a journal read, Start permission or native completion.</p>}
++  <p>Allow does not start work. The CLI can submit once before the original permission expires. It cannot select another project, candidate or action, build, publish, repair or abandon history, or repeat an uncertain operation.</p>
+   <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow this one reviewed local-history step.</label>
+   <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow once</button>
+   {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
+-  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original permission / result</button>
++  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original preparation / permission / result</button>
+   <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke permission / request Stop</button>
+   {s.pending&&<p role="status">Waiting for the original permission reply.</p>}{s.revoking&&<p role="status">Revocation requested. Keep Desktop open until the original calls and cleanup return.</p>}
+   {s.issue&&<p role="alert">{s.issue}</p>}
+   {a&&<p>{s.stale?'Earlier or unconfirmed context · ':''}{a.status?`${a.status.state} · ${a.status.settlement}`:a.enabled?'One-use permission observed':'No unused permission observed'}{seconds!==null?` · at most ${seconds}s remaining`:''}.</p>}
+-  {commands.length>0&&<><p>Run manually. Keep the request ID printed before Submit; use its Status/Cancel after a lost reply, never Submit again.</p><pre>{commands.join('\n')}</pre></>}
++  {commands.length>0&&<><p>Run manually. Keep the request ID printed before Prepare or Submit; use its Status/Cancel after a lost reply, never Submit again.</p><pre>{commands.join('\n')}</pre></>}
+   {a?.status?.state==='complete'&&<p>The original caller, native owner and history writer returned. This result grants no build, Store release, repair or retry authority.</p>}
+   {a?.status?.result&&<details><summary>Recorded local-history result</summary><pre>{JSON.stringify(a.status.result,null,2)}</pre></details>}
+  </details>;
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1127,7 +1127,7 @@
+   }));
+   localHistoryControllerRef.current = localHistory;
+   const localHistoryState = useSyncExternalStore(localHistory.subscribe, localHistory.getSnapshot, localHistory.getSnapshot);
+-  const [agentLocalHistory]=useState(()=>new AgentLocalHistoryController({delegate:r=>localHistory.delegatePrepared(r),current:()=>{
++  const [agentLocalHistory]=useState(()=>new AgentLocalHistoryController({delegate:r=>localHistory.delegatePrepared(r),preparationReason:r=>localHistory.cliPreparationReason(r),current:()=>{
+     const service=cliService.current,w=workspaceRef.current;
+     const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
+     const r=localHistory.delegationReview();
+diff --git a/desktop/tests/agent-local-history.test.mjs b/desktop/tests/agent-local-history.test.mjs
+--- a/desktop/tests/agent-local-history.test.mjs
++++ b/desktop/tests/agent-local-history.test.mjs
+@@ -10,8 +10,8 @@
+ const copy=v=>structuredClone(v),flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
+ const review=(kind='verify',platform)=>({kind,operationId:A,ownerGeneration:B,statusRevision:1,...(platform?{platform}:{}),...(kind==='review-inputs'?{candidateOperationId:UUID}:{})});
+-const empty=()=>({permissionRevision:'0',serviceInstance:null,projectId:null,grantId:null,reviewId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,requestId:null,status:null});
+-const access=(r=review(),extra={})=>({permissionRevision:'1',serviceInstance:S,projectId:P,grantId:G,reviewId:R,review:r,enabled:true,remainingMs:200000,consumed:false,pending:false,unknown:false,requestId:null,status:null,...extra});
++const empty=()=>({permissionRevision:'0',preparation:null,serviceInstance:null,projectId:null,grantId:null,reviewId:null,review:null,enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,requestId:null,status:null});
++const access=(r=review(),extra={})=>({permissionRevision:'1',preparation:null,serviceInstance:S,projectId:P,grantId:G,reviewId:R,review:r,enabled:true,remainingMs:200000,consumed:false,pending:false,unknown:false,requestId:null,status:null,...extra});
+ const report=(r=review(),phase='inputs-ready')=>({enrolled:true,headSequence:2,history:r.kind==='review-inputs'?[{operationId:UUID,phase,recoveryRequired:phase!=='settled-failure'}]:[],candidateInputs:r.kind==='review-inputs'&&phase==='inputs-ready'?{operationId:UUID,candidateSha256:H,sourceCommit:'a'.repeat(40),sourceTree:'b'.repeat(40),application:'dev.example.app',version:{name:'1.2',build:123},files:[{fileName:r.platform?'export/app.ipa':'app-release.aab',bytes:100,sha256:H},{fileName:'store-metadata.zip',bytes:100,sha256:H},{fileName:'validation-report.json',bytes:100,sha256:H}],archive:r.platform?{directory:'archive.xcarchive',entries:1,bytes:100,sha256:H}:null,observation:'current-bundle-only',priorCreateFinality:'not-established'}:null,limitations:limits});
+ const used=(r=review(),extra={})=>{const status={origin:{projectId:P,serviceInstance:S,requestId:Q},grantId:G,reviewId:R,revision:2,review:r,state:'running',settlement:'pending',reason:'none',operation:{operationId:A,ownerGeneration:B,statusRevision:2},outcome:null,result:null,...extra};return access(r,{enabled:false,remainingMs:0,consumed:true,pending:status.settlement!=='settled',unknown:status.state==='unknown',requestId:Q,status});};
+ const done=(r=review(),phase)=>used(r,{state:'complete',settlement:'settled',outcome:'complete',result:report(r,phase)});
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -15,7 +15,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/agent-local-history-prepare.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs"
+   },
+diff --git a/desktop/src-tauri/src/saved_command_agent_local_checks.rs b/desktop/src-tauri/src/saved_command_agent_local_checks.rs
+--- a/desktop/src-tauri/src/saved_command_agent_local_checks.rs
++++ b/desktop/src-tauri/src/saved_command_agent_local_checks.rs
+@@ -403,7 +403,7 @@
+             operation: wire::Operation::LocalProjectChecks,
+             platform: wire::Platform::Android,
+         });
+-        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
++        let prepared = Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
+             agent_build: None, agent_local_check: Some(link.clone()),
+             upload_key_preparation: None,
+             upload_key: None,
+diff --git a/desktop/src-tauri/src/saved_command_owner_tests.rs b/desktop/src-tauri/src/saved_command_owner_tests.rs
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -92,7 +92,7 @@
+         expected.operation = operation;
+         let mut prepared = projection(SavedCommandDomain::OfflinePreflight);
+         prepared.context = Context::OfflinePreflight(expected.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None,
+             material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         let request = |consent, operation_id| wire::start(&json!({"operationId": operation_id,
+@@ -194,7 +194,7 @@
+             SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
+             SavedCommandDomain::LocalStorePreflight => bridge.local_store.original_for_test(),
+         };
+-        original.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
++        original.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
+             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+             && original.inner.runtime.offline_preflight_installed_profile_available());
+@@ -409,7 +409,7 @@
+         let owner = application(SavedCommandDomain::AndroidBuild);
+         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
+         prepared.context = Context::AndroidBuild(context.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -440,7 +440,7 @@
+         "baselineGeneration":3,"action":"recover"})).unwrap();
+     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
+     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
+-    owner.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
++    owner.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
+     // An unqualified runtime or this plain test's absent executor refuses the
+@@ -588,7 +588,7 @@
+         let app = application(SavedCommandDomain::IOSArchive);
+         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
+         { let mut r = app.inner.lock(); r.recovery = Some(observed);
+-            r.prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
++            r.prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
+                 project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
+             Instant::now(), Some((1, project())), Availability::Available).unwrap();
+@@ -726,7 +726,7 @@
+         // No positive runtime/toolchain/observer permission is manufactured.
+         { let mut r = owner.inner.lock();
+             assert!(r.active.is_none() && r.prepared.is_none());
+-            r.prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
++            r.prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+                 registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
+         let registration = if scenario == "stale-registration" { 2 } else { 1 };
+@@ -1168,7 +1168,7 @@
+     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
+     assert_eq!(owner.inner.lock().revision, 0);
+     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+-    owner.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
++    owner.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
+     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
+@@ -1250,7 +1250,7 @@
+     let intent = projection(SavedCommandDomain::ArtifactInspection);
+     let intent_id = intent.operation_id.clone();
+     let intent_generation = intent.owner_generation.clone();
+-    prepared.inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
++    prepared.inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
+         expires: Instant::now() + INTENT, registration: 1, project: project(),
+         recovery_stamp: None, material: None, recovery: None, android_selection: None,
+         artifact_selection: None, artifact_tools: None });
+diff --git a/desktop/src-tauri/src/offline_preflight_owner_tests.rs b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+--- a/desktop/src-tauri/src/offline_preflight_owner_tests.rs
++++ b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+@@ -13,7 +13,7 @@
+     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
+     outcome: None, reason: Reason::None, result: None, stage: None } }
+ fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
+-    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
++    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+ }
+ fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
+ fn active() -> (OfflinePreflightOwner, Arc<Session>) { active_with_agent(None) }
+diff --git a/desktop/src-tauri/src/saved_command_agent_store_tests.rs b/desktop/src-tauri/src/saved_command_agent_store_tests.rs
+--- a/desktop/src-tauri/src/saved_command_agent_store_tests.rs
++++ b/desktop/src-tauri/src/saved_command_agent_store_tests.rs
+@@ -177,7 +177,7 @@
+         consumed: AtomicBool::new(false),
+     });
+     let prepared = Prepared {
+-        agent_history:None, agent_store_preparation: None,
++        agent_history_preparation:None, agent_history:None, agent_store_preparation: None,
+         agent_store: Some(link.clone()),
+         store_witness: Some(witness),
+         agent_build: None,
+diff --git a/desktop/src-tauri/src/saved_command_agent_apple_prepare.rs b/desktop/src-tauri/src/saved_command_agent_apple_prepare.rs
+--- a/desktop/src-tauri/src/saved_command_agent_apple_prepare.rs
++++ b/desktop/src-tauri/src/saved_command_agent_apple_prepare.rs
+@@ -462,7 +462,7 @@
+             projection.phase = Phase::AwaitingConsent;
+             projection.intent_usable = false;
+             let prepared = Prepared {
+-                agent_history:None, agent_store_preparation: None,
++                agent_history_preparation:None, agent_history:None, agent_store_preparation: None,
+                 agent_store: None,
+                 store_witness: None,
+                 agent_build: None,
+diff --git a/desktop/src-tauri/src/saved_command_agent_ios_recovery.rs b/desktop/src-tauri/src/saved_command_agent_ios_recovery.rs
+--- a/desktop/src-tauri/src/saved_command_agent_ios_recovery.rs
++++ b/desktop/src-tauri/src/saved_command_agent_ios_recovery.rs
+@@ -717,7 +717,7 @@
+             .bind(agent::FAMILY, id('a'), id('b'), 1, expires)
+             .unwrap();
+         let prepared = Prepared {
+-            agent_history: None,
++            agent_history_preparation:None, agent_history: None,
+             agent_store_preparation: None,
+             agent_store: None,
+             store_witness: None,
+diff --git a/desktop/src-tauri/src/saved_command_agent_ios_archive.rs b/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
+--- a/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
++++ b/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
+@@ -541,7 +541,7 @@
+                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+             ),
+         };
+-        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
++        let prepared = Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
+             agent_build: Some(link.clone()),
+             agent_local_check: None,
+             upload_key_preparation: None,
+diff --git a/desktop/src-tauri/src/saved_command_agent_android_build.rs b/desktop/src-tauri/src/saved_command_agent_android_build.rs
+--- a/desktop/src-tauri/src/saved_command_agent_android_build.rs
++++ b/desktop/src-tauri/src/saved_command_agent_android_build.rs
+@@ -569,7 +569,7 @@
+                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+             ),
+         };
+-        let prepared = Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
++        let prepared = Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None,
+             agent_build: Some(link.clone()),
+             agent_local_check: None,
+             upload_key_preparation: None,
+diff --git a/desktop/src-tauri/src/saved_command_apple_memory_tests.rs b/desktop/src-tauri/src/saved_command_apple_memory_tests.rs
+--- a/desktop/src-tauri/src/saved_command_apple_memory_tests.rs
++++ b/desktop/src-tauri/src/saved_command_apple_memory_tests.rs
+@@ -157,7 +157,7 @@
+         projection.intent_usable = true;
+         let old_review = registry.apple.review.clone();
+         registry.prepared = Some(Prepared {
+-            agent_history:None, agent_store_preparation: None,
++            agent_history_preparation:None, agent_history:None, agent_store_preparation: None,
+             agent_store: None,
+             store_witness: None,
+             agent_build: None,
+diff --git a/desktop/src-tauri/src/service_local_history_tests.rs b/desktop/src-tauri/src/service_local_history_tests.rs
+--- a/desktop/src-tauri/src/service_local_history_tests.rs
++++ b/desktop/src-tauri/src/service_local_history_tests.rs
+@@ -10,10 +10,12 @@
+         status_revision: 3,
+         platform: None,
+         candidate_operation_id: None,
++        stage_operation_id: None,
+     }
+ }
+ fn scope(f: &Fixture) -> Arc<queue::Scope> {
+     Arc::new(queue::Scope {
++        preparation: None,
+         project_id: id('1'),
+         runtime_id: "p1".into(),
+         review_id: id('4'),
+@@ -37,6 +39,7 @@
+         head_sequence: 1,
+         history: vec![],
+         candidate_inputs: None,
++        reviewed_files: None,
+         limitations: h::LIMITATIONS,
+     }
+ }
+@@ -222,7 +225,13 @@
+     for index in 1..=32 {
+         let mut input = f.input();
+         input.origin.request_id = Id::parse(&format!("{index:032x}")).unwrap();
+-        if index % 2 == 0 {
++        if index % 4 == 0 {
++            use crate::service_local_history_prepare_protocol as hp;
++            let h=scope(&f);
++            f.inbox.prepare_history(hp::Request{origin:input.origin,selection:hp::Selection{kind:hp::Kind::Verify,platform:None,candidate_operation_id:None,stage_operation_id:None}},queue::preparation::Scope{saved:crate::agent_identity_requests::SavedPoint{project_id:id('1'),runtime_id:"p1".into(),root:h.root.clone(),device:1,inode:2,revision:0,fresh:false},read:h.read.clone()},Instant::now()).unwrap();
++            let c=f.inbox.claim_history_preparation().unwrap().unwrap();let e=c.entry().clone();
++            e.refused(h::Reason::NativeRefused);c.returned();e.claim_history().unwrap().unwrap().returned(Ok(())).unwrap();
++        } else if index % 2 == 0 {
+             f.inbox.allow_history(scope(&f), id('3')).unwrap();
+             f.inbox.submit_history(input, Instant::now()).unwrap();
+             let c = f.inbox.claim_local_history().unwrap().unwrap();
+diff --git a/desktop/src-tauri/src/saved_command_agent_tool_inspect_tests.rs b/desktop/src-tauri/src/saved_command_agent_tool_inspect_tests.rs
+--- a/desktop/src-tauri/src/saved_command_agent_tool_inspect_tests.rs
++++ b/desktop/src-tauri/src/saved_command_agent_tool_inspect_tests.rs
+@@ -276,7 +276,7 @@
+         }
+         let expires = now + INTENT;
+         owner.inner.lock().prepared = Some(Prepared {
+-            agent_history: None, agent_store_preparation: None, agent_store: None, store_witness: None,
++            agent_history_preparation: None, agent_history: None, agent_store_preparation: None, agent_store: None, store_witness: None,
+             agent_build: None, agent_local_check: None, upload_key_preparation: None, upload_key: None,
+             apple: None, tools: None, local_history: None,
+             projection: RunProjection { agent_build: None, agent_local_check: None,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -62,6 +62,8 @@
+ mod service_store_protocol;
+ #[path="../src/service_local_history_protocol.rs"]
+ mod service_local_history_protocol;
++#[path="../src/service_local_history_prepare_protocol.rs"]
++mod service_local_history_prepare_protocol;
+ #[path="../src/service_store_prepare_protocol.rs"]
+ mod service_store_prepare_protocol;
+ #[path="../src/service_store_inventory_protocol.rs"]

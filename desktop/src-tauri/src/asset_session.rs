@@ -750,7 +750,9 @@ impl GuiCall {
     pub(crate) fn record_installed_native_response(self: &Arc<Self>, id: u32, response: NativeResponse,
         selected: Option<&std::path::Path>) -> Result<(), ()> {
         let owner = self.owner().ok_or(())?;
-        if owner.id != id || !Arc::ptr_eq(&owner.gui, self) { return Err(()); }
+        if owner.id != id || if owner.has_credential_backup_picker() {
+            owner.installed_backup_choice(self).is_none()
+        } else { !Arc::ptr_eq(&owner.gui,self) } {return Err(());}
         let mut witness = self.installed_native_response_witness.lock().map_err(|_| ())?;
         if witness.is_some() { return Err(()); } // First real response is immutable.
         // Sole caller is the original main-thread PanelState::Responded tick.
@@ -1254,8 +1256,11 @@ pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 
 /// Nonsecret weak reference to the actual document. Only that document may
 /// create this gate; the original Supervisor calls it after durable READY.
-pub(crate) struct GitHubPreflightGoGate { inner: Weak<Inner> }
+pub(crate) struct GitHubPreflightGoGate { inner: Weak<Inner>, agent:Option<Arc<crate::service_github_action_requests::Entry>>, stamp:Option<crate::edit_owner::SavedEditStamp> }
 impl GitHubPreflightGoGate {
+    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
+    pub(crate) fn take_stamp(&mut self)->Option<crate::edit_owner::SavedEditStamp>{self.stamp.take()}
+    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn same_original_document(&self, other: &Self) -> bool {
         Weak::ptr_eq(&self.inner, &other.inner) && self.inner.strong_count() != 0
@@ -1277,14 +1282,27 @@ impl GitHubPreflightGoGate {
         if current.0 != original.1 || current.1 != original.2 { return Err(s::refused(p::Reason::TargetChanged)); }
         // This mutex remains held through original session expiry/pin checks,
         // one-use owner claim and private-buffer transfer. No post-send check.
-        state.github.preflight_go(id, digest, request, Instant::now(), claim)
+        if let Some(e)=&self.agent {
+            e.current(true).map_err(application_service::public_error)?;
+            let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
+            // The sole original stamp moved into this ticket's Active before Doc unlock.
+            if state.github.preflight_active_stamp(id,request).is_none_or(|stamp|!edit.matches(stamp)){return Err(s::refused(p::Reason::TargetChanged));}
+        }
+        state.github.preflight_go(id,digest,request,Instant::now(),||{
+            let granted=claim();
+            if granted { if let Some(e)=&self.agent {if e.go(id).is_err(){e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);return false;}} }
+            granted
+        })
     }
 }
 
 /// Nonsecret weak reference to the actual document. Only that document may
 /// create this gate; the original Supervisor calls it after durable READY.
-pub(crate) struct GitHubReleaseGoGate { inner: Weak<Inner> }
+pub(crate) struct GitHubReleaseGoGate { inner: Weak<Inner>, agent:Option<Arc<crate::service_github_action_requests::Entry>>, stamp:Option<crate::edit_owner::SavedEditStamp> }
 impl GitHubReleaseGoGate {
+    pub(crate) fn agent(&self)->Option<&Arc<crate::service_github_action_requests::Entry>>{self.agent.as_ref()}
+    pub(crate) fn take_stamp(&mut self)->Option<crate::edit_owner::SavedEditStamp>{self.stamp.take()}
+    pub(crate) fn agent_entering(&self)->Result<(),BridgeError>{if let Some(e)=&self.agent{e.entering().map_err(application_service::public_error)?;}Ok(())}
     pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_release_protocol::Request,
         claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
         use crate::{github_release_protocol as p, github_release_session as s};
@@ -1302,7 +1320,17 @@ impl GitHubReleaseGoGate {
         if current.0 != original.1 || current.1 != original.2 { return Err(s::refused(p::Reason::TargetChanged)); }
         // This mutex remains held through original session expiry/pin checks,
         // one-use owner claim and private-buffer transfer. No post-send check.
-        state.github.release_go(id, digest, request, Instant::now(), claim)
+        if let Some(e)=&self.agent {
+            e.current(true).map_err(application_service::public_error)?;
+            let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
+            // The sole original stamp moved into this ticket's Active before Doc unlock.
+            if state.github.release_active_stamp(id,request).is_none_or(|stamp|!edit.matches(stamp)){return Err(s::refused(p::Reason::TargetChanged));}
+        }
+        state.github.release_go(id,digest,request,Instant::now(),||{
+            let granted=claim();
+            if granted { if let Some(e)=&self.agent {if e.go(id).is_err(){e.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);return false;}} }
+            granted
+        })
     }
 }
 
@@ -4555,6 +4583,10 @@ impl DocumentBinding {
     pub(crate) fn github_preflight_command(&self, name: &str, value: &Value) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
         use crate::{github_preflight_protocol as p, github_preflight_session as s};
         let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_preflight_execute(command,None)
+    }
+    pub(super) fn github_preflight_execute(&self,command:crate::github_preflight_protocol::Command,agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<crate::github_preflight_protocol::Status,BridgeError>{
+        use crate::{github_preflight_protocol as p,github_preflight_session as s};
         if matches!(command, p::Command::Status) { return Ok(self.github_preflight_status()); }
         // Native entropy/account DATA before locking. No filesystem traversal,
         // helper, token copy or network occurs at this preparation boundary.
@@ -4576,7 +4608,11 @@ impl DocumentBinding {
             .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
         if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
         let project_binding = github_preflight_project_binding(&root)?;
-        let gate = GitHubPreflightGoGate { inner: Arc::downgrade(&self.inner) };
+        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity);
+        if agent.is_some() && edit.is_err(){return Err(s::refused(p::Reason::TargetChanged));}
+        state.github.preflight_agent_entry(&command,agent.as_ref(),generation,&root,&project_binding,edit.as_ref().ok(),Instant::now())?;
+        let stamp=edit.as_ref().ok().map(|e|e.stamp()).transpose()?;
+        let gate = GitHubPreflightGoGate { inner: Arc::downgrade(&self.inner),agent,stamp };
         let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let marker = marker.map(|fresh| supervisor.installed_preflight_prepare_marker(&gate, fresh)).transpose()?;
@@ -4602,6 +4638,10 @@ impl DocumentBinding {
     pub(crate) fn github_release_command(&self, name: &str, value: &Value) -> Result<crate::github_release_protocol::Status, BridgeError> {
         use crate::{github_release_protocol as p, github_release_session as s};
         let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        self.github_release_execute(command,None)
+    }
+    pub(super) fn github_release_execute(&self,command:crate::github_release_protocol::Command,agent:Option<Arc<crate::service_github_action_requests::Entry>>)->Result<crate::github_release_protocol::Status,BridgeError>{
+        use crate::{github_release_protocol as p,github_release_session as s};
         if matches!(command, p::Command::Status) { return Ok(self.github_release_status()); }
         // Native entropy/account DATA before locking. No filesystem traversal,
         // helper, token copy or network occurs at this preparation boundary.
@@ -4623,7 +4663,11 @@ impl DocumentBinding {
             .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
         if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
         let project_binding = github_preflight_project_binding(&root)?;
-        let gate = GitHubReleaseGoGate { inner: Arc::downgrade(&self.inner) };
+        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity);
+        if agent.is_some() && edit.is_err(){return Err(s::refused(p::Reason::TargetChanged));}
+        state.github.release_agent_entry(&command,agent.as_ref(),generation,&root,&project_binding,edit.as_ref().ok(),Instant::now())?;
+        let stamp=edit.as_ref().ok().map(|e|e.stamp()).transpose()?;
+        let gate = GitHubReleaseGoGate { inner: Arc::downgrade(&self.inner),agent,stamp };
         let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
         match command {
             p::Command::Prepare(args) => state.github.release_prepare(args, generation, root, &project_binding,

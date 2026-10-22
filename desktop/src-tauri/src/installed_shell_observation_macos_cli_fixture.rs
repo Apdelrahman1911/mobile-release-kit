@@ -1,7 +1,7 @@
 //! Two fixed comparison files, retained inside the existing observer Record.
 //! Raw FDs are never duplicated, handed off, or implicitly closed by Drop.
 //! A failed/uncertain close is absorbing; process exit is not a close receipt.
-use super::{application, NAME};
+use super::{application_for, NAME};
 use nix::{
     fcntl::{self, AtFlags, OFlag},
     libc,
@@ -22,14 +22,14 @@ use std::{
 };
 
 const LIMIT: usize = 4096;
-pub(super) const PHASE_LINE_LIMIT: usize = 512;
-pub(super) const NATIVE: &str = "cli-native.jsonl";
-pub(super) const DRIVER: &str = "cli-driver.jsonl";
+pub(in super::super) const PHASE_LINE_LIMIT: usize = 512;
+pub(in super::super) const NATIVE: &str = "cli-native.jsonl";
+pub(in super::super) const DRIVER: &str = "cli-driver.jsonl";
 
 // Apply before the general JSON parser: the 4 KiB file bound alone would
 // permit hundreds of tiny maps. Every one of the eight fixed phase shapes
 // fits this smaller bound; neither a grant nor arbitrary payload belongs here.
-pub(super) fn phase_line(raw: &[u8]) -> Result<&[u8], ()> {
+pub(in super::super) fn phase_line(raw: &[u8]) -> Result<&[u8], ()> {
     if raw.is_empty() || raw.len() > PHASE_LINE_LIMIT {
         return Err(());
     }
@@ -65,7 +65,7 @@ struct Held {
     stamp: Stamp,
     directory: bool,
 }
-pub(super) struct Files {
+pub(in super::super) struct Files {
     held: Vec<Held>,
     native: usize,
     driver: usize,
@@ -73,26 +73,32 @@ pub(super) struct Files {
     sent: Vec<u8>,
     received: Vec<u8>,
     rows: usize,
+    row_limit: usize,
     closed: bool,
     unknown: bool,
 }
 impl Files {
-    pub(super) fn capture(project: &Path, uid: u32) -> Result<Self, ()> {
+    pub(in super::super) fn capture(project: &Path, uid: u32) -> Result<Self, ()> { Self::capture_case(project,uid,NAME) }
+    pub(in super::super) fn capture_backup(project:&Path,uid:u32)->Result<Self,()> {
+        Self::capture_case(project,uid,super::super::vault::upload_key::cli::SCOPE)
+    }
+    fn capture_case(project:&Path,uid:u32,name:&str)->Result<Self,()> {
+        let row_limit=if name==NAME {4} else if name==super::super::vault::upload_key::cli::SCOPE {7} else{return Err(());};
         let mut f = Self {
             held: Vec::with_capacity(16),
             native: 0,
             driver: 0,
-            application: application(uid).ok_or(())?,
+            application: application_for(uid,name).ok_or(())?,
             sent: Vec::with_capacity(LIMIT),
             received: Vec::with_capacity(LIMIT),
-            rows: 0,
+            rows: 0, row_limit,
             closed: false,
             unknown: false,
         };
         // Retain failed setup too: there is one explicit close pass. Failed
         // closes leave their original numeric identity in this forgotten owner.
         let result = (|| {
-            let state = project.parent().ok_or(())?.join("state").join(NAME);
+            let state = project.parent().ok_or(())?.join("state").join(name);
             let parent = f.path(&state, uid)?;
             f.native = f.open(Some(parent), NATIVE.as_bytes(), uid, false, true)?;
             f.driver = f.open(Some(parent), DRIVER.as_bytes(), uid, false, false)?;
@@ -245,7 +251,7 @@ impl Files {
         }
         Ok(size)
     }
-    pub(super) fn current(&self) -> Result<(), ()> {
+    pub(in super::super) fn current(&self) -> Result<(), ()> {
         if self.closed || self.unknown {
             return Err(());
         }
@@ -254,7 +260,7 @@ impl Files {
         }
         Ok(())
     }
-    pub(super) fn application(&self) -> Result<PathBuf, ()> {
+    pub(in super::super) fn application(&self) -> Result<PathBuf, ()> {
         self.current()?;
         Ok(self.application.clone())
     }
@@ -274,8 +280,8 @@ impl Files {
         }
         Ok(raw)
     }
-    pub(super) fn poll(&mut self, index: usize, phase: &str) -> Result<Option<Value>, ()> {
-        if index >= 4 || index != self.rows {
+    pub(in super::super) fn poll(&mut self, index: usize, phase: &str) -> Result<Option<Value>, ()> {
+        if index >= self.row_limit || index != self.rows {
             return Err(());
         }
         let raw = self.read(self.driver)?;
@@ -299,7 +305,7 @@ impl Files {
         self.rows += 1;
         Ok(Some(v))
     }
-    pub(super) fn send(&mut self, v: &Value) -> Result<(), ()> {
+    pub(in super::super) fn send(&mut self, v: &Value) -> Result<(), ()> {
         self.current()?;
         let mut raw = crate::edit_protocol::bounded(v, PHASE_LINE_LIMIT).map_err(|_| ())?;
         raw.push(b'\n');
@@ -332,7 +338,11 @@ impl Files {
         }
         Ok(())
     }
-    pub(super) fn close(&mut self) -> Result<(), ()> {
+    pub(in super::super) fn finish_backup(&mut self)->Result<(),()> {
+        if self.row_limit!=7 || self.rows!=7 || self.sent.iter().filter(|b|**b==b'\n').count()!=7 {return Err(());}
+        self.current()?;self.close()
+    }
+    pub(in super::super) fn close(&mut self) -> Result<(), ()> {
         if self.closed || self.unknown {
             return Err(());
         }
@@ -355,7 +365,7 @@ impl Files {
             Err(())
         }
     }
-    pub(super) fn closed(&self) -> bool {
+    pub(in super::super) fn closed(&self) -> bool {
         self.closed && !self.unknown && self.held.iter().all(|h| h.fd.is_none())
     }
 }

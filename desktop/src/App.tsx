@@ -2,7 +2,7 @@ import { AgentLocalHistory } from './components/AgentLocalHistory.tsx';
 import { AgentLocalHistoryController } from './agentLocalHistoryController.ts';
 import { AgentStorePreparation } from './components/AgentStorePreparation.tsx';
 import { StorePreparationController } from './agentStorePreparationController.ts';
-import { storePreparationInput, storePreparationPeerReason, storePreparationPreparesIntent, storePreparationExecutesCandidate } from './agentStorePreparation.ts';
+import { storePreparationInput, storePreparationPeerReason, storePreparationNativeOperation, storePreparationRelease } from './agentStorePreparation.ts';
 import { captureCounterSaved, COUNTER_PURPOSE } from './versionCounterSetup.ts';
 import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
 import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
@@ -644,12 +644,12 @@ export function App() {
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
-    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();},
-    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:null,
+    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();githubPreflightControllerRef.current?.syncContext();githubReleaseControllerRef.current?.syncContext();githubPublicationControllerRef.current?.syncCounterSource();},
+    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile'||r.kind==='counter-prepare'||r.kind==='counter-create'||r.kind==='publication-pending'||r.kind==='counter-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('preflight-')?githubPreflightControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('release-')?githubReleaseControllerRef.current?.delegatePrepared(r)??null:null,
     current:()=>{const service=pathService.current;return {
       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
-      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile')].filter((r):r is GithubActionSelection=>!!r),
+      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile'),githubPreflightControllerRef.current?.agentSelection('preflight-prepare'),githubPreflightControllerRef.current?.agentSelection('preflight-dispatch'),githubPreflightControllerRef.current?.agentSelection('preflight-pending'),githubPreflightControllerRef.current?.agentSelection('preflight-observe'),githubReleaseControllerRef.current?.agentSelection('release-prepare'),githubReleaseControllerRef.current?.agentSelection('release-dispatch'),githubReleaseControllerRef.current?.agentSelection('release-pending'),githubReleaseControllerRef.current?.agentSelection('release-observe'),githubPublicationControllerRef.current?.dispatchSelection('counter-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-create'),githubPublicationControllerRef.current?.dispatchSelection('publication-pending'),githubPublicationControllerRef.current?.dispatchSelection('counter-reconcile')].filter((r):r is GithubActionSelection=>!!r),
       blockedReason:agentGithubActionAdmission.current(),
     };},
   }));
@@ -967,11 +967,13 @@ export function App() {
     const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
     const pr=!!selected&&(selected.kind==='draft-pr-create'||selected.kind==='pr-create')&&pullRequestRef.current?.agentSelected(selected)===true;
     const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
-    const publication=!!selected&&(selected.kind==='setup-publish'||selected.kind==='setup-reconcile')&&githubPublicationControllerRef.current?.agentSelected(selected)===true;
-    const blocked=savedCommandBusy(false,false,false,false,false,false,false,publication,repository,false,pr,retry,false,true)??
+    const publication=!!selected&&githubPublicationControllerRef.current?.agentSelected(selected)===true;
+    const preflight=!!selected&&githubPreflightControllerRef.current?.agentSelected(selected)===true;
+    const release=!!selected&&githubReleaseControllerRef.current?.agentSelected(selected)===true;
+    const blocked=savedCommandBusy(false,preflight,release,false,false,false,false,publication,repository,false,pr,retry,false,true)??
       savedOwnersPrerequisiteReason(false,false,undefined,false,true);
     if(blocked)return blocked;
-    if(githubPreflight.getSnapshot().status?.prepared||githubRelease.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';
+    if(!preflight&&githubPreflightControllerRef.current?.getSnapshot().status?.prepared||!release&&githubReleaseControllerRef.current?.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';
     const connection=githubConnection.getSnapshot(),project=workspaceRef.current.selectedId,current=connection.status;
     return current?.session?.state==='connected'&&current.session.projectId===project&&connection.context?.projectId===project&&current.account.state==='observed'&&
       (repository||current.repository.state==='observed')?null:'Connect the exact reviewed GitHub account and project first.';
@@ -1127,7 +1129,7 @@ export function App() {
   }));
   localHistoryControllerRef.current = localHistory;
   const localHistoryState = useSyncExternalStore(localHistory.subscribe, localHistory.getSnapshot, localHistory.getSnapshot);
-  const [agentLocalHistory]=useState(()=>new AgentLocalHistoryController({delegate:r=>localHistory.delegatePrepared(r),current:()=>{
+  const [agentLocalHistory]=useState(()=>new AgentLocalHistoryController({delegate:r=>localHistory.delegatePrepared(r),preparationReason:r=>localHistory.cliPreparationReason(r),current:()=>{
     const service=cliService.current,w=workspaceRef.current;
     const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
     const r=localHistory.delegationReview();
@@ -1179,15 +1181,20 @@ export function App() {
     const service=cliService.current,w=workspaceRef.current;
     const project=w.selectedId&&Object.hasOwn(w.projects,w.selectedId)?w.projects[w.selectedId]??null:null;
     const tools=androidBuild.getSnapshot();
-    const observation=project?(kind==='android-candidate-upload'?(tools.project?.projectId===project.project.id?tools.project:null):localStoreProjectObservation(project,releaseVersion.getSnapshot())):null;
+    // Reconcile uses this original Android application observation too, but
+    // never its tool catalogue/selection/loan. Candidate upload alone needs tools.
+    const androidObservation=kind==='android-candidate-upload'||kind.startsWith('android-')&&storePreparationRelease(kind)?.kind==='reconcile';
+    const observation=project?(androidObservation?(tools.project?.projectId===project.project.id?tools.project:null):localStoreProjectObservation(project,releaseVersion.getSnapshot())):null;
     const input=storePreparationInput(kind,observation,assetSession.getSnapshot(),localHistory.getSnapshot(),tools);
     const peer=storePreparationControllerRef.current?.peer()??null;
-    const peers=storePreparationPeerReason(peer&&!storePreparationPreparesIntent(peer.input.kind)&&!storePreparationExecutesCandidate(peer.input.kind)?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
-      storePreparationPeerReason(peer&&storePreparationPreparesIntent(peer.input.kind)?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
-      storePreparationPeerReason(peer&&storePreparationExecutesCandidate(peer.input.kind)?peer.input:null,peer?.review??null,localStoreExecuteControllerRef.current?.getSnapshot()??null,storeExecuteBusy());
+    const domain=peer?storePreparationNativeOperation(peer.input.kind):null;
+    const peers=storePreparationPeerReason(peer&&domain==='local-store-preflight'?peer.input:null,peer?.review??null,localStore.getSnapshot(),localStoreOwnerReason(localStore.getSnapshot()))??
+      storePreparationPeerReason(peer&&domain==='local-store-prepare'?peer.input:null,peer?.review??null,localStorePrepare.getSnapshot(),localStorePrepareOwnerReason(localStorePrepare.getSnapshot()))??
+      storePreparationPeerReason(peer&&domain==='local-store-execute'?peer.input:null,peer?.review??null,localStoreExecuteControllerRef.current?.getSnapshot()??null,storeExecuteBusy())??
+      storePreparationPeerReason(peer&&(domain==='local-store-reconcile'||domain==='local-store-recovery-settle')?peer.input:null,peer?.review??null,localStoreReconcileControllerRef.current?.getSnapshot()??null,storeReconcileBusy());
     return {port:service.api?.mode==='native'?service.api.agentStorePreparation??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:project?.project.id??null,epoch:project??service,preview:service.api?.mode==='preview',input,
-      blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??storeReconcileBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
+      blockedReason:agentStoreControllerRef.current?.ownerReason()??appleProvisioningBusy()??peers??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
   }}));
   storePreparationControllerRef.current=storePreparationAccess;
   useSyncExternalStore(storePreparationAccess.subscribe,storePreparationAccess.getSnapshot,storePreparationAccess.getSnapshot);

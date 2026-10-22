@@ -17,7 +17,7 @@ impl Case {
         Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
     } }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
-    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::BackupRoundTrip) { 13 } else if self == Self::UploadKey(upload_key::Case::ColdReopen) { 6 } else if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::BackupCli) { 14 } else if self == Self::UploadKey(upload_key::Case::BackupRoundTrip) { 13 } else if self == Self::UploadKey(upload_key::Case::ColdReopen) { 6 } else if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +86,7 @@ impl Control {
             claimed: AtomicBool::new(false), returned: AtomicBool::new(false), next: AtomicU8::new(0),
             checkpoint: AtomicBool::new(false), complete: AtomicBool::new(false), quit: AtomicU8::new(case.maximum_original() as u8), upload:upload_key::Flow::default() }))
     }
-    fn observation(&self) -> Option<Arc<Observation>> {
+    pub(super) fn observation(&self) -> Option<Arc<Observation>> {
         self.original.get()?.upgrade().filter(|q| q.case == OuterCase::Vault(self.case)
             && q.vault.as_ref().is_some_and(|c| std::ptr::eq(c.as_ref(), self)))
     }
@@ -97,6 +97,10 @@ impl Control {
     }
     pub(crate) fn permits(&self, document: &Arc<()>) -> bool {
         self.bound(document) && !self.complete.load(Ordering::SeqCst) && self.observation().is_some_and(|q| q.timely())
+    }
+    pub(crate) fn backup_picker_returned(&self, owner:&Arc<crate::asset_session::OriginalWork>,call:&Arc<crate::asset_session::GuiCall>,choice:crate::asset_session::CredentialBackupChoice)->Result<(),()> {
+        if self.case!=Case::UploadKey(upload_key::Case::BackupCli) {return Err(());}
+        self.observation().ok_or(())?.backup_cli_picker_returned(owner,call,choice)
     }
     pub(crate) fn root(&self) -> &Path { &self.root }
     pub(crate) fn project(&self) -> &Path { &self.project }
@@ -173,7 +177,7 @@ pub(super) struct Record {
     opened: bool, preview_consumed: bool, initialized: bool, locked: bool, reopened: bool, unlocked: bool,
     relocked: bool, not_executed: bool, original_count: usize, final_originals: bool,
     initialization: Option<Value>, lookup: Option<Value>, storage: Option<Value>,
-    upload: upload_key::Record,
+    pub(super) upload: upload_key::Record,
 }
 
 impl Observation {

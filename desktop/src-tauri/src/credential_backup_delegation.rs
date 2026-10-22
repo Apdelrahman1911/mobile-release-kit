@@ -5,9 +5,14 @@ use super::*;
 use crate::credential_setup::KeyReference;
 use crate::service_upload_key_protocol as agent;
 
-pub(in crate::asset_session) enum Selection {
+enum SavedSelection {
     Export(StoredRef),
     Restore(format::Identity),
+}
+
+pub(in crate::asset_session) struct Selection {
+    saved: SavedSelection,
+    qualification: backup_desktop::Qualification,
 }
 
 impl Selection {
@@ -16,7 +21,11 @@ impl Selection {
         state: &DocumentState,
         input: &agent::Selection,
     ) -> Result<Self, AssetError> {
-        backup_desktop::qualification(document)?;
+        Self::capture_qualified(document, state, input, backup_desktop::Qualification::Ordinary)
+    }
+    pub(in crate::asset_session) fn capture_qualified(document: &DocumentBinding, state: &DocumentState,
+        input: &agent::Selection, qualification: backup_desktop::Qualification) -> Result<Self, AssetError> {
+        qualification.check(document)?;
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let identity = session.identity.ok_or_else(AssetError::invalid)?;
         let value = match input {
@@ -35,19 +44,22 @@ impl Selection {
                             && r.authenticated.descriptor.kind == Kind::AndroidKeystore
                     })
                     .ok_or_else(|| AssetError::new(Reason::SourceRefused))?;
-                Self::Export(row.reference(identity))
+                SavedSelection::Export(row.reference(identity))
             }
-            agent::Selection::RestoreEncrypted { .. } if input.valid() => Self::Restore(identity),
+            agent::Selection::RestoreEncrypted { .. } if input.valid() => SavedSelection::Restore(identity),
             _ => return Err(AssetError::invalid()),
         };
+        let value = Self { saved: value, qualification };
         value.current(document, state)?;
         Ok(value)
     }
 
+    pub(in crate::asset_session) fn extra_bytes(&self) -> usize { self.qualification.extra_bytes() }
+
     pub(in crate::asset_session) fn kind(&self) -> agent::Kind {
-        match self {
-            Self::Export(_) => agent::Kind::BackupEncrypted,
-            Self::Restore(_) => agent::Kind::RestoreEncrypted,
+        match &self.saved {
+            SavedSelection::Export(_) => agent::Kind::BackupEncrypted,
+            SavedSelection::Restore(_) => agent::Kind::RestoreEncrypted,
         }
     }
 
@@ -56,7 +68,7 @@ impl Selection {
         document: &DocumentBinding,
         state: &DocumentState,
     ) -> Result<(), AssetError> {
-        backup_desktop::qualification(document)?;
+        self.qualification.check(document)?;
         idle(state)?;
         let context = state.context.as_ref().ok_or_else(AssetError::invalid)?;
         let session = state
@@ -71,9 +83,9 @@ impl Selection {
         {
             return Err(AssetError::new(Reason::ContextStale));
         }
-        let identity = match self {
-            Self::Export(r) => r.identity,
-            Self::Restore(i) => *i,
+        let identity = match &self.saved {
+            SavedSelection::Export(r) => r.identity,
+            SavedSelection::Restore(i) => *i,
         };
         if session.identity != Some(identity)
             || session
@@ -83,8 +95,8 @@ impl Selection {
         {
             return Err(AssetError::new(Reason::ContextStale));
         }
-        match self {
-            Self::Export(reference) => {
+        match &self.saved {
+            SavedSelection::Export(reference) => {
                 session_kind_gate(context, Kind::AndroidKeystore)?;
                 if !session.rows.iter().any(|row| {
                     !row.mutation_pending
@@ -94,10 +106,10 @@ impl Selection {
                     return Err(AssetError::new(Reason::SourceChanged));
                 }
             }
-            Self::Restore(_) if session.rows.len() >= store::DESCRIPTOR_COUNT => {
+            SavedSelection::Restore(_) if session.rows.len() >= store::DESCRIPTOR_COUNT => {
                 return Err(AssetError::new(Reason::Capacity));
             }
-            Self::Restore(_) => {
+            SavedSelection::Restore(_) => {
                 session_kind_gate(context, Kind::AndroidKeystore)?;
             }
         }
@@ -126,10 +138,10 @@ impl Selection {
                 .ok_or_else(AssetError::invalid)?
                 .revision
         };
-        match self {
-            Self::Export(reference) => {
+        match &self.saved {
+            SavedSelection::Export(reference) => {
                 let record = reference.record.token();
-                document.choose_credential_backup_export_delegated(
+                document.choose_credential_backup_export_qualified(
                     app,
                     context_revision,
                     commands::RecordRef {
@@ -137,12 +149,14 @@ impl Selection {
                         expected_revision: reference.revision.counter,
                     },
                     Some(link),
+                    self.qualification.clone(),
                 )
             }
-            Self::Restore(_) => document.choose_credential_backup_import_delegated(
+            SavedSelection::Restore(_) => document.choose_credential_backup_import_qualified(
                 app,
                 context_revision,
                 Some(link),
+                self.qualification.clone(),
             ),
         }
         .map(|_| ())

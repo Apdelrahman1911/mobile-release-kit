@@ -1,9 +1,12 @@
-//! Four fixed calls to the already-open Desktop. No provider, candidate,
+//! Five fixed calls to the already-open Desktop. No provider, candidate,
 //! credential, prepared material or release executor exists in this client.
 use super::*;
 use crate::service_local_history_protocol as store;
+use crate::service_local_history_prepare_protocol as prepare;
 
-pub(super) const COMMANDS: [CommandCapability; 4] = [
+pub(super) const COMMANDS: [CommandCapability; 5] = [
+    CommandCapability {command:"local-history-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","KIND","[UUID [--android|--ios]]"],
+        description:"Request read-only native History preparation; separately approve Start in Desktop. No Abandon or Store authority."},
     CommandCapability {
         command: "local-history-scope",
         arguments: &["PROJECT_ID"],
@@ -19,7 +22,7 @@ pub(super) const COMMANDS: [CommandCapability; 4] = [
             "REVIEW_ID",
             "--reviewed",
         ],
-        description: "Run the exact Desktop-prepared Enroll, Verify or input review once.",
+        description: "Start the exact Desktop-approved enrollment or local file review once.",
     },
     CommandCapability {
         command: "local-history-status",
@@ -34,6 +37,7 @@ pub(super) const COMMANDS: [CommandCapability; 4] = [
     },
 ];
 enum Command {
+    Prepare {project:Id,instance:Id,selection:prepare::Selection},
     Scope(Id),
     Submit {
         project: Id,
@@ -69,6 +73,24 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         words.pop();
     }
     let command = match words.as_slice() {
+        ["local-history-prepare",project,instance,kind,tail @ ..]=>{
+            let kind=match *kind {
+                "enroll"=>store::Kind::Enroll,"verify"=>store::Kind::Verify,"review-inputs"=>store::Kind::ReviewInputs,
+                "review-prepared"=>store::Kind::ReviewPrepared,"review-execution"=>store::Kind::ReviewExecution,
+                "review-reconcile"=>store::Kind::ReviewReconcile,"review-recovery"=>store::Kind::ReviewRecovery,
+                "review-stage-prepared"=>store::Kind::ReviewStagePrepared,"review-stage-execution"=>store::Kind::ReviewStageExecution,
+                "review-external-readiness"=>store::Kind::ReviewExternalReadiness,_=>return Err(Error::InvalidRequest),
+            };
+            let (selected,platform)=match tail {
+                []=>(None,None),[id]=>(Some((*id).to_owned()),None),
+                [id,"--ios"]=>(Some((*id).to_owned()),Some(store::Platform::Ios)),
+                [id,"--android"]=>(Some((*id).to_owned()),Some(store::Platform::Android)),_=>return Err(Error::InvalidRequest),
+            };
+            let selection=prepare::Selection{kind,platform,candidate_operation_id:if kind.stage(){None}else{selected.clone()},
+                stage_operation_id:if kind.stage(){selected}else{None}};
+            if !selection.valid(){return Err(Error::InvalidRequest);}
+            Command::Prepare{project:Id::parse(project)?,instance:Id::parse(instance)?,selection}
+        }
         ["local-history-submit", project, instance, grant, review, "--reviewed"] => {
             Command::Submit {
                 project: Id::parse(project)?,
@@ -124,6 +146,14 @@ fn output(
     if let p::ResponseBody::Error(e) = response.response {
         return Err(e);
     }
+    if let p::ResponseBody::LocalHistoryPreparation(status)=&response.response {
+        status.validate()?;
+        if submitted.is_some()||status.origin!=*q||response.service_instance!=q.service_instance{return Err(Error::StateUnknown);}
+        let code=match status.phase {prepare::Phase::Unknown=>6,prepare::Phase::Refused|prepare::Phase::Cancelled|prepare::Phase::Expired=>5,_=>0};
+        let bytes=if json {let mut b=p::encode_response(response)?;b.push(b'\n');b}
+            else{format!("Local History preparation: {:?}; {:?}.\n{}Comparison only. Use Desktop Check, then separate one-use Start approval. No native execution or enrollment has been authorized.\n",status.phase,status.settlement,receipt(q)).into_bytes()};
+        return Ok((code,bytes));
+    }
     let p::ResponseBody::LocalHistoryRequest(status) = &response.response else {
         return Err(Error::StateUnknown);
     };
@@ -154,7 +184,7 @@ fn output(
             status.settlement,
             receipt(q)
         );
-        text.push_str("Desktop approved only this Enroll, Verify or current input review. Enrollment creates original local history and Keychain items; it never replaces them. Read results do not establish Store authority or earlier build finality. Keep unknown requests and history intact; do not replay.\n");
+        text.push_str("Desktop approved only this enrollment or current local file review. Enrollment creates original local history and Keychain items; it never replaces them. Read results do not establish Store authority or earlier build finality. Keep unknown requests and history intact; do not replay.\n");
         if let Some(result) = &status.result {
             text.push_str(
                 &String::from_utf8(
@@ -220,6 +250,11 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                 };
                 return Ok((0, bytes));
             }
+            Command::Prepare{project,instance,selection}=>{
+                let q=store::Query{project_id:project,service_instance:instance,request_id:Id::random()?};
+                std::io::stderr().write_all(receipt(&q).as_bytes()).map_err(|_|Error::Unavailable)?;
+                (q.clone(),None,p::RequestBody::LocalHistoryPrepare(prepare::Request{origin:q,selection}))
+            }
             Command::Submit {
                 project,
                 instance,
@@ -255,12 +290,14 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                 .enable_all()
                 .build()
                 .map_err(|_| Error::Unavailable)?;
+            let selected=if let p::RequestBody::LocalHistoryPrepare(v)=&body{Some(v.selection.clone())}else{None};
             let request = p::Request {
                 version: p::VERSION,
                 request_id: Id::random()?,
                 request: body,
             };
             let response = rt.block_on(crate::installed_cli_ipc::request(&path, &request))?;
+            if selected.as_ref().is_some_and(|selected|!matches!(&response.response,p::ResponseBody::LocalHistoryPreparation(s) if &s.selection==selected)) {return Err(Error::StateUnknown);}
             output(
                 &response,
                 &q,
@@ -338,7 +375,9 @@ mod tests {
         assert!(caps.len() <= CAPABILITIES_BYTES);
         let value: serde_json::Value = serde_json::from_slice(&caps).unwrap();
         assert_eq!(value["localHistory"]["savedConfigRequired"], false);
-        assert_eq!(value["localHistory"]["cliPrepare"], false);
+        assert_eq!(value["localHistory"]["cliPrepare"], true);
+        assert_eq!(value["localHistory"]["prepareIsStart"], false);
+        assert!(value["requestDiscovery"]["families"].as_array().unwrap().iter().any(|v|v=="local-history"));
         assert!(HELP.contains("local-history-submit"));
     }
     #[test]
@@ -360,6 +399,7 @@ mod tests {
                 status_revision: 3,
                 platform: None,
                 candidate_operation_id: None,
+                stage_operation_id: None,
             },
             state: store::State::Queued,
             settlement: p::Settlement::Pending,
@@ -383,4 +423,31 @@ mod tests {
         r.response = p::ResponseBody::LocalHistoryAccess(Box::new(store::Access::empty()));
         assert!(output(&r, &q, None, false).is_err());
     }
+    #[test]
+    fn local_history_prepare_cli_has_sixteen_closed_contexts_and_no_start_or_origin_fallback(){
+        let uuid="12345678-1234-4234-8234-123456789abc";let mut count=0;
+        for (kind,suffixes) in [
+            ("enroll",vec!["".to_owned()]),("verify",vec!["".to_owned()]),
+            ("review-inputs",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
+            ("review-prepared",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
+            ("review-execution",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
+            ("review-reconcile",vec![format!(" {uuid}"),format!(" {uuid} --ios")]),
+            ("review-recovery",vec![format!(" {uuid}")]),
+            ("review-stage-prepared",vec![format!(" {uuid} --android"),format!(" {uuid} --ios")]),
+            ("review-stage-execution",vec![format!(" {uuid} --android"),format!(" {uuid} --ios")]),
+            ("review-external-readiness",vec![format!(" {uuid} --ios")])]{
+            for suffix in suffixes{let command=format!("local-history-prepare {} {} {kind}{suffix} --json",id(1).as_str(),id(2).as_str());
+                let parsed=parse(&args(&command)).unwrap();assert!(parsed.json);let Command::Prepare{project,instance,selection}=parsed.command else{panic!("not Prepare")};
+                assert_eq!(project,id(1));assert_eq!(instance,id(2));assert!(selection.valid());count+=1;}
+        }assert_eq!(count,16);
+        for tail in [format!("abandon-inputs {uuid}"),format!("review-recovery {uuid} --ios"),format!("review-inputs {uuid} --android"),format!("review-stage-prepared {uuid}"),"verify --ios".into(),"verify --reviewed".into(),"verify --root /inert".into()]{assert!(parse(&args(&format!("local-history-prepare {} {} {tail}",id(1).as_str(),id(2).as_str()))).is_err());}
+        let q=store::Query{project_id:id(1),service_instance:id(2),request_id:id(5)};
+        let status=prepare::Status{origin:q.clone(),selection:prepare::Selection{kind:store::Kind::Verify,platform:None,candidate_operation_id:None,stage_operation_id:None},revision:1,phase:prepare::Phase::Queued,settlement:p::Settlement::Pending,reason:store::Reason::None,review:None,remaining_ms:0};
+        let mut response=p::Response{version:p::VERSION,service_instance:id(2),request_id:id(6),client_id:id(8),session_id:id(9),response:p::ResponseBody::LocalHistoryPreparation(Box::new(status))};
+        let (code,bytes)=output(&response,&q,None,false).unwrap();assert_eq!(code,0);assert!(String::from_utf8(bytes).unwrap().contains("separate one-use Start"));
+        assert!(output(&response,&q,Some((&id(3),&id(4))),false).is_err());
+        if let p::ResponseBody::LocalHistoryPreparation(s)=&mut response.response{s.origin.request_id=id(7);}
+        assert!(output(&response,&q,None,true).is_err());
+    }
+
 }

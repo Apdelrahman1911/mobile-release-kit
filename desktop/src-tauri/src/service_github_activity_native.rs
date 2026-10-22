@@ -131,6 +131,7 @@ impl ConnectionState {
                 .ok_or_else(BridgeError::protocol)?
                 .min(session.clock.end),
             data,
+            dispatch: None,
             activity: Some(Capture {
                 request,
                 generation,

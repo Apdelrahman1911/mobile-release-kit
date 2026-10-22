@@ -276,7 +276,7 @@ fn first_start_source_cut_refuses_foreign_entry_without_retiring_prepared_or_bor
         }
         let expires = now + INTENT;
         owner.inner.lock().prepared = Some(Prepared {
-            agent_history: None, agent_store_preparation: None, agent_store: None, store_witness: None,
+            agent_history_preparation: None, agent_history: None, agent_store_preparation: None, agent_store: None, store_witness: None,
             agent_build: None, agent_local_check: None, upload_key_preparation: None, upload_key: None,
             apple: None, tools: None, local_history: None,
             projection: RunProjection { agent_build: None, agent_local_check: None,

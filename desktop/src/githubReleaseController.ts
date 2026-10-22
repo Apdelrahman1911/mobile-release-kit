@@ -1,3 +1,7 @@
+import { parseGithubActionStatus, sameGithubActionSelection } from './agentGithubActionAccess.ts';
+import type { GithubActionDelegate, GithubActionSelection, GithubActionStatus } from './agentGithubActionAccess.ts';
+import { parseGithubDispatchSelection, githubDispatchPreparedHash, githubDispatchRecordHash } from './githubDispatchDelegation.ts';
+import type { GithubDispatchKind, GithubDispatchSelection } from './githubDispatchDelegation.ts';
 // Renderer coordination only. Native owns consent, credential custody, clocks,
 // durable intent, the one POST, and original-worker finality. No automatic
 // network polling/retry, replacement owner, or browser fallback lives here.
@@ -14,9 +18,14 @@ interface Context { documentId: string; projectId: string; projectGeneration: nu
 interface Observer { api: Port; active: boolean; unlisten: (() => void) | null; ready: Promise<void> | null;
   reading: Promise<void> | null; accepted: GitHubReleaseStatus | null }
 interface Pending { observer: Observer; context: Context; epoch: object; kind: GitHubReleaseKind;
-  revision: number; previousId: string | null; operationId: string | null; sent: boolean;
+  revision: number; previousId: string | null; operationId: string | null; sent: boolean; returned:boolean; requiresRead:boolean;
   branch: string; platform: GitHubReleasePlatform | null; selection: GitHubReleaseSelection | null; marker: string | null }
 interface Review { observer: Observer; context: Context; epoch: object; prepared: GitHubReleasePrepared }
+interface AgentOrigin {observer:Observer;context:Context;epoch:object;selection:GithubDispatchSelection;review:Review|null;record:GitHubReleaseRecord|null;originalId:string|null;
+ allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;unknown:boolean;released:boolean}
+interface AgentCheck {origin:AgentOrigin;allowed:boolean;unused:boolean;noAllow:boolean;terminal:GithubActionStatus|null;status:GitHubReleaseStatus|null}
+interface RecordRead {observer:Observer;context:Context;epoch:object;status:GitHubReleaseStatus}
+
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); }
@@ -64,6 +73,7 @@ export class GitHubReleaseController {
   private observer: Observer | null = null;
   private pending: Pending | null = null;
   private review: Review | null = null;
+  private agent:AgentOrigin|null=null; private recordRead:RecordRead|null=null; private agentRecord:GitHubReleaseRecord|null=null;
   private current: Context | null = null;
   private epoch: object = {};
   private blocked = false;
@@ -78,10 +88,10 @@ export class GitHubReleaseController {
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<GitHubReleaseView>): void {
     if (this.disposed) return;
-    this.state = freeze({ ...this.state, ...patch }); this.listeners.forEach((fn) => fn());
+    this.state = freeze({ ...this.state, ...patch, delegating:this.agent!==null }); this.listeners.forEach((fn) => fn());
   }
   private invalidate(patch: Partial<GitHubReleaseView> = {}): void {
-    this.epoch = {}; this.review = null;
+    this.epoch = {}; this.review = null; this.recordRead=null; this.agentRecord=null;
     if (this.pending && !this.pending.sent) { this.pending = null; patch.pending = false; }
     this.update({ confirmed: false, confirmation: '', ...patch });
   }
@@ -138,9 +148,9 @@ export class GitHubReleaseController {
       ...(s.recoveryConfirmation === '' ? {} : { recoveryConfirmation: s.recoveryConfirmation }) };
     return (!s.recovery || selected.recoveryRunId !== null) && githubReleaseSelection(selected, s.platform) ? selected : null;
   }
-  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && this.currentPrepared() !== null }); }
+  setConfirmed(value: boolean): void { this.update({ confirmed: value === true && !this.agent && this.currentPrepared() !== null }); }
   private needsOriginal(observer: Observer): boolean {
-    return this.pending?.observer === observer && this.pending.sent || !!observer.accepted?.operation && observer.accepted.operation.phase !== 'settled';
+    return this.agent?.observer===observer || observer.reading!==null || this.pending?.observer === observer && this.pending.sent || !!observer.accepted?.operation && observer.accepted.operation.phase !== 'settled';
   }
   private detach(observer: Observer): void {
     observer.active = false; const stop = observer.unlisten; observer.unlisten = null;
@@ -183,15 +193,16 @@ export class GitHubReleaseController {
         && inContext(r.prepared, p.context) && (op.effect !== 'accepted' || r.runId !== null) && (s.run === null || r.runId === s.run.id))) return false;
     return true;
   }
-  private correlate(o: Observer, s: GitHubReleaseStatus): void {
+  private correlate(o: Observer, s: GitHubReleaseStatus, readAfterReturn:Pending|null=null): void {
     const p = this.pending;
     if (!p || p.observer !== o || !this.origin(p, s)) return;
     p.operationId = s.operation!.id;
     const accepted = o.accepted;
     if (!accepted || !this.origin(p, accepted)) return;
     if (accepted.operation?.phase === 'cleanup-unknown') { this.fail('cleanup-unknown'); return; }
-    if (accepted.operation?.phase !== 'settled') return;
+    if (accepted.operation?.phase !== 'settled' || !p.returned || p.requiresRead && readAfterReturn!==p) return;
     this.pending = null;
+    if(accepted.operation.reason==='none'&&p.kind!=='prepare')this.recordRead={observer:o,context:p.context,epoch:p.epoch,status:accepted};
     if (!this.blocked && p.epoch === this.epoch && sameConnectionData(p.context, context(this.connection()))
         && o.api === this.api && p.kind === 'prepare' && accepted.prepared) {
       this.review = { observer: o, context: p.context, epoch: p.epoch, prepared: accepted.prepared };
@@ -199,19 +210,19 @@ export class GitHubReleaseController {
     this.update({ pending: false, uncertain: this.blocked, error: this.blocked ? this.state.error :
       accepted.operation.reason === 'none' ? null : accepted.operation.reason });
   }
-  private receive(o: Observer, value: unknown): GitHubReleaseStatus | null {
+  private receive(o: Observer, value: unknown, readAfterReturn:Pending|null=null): GitHubReleaseStatus | null {
     if (!o.active) return null;
     const s = parseGitHubReleaseStatus(value);
     if (!s) { this.fail('response-invalid'); return null; }
     const old = o.accepted;
-    if (old && s.revision < old.revision) { if (progress(s, old)) this.correlate(o, s); return s; }
+    if (old && s.revision < old.revision) { if (progress(s, old)) this.correlate(o, s, readAfterReturn); return s; }
     if (old && !progress(old, s)) { this.fail('response-invalid'); return null; }
     o.accepted = s;
     if (s.operation?.phase === 'cleanup-unknown' || s.reason === 'cleanup-unknown') this.fail('cleanup-unknown');
     if (this.review && (!s.prepared || s.sessionId !== this.review.context.sessionId
         || !sameConnectionData(s.prepared, this.review.prepared))) { this.review = null; this.update({ confirmed: false }); }
     this.update({ status: s });
-    this.correlate(o, s);
+    this.correlate(o, s, readAfterReturn);
     if (this.cancellationId === s.operation?.id && s.operation?.phase === 'settled') {
       this.cancellationId = null; this.update({ uncertain: this.blocked || this.pending !== null });
     }
@@ -219,13 +230,15 @@ export class GitHubReleaseController {
   }
   private async read(o: Observer): Promise<void> {
     if (!o.active || o.reading) return o.reading ?? undefined;
+    const d=this.agent?.observer===o?this.agent:null;
+    const check:AgentCheck|null=d?{origin:d,allowed:d.allowed,unused:d.unused,noAllow:d.noAllow,terminal:d.terminal,status:null}:null;
     const work = Promise.resolve().then(async () => {
       if (!o.active) return;
-      try { this.receive(o, await o.api.githubReleaseStatus()); }
+      try { const returnedOriginal=this.pending?.observer===o&&this.pending.returned?this.pending:null; const status=this.receive(o, await o.api.githubReleaseStatus(),returnedOriginal); if(check)check.status=status; }
       catch { if (o.active) this.update({ error: 'response-invalid' }); }
     });
     o.reading = work; this.update({ observing: true });
-    try { await work; } finally { if (o.reading === work) { o.reading = null; this.update({ observing: false }); } }
+    try { await work; } finally { if (o.reading === work) { o.reading = null; if(check)this.settleAgent(check); this.update({ observing: false }); this.maintain(); } }
   }
   checkStatus(): Promise<void> { const o = this.maintain(); return o && !this.disposed ? this.read(o) : Promise.resolve(); }
   currentPrepared(): GitHubReleasePrepared | null {
@@ -238,7 +251,7 @@ export class GitHubReleaseController {
   startReason(): string | null {
     if (this.disposed || this.state.mode !== 'native' || !this.api || this.observer?.api !== this.api) return 'A native connection is required; preview never dispatches workflows.';
     if (this.blocked || this.state.uncertain) return 'Original acknowledgement or cleanup is unconfirmed. Read local Status; do not repeat the request.';
-    if (this.pending || this.state.cancelling || this.state.status?.operation && this.state.status.operation.phase !== 'settled') return 'Wait for the original action to settle. Stopping locally does not cancel a GitHub run.';
+    if (this.agent || this.pending || this.state.cancelling || this.state.status?.operation && this.state.status.operation.phase !== 'settled') return 'Wait for the original action to settle. Stopping locally does not cancel a GitHub run.';
     const c = context(this.connection()), s = this.state.status;
     if (!c || !s || s.sessionId !== c.sessionId) return 'Connect the selected project’s explicit repository and read local Status first.';
     if (!s.available) return GITHUB_RELEASE_REASON_HELP[s.reason];
@@ -266,7 +279,7 @@ export class GitHubReleaseController {
     if (this.disposed || this.startReason()) return;
     const o = this.observer!, c = context(this.connection())!, s = this.state.status!;
     const p: Pending = { observer: o, context: c, epoch: this.epoch, kind, revision: s.revision,
-      previousId: s.operation?.id ?? null, operationId: null, sent: false, branch: this.state.branch, platform: this.state.platform, selection: this.selection(), marker };
+      previousId: s.operation?.id ?? null, operationId: null, sent: false, returned:false, requiresRead:false, branch: this.state.branch, platform: this.state.platform, selection: this.selection(), marker };
     this.pending = p; this.review = null; this.update({ pending: true, confirmed: false, confirmation: '', error: null });
     // Latch before any subscriber, then recheck after synchronous notifications.
     if (this.pending !== p || p.epoch !== this.epoch || o.api !== this.api || !sameConnectionData(c, context(this.connection()))) {
@@ -274,14 +287,15 @@ export class GitHubReleaseController {
     }
     p.sent = true;
     const failed = (error: unknown) => {
+      p.returned=true;
       if (this.pending !== p) return; // Exact native settlement already won.
       const e = githubReleaseError(error);
       if (e.admission === 'not-admitted' && p.operationId === null && !this.blocked) {
         this.pending = null; this.update({ pending: false, error: e.reason }); this.maintain();
-      } else this.update({ uncertain: true, error: e.reason });
+      } else {p.requiresRead=true;this.update({ uncertain: true, error: e.reason });}
     };
     try { void invoke(o.api, c, s.revision).then((reply) => {
-      const accepted = this.receive(o, reply);
+      p.returned=true; const accepted = this.receive(o, reply);
       if (this.pending === p && (!accepted || p.operationId === null)) this.update({ uncertain: true, error: 'response-invalid' });
     }, failed); } catch (error) { failed(error); }
   }
@@ -306,6 +320,80 @@ export class GitHubReleaseController {
     this.begin(kind, marker, (api, c, revision) => (kind === 'track' ? api.trackGitHubRelease : api.reconcileGitHubRelease)
       ({ sessionId: c.sessionId, expectedRevision: revision, marker }));
   }
+
+  selectRecordForAgent(marker:string):boolean {
+    if(this.agent||this.pending||this.observer?.reading||this.blocked||this.state.cancelling)return false;
+    const rr=this.recordRead,c=context(this.connection()),s=this.observer?.accepted;
+    if(!rr||!c||rr.observer!==this.observer||rr.epoch!==this.epoch||!sameConnectionData(rr.context,c)||!s||s.operation?.id!==rr.status.operation?.id||!sameConnectionData(s.pending,rr.status.pending))return false;
+    const rows=s.pending.filter(r=>r.prepared.target.marker===marker&&inContext(r.prepared,c));if(rows.length!==1)return false;
+    this.agentRecord=rows[0]!;this.update({confirmed:false});return this.agentRecord===rows[0];
+  }
+  agentSelection(kind:GithubDispatchKind):GithubDispatchSelection|null {
+    const o=this.observer,s=o?.accepted,c=context(this.connection());
+    if(!kind.startsWith('release-')||this.disposed||this.agent||this.blocked||this.state.uncertain||this.pending||this.state.cancelling||
+       !o?.active||o.api!==this.api||o.reading||!c||!s?.available||s.sessionId!==c.sessionId||s.reason!=='none'||s.operation&&s.operation.phase!=='settled')return null;
+    const base={kind,sessionId:c.sessionId,expectedRevision:s.revision};
+    if(kind==='release-prepare')return this.currentPrepared()?null:parseGithubDispatchSelection({...base,expectedConnectionRevision:this.connection().status!.revision,branch:this.state.branch,platform:this.state.platform,selection:this.selection()});
+    if(kind==='release-pending')return this.currentPrepared()?null:parseGithubDispatchSelection(base);
+    if(kind==='release-dispatch'){const prepared=this.currentPrepared();return prepared&&this.state.confirmed&&this.state.confirmation===prepared.confirmation?parseGithubDispatchSelection({...base,consentId:prepared.target.marker,confirm:true,confirmation:this.state.confirmation}):null;}
+    const rr=this.recordRead,row=this.agentRecord;
+    if(!rr||!row||rr.observer!==o||rr.epoch!==this.epoch||!sameConnectionData(rr.context,c)||s.operation?.id!==rr.status.operation?.id||!sameConnectionData(s.pending,rr.status.pending)||!s.pending.some(r=>sameConnectionData(r,row)))return null;
+    return parseGithubDispatchSelection({...base,marker:row.prepared.target.marker,observe:row.runId===null?'reconcile':'track',runId:row.runId});
+  }
+  agentSelected(s:GithubActionSelection):boolean {return this.agent?sameGithubActionSelection(this.agent.selection,s)&&this.agentCurrent(this.agent):
+    s.kind.startsWith('release-')&&sameGithubActionSelection(this.agentSelection(s.kind as GithubDispatchKind),s);}
+  private agentCurrent(d:AgentOrigin):boolean {
+    if(this.agent!==d||d.unknown||this.disposed||this.blocked||this.pending||this.state.cancelling||d.observer!==this.observer||d.observer.api!==this.api||!d.observer.active||d.observer.reading||
+       d.epoch!==this.epoch||!sameConnectionData(d.context,context(this.connection()))||d.observer.accepted?.revision!==d.selection.expectedRevision)return false;
+    if(d.selection.kind==='release-prepare')return d.selection.branch===this.state.branch&&d.selection.platform===this.state.platform && sameConnectionData(d.selection.selection,this.selection());
+    if(d.selection.kind==='release-dispatch')return this.review===d.review&&!!d.review&&this.currentPrepared()===d.review.prepared;
+    if(d.selection.kind==='release-observe')return this.agentRecord===d.record;
+    return d.selection.kind==='release-pending'&&this.review===null;
+  }
+  delegatePrepared(raw:GithubActionSelection):GithubActionDelegate|null {
+    if(!raw.kind.startsWith('release-'))return null;
+    const selected=this.agentSelection(raw.kind as GithubDispatchKind);
+    if(!selected||!sameGithubActionSelection(selected,raw))return null;
+    const o=this.observer!,d:AgentOrigin={observer:o,context:context(this.connection())!,epoch:this.epoch,selection:selected,review:this.review,record:this.agentRecord,originalId:o.accepted?.operation?.id??null,
+      allowed:false,unused:false,noAllow:false,terminal:null,unknown:false,released:false};
+    this.agent=d;this.update({confirmed:false});
+    const uncertain=()=>{d.unknown=true;this.fail('cleanup-unknown');};
+    return Object.freeze({current:()=>this.agentCurrent(d),released:()=>d.released,
+      allowReturned:()=>{if(this.agent===d&&!d.unknown){d.allowed=true;this.update({});}},
+      observe:(raw:GithubActionStatus)=>{if(this.agent!==d||d.unknown)return;const s=parseGithubActionStatus(raw);
+        if(!s||!sameGithubActionSelection(s.review,d.selection)||s.settlement==='unknown'){uncertain();return;}
+        if(s.settlement==='settled'){d.terminal=s;this.update({});}},
+      unusedReturned:()=>{if(this.agent===d&&!d.unknown){d.unused=true;this.update({});}},
+      notSubmitted:()=>{if(this.agent===d&&!d.unknown){d.noAllow=true;d.unused=true;this.update({});}},uncertain});
+  }
+  private settleAgent(check:AgentCheck):void {
+    const d=check.origin,s=check.status,f=check.terminal;
+    if(this.agent!==d||!s||d.unknown||this.blocked||!(check.allowed||check.noAllow)||this.pending||this.state.cancelling||d.observer.reading||!d.observer.active||
+       d.observer!==this.observer||!sameConnectionData(s,d.observer.accepted)||s.sessionId!==d.selection.sessionId||s.reason==='cleanup-unknown'||s.operation&&s.operation.phase!=='settled')return;
+    let adopt=false;
+    if(f?.settlement==='settled'&&!f.neverAdmitted){
+      const kind=d.selection.kind==='release-observe'?d.selection.observe:d.selection.kind.slice('release-'.length),op=s.operation;
+      if(!op||op.id!==f.operationId||op.kind!==kind||op.effect!==f.effect)return;
+      if(f.state==='complete'){
+        if(op.reason!=='none')return;
+        const result=f.result;
+        if(d.selection.kind==='release-prepare'){const p=s.prepared;if(!p||!result||result.type!=='prepared'||!inContext(p,d.context)||
+          p.target.branch!==d.selection.branch||p.target.platform!==d.selection.platform||result.marker!==p.target.marker||result.preparedSha256!==githubDispatchPreparedHash(p)||result.sourceSha!==p.sourceSha)return;
+          if(!sameConnectionData(p.target.selection,d.selection.selection))return;
+          adopt=true;
+        }else if(d.selection.kind==='release-pending'){if(!result||result.type!=='pending'||!sameConnectionData(result.rows,s.pending.map(r=>({marker:r.prepared.target.marker,runId:r.runId,purpose:'release'}))))return;}
+        else if(d.selection.kind==='release-observe'){if(!result||result.type!=='observed'||!s.run||result.marker!==d.selection.marker||result.runId!==s.run.id||result.attempt!==s.run.attempt||result.status!==s.run.status||result.conclusion!==s.run.conclusion)return;
+          if(!d.record||!('recordSha256'in f.review)||f.review.recordSha256!==githubDispatchRecordHash(d.record))return;}
+        else if(d.selection.kind==='release-dispatch'){if(!d.review||!('preparedSha256'in f.review)||f.review.preparedSha256!==githubDispatchPreparedHash(d.review.prepared)||!s.pending.some(r=>r.prepared.target.marker===d.review!.prepared.target.marker&&r.runId!==null))return;}
+      }
+    }else if(check.unused||f?.neverAdmitted){if((s.operation?.id??null)!==d.originalId||s.revision<d.selection.expectedRevision)return;}
+    else return;
+    d.released=true;this.agent=null;this.review=null;this.agentRecord=null;
+    const current=d.epoch===this.epoch&&d.observer.api===this.api&&sameConnectionData(d.context,context(this.connection()));
+    if(current&&adopt&&s.prepared)this.review={observer:d.observer,context:d.context,epoch:d.epoch,prepared:s.prepared};
+    if(current&&f?.state==='complete'&&!adopt)this.recordRead={observer:d.observer,context:d.context,epoch:d.epoch,status:s};
+    this.update({confirmed:false});
+  }
   canCancel(): boolean {
     return !this.disposed && !this.state.cancelling && !!this.observer?.accepted?.operation
       && this.observer.accepted.operation.phase === 'running';
@@ -323,6 +411,6 @@ export class GitHubReleaseController {
 }
 
 export function githubReleaseOwnerReason(state: GitHubReleaseView): string | null {
-  return state.pending || state.uncertain || state.cancelling || state.status?.operation && state.status.operation.phase !== 'settled'
+  return state.delegating || state.pending || state.uncertain || state.cancelling || state.status?.operation && state.status.operation.phase !== 'settled'
     ? 'The original protected release workflow action is running or unverified. Read its local Status before starting another operation.' : null;
 }

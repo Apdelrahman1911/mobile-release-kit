@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { agent_build: None, agent_loca
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) { active_with_agent(None) }

@@ -120,15 +120,24 @@ installed nor settled. Service registration and copy approval are never invoked
 automatically by this controller. In particular the Java 21 workflow example is
 not an override for the checked macOS supplier's Temurin 17 profile.
 
-## macOS 27 Xcode companion: minimal remaining action
+## macOS 27 Xcode companion: reuse the completed ARM package
 
 The source in this base already has `min="26.0"` without a `before="27"` ceiling,
 and the shared native OS-version correction. **No new XML, native OS gate,
 allowlist or workflow edit is necessary for this lane.** The owner now reports
 the main app working on macOS 27. That is not Xcode-companion, SDK, archive,
-signing or upload verification. The older signed companion remains 26-only.
+signing or upload verification. The older Intel companion remains 26-only.
 
-Root can reuse the existing `.github/workflows/desktop-macos-installed.yml` job:
+The corrected ARM companion has since passed signing/notarization, first/repeat
+installation and both managed-tool admission tests on macOS 26: source
+`bf9d397b`, run `39301915324`, attempt 1. Reuse
+[artifact 12211884317](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39301915324/artifacts/12211884317),
+confirmed available on October 22 and expiring November 2, 2026, 18:31:42 UTC.
+See `desktop-macos-manual-test-guide.md` for installation prerequisites and the
+remaining macOS 27 verification limitation. Do not rebuild merely for reassurance.
+
+If a replacement is actually needed, Root can reuse the existing
+`.github/workflows/desktop-macos-installed.yml` job:
 
 - event: `workflow_dispatch`;
 - exact existing ref: `refs/heads/verify/desktop-macos-xcode-setup`;

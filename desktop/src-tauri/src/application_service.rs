@@ -469,6 +469,7 @@ impl ApplicationService {
                 p::RequestBody::ToolSetupSubmit(input) => return self.tool_setup_submit(client,input.clone()),
                 p::RequestBody::ToolSetupStatus(query) => return self.tool_setup_query(client,query,false),
                 p::RequestBody::ToolSetupCancel(query) => return self.tool_setup_query(client,query,true),
+                p::RequestBody::LocalHistoryPrepare(v)=>return self.service_local_history_prepare(client,v.clone()),
                 p::RequestBody::LocalHistoryScope(q)=>return self.service_local_history_scope(client,&q.project_id),
                 p::RequestBody::LocalHistorySubmit(v)=>return self.service_local_history_submit(client,v.clone()),
                 p::RequestBody::LocalHistoryStatus(q)=>return self.service_local_history_query(client,q,false),
@@ -561,7 +562,7 @@ impl ApplicationService {
                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
                 p::RequestBody::ToolSetupSubmit(_) | p::RequestBody::ToolSetupStatus(_) | p::RequestBody::ToolSetupCancel(_) |
-                p::RequestBody::LocalHistoryScope(_)|p::RequestBody::LocalHistorySubmit(_)|p::RequestBody::LocalHistoryStatus(_)|p::RequestBody::LocalHistoryCancel(_)|
+                p::RequestBody::LocalHistoryPrepare(_)|p::RequestBody::LocalHistoryScope(_)|p::RequestBody::LocalHistorySubmit(_)|p::RequestBody::LocalHistoryStatus(_)|p::RequestBody::LocalHistoryCancel(_)|
                 p::RequestBody::StorePrepare(_) | p::RequestBody::StoreStart(_) |
                 p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
                 p::RequestBody::AppleProvisioningPrepare(_) | p::RequestBody::AppleProvisioningSubmit(_) | p::RequestBody::AppleProvisioningStatus(_) | p::RequestBody::AppleProvisioningCancel(_) |

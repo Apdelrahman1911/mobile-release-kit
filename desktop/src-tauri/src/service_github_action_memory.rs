@@ -4,20 +4,23 @@ use super::*;
 use std::mem::size_of;
 
 const ANCILLARY_LIMIT: usize = 128 * 1024;
-// SAME former128KiB slack, now exclusively names every retained Activity snapshot.
+// SAME former128KiB slack, now exclusively names every mutually exclusive Activity/dispatch snapshot.
 const SNAPSHOTS: usize = p::REQUEST_LIMIT * p::activity::SNAPSHOT_BACKING;
 const ARC_HEADER: usize = 2 * size_of::<usize>();
 // NativeScope::valid/Review::retained_fits check physical capacities, not just
 // string lengths. Submit IDs are rebuilt by Id::parse; the operation is fixed
 // by Kind::operation before entry. No row stores a full Prepared or payload.
-const SCOPE_HEAP: usize = 64 + 128 + 8192 + 128 + 64 + 128;
-const OUTPUT_HEAP: usize = 4 * 64 + 128 + 64 + 128 + 84;
+const SCOPE_HEAP: usize = 64 + 128 + 8192 + 128 + 64 + 128 + 32;
+const OUTPUT_HEAP: usize = 4 * 64 + 128 + 64 + 128 + 84 + 32;
 
 fn sum(values: &[usize]) -> Option<usize> {
     values.iter().try_fold(0usize, |n, v| n.checked_add(*v))
 }
 
 fn row_bytes() -> Option<usize> {
+    if size_of::<dispatch::Snapshot>() + ARC_HEADER + p::dispatch::ROWS*size_of::<p::dispatch::Pending>() > p::dispatch::SNAPSHOT_BACKING
+        || p::dispatch::SNAPSHOT_BACKING != p::activity::SNAPSHOT_BACKING {return None;}
+
     sum(&[
         SCOPE_HEAP,
         4 * 64,             // actual immutable Submit IDs
@@ -37,6 +40,12 @@ fn row_bytes() -> Option<usize> {
     ])
 }
 
+// Full unused scope remains separate from every retained row; the MAIN caller
+// uses this same term inside its original48KiB phase envelope.
+pub(super) fn unused_scope_bytes() -> Option<usize> {
+    sum(&[SCOPE_HEAP, size_of::<NativeScope>(), 4 * ARC_HEADER, 2048])
+}
+
 fn ancillary_bytes() -> Option<usize> {
     sum(&[
         size_of::<Inbox>(),
@@ -44,9 +53,10 @@ fn ancillary_bytes() -> Option<usize> {
         64, // instance ID allocation
         p::REQUEST_LIMIT.checked_mul(size_of::<Arc<Entry>>())?,
         4 * size_of::<Lease>(),
-        // One unused/current scope/lease plus its off-Doc Allow transition.
-        // Old claimed scopes are still fully included in every retained row.
-        2 * p::ROW_BACKING,
+        // One unused/current scope plus its off-Doc Allow transition and MAIN
+        // decode scratch. New native inputs check their actual phase envelope;
+        // all old claimed scopes remain fully included in every retained row.
+        p::MAIN_CALL_BACKING,
         4 * (size_of::<p::Access>() + size_of::<p::Status>() + 2 * OUTPUT_HEAP),
         // The one permission controller retains at most one normal plus one
         // Revoke caller. Typed Tauri uses a String (no Value tree); keep each
@@ -56,7 +66,6 @@ fn ancillary_bytes() -> Option<usize> {
         32 * ARC_HEADER,
         16 * (size_of::<tokio::sync::watch::Sender<u32>>()
             + size_of::<tokio::sync::watch::Receiver<u32>>()),
-        16 * 1024, // fixed control/lock/weak/reader/scalar scratch, not IPC8
     ])
 }
 

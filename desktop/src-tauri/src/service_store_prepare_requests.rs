@@ -645,6 +645,7 @@ pub(super) enum StoredEntry {
     Original(Arc<Entry>),
     Preparation(Arc<PrepareEntry>),
     LocalHistory(Arc<super::history::Entry>),
+    LocalHistoryPreparation(Arc<super::history::preparation::Entry>),
 }
 impl StoredEntry {
     pub fn origin(&self) -> &p::Query {
@@ -652,6 +653,7 @@ impl StoredEntry {
             Self::Original(e) => e.origin(),
             Self::Preparation(e) => e.origin(),
             Self::LocalHistory(e) => e.origin(),
+            Self::LocalHistoryPreparation(e) => e.origin(),
         }
     }
     pub fn pending(&self) -> bool {
@@ -659,6 +661,7 @@ impl StoredEntry {
             Self::Original(e) => e.pending(),
             Self::Preparation(e) => e.pending(),
             Self::LocalHistory(e) => e.pending(),
+            Self::LocalHistoryPreparation(e) => e.pending(),
         }
     }
     pub fn cancel(&self, reason: p::Reason, at: Instant) {
@@ -666,6 +669,7 @@ impl StoredEntry {
             Self::Original(e) => e.cancel(reason, at),
             Self::Preparation(e) => e.cancel(reason, at),
             Self::LocalHistory(e) => e.cancel(reason, at),
+            Self::LocalHistoryPreparation(e) => e.cancel(reason, at),
         }
     }
     pub fn unknown(&self, reason: p::Reason) {
@@ -673,8 +677,10 @@ impl StoredEntry {
             Self::Original(e) => e.unknown(reason),
             Self::Preparation(e) => e.unknown(reason),
             Self::LocalHistory(e) => e.unknown(reason),
+            Self::LocalHistoryPreparation(e) => e.unknown(reason),
         }
     }
+    pub fn history_preparation(&self)->Option<&Arc<super::history::preparation::Entry>> {if let Self::LocalHistoryPreparation(e)=self{Some(e)}else{None}}
     pub fn history(&self)->Option<&Arc<super::history::Entry>>{if let Self::LocalHistory(e)=self{Some(e)}else{None}}
     pub fn original(&self) -> Option<&Arc<Entry>> {
         if let Self::Original(e) = self {

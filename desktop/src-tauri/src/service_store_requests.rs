@@ -165,7 +165,7 @@ struct Book {
     lease: Option<Arc<Lease>>,
     entries: Vec<StoredEntry>,
     preparation: Option<Arc<PreparationLease>>,
-    history: Option<Arc<history::Lease>>,
+    history: Option<history::Allowed>,
     closed: bool,
 }
 pub(crate) struct Inbox {
@@ -773,7 +773,7 @@ impl Inbox {
             l.scope.control.stop(reason, at);
         }
         if let Some(l) = &b.preparation { l.scope.control.stop(reason, at); }
-        if let Some(l)=&b.history{l.scope.control.stop(reason,at);}
+        if let Some(l)=&b.history{l.stop(reason,at);}
         for e in &b.entries {
             if e.pending() {
                 e.cancel(reason, at);
@@ -800,7 +800,7 @@ impl Inbox {
             l.scope.control.unknown(at);
         }
         if let Some(l) = &b.preparation { l.scope.control.unknown(at); }
-        if let Some(l)=&b.history{l.scope.control.unknown(at);}
+        if let Some(l)=&b.history{l.fence(at);}
         for e in &b.entries {
             e.unknown(p::Reason::HistoryUnavailable);
         }
@@ -818,7 +818,7 @@ impl Inbox {
             .iter()
             .filter(|e| &e.origin().project_id == project)
             .map(|e| crate::service_request_catalogue::AdditionalRequest {
-                family: if matches!(e,StoredEntry::LocalHistory(_)){crate::service_request_catalogue::AdditionalFamily::LocalHistory}else{crate::service_request_catalogue::AdditionalFamily::Store},
+                family: if matches!(e,StoredEntry::LocalHistory(_) | StoredEntry::LocalHistoryPreparation(_)){crate::service_request_catalogue::AdditionalFamily::LocalHistory}else{crate::service_request_catalogue::AdditionalFamily::Store},
                 request_id: e.origin().request_id.clone(),
             })
             .collect())

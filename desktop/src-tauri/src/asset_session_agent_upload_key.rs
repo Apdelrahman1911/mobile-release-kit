@@ -455,6 +455,12 @@ impl DocumentBinding {
         window: &str,
         args: Allow,
     ) -> Result<p::Access, BridgeError> {
+        self.allow_agent_upload_key_qualified(window, args, vault::backup_desktop::Qualification::Ordinary)
+    }
+    #[cfg(all(feature = "desktop-shell", target_os = "macos", target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    pub(in crate::asset_session) fn allow_agent_upload_key_qualified(&self, window: &str, args: Allow,
+        qualification: vault::backup_desktop::Qualification) -> Result<p::Access, BridgeError> {
         if window != MAIN || args.consent_version != args.selection.kind().consent() {
             return Err(BridgeError::invalid());
         }
@@ -469,12 +475,13 @@ impl DocumentBinding {
                 .agent_upload_key
                 .allow_available(&args.consent_id)
                 .map_err(public)?;
-            let proof = proof::capture(
+            let proof = proof::capture_qualified(
                 self,
                 &state,
                 &args.selection,
                 args.context_revision,
                 args.expected_status_revision,
+                qualification,
             )
             .map_err(|_| public(Error::Conflict))?;
             let native = self.service_project_locked(&state, &args.project_id)?;

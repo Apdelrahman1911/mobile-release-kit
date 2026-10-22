@@ -246,7 +246,7 @@ impl DocumentBinding {
         &self, command: p::Command, app_data: Option<std::path::PathBuf>,
         agent: Option<Arc<crate::service_github_action_requests::Entry>>,
     ) -> Result<p::Status, BridgeError> {
-        if agent.is_some() && !matches!(command, p::Command::Publish(_) | p::Command::Reconcile(_)) {
+        if agent.as_ref().is_some_and(|e|!e.scope().review.kind().dispatch_family()) && !matches!(command, p::Command::Publish(_) | p::Command::Reconcile(_)) {
             return Err(s::refused(p::Reason::InvalidInput));
         }
         if matches!(command, p::Command::Status) {
@@ -328,9 +328,11 @@ impl DocumentBinding {
                 })
             })?;
         // The explicit native identity check precedes counter state/native
-        // app-data resolution and home/source acquisition. Counter is excluded.
-        if let Some(e) = &agent {
-            state.github.publication_agent_current(&command, e, generation, &root, &edit, Instant::now())?;
+        // app-data resolution and home/source acquisition. Counter keeps its SAME native Facet.
+        if let Some(e)=agent.as_ref().filter(|e|!e.scope().review.kind().dispatch_family()){
+            state.github.publication_agent_current(&command,e,generation,&root,&edit,Instant::now())?;
+        } else {
+            state.github.counter_agent_entry(&command,agent.as_ref(),generation,&root,&binding,&edit,Instant::now())?;
         }
         let counter = match &command {
             p::Command::Prepare(args) if args.purpose == Some(p::counter::Purpose::Counter) => {

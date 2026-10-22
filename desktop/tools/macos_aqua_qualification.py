@@ -1140,7 +1140,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = (*CLI.CASES, *UPSTREAM.CASES, *PUSH.ALL_CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
+ALL_CASES = (*CLI.CASES, *CLI.BACKUP.CASES, *UPSTREAM.CASES, *PUSH.ALL_CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -1740,7 +1740,7 @@ class Binding:
         self.checked()
         flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks, identity_native, tool_setup, tool_service)
         need(all(type(flag) is bool for flag in flags) and sum(flags) + (upload_key is not None) <= 1
-             and (upload_key is None or type(upload_key) is str and upload_key in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE)), "scope-not-supported")
+             and (upload_key is None or type(upload_key) is str and upload_key in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, CLI.BACKUP.SCOPE)), "scope-not-supported")
         if tool_setup or tool_service:
             return TOOLS.fixture_path(self, native_home, service=tool_service, need=need)
         need(native_home is None, "scope-not-supported")
@@ -1776,11 +1776,11 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (CLI.SCOPE, *UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
+    need(scope in (CLI.SCOPE, CLI.BACKUP.SCOPE, *UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
     if scope == UPSTREAM.SCOPE:
         return UPSTREAM.CASES
-    if scope == CLI.SCOPE:
-        return CLI.CASES
+    if scope in (CLI.SCOPE, CLI.BACKUP.SCOPE):
+        return (scope,)
     if scope in PUSH.SCOPES:
         return PUSH.CREATE.CASES if scope == PUSH.CREATE.SCOPE else PUSH.CASES
     if scope == FETCH.SCOPE:
@@ -1810,7 +1810,7 @@ def selected_cases(scope=None):
 
 def argument_scope(argv):
     # Closed scopes only; no executable/path/env/timeout passthrough.
-    need(type(argv) is list and (argv == [] or argv == ["--scope", CLI.SCOPE] or argv == ["--scope", "ios-unsigned-archive"]
+    need(type(argv) is list and (argv == [] or argv == ["--scope", CLI.SCOPE] or argv == ["--scope", CLI.BACKUP.SCOPE] or argv == ["--scope", "ios-unsigned-archive"]
                                or argv == ["--scope", "ios-current-synthetic"]
                                or argv == ["--scope", PROJECT_FIELDS_CASE]
                                or argv == ["--scope", ANDROID_INPUT_CASE]
@@ -1847,6 +1847,8 @@ def case_timeout(case):
         return UPSTREAM.TIMEOUT
     if case in CLI.CASES:
         return CLI.APP_SECONDS
+    if case == CLI.BACKUP.SCOPE:
+        return CLI.BACKUP.APP_SECONDS
     if case in PUSH.ALL_CASES:
         return PUSH.TIMEOUT
     if case in FETCH.CASES:
@@ -1861,7 +1863,7 @@ def case_timeout(case):
         return (105, 1875)[LOCAL_CHECK_CASES.index(case)]
     if case in LOCAL_EDIT_CASES:
         return (135, 105, 195)[LOCAL_EDIT_CASES.index(case)]
-    return UPLOAD.TIMEOUT if case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE else 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
+    return UPLOAD.TIMEOUT if case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE) else 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -2636,7 +2638,7 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in CLI.CASES or case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.ALL_CASES or case == UPSTREAM.CASE:
+    if case in CLI.CASES or case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE) or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.ALL_CASES or case == UPSTREAM.CASE:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case == UPSTREAM.CASE:
@@ -2663,7 +2665,7 @@ def expected_result(binding, case):
             value["projectFields"] = _expected_project_fields()
         if case in VAULT_HELPER_CASES:
             value["vaultHelper"] = _expected_vault_helper(case)
-        if case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE:
+        if case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE):
             value["vaultHelper"] = None  # Never synthesize native generation facts.
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
@@ -2935,6 +2937,9 @@ def parse_result(stdout, stderr, binding, case):
     if case in UPLOAD.CASES:
         need(type(value) is dict and "vaultHelper" in value,"upload-key-report")
         expected["vaultHelper"]=_upload_report(value["vaultHelper"],case)
+    if case == CLI.BACKUP.SCOPE:
+        need(type(value) is dict and "vaultHelper" in value, "upload-key-backup-cli-report")
+        expected["vaultHelper"] = CLI.BACKUP.report(value["vaultHelper"])
     if case == BACKUP.SCOPE:
         need(type(value) is dict and "vaultHelper" in value, "upload-key-backup-report")
         expected["vaultHelper"] = _upload_backup_report(value["vaultHelper"])
@@ -3075,8 +3080,8 @@ def _native_action_context(value, native, panel, *, case=None):
             spec = ("quit-confirm", "quit", (3,), 16) if value["step"] == "Quit" else None
         elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
-        elif value["step"] == "Quit" and case == BACKUP.SCOPE:
-            spec = ("quit-confirm", "quit", (5, 13), 16)
+        elif value["step"] == "Quit" and case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE):
+            spec = ("quit-confirm", "quit", (5, 14) if case == CLI.BACKUP.SCOPE else (5, 13), 16)
         elif value["step"] == "Quit" and case in COLD.CASES:
             spec = ("quit-confirm", "quit", (6,) if case == COLD.REOPEN else (5, 9), 16)
         elif value["step"] == "Quit" and case in UPLOAD.CASES:
@@ -4056,7 +4061,7 @@ def _vault_original_failure_data(value):
 
 
 def _vault_failure_context(value, source, step, reason, case):
-    need(source == "record" and (case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE) and reason == "vault-finality-contract"
+    need(source == "record" and (case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE)) and reason == "vault-finality-contract"
          and type(step) is str and step in FAILURE_STEPS and step.startswith("Vault(")
          and type(value) is dict and set(value) == {"source", "step", "observationOnly", "snapshot"}
          and value["source"] == "first-original-vault-snapshot" and value["step"] == step
@@ -4069,7 +4074,7 @@ def _vault_failure_context(value, source, step, reason, case):
     need(type(snapshot) is dict and set(snapshot) == flags | fields
          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
-         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (13 if case == BACKUP.SCOPE else 6 if case == COLD.REOPEN else 9 if case == COLD.PRODUCE else 11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (14 if case == CLI.BACKUP.SCOPE else 13 if case == BACKUP.SCOPE else 6 if case == COLD.REOPEN else 9 if case == COLD.PRODUCE else 11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
     phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
     reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
                "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",
@@ -4560,7 +4565,7 @@ def fixture_data(case, final, *, ios_output_created=None):
             "app": (0o700, ("build.gradle.kts",)), "inputs": (0o700, ("VERSION", "kind-input", "link-input")),
             "ios": (0o700, ("Example.xcodeproj", "Example.xcworkspace")), "ios/Example.xcodeproj": (0o700, ()),
             "ios/Example.xcworkspace": (0o700, ()), "metadata": (0o700, ()), "release": (0o755, ("mobile-release.json",))}
-    saved = case in UPLOAD.CASES or case in COLD.CASES or case == BACKUP.SCOPE or case == "noop-stale" or final and case == "first-save"
+    saved = case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE) or case == "noop-stale" or final and case == "first-save"
     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
     directories = {".": (0o700, (".gitignore", "app", "keep.txt", "version.properties")),
@@ -4705,9 +4710,9 @@ class Fixtures:
         self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
-                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
-        if scope == CLI.SCOPE:
-            self.path = CLI.fixture_path(binding)
+                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, CLI.BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+        if scope in (CLI.SCOPE, CLI.BACKUP.SCOPE):
+            self.path = CLI.fixture_path(binding, case=scope)
         self.cli = None
         self.fds = set()
         self.close_errors = 0
@@ -4903,7 +4908,7 @@ class Fixtures:
             else:
                 self.originals[case] = self._capture(case, False)
         self._namespace()
-        if self.cases == CLI.CASES:
+        if CLI.selected(self.cases):
             CLI.prepare(self)
         if self.cases == UPSTREAM.CASES:
             UPSTREAM.prepare_parents(self)
@@ -4913,7 +4918,7 @@ class Fixtures:
             FETCH.prepare_parents(self)
         if self.cases == TOOLS.CASES:
             TOOLS.prepare_parents(self, need, signature)
-        if self.cases in (VAULT_HELPER_CASES, COLD.CASES, BACKUP.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
+        if self.cases in (VAULT_HELPER_CASES, COLD.CASES, BACKUP.CASES, CLI.BACKUP.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
             self._prepare_vault_parents()
         if self.cases == (IOS_ACCOUNT_CASE,):
             self._prepare_account()
@@ -5086,10 +5091,10 @@ class Fixtures:
                      else ("home", "tmp", "recovery-initial.json", "recovery-generated.json", "recovery-before.json") if case == RECOVERY_CASE
                      else ("account-baseline.json", "home", "tmp") if case == IOS_ACCOUNT_CASE
                      else ("home", "tmp", "identity-foreign-control") if case == identity_qualification.CASES[2]
-                     else ("home", "tmp", *CLI.PHASES) if case in CLI.CASES
+                     else ("home", "tmp", *CLI.PHASES) if case in (*CLI.CASES, *CLI.BACKUP.CASES)
                      else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
-        if case in CLI.CASES:
+        if CLI.selected((case,)):
             CLI.before_call(self)
         if case in TOOLS.CASES:
             TOOLS.before_call(self, case, need, signature)
@@ -5099,7 +5104,7 @@ class Fixtures:
             self._roster(self.vault_parents[case], (), "vault-application-collision")
         if case in COLD.CASES:
             self.upload_cold.before_call(self, case)
-        if case == BACKUP.SCOPE:
+        if case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE):
             BACKUP.before_call(self)
         for name in ("home", "tmp"):
             with self._temporary(self._open(name, state, directory=True)) as fd:
@@ -5510,7 +5515,7 @@ class Fixtures:
 
     def admit_normal_account_runtime(self, source, work, *, application_source):
         """Same-job installed originals, not a fabricated producer/supplier result."""
-        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES, PUSH.CREATE.CASES, UPSTREAM.CASES, CLI.CASES)
+        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES, BACKUP.CASES, FETCH.CASES, PUSH.CASES, PUSH.CREATE.CASES, UPSTREAM.CASES, CLI.CASES, CLI.BACKUP.CASES)
               or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
              and not self.inflight and self.recovery_runtime is None,
              "normal-account-runtime-order")
@@ -5562,7 +5567,7 @@ class Fixtures:
             self.normal_runtime_policy[self.recovery_runtime_originals[-1][2]] = stat.S_IFREG | (0o555 if relative.endswith("python3") else 0o444)
             need(info[6] == row["size"] and hashed == row["sha256"], "normal-account-installed-runtime-file")
         self.recovery_runtime = (str(installed / "python/bin/python3"), str(installed / "core.zip"))
-        if self.cases == CLI.CASES:
+        if CLI.selected(self.cases):
             CLI.admit_installed(self, stager, parents, inventory)
         self.recovery_runtime_paths()
         for original in self.gate_files:
@@ -5641,7 +5646,7 @@ class Fixtures:
         # TMPDIR still isolate unrelated app state but cannot redirect Keychain.
         account = pwd.getpwuid(self.uid)
         need(account.pw_uid == self.uid and self.uid > 0, "vault-native-user")
-        self.vault_paths = {case: (BACKUP.fixture_path(self.binding, account.pw_dir) if case == BACKUP.SCOPE
+        self.vault_paths = {case: (BACKUP.fixture_path(self.binding, account.pw_dir, case=case) if case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE)
                                  else COLD.fixture_path(self.binding, account.pw_dir, case) if case in COLD.CASES
                                  else UPLOAD.fixture_path(self.binding, account.pw_dir, case) if case in UPLOAD.CASES
                                  else vault_fixture_path(self.binding, account.pw_dir, case)) for case in self.cases}
@@ -5666,13 +5671,13 @@ class Fixtures:
             self.vault_parents[case] = (self.vault_parents[COLD.PRODUCE] if self.cases == COLD.CASES and case == COLD.REOPEN
                                        else self._mkdir(self.vault_namespace, COLD.PROJECT if self.cases == COLD.CASES else case))
             self._roster(self.vault_parents[case], (), "vault-case-collision")
-        if self.cases == BACKUP.CASES:
+        if self.cases in (BACKUP.CASES, CLI.BACKUP.CASES):
             BACKUP.prepare(self)
         # The core, not the fixture owner, creates the application/vault leaves.
         self._vault_namespace_current()
 
     def _vault_namespace_current(self):
-        need((self.cases in (VAULT_HELPER_CASES, COLD.CASES, BACKUP.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES) and self.vault_namespace is not None
+        need((self.cases in (VAULT_HELPER_CASES, COLD.CASES, BACKUP.CASES, CLI.BACKUP.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES) and self.vault_namespace is not None
              and self.vault_support is not None and self.vault_ancestors, "vault-fixture-custody")
         for parent, name, fd, original in self.vault_ancestors:
             need(signature(os.fstat(fd))[:5] == original
@@ -5683,7 +5688,7 @@ class Fixtures:
         self._roster(self.vault_namespace, (COLD.PROJECT,) if self.cases == COLD.CASES else self.cases, "vault-namespace-roster")
         for case in self.cases:
             self._named(self.vault_namespace, COLD.PROJECT if self.cases == COLD.CASES else case, self.vault_parents[case], 0o700)
-            if case == BACKUP.SCOPE:
+            if case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE):
                 BACKUP.namespace_current(self)
             else:
                 self._roster(self.vault_parents[case], ("dev.mobile-release-kit.desktop",)
@@ -5917,7 +5922,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     cases = selected_cases(scope)
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
     not_executed = []
-    if scope in (CLI.SCOPE, identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES):
+    if scope in (CLI.SCOPE, CLI.BACKUP.SCOPE, identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE, BACKUP.SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES):
         # Root's CURRENT normal-package preparation must call the same original
         # admit_normal_account_runtime first. No historical Aqua supplier route.
         fixtures.recovery_runtime_paths()
@@ -5937,10 +5942,10 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         if scope in PUSH.SCOPES:
             PUSH.before_invocation(fixtures, case, run_owned, username)
         fixtures.before_call(case)
-        state_root = fixtures.path if scope in (CLI.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+        state_root = fixtures.path if scope in (CLI.SCOPE, CLI.BACKUP.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, UPSTREAM.SCOPE, FETCH.SCOPE, *PUSH.SCOPES) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
-                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE, BACKUP.SCOPE, CLI.BACKUP.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
         need(isinstance(state_root, Path), "fixture-state-not-prepared")
         state = state_root / "state" / case
         argv = [EXECUTABLE, case]
@@ -5953,7 +5958,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         # exception/interruption or foreign/malformed result leaves finality
         # unknown, with no readback, close or later invocation.
         try:
-            if scope == CLI.SCOPE:
+            if scope in (CLI.SCOPE, CLI.BACKUP.SCOPE):
                 result = CLI.invoke(fixtures, run_owned, argv, app_environment(state, uid, username), state)
             else:
                 result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
@@ -6010,6 +6015,9 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
             readback = identity_qualification.readback(fixtures, case, report["projectIdentity"])
         elif case == RECOVERY_CASE:
             readback = fixtures.readback_recovery(report["projectRecovery"])
+        elif case == CLI.BACKUP.SCOPE:
+            readback = {**BACKUP.readback_cli(fixtures, report["vaultHelper"], UPLOAD, CLI.BACKUP),
+                        "installedCli": CLI.readback(fixtures, report["vaultHelper"])}
         elif case == BACKUP.SCOPE:
             readback = BACKUP.readback(fixtures, report["vaultHelper"], UPLOAD)
             if report["vaultHelper"]["testResult"] == "not-executed":

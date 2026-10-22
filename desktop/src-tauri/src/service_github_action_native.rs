@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Allow {
-    selection: native::Selection,
+    selection: native::dispatch::Selection,
     consent_version: String,
     expected_permission_revision: p::activity::PermissionRevision,
 }
@@ -63,14 +63,19 @@ impl DocumentBinding {
     fn github_action_review(
         &self,
         s: &mut DocumentState,
-        a: &native::Selection,
+        a: &native::dispatch::Selection,
     ) -> Result<(native::Review, NativeProject), BridgeError> {
         self.expire(s, Instant::now());
         self.service_document_gate(s)?;
         let gate = self.github_gate(s);
         let supervisor = &self.inner.bridge.supervisor;
         let now = Instant::now();
+        let legacy=a.legacy();
         let available = match a.kind() {
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_status(supervisor.github_preflight_profile_available(),now,gate).available,
+            p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_status(supervisor.github_release_profile_available(),now,gate).available,
+            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.publication_status(supervisor.github_publication_profile_available(),now,gate).available,
+
             p::Kind::ActivityOverview => s.github.github_activity_status(supervisor.github_activity_profile_available(), now, gate).available,
             p::Kind::RepositoryCreate => {
                 s.github
@@ -108,27 +113,34 @@ impl DocumentBinding {
         if g != generation {
             return Err(public(Error::Conflict));
         }
+        if a.kind().dispatch_family() && (root.path.capacity() > native::dispatch::ROOT_BACKING
+            || !dispatch::main_call_fits()) { return Err(BridgeError::invalid()); }
         let edit = self
             .inner
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
         let review = match a.kind() {
-            p::Kind::ActivityOverview => s.github.github_activity_agent_review(a, generation, &root,
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+            p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_review(a.input().ok_or_else(BridgeError::invalid)?,generation,&root,&github_setup_project_binding(&root)?,&edit,now,None),
+
+            p::Kind::ActivityOverview => s.github.github_activity_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root,
                 &github_setup_project_binding(&root)?, &edit, now),
             p::Kind::RepositoryCreate => s
                 .github
-                .repository_create_agent_review(a, generation, &root, &edit, now),
+                .repository_create_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
             p::Kind::DraftPrCreate | p::Kind::PrCreate => s
                 .github
-                .pull_request_agent_review(a, generation, &root, &edit, now),
+                .pull_request_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
             p::Kind::FailedJobsRetry => s
                 .github
-                .actions_retry_agent_review(a, generation, &root, &edit, now),
-            p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_review(a, generation, &root, &edit, now),
+                .actions_retry_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
+            p::Kind::SetupPublish | p::Kind::SetupReconcile => s.github.publication_agent_review(legacy.as_ref().ok_or_else(BridgeError::invalid)?, generation, &root, &edit, now),
         }?;
         let native = self.service_project_locked(s, &id)?;
-        if native.canonical_root != root.path || native.registration_generation != generation {
+        if (a.kind().dispatch_family() && native.canonical_root.capacity() > native::dispatch::ROOT_BACKING)
+            || native.canonical_root != root.path || native.registration_generation != generation {
             return Err(public(Error::Conflict));
         }
         Ok((review, native))
@@ -169,7 +181,7 @@ impl DocumentBinding {
         window: &str,
         args: Allow,
     ) -> Result<MainAccess, BridgeError> {
-        if window != MAIN || !args.selection.valid() || args.consent_version != args.selection.kind().consent() {
+        if window != MAIN || !args.selection.valid() || !args.selection.retained_fits() || args.consent_version != args.selection.kind().consent() {
             return Err(BridgeError::invalid());
         }
         if self
@@ -214,6 +226,7 @@ impl DocumentBinding {
             || !Arc::ptr_eq(&review.identity, &current.identity)
             || review.data != current.data
             || review.activity != current.activity
+            || review.dispatch != current.dispatch
             || !self
                 .inner
                 .bridge
@@ -223,6 +236,8 @@ impl DocumentBinding {
         {
             return Err(public(Error::Conflict));
         }
+        drop(current);
+        drop(current_native);
         service.native_history_current().map_err(public)?;
         if let Some(old) = self.github_action_service()? {
             if !Arc::ptr_eq(&old, &service) {
@@ -248,11 +263,18 @@ impl DocumentBinding {
             Arc::downgrade(&self.inner.session_identity),
             self.inner.changes.clone(),
         );
-        let access = service
-            .github_action_requests()
-            .allow(scope.clone(), grant_id)
-            .map_err(public)?;
+        // SAME final Doc cut. Consume N BEFORE the first possibly installing
+        // call. Any subsequent refusal/lost reply leaves N permanently spent.
+        self.consume_github_action_permission_locked(&s, epoch, next)?;
+        let access = match service.github_action_requests().allow(scope.clone(), grant_id) {
+            Ok(access)=>access,
+            Err(error)=>{scope.unused_closed(); return Err(public(error));}
+        };
         let installed = match review.data.kind() {
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_allow(review,&scope),
+            p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_allow(review,&scope),
+            p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_allow(review,&scope),
+
             p::Kind::ActivityOverview => s.github.github_activity_agent_allow(review, &scope),
             p::Kind::RepositoryCreate => s.github.repository_create_agent_allow(&review, &scope),
             p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_allow(&review, &scope),
@@ -263,8 +285,17 @@ impl DocumentBinding {
             scope.unused_closed();
             return Err(e);
         }
-        self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release);
         Ok(access_revision(access, next))
+    }
+    // Called with the original final Doc guard, immediately before Inbox.allow.
+    // A later installation/response error never rolls the consumed revision back.
+    fn consume_github_action_permission_locked(&self, _state: &DocumentState,
+        expected: p::activity::PermissionRevision, next: u64) -> Result<(), BridgeError> {
+        if expected.successor(self.inner.agent_github_action_revoke_epoch.load(Ordering::Acquire)) != Some(next) {
+            return Err(public(Error::Conflict));
+        }
+        self.inner.agent_github_action_revoke_epoch.store(next, Ordering::Release);
+        Ok(())
     }
     pub(crate) fn revoke_agent_github_action(
         &self,
@@ -285,6 +316,10 @@ impl DocumentBinding {
         if let Ok(Some(scope)) = &scope {
             scope.revoke(p::Reason::PermissionRevoked, at);
             match scope.review.kind() {
+                p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve => s.github.preflight_agent_revoke(scope),
+                p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve => s.github.release_agent_revoke(scope),
+                p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => s.github.counter_agent_revoke(scope),
+
                 p::Kind::ActivityOverview => s.github.github_activity_agent_revoke(scope),
                 p::Kind::RepositoryCreate => s.github.repository_create_agent_revoke(scope),
                 p::Kind::DraftPrCreate | p::Kind::PrCreate => s.github.pull_request_agent_revoke(scope),
@@ -305,6 +340,7 @@ impl DocumentBinding {
         &self,
         service: &Arc<ApplicationService>,
         entry: &Arc<r::Entry>,
+        app_data:Option<std::path::PathBuf>,
     ) -> Result<(), BridgeError> {
         let scope = entry.scope();
         scope.current(false).map_err(public)?;
@@ -342,6 +378,7 @@ impl DocumentBinding {
         // its own Doc/root/Edit/Connection and optional origin before Consent.take.
         let v = &scope.review;
         match v.kind() {
+            p::Kind::PreflightPrepare | p::Kind::PreflightDispatch | p::Kind::PreflightPending | p::Kind::PreflightObserve | p::Kind::ReleasePrepare | p::Kind::ReleaseDispatch | p::Kind::ReleasePending | p::Kind::ReleaseObserve | p::Kind::CounterPrepare | p::Kind::CounterCreate | p::Kind::PublicationPending | p::Kind::CounterReconcile => self.github_dispatch_agent_start(entry,app_data)?,
             p::Kind::ActivityOverview => {
                 let p::Review::ActivityOverview(r) = v else { return Err(BridgeError::invalid()); };
                 self.github_activity_execute(crate::github_activity_protocol::Command::Read(crate::github_activity_protocol::ReadArgs {
@@ -393,13 +430,13 @@ impl DocumentBinding {
         }
         Ok(())
     }
-    pub(crate) fn github_action_agent_tick(&self) {
+    pub(crate) fn github_action_agent_tick(&self, app_data:Option<std::path::PathBuf>) {
         let Some(service) = self.github_action_service().ok().flatten() else {
             return;
         };
         if let Ok(Some(call)) = service.github_action_requests().claim() {
             let e = call.entry().clone();
-            let result = self.github_action_start(&service, &e).map_err(|error| {
+            let result = self.github_action_start(&service, &e, app_data).map_err(|error| {
                 if error.code == "cleanup_unknown" || error.code == "cli_access_unknown" {
                     p::Reason::CleanupUnknown
                 } else {
@@ -444,3 +481,14 @@ impl DocumentBinding {
         if let Ok(Some(s)) = self.github_action_service() { s.github_action_requests().close(at); }
     }
 }
+
+// Only new Prepare allows the bounded native Release selection. Other MAIN
+// variants and all IPC/CLI commands retain their original1024-byte envelope.
+pub(crate) fn decode_allow(b:&[u8])->Result<Allow,BridgeError>{
+    if b.is_empty()||b.len()>4096{return Err(BridgeError::invalid());}
+    let args:Allow=serde_json::from_slice(b).map_err(|_|BridgeError::invalid())?;
+    if b.len()>args.selection.limit()||!args.selection.valid()||!args.selection.retained_fits(){return Err(BridgeError::invalid());}
+    Ok(args)
+}
+#[path="service_github_dispatch_native.rs"]
+mod dispatch;

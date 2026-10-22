@@ -87,10 +87,10 @@ pub(super) mod observation {
     pub(super) fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ObservationError> {
         let call = entry.call.upgrade().ok_or(ObservationError::OriginalCall)?;
         let owner = call.owner().ok_or(ObservationError::OriginalOwner)?;
-        // Existing installed observer roles remain single-primary only. The
-        // new backup purposes receive no observer/qualification authority.
-        if backup_choice(entry.kind).is_some() || !entry.matches(&call, owner.id, entry.kind)
-            || !Arc::ptr_eq(&owner.gui, &call) { return Err(ObservationError::OriginalBinding); }
+        if !entry.matches(&call,owner.id,entry.kind) || match backup_choice(entry.kind) {
+            Some(choice)=>owner.installed_backup_choice(&call)!=Some(choice),
+            None=>!Arc::ptr_eq(&owner.gui,&call),
+        } {return Err(ObservationError::OriginalBinding);}
         Ok((call, owner))
     }
     fn allowed(call: &GuiCall, owner: &OriginalWork) -> Result<bool, ObservationError> {
@@ -154,22 +154,23 @@ pub(super) mod observation {
             }
         }
     }
-    fn original_admitted(id: u32, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_press: bool) -> Option<bool> {
+    fn original_admitted(id: u32, kind: PanelKind, call: &Arc<GuiCall>, original: &Arc<OriginalWork>, after_press: bool) -> Option<bool> {
         let owner = call.owner()?;
-        if owner.id != id || !Arc::ptr_eq(&owner, original) || !Arc::ptr_eq(&owner.gui, call) { return None; }
+        if owner.id!=id || !Arc::ptr_eq(&owner,original) || !original_call(&owner,call,kind)
+            || backup_choice(kind).is_some_and(|c|owner.installed_backup_choice(call)!=Some(c)) {return None;}
         if after_press { let _facts = call.facts()?; Some(true) }
         else { allowed(call, &owner).ok() }
     }
     pub(crate) struct PreparedOpenInput {
-        pub(crate) id: u32, identity: native::OpenIdentity,
+        pub(crate) id: u32, kind: PanelKind, identity: native::OpenIdentity,
         call: Arc<GuiCall>, owner: Arc<OriginalWork>, release: Arc<OpenRelease>,
     }
     impl PreparedOpenInput {
         pub(crate) fn admitted(&self, after: bool) -> Option<bool> {
-            original_admitted(self.id, &self.call, &self.owner, after)
+            original_admitted(self.id, self.kind, &self.call, &self.owner, after)
         }
         pub(crate) fn token(&self) -> OpenAction {
-            OpenAction { id: self.id, identity: self.identity, call: self.call.clone(), owner: self.owner.clone(), release: self.release.clone() }
+            OpenAction { id: self.id, kind:self.kind, identity: self.identity, call: self.call.clone(), owner: self.owner.clone(), release: self.release.clone() }
         }
         pub(crate) fn no_entry(&self, custody: bool) -> bool { self.release.no_entry(custody) }
         pub(crate) fn progress_handle(&self) -> Arc<OpenRelease> { self.release.clone() }
@@ -177,7 +178,7 @@ pub(super) mod observation {
     /// Owned scalar identity/custody only; the original native panel stays TLS.
     #[derive(Clone)]
     pub(crate) struct OpenAction {
-        pub(crate) id: u32, identity: native::OpenIdentity,
+        pub(crate) id: u32, kind: PanelKind, identity: native::OpenIdentity,
         call: Arc<GuiCall>, owner: Arc<OriginalWork>, release: Arc<OpenRelease>,
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,14 +243,14 @@ pub(super) mod observation {
         pub(crate) fn expired(&self) -> bool { self.release.expired() }
         pub(crate) fn stopped(&self) -> bool { self.owner.stopped() }
         pub(crate) fn admitted(&self, after: bool) -> Option<bool> {
-            original_admitted(self.id, &self.call, &self.owner, after)
+            original_admitted(self.id, self.kind, &self.call, &self.owner, after)
         }
         pub(crate) fn refuse_original_at(&self, at: Instant, reason: Reason) -> Result<(), ObservationError> {
             // Only an actually retired original action/no-entry may request
             // this known failure cleanup. A historical retired bit + Unknown
             // is not retirement. The facts guard returns before failed_at.
             if !matches!(reason, Reason::SourceRefused | Reason::Deadline) || self.state() != "retired"
-                || original_admitted(self.id, &self.call, &self.owner, true) != Some(true)
+                || original_admitted(self.id, self.kind, &self.call, &self.owner, true) != Some(true)
                 || self.state() != "retired" { return Err(ObservationError::OpenCustody); }
             self.call.failed_at(reason, at);
             Ok(()) // STOP requested, not a native callback/release/join receipt.
@@ -308,7 +309,7 @@ pub(super) mod observation {
             if !identity.targets(target) { return Err(ObservationError::OpenCustody); }
             let release = Arc::new(OpenRelease::new());
             entry.open_release = Some(release.clone());
-            Ok(PreparedOpenInput { id, identity, call, owner, release })
+            Ok(PreparedOpenInput { id, kind:entry.kind, identity, call, owner, release })
         })
     }
     pub(crate) fn open_release_data_check() -> bool {
@@ -480,7 +481,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
     observer: Option<&super::installed_observation::Observation>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-    identity_return: &mut Option<(u32, native::IdentityStartReturn)>,
+    identity_return: &mut Option<(u32, PanelKind, native::IdentityStartReturn)>,
 ) -> NativeResult {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Ok(()); };
     if !original_call(&owner, call, choice) { call.not_created(Reason::SourceChanged); return Ok(()); }
@@ -512,7 +513,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
         let entry = book.as_mut().filter(|entry| entry.matches(call, owner.id, choice)).ok_or(Reason::CleanupUnknown)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-        let arm = observer.filter(|q| backup_choice(choice).is_none() && q.open_identity_scope(owner.id, choice));
+        let arm = observer.filter(|q| q.open_identity_scope(owner.id, choice));
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
         if let Some(q) = arm {
@@ -536,7 +537,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
         };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-        if arm.is_some() { *identity_return = panel.take_installed_identity_start_return().map(|data| (owner.id, data)); }
+        if arm.is_some() { *identity_return = panel.take_installed_identity_start_return().map(|data| (owner.id, choice, data)); }
         returned.map_err(|error| if error.kind() == std::io::ErrorKind::PermissionDenied {
             // Native start observed an unavailable/occupied parent before any
             // NSWindow/NSAlert construction. The reserved cell still closes.
@@ -573,7 +574,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
             if entry.open_release.as_ref().is_some_and(|r| !r.release_ready()) { return Ok(()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            if backup_choice(kind).is_none() {
+            if backup_choice(kind).is_none() || call.owner().is_some_and(|o|o.installed_backup_choice(call).is_some()) {
                 let (bound_call, bound_owner) = observation::original(entry).map_err(|_| ())?;
                 if !Arc::ptr_eq(&bound_call, call) || bound_owner.id != id { return Err(()); }
             }
@@ -581,7 +582,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
             let polled = poll_original(panel, kind);
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            if backup_choice(kind).is_none() {
+            if backup_choice(kind).is_none() || entry.open_release.is_some() {
                 // Take the saved post-poll DATA even on Err, before close/release
                 // or state conversion here. No native query/owner replacement.
                 *completion_return = panel.take_installed_completion_return().map(|data| (id, data));
@@ -592,7 +593,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
                     if first {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-                        if !images && backup_choice(kind).is_none() {
+                        if !images && (backup_choice(kind).is_none() || call.owner().is_some_and(|o|o.installed_backup_choice(call).is_some())) {
                             call.record_installed_native_response(id, response_kind(response), match selected.as_ref().ok() {
                                 Some(DialogResult::Single(path)) => Some(path.as_path()), _ => None,
                             })?;
@@ -777,10 +778,10 @@ async fn run_owned_panel(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, call
         );
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-        if let (Some(q), Some((id, data))) = (starting_observer.as_ref(), identity_return) {
+        if let (Some(q), Some((id, actual_kind, data))) = (starting_observer.as_ref(), identity_return) {
             // Original construct has returned and PANEL/GuiFacts guards are
             // gone. Publish only its saved scalar DATA, before the same send.
-            q.identity_start_returned(id, data);
+            q.identity_start_returned(id, actual_kind, data);
         }
         let _ = done.send(result);
     }).is_err() {

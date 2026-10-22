@@ -68,7 +68,7 @@ fn status() -> p::Status {
         effect: p::Effect::None,
         never_admitted: false,
         do_not_replay: true,
-        snapshot: Some(snapshot()),
+        snapshot: Some(snapshot()), result:None,
     }
 }
 

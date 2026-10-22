@@ -76,10 +76,15 @@ pub(in crate::asset_session) struct Selectors {
     purpose: Purpose,
     second: Arc<GuiCall>,
     progress: Mutex<Progress>,
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(super) observation: OnceLock<Arc<super::backup_picker_observation::Admission>>,
 }
 impl Selectors {
     fn new(owner: Weak<OriginalWork>, document: Weak<Inner>, purpose: Purpose) -> Self {
-        Self { purpose, progress: Mutex::new(Progress { phase: Phase::First,
+        Self {
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            observation: OnceLock::new(),
+            purpose, progress: Mutex::new(Progress { phase: Phase::First,
             paths: [None, None], io_started_at: None }),
             second: Arc::new(GuiCall { owner, document,
                 facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
@@ -130,6 +135,8 @@ impl Selectors {
         let mut bytes = std::mem::size_of::<GuiCall>().checked_add(2 * std::mem::size_of::<usize>())?
             .checked_add(facts.selected.as_ref().map_or(0, PathBuf::capacity))?;
         for path in progress.paths.iter().flatten() { bytes = bytes.checked_add(path.capacity())?; }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if let Some(a)=self.observation.get() { bytes=bytes.checked_add(a.retained_bytes())?; }
         Some(bytes)
     }
     pub(in crate::asset_session) fn settled_census_bytes(&self) -> Option<usize> {
@@ -141,6 +148,21 @@ impl Selectors {
                 && (facts.not_created && !facts.created || facts.created && facts.destroyed && !facts.not_created)
                 && facts.refusal != Some(Reason::CleanupUnknown)) { return None; }
         self.retained_bytes()
+    }
+    // Read-only predicate over retained originals, before abort/drain. Neither
+    // a status row nor an empty post-retirement source can supply these facts.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn returned_before_io(&self, owner: &OriginalWork) -> bool {
+        owner.endpoint().is_none()
+            && self.progress.try_lock().is_ok_and(|p|p.phase==Phase::Second && p.io_started_at.is_none()
+                && p.paths[0].is_some() && p.paths[1].is_none())
+            && owner.gui.facts.try_lock().is_ok_and(|f|selected_original(&f,true))
+            && self.second.facts.try_lock().is_ok_and(|f|f.dispatched && f.created && !f.constructing
+                && !f.showing && f.destroyed && f.close_ack && f.released && !f.not_created
+                && !f.accepted && f.accepted_at.is_none() && f.selected.is_none()
+                && f.refusal!=Some(Reason::CleanupUnknown))
+            && owner.child.try_lock().is_ok_and(|b|b.handle.is_none() && b.receipt==JoinReceipt::New)
+            && owner.source.try_lock().is_ok_and(|b|b.not_started())
     }
     fn remember_selected(&self, owner: &OriginalWork, choice: Choice) -> Result<(), Reason> {
         let mut progress = self.progress.try_lock().map_err(|_| Reason::CleanupUnknown)?;
@@ -259,6 +281,11 @@ impl OriginalWork {
         let selectors = self.backup_selection.get().ok_or(Reason::InvalidRequest)?;
         selectors.remember_selected(self, choice)?;
         document.bump(&mut state);
+        drop(state);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if let Some(a)=selectors.observation.get() {
+            a.picker_returned(&owner,selectors.call(self,choice.index()),choice)?;
+        }
         Ok(())
     }
 }
@@ -336,6 +363,8 @@ fn refuse_before_io(owner: &OriginalWork, reason: Reason) -> Reason {
     // No document/Work lock here. The real first failure precedes all remaining
     // independent no-GO/close observations and never receives a renewed grace.
     owner.credential_backup_failed(reason);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    owner.installed_backup_before_abort(reason);
     let primary = match owner.gui.facts() {
         Some(facts) if !facts.dispatched && !facts.created && !facts.constructing => {
             drop(facts); owner.gui.not_created(reason); true
@@ -372,6 +401,8 @@ pub(super) async fn run_selected(document: &DocumentBinding, owner: &Arc<Origina
                 let result = (|| match purpose {
                     Purpose::Import => {
                         let sources = pair.into_import(owner)?;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                        let sources = super::backup_picker_observation::compare_import(owner, sources)?;
                         backup_native::prepare_import(document, &mut state, &slot, sources).map_err(|error| error.reason)
                     },
                     Purpose::Export => {
@@ -406,7 +437,14 @@ impl DocumentBinding {
     pub(in crate::asset_session) fn choose_credential_backup_export_delegated(&self, app: tauri::AppHandle,
         context_revision: u32, reference: commands::RecordRef<'_>,
         agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus, AssetError> {
-        super::backup_desktop::qualification(self)?;
+        self.choose_credential_backup_export_qualified(app, context_revision, reference, agent,
+            super::backup_desktop::Qualification::Ordinary)
+    }
+    pub(in crate::asset_session) fn choose_credential_backup_export_qualified(&self, app: tauri::AppHandle,
+        context_revision: u32, reference: commands::RecordRef<'_>,
+        agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>,
+        qualification: super::backup_desktop::Qualification) -> Result<AssetStatus, AssetError> {
+        qualification.check(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
         if let Some(link) = &agent {
@@ -426,6 +464,7 @@ impl DocumentBinding {
         let mut slot = self.backup_picker_slot(&mut state, context, Purpose::Export, Some(key))?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference);
         if let Some(link) = &agent { super::super::agent_upload_key::attach(&state, &slot.owner, link)?; }
+        qualification.attach(self, &state, &slot, agent.as_ref())?;
         let start = self.install(&mut state, slot, super::super::Job::Vault(Job::BackupPick { app, purpose: Purpose::Export }))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
@@ -436,7 +475,13 @@ impl DocumentBinding {
     pub(in crate::asset_session) fn choose_credential_backup_import_delegated(&self, app: tauri::AppHandle,
         context_revision: u32, agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>)
         -> Result<AssetStatus, AssetError> {
-        super::backup_desktop::qualification(self)?;
+        self.choose_credential_backup_import_qualified(app, context_revision, agent,
+            super::backup_desktop::Qualification::Ordinary)
+    }
+    pub(in crate::asset_session) fn choose_credential_backup_import_qualified(&self, app: tauri::AppHandle,
+        context_revision: u32, agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>,
+        qualification: super::backup_desktop::Qualification) -> Result<AssetStatus, AssetError> {
+        qualification.check(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
         if let Some(link) = &agent {
@@ -449,6 +494,7 @@ impl DocumentBinding {
         }
         let slot = self.backup_picker_slot(&mut state, context, Purpose::Import, None)?;
         if let Some(link) = &agent { super::super::agent_upload_key::attach(&state, &slot.owner, link)?; }
+        qualification.attach(self, &state, &slot, agent.as_ref())?;
         let start = self.install(&mut state, slot, super::super::Job::Vault(Job::BackupPick { app, purpose: Purpose::Import }))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
@@ -593,5 +639,82 @@ mod tests {
         assert!(selectors.extra_settled()); // Native quiescence remains distinct.
         assert!(selectors.settled_census_bytes().is_none());
         assert_eq!(selectors.retained_bytes(), Some(base + bytes + code_path));
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn returned_second_stop_retains_both_originals_and_never_invents_child_return() {
+        let owner = owner();
+        let s = owner.backup_selection.get().unwrap();
+        owner.set_endpoint(None); // DATA, not actual presented().
+        selected_data(&owner.gui, "/private/inert-only.mrkbackup");
+        s.remember_selected(&owner, Choice::EncryptedBackup).unwrap();
+        assert!(!s.returned_before_io(&owner));
+        {
+            // Only retained predicate DATA, NOT a native close/response proof.
+            let mut f = s.second.facts().unwrap();
+            f.dispatched = true; f.created = true; f.destroyed = true;
+            f.close_queued = true; f.close_ack = true;
+            f.release_queued = true; f.released = true;
+        }
+        assert!(s.returned_before_io(&owner));
+        assert!(owner.child.try_lock().unwrap().receipt == JoinReceipt::New);
+        for missing in 0..4 {
+            {
+                let mut f=s.second.facts().unwrap();
+                match missing {0=>f.close_ack=false,1=>f.released=false,2=>f.showing=true,_=>f.refusal=Some(Reason::CleanupUnknown)}
+            }
+            assert!(!s.returned_before_io(&owner));
+            {
+                let mut f=s.second.facts().unwrap();
+                f.close_ack=true; f.released=true; f.showing=false; f.refusal=None;
+            }
+        }
+        owner.child.try_lock().unwrap().receipt=JoinReceipt::Returned; // DATA for wrong entered child.
+        assert!(!s.returned_before_io(&owner));
+        owner.child.try_lock().unwrap().receipt=JoinReceipt::New;
+        owner.set_endpoint(Some(Instant::now()+WORK));
+        assert!(!s.returned_before_io(&owner));
+        owner.set_endpoint(None);
+        assert!(s.returned_before_io(&owner));
+        s.abort_after_return(&owner).unwrap();
+        assert!(!s.returned_before_io(&owner)); // Empty/Aborted later state cannot mint this fact.
+        assert!(s.observation.get().is_none()); // No sealed Control, so never qualification.
+        assert!(owner.coordinator.lock().unwrap().receipt==JoinReceipt::New);
+    }
+
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl OriginalWork {
+    pub(crate) fn installed_backup_choice(&self, call:&GuiCall)->Option<Choice> {
+        let s=self.backup_selection.get()?;let a=s.observation.get()?;
+        if !a.bound(self) {return None;}
+        s.purpose.choices().into_iter().find(|c|s.matches(self,call,*c))
+    }
+    pub(crate) fn installed_backup_export_scope(&self)->bool {
+        self.backup_selection.get().is_some_and(|s|s.observation.get().is_some_and(|a|
+            a.phase()==crate::shell::installed_observation::vault::upload_key::cli::Phase::Export && a.action(self)) && s.io_scope(self,Purpose::Export))
+    }
+    pub(crate) fn installed_backup_import_scope(&self)->bool {
+        self.backup_selection.get().is_some_and(|s|s.observation.get().is_some_and(|a|
+            a.phase()==crate::shell::installed_observation::vault::upload_key::cli::Phase::Restore && a.action(self)) && s.io_scope(self,Purpose::Import))
+    }
+    pub(crate) fn installed_backup_second_entered(&self)->bool {
+        self.backup_selection.get().is_some_and(|s|s.observation.get().is_some_and(|a|
+            a.phase()==crate::shell::installed_observation::vault::upload_key::cli::Phase::CancelRestore && a.action(self))
+            && s.progress.try_lock().is_ok_and(|p|p.phase==Phase::Second && p.io_started_at.is_none()
+                && p.paths[0].is_some() && p.paths[1].is_none())
+            && self.gui.facts.try_lock().is_ok_and(|f|selected_original(&f,true))
+            && s.second.facts.try_lock().is_ok_and(|f|f.dispatched && f.created && f.showing && !f.constructing
+                && !f.response && !f.close_queued && !f.released && f.refusal.is_none()))
+    }
+    fn installed_backup_before_abort(&self, reason:Reason) {
+        let Some(s)=self.backup_selection.get() else {return;};
+        let Some(a)=s.observation.get() else {return;};
+        if reason!=Reason::UserCancelled
+            || !self.agent_upload_key.get().is_some_and(|l|l.entry().first_stop().is_ok_and(|r|
+                r.is_some_and(|(why,_)|why==crate::service_upload_key_protocol::Reason::PermissionRevoked)))
+            || !s.returned_before_io(self) {return;}
+        let _=a.no_io_returned(self); // comparison only, before original teardown
     }
 }

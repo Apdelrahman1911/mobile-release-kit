@@ -62,7 +62,7 @@ fn returned_status_and_lost_reply_keep_exact_original_ids_and_no_replay() {
         reason: github::Reason::None,
         effect: github::Effect::AcceptedUnconfirmed,
         never_admitted: false,
-        do_not_replay: true, snapshot: None,
+        do_not_replay: true, snapshot: None, result:None,
     };
     let mut response = p::Response {
         version: 1,
@@ -127,7 +127,7 @@ fn publication_cli_output_preserves_read_effect_original_ids_and_counter_exclusi
                 origin:q.clone(),grant_id:id("d"),review,revision:4,state:github::State::Complete,settlement:p::Settlement::Settled,
                 operation_id:Some("github-publication-7".into()),reason:github::Reason::None,
                 effect:if kind==github::Kind::SetupReconcile {github::Effect::None}else{github::Effect::DraftPrObserved},
-                never_admitted:false,do_not_replay:true, snapshot:None,
+                never_admitted:false,do_not_replay:true, snapshot:None, result:None,
             }),
         };
         let (code,bytes)=output(&response,&q,Some(&id("d")),false).unwrap();assert_eq!(code,0);
@@ -156,7 +156,7 @@ fn activity_cli_output_is_historical_compact_data_not_a_new_read_permission() {
             state: github::State::Complete, settlement: p::Settlement::Settled,
             operation_id: Some("github-activity-7".into()), reason: github::Reason::None,
             effect: github::Effect::None, never_admitted: false, do_not_replay: true,
-            snapshot: Some(Snapshot {
+            result:None, snapshot: Some(Snapshot {
                 account_id: 11, repository_id: 22, observed_at: "2026-10-21T12:00:00Z".into(),
                 pull_requests: Section { state: SectionState::Unavailable, reason: SectionReason::Forbidden,
                     coverage: Coverage::Unknown, total: None, rows: vec![] },

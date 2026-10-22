@@ -50,5 +50,5 @@ export interface GitHubPreflightError { code: string; reason: GitHubPreflightRea
 export interface GitHubPreflightView {
   mode: 'native' | 'preview' | 'unavailable'; status: GitHubPreflightStatus | null;
   branch: string; platform: GitHubPreflightPlatform | null; confirmed: boolean;
-  pending: boolean; observing: boolean; cancelling: boolean; uncertain: boolean; error: GitHubPreflightReason | null;
+  delegating?: boolean; pending: boolean; observing: boolean; cancelling: boolean; uncertain: boolean; error: GitHubPreflightReason | null;
 }

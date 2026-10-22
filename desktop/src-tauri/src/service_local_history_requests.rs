@@ -14,7 +14,19 @@ use std::{
     },
     time::Instant,
 };
+#[path = "service_local_history_prepare_requests.rs"]
+pub(crate) mod preparation;
+pub(super) enum Allowed {
+    Start(Arc<Lease>),
+    Preparation(Arc<preparation::Entry>),
+}
+impl Allowed {
+    pub(super) fn occupied(&self) -> bool {match self {Self::Start(l)=>l.occupied(),Self::Preparation(e)=>e.pending()}}
+    pub(super) fn stop(&self, reason:p::Reason, at:Instant) {match self {Self::Start(l)=>l.scope.control.stop(reason,at),Self::Preparation(e)=>e.cancel(reason,at)}}
+    pub(super) fn fence(&self, at:Instant) {match self {Self::Start(l)=>l.scope.control.unknown(at),Self::Preparation(e)=>e.unknown(p::Reason::HistoryUnavailable)}}
+}
 pub(crate) struct Scope {
+    pub(crate) preparation: Option<Weak<preparation::Entry>>,
     pub(crate) project_id: Id,
     pub(crate) runtime_id: String,
     pub(crate) review_id: Id,
@@ -468,59 +480,33 @@ impl Drop for History {
 }
 
 impl Inbox {
-    pub(crate) fn can_allow_history(&self) -> Result<(), Error> {
-        let b = self.lock()?;
-        if b.closed {
-            return Err(Error::Unavailable);
-        }
-        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) {
-            return Err(Error::Busy);
-        }
-        if b.lease.as_ref().is_some_and(|l| {
-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
-        }) {
-            return Err(Error::Busy);
-        }
-        if b.entries.len() >= super::p::REQUEST_LIMIT
-            || b.entries.iter().any(|e| e.pending())
-            || b.history.as_ref().is_some_and(|l| {
-                !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
-            })
-        {
-            return Err(Error::Busy);
-        }
+    pub(crate) fn can_allow_history(&self) -> Result<(),Error> {self.can_allow_history_from(None)}
+    pub(crate) fn can_allow_history_from(&self, preparation:Option<&Arc<preparation::Entry>>) -> Result<(), Error> {
+        let b=self.lock()?;
+        if b.closed{return Err(Error::Unavailable);}
+        let except=preparation.filter(|e|preparation::excludes(&b,e,false));
+        if preparation.is_some() && except.is_none(){return Err(Error::AccessDenied);}
+        if b.preparation.as_ref().is_some_and(|l|l.scope.occupied())
+            || b.lease.as_ref().is_some_and(|l|!l.scope.retired.load(Ordering::Acquire)||l.scope.control.first().is_err())
+            || b.entries.len()>=super::p::REQUEST_LIMIT
+            || b.entries.iter().any(|e|e.pending() && !except.is_some_and(|old|e.history_preparation().is_some_and(|e|Arc::ptr_eq(e,old))))
+            || b.history.as_ref().is_some_and(|l|l.occupied())&&except.is_none(){return Err(Error::Busy);}
         Ok(())
     }
-    pub(crate) fn allow_history(&self, scope: Arc<Scope>, id: Id) -> Result<p::Access, Error> {
-        let now = Instant::now();
-        if !scope.valid(now) {
-            return Err(Error::Conflict);
-        }
-        let mut b = self.lock()?;
-        if b.closed {
-            return Err(Error::Unavailable);
-        }
-        if b.preparation.as_ref().is_some_and(|l| l.scope.occupied()) {
-            return Err(Error::Busy);
-        }
-        if b.lease.as_ref().is_some_and(|l| {
-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
-        }) {
-            return Err(Error::Busy);
-        }
-        if b.entries.len() >= super::p::REQUEST_LIMIT || b.entries.iter().any(|e| e.pending()) {
-            return Err(Error::Busy);
-        }
-        if b.history.as_ref().is_some_and(|l| {
-            !l.scope.retired.load(Ordering::Acquire) || l.scope.control.first().is_err()
-        }) {
-            return Err(Error::Busy);
-        }
-        b.history = Some(Arc::new(Lease {
-            id,
-            scope,
-            entry: Mutex::new(None),
-        }));
+    pub(crate) fn allow_history(&self,scope:Arc<Scope>,id:Id)->Result<p::Access,Error>{
+        if !scope.valid(Instant::now()){return Err(Error::Conflict);}
+        let original=scope.preparation.as_ref().map(|e|e.upgrade().ok_or(Error::Conflict)).transpose()?;
+        let mut b=self.lock()?;
+        if b.closed{return Err(Error::Unavailable);}
+        let except=original.as_ref().filter(|e|preparation::excludes(&b,e,true));
+        if original.is_some()&&except.is_none(){return Err(Error::AccessDenied);}
+        if b.preparation.as_ref().is_some_and(|l|l.scope.occupied())
+            ||b.lease.as_ref().is_some_and(|l|!l.scope.retired.load(Ordering::Acquire)||l.scope.control.first().is_err())
+            ||b.entries.len()>=super::p::REQUEST_LIMIT
+            ||b.entries.iter().any(|e|e.pending()&&!except.is_some_and(|old|e.history_preparation().is_some_and(|e|Arc::ptr_eq(e,old))))
+            ||b.history.as_ref().is_some_and(Allowed::occupied)&&except.is_none(){return Err(Error::Busy);}
+        if let Some(e)=except {e.finish_handoff()?;}
+        b.history=Some(Allowed::Start(Arc::new(Lease{id,scope,entry:Mutex::new(None)})));
         self.history_access_locked(&b)
     }
     pub(crate) fn submit_history(
@@ -545,7 +531,7 @@ impl Inbox {
                 _ => Err(Error::Conflict),
             };
         }
-        let lease = b.history.as_ref().ok_or(Error::AccessDenied)?.clone();
+        let lease = match &b.history {Some(Allowed::Start(l))=>l.clone(),_=>return Err(Error::AccessDenied)};
         if lease.id != input.grant_id
             || lease.scope.review_id != input.review_id
             || lease.scope.project_id != input.origin.project_id
@@ -639,7 +625,7 @@ impl Inbox {
         self.history_access_locked(&b)
     }
     fn history_access_locked(&self, b: &Book) -> Result<p::Access, Error> {
-        let Some(l) = &b.history else {
+        let Some(Allowed::Start(l)) = &b.history else {
             return Ok(p::Access::empty());
         };
         let entry = l
@@ -731,11 +717,13 @@ fn quoted_backing(entry: usize, scope: usize, control: usize, native: usize) -> 
     // History's extra term includes two weak native grants (64KiB), three
     // public-return trees (<=384 typed nodes,256 bytes/node plus all24KiB text
     // and one8KiB report), and all three32-node RAW decode/validation copies.
-    let history = 64 * 1024 + 3 * (384 * 256 + p::STATUS_LIMIT + 8192) + 3 * p::RAW_NODES * 512;
+    let history = 64 * 1024 + 3 * (384 * 256 + p::STATUS_LIMIT + 8192)
+        + 3 * p::RAW_NODES * 512 + 3 * crate::service_local_history_prepare_protocol::COMPARISON_BYTES;
     (history <= HISTORY_EXTRA && total <= super::p::DOCUMENT_BACKING)
         .then_some(super::p::DOCUMENT_BACKING)
 }
 pub(crate) fn retained_document_backing() -> Option<usize> {
+    preparation::cell_backing()?;
     quoted_backing(
         std::mem::size_of::<Entry>(),
         std::mem::size_of::<Scope>(),

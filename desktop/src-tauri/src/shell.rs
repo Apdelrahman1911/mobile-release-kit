@@ -2102,7 +2102,7 @@ async fn allow_agent_github_action(webview:Webview,request:tauri::ipc::Request<'
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window=edit_window(&webview)?;
     #[cfg(any(target_os="linux",target_os="macos"))] {
-        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        let args:crate::asset_session::agent_github_action::Allow=crate::asset_session::agent_github_action::decode_allow(project_identity_request_bytes(&request)?)?;
         state.document.allow_agent_github_action(window,args)
     }
     #[cfg(not(any(target_os="linux",target_os="macos")))] {let _=(window,request,state);Err(BridgeError::unavailable("GitHub delegation is unavailable on this platform."))}
@@ -2217,8 +2217,8 @@ async fn agent_local_history_access(webview: Webview, request: tauri::ipc::Reque
     let window = edit_window(&webview)?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
-        serde_json::to_value(state.document.agent_local_history_access(window)?).map_err(|_| BridgeError::protocol())
+        let args: crate::asset_session::agent_local_history::AccessQuery = crate::asset_session::agent_local_history::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_local_history_access(window,args.exact())?).map_err(|_| BridgeError::protocol())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     { let _ = (window, request, state); Err(BridgeError::unavailable("Local history delegation is not supported on this platform.")) }
@@ -4089,7 +4089,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             #[cfg(any(target_os="linux",target_os="macos"))]
             document.play_cleanup_agent_tick();
             #[cfg(any(target_os="linux",target_os="macos"))]
-            document.github_action_agent_tick();
+            document.github_action_agent_tick(app.path().app_local_data_dir().ok());
             #[cfg(any(target_os="linux",target_os="macos"))]
             upload_key.tick(&document, &app).await;
             #[cfg(any(target_os="linux",target_os="macos"))]

@@ -27,6 +27,9 @@ pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 mod backup_native;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(in crate::asset_session) use backup_native::installed as installed_backup_observation;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[path = "credential_backup_picker_observation.rs"]
+pub(in crate::asset_session) mod backup_picker_observation;
 #[path = "credential_backup_selection.rs"]
 mod backup_selection;
 #[path = "credential_backup_desktop.rs"]

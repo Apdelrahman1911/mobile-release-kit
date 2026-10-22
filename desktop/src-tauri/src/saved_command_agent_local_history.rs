@@ -6,10 +6,11 @@ use crate::{
     service_store_requests::history as requests,
 };
 use std::sync::{OnceLock, Weak};
+use serde::Deserialize;
 fn refused() -> BridgeError {
     crate::local_release_history_owner::unavailable()
 }
-fn review(
+pub(super) fn review(
     c: &Context,
     id: &str,
     generation: &str,
@@ -22,22 +23,30 @@ fn review(
         history_wire::Action::Enroll => p::Kind::Enroll,
         history_wire::Action::Verify => p::Kind::Verify,
         history_wire::Action::ReviewInputs => p::Kind::ReviewInputs,
-        _ => return Err(refused()),
+        history_wire::Action::ReviewPrepared => p::Kind::ReviewPrepared,
+        history_wire::Action::ReviewExecution => p::Kind::ReviewExecution,
+        history_wire::Action::ReviewReconcile => p::Kind::ReviewReconcile,
+        history_wire::Action::ReviewRecovery => p::Kind::ReviewRecovery,
+        history_wire::Action::ReviewStagePrepared => p::Kind::ReviewStagePrepared,
+        history_wire::Action::ReviewStageExecution => p::Kind::ReviewStageExecution,
+        history_wire::Action::ReviewExternalReadiness => p::Kind::ReviewExternalReadiness,
+        history_wire::Action::AbandonInputs => return Err(refused()),
     };
     let platform = match c.platform {
         None => None,
         Some(history_wire::CandidatePlatform::Ios) => Some(p::Platform::Ios),
-        _ => return Err(refused()),
+        Some(history_wire::CandidatePlatform::Android) => Some(p::Platform::Android),
     };
     let r = p::Review {
         kind,
         platform,
         candidate_operation_id: c.candidate_operation_id.clone(),
+        stage_operation_id: c.stage_operation_id.clone(),
         operation_id: s::Id::parse(id).map_err(|_| refused())?,
         owner_generation: s::Id::parse(generation).map_err(|_| refused())?,
         status_revision: revision,
     };
-    if c.stage_operation_id.is_some() || !r.valid() {
+    if !r.valid() {
         return Err(refused());
     }
     Ok(r)
@@ -52,8 +61,10 @@ pub(crate) struct Approval {
     root: RegisteredRoot,
     expires: Instant,
     review: p::Review,
+    preparation: Option<Weak<requests::preparation::Entry>>,
 }
 impl Approval {
+    pub(crate) fn preparation(&self)->Option<Arc<requests::preparation::Entry>> {self.preparation.as_ref().and_then(Weak::upgrade)}
     pub(crate) fn review(&self) -> &p::Review {
         &self.review
     }
@@ -192,7 +203,7 @@ impl Binding {
         }
     }
 }
-fn native_reason(r: p::Reason) -> Reason {
+pub(super) fn native_reason(r: p::Reason) -> Reason {
     match r {
         p::Reason::Expired => Reason::IntentExpired,
         p::Reason::ContextChanged => Reason::ContextChanged,
@@ -202,7 +213,7 @@ fn native_reason(r: p::Reason) -> Reason {
         _ => Reason::Cancelled,
     }
 }
-fn reason(r: Reason, control: &requests::Control) -> p::Reason {
+pub(super) fn reason(r: Reason, control: &requests::Control) -> p::Reason {
     match r {
         Reason::None => p::Reason::None,
         Reason::Cancelled => control
@@ -236,6 +247,10 @@ struct ReturnedResult {
     limitations: [p::Limitation; 3],
     #[serde(default)]
     candidate_inputs: Option<ReturnedInputs>,
+    #[serde(default)] prepared_intent: Option<serde_json::Value>,
+    #[serde(default)] execution_receipt: Option<serde_json::Value>,
+    #[serde(default)] reconciliation_receipt: Option<serde_json::Value>,
+    #[serde(default)] readiness_receipt: Option<serde_json::Value>,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -255,6 +270,40 @@ struct ReturnedInputs {
     observation: String,
     prior_create_finality: String,
 }
+fn reviewed_files(native:&ReturnedResult,r:&p::Review)->Result<Option<Box<crate::service_local_history_prepare_protocol::ReviewedFiles>>,BridgeError>{
+    use crate::service_local_history_prepare_protocol::{ReviewedFiles,FilesKind,FilesObservation,Stage,PriorFinality,Destination};
+    let options=[&native.prepared_intent,&native.execution_receipt,&native.reconciliation_receipt,&native.readiness_receipt];
+    let (index,kind,observation,finality)=match r.kind {
+        p::Kind::ReviewPrepared|p::Kind::ReviewReconcile|p::Kind::ReviewStagePrepared=>(0,FilesKind::Prepared,FilesObservation::Prepared,"priorPrepareFinality"),
+        p::Kind::ReviewExecution|p::Kind::ReviewStageExecution=>(1,FilesKind::Execution,FilesObservation::Execution,"priorExecutionFinality"),
+        p::Kind::ReviewRecovery=>(2,FilesKind::Reconciliation,FilesObservation::Reconciliation,"priorExecutionFinality"),
+        p::Kind::ReviewExternalReadiness=>(3,FilesKind::ExternalReadiness,FilesObservation::ExternalReadiness,"priorExecutionFinality"),
+        _=>return if options.iter().all(|v|v.is_none()){Ok(None)}else{Err(refused())},
+    };
+    if options.iter().enumerate().any(|(i,v)|i!=index&&v.is_some()){return Err(refused());}
+    let v=options[index].as_ref().ok_or_else(refused)?;
+    let text=|key:&str|v.get(key).and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(refused);
+    let optional=|key:&str|->Result<Option<String>,BridgeError>{v.get(key).map(|v|v.as_str().map(str::to_owned).ok_or_else(refused)).transpose()};
+    if v.get(finality).and_then(serde_json::Value::as_str)!=Some("not-established")
+        ||v.get("observation").and_then(serde_json::Value::as_str)!=Some(match observation {
+            FilesObservation::Prepared=>"current-prepared-files-only",FilesObservation::Execution=>"current-execution-files-only",
+            FilesObservation::Reconciliation=>"current-recovery-files-only",FilesObservation::ExternalReadiness=>"current-external-readiness-files-only"}) {return Err(refused());}
+    let d=v.get("destination").ok_or_else(refused)?;
+    let stage=if kind==FilesKind::ExternalReadiness {Some(Stage::ExternalTesting)} else {
+        v.get("stage").map(|v|Stage::deserialize(v).map_err(|_|refused())).transpose()?
+    };
+    let out=ReviewedFiles{kind,operation_id:text("operationId")?,candidate_sha256:text("candidateSha256")?,intent_sha256:text("intentSha256")?,
+        receipt_sha256:optional("receiptSha256")?,source_commit:text("sourceCommit")?,source_tree:text("sourceTree")?,
+        application:text(if r.platform==Some(p::Platform::Ios){"bundleId"}else{"applicationId"})?,
+        version:p::Version::deserialize(v.get("version").ok_or_else(refused)?).map_err(|_|refused())?,
+        destination:Destination{channel:d.get("channel").and_then(serde_json::Value::as_str).map(str::to_owned).ok_or_else(refused)?,
+            release_status:d.get("releaseStatus").map(|v|v.as_str().map(str::to_owned).ok_or_else(refused)).transpose()?,
+            automatic_release:d.get("automaticRelease").map(|v|v.as_bool().ok_or_else(refused)).transpose()?},
+        stage,candidate_operation_id:optional("candidateOperationId")?,predecessor_operation_id:optional("predecessorOperationId")?,
+        predecessor_receipt_sha256:optional("predecessorReceiptSha256")?,execution_receipt_sha256:optional("executionReceiptSha256")?,
+        observation,prior_finality:PriorFinality::NotEstablished};
+    if !out.bounded(r){return Err(refused());}Ok(Some(Box::new(out)))
+}
 fn report(t: &Terminal, r: &p::Review) -> Result<p::Report, BridgeError> {
     let Terminal::LocalReleaseHistory(t) = t else {
         return Err(refused());
@@ -269,6 +318,7 @@ fn report(t: &Terminal, r: &p::Review) -> Result<p::Report, BridgeError> {
     if native.schema_version != 1 || native.scope != "local-release-history" {
         return Err(refused());
     }
+    let reviewed_files=reviewed_files(&native,r)?;
     let candidate_inputs = match native.candidate_inputs {
         None => None,
         Some(c) => {
@@ -296,6 +346,7 @@ fn report(t: &Terminal, r: &p::Review) -> Result<p::Report, BridgeError> {
         head_sequence: native.head_sequence,
         history: native.history,
         candidate_inputs,
+        reviewed_files,
         limitations: native.limitations,
     };
     if !result.bounded(r) {
@@ -370,7 +421,7 @@ fn projection(
 }
 pub(super) fn start_matches(p: &Prepared, entry: Option<&Arc<requests::Entry>>) -> bool {
     match (&p.agent_history, entry) {
-        (None, None) => true,
+        (None, None) => p.agent_history_preparation.is_none(),
         (Some(link), Some(entry)) => {
             link.entry.get().is_some_and(|e| Arc::ptr_eq(e, entry))
                 && Arc::ptr_eq(link.scope(), entry.scope())
@@ -404,6 +455,7 @@ pub(super) fn changed(r: &Registry) {
     }
 }
 pub(super) fn retired_prepared(p: &Prepared, reason: Reason, revision: u32) {
+    history_preparation::retired(p,reason);
     if let Some(b) = &p.agent_history {
         b.publish(&retire(p.projection.clone(), reason), revision, true);
     }
@@ -421,6 +473,10 @@ impl SavedCommandOwner {
         generation: &s::Id,
         revision: u32,
     ) -> Result<Arc<Approval>, BridgeError> {
+        self.history_approval_from(kind,operation,generation,revision,None)
+    }
+    pub(crate) fn history_approval_from(&self,kind:p::Kind,operation:&s::Id,generation:&s::Id,revision:u32,
+        original:Option<&Arc<requests::preparation::Entry>>)->Result<Arc<Approval>,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
         let mut r = self.inner.lock();
         self.inner.expire_prepared(&mut r, Instant::now());
@@ -429,6 +485,11 @@ impl SavedCommandOwner {
             .as_ref()
             .filter(|p| {
                 p.agent_history.is_none()
+                    && match (&p.agent_history_preparation,original) {
+                        (None,None)=>true,
+                        (Some(l),Some(e))=>Arc::ptr_eq(&l.entry,e)&&e.ready(),
+                        _=>false,
+                    }
                     && p.projection.phase == Phase::AwaitingConsent
                     && p.projection.intent_usable
                     && r.revision == revision
@@ -458,6 +519,7 @@ impl SavedCommandOwner {
             registration: p.registration,
             root: p.project.clone(),
             expires: p.expires,
+            preparation:original.map(Arc::downgrade),
             review,
         }))
     }
@@ -496,6 +558,14 @@ impl SavedCommandOwner {
             .as_mut()
             .filter(|p| p.agent_history.is_none() && approval.matches(&self.inner, p))
             .ok_or_else(refused)?;
+        match (&p.agent_history_preparation,approval.preparation.as_ref(),scope.preparation.as_ref()) {
+            (None,None,None)=>{},
+            (Some(l),Some(a),Some(b)) if a.as_ptr()==Arc::as_ptr(&l.entry)&&b.as_ptr()==Arc::as_ptr(&l.entry)
+                && Arc::ptr_eq(&scope.read,&l.entry.scope().read)=>{
+                l.entry.begin_handoff(&scope.review).map_err(|_|refused())?;
+            },
+            _=>return Err(refused()),
+        }
         let link = Arc::new(Binding {
             _witness: approval.witness.clone(),
             approval,
@@ -648,25 +718,25 @@ mod tests {
             .platform,
             Some(p::Platform::Ios)
         );
-        for action in [
-            history_wire::Action::AbandonInputs,
-            history_wire::Action::ReviewPrepared,
-            history_wire::Action::ReviewExecution,
-            history_wire::Action::ReviewReconcile,
-            history_wire::Action::ReviewRecovery,
-            history_wire::Action::ReviewStagePrepared,
-            history_wire::Action::ReviewStageExecution,
-            history_wire::Action::ReviewExternalReadiness,
-        ] {
-            c.action = action;
-            assert!(review(
-                &Context::LocalReleaseHistory(c.clone()),
-                &"a".repeat(32),
-                &"b".repeat(32),
-                1
-            )
-            .is_err());
+        for action in [history_wire::Action::ReviewPrepared,history_wire::Action::ReviewExecution,history_wire::Action::ReviewReconcile]{
+            c.action=action;assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok());
         }
+        c.action=history_wire::Action::ReviewRecovery;
+        assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_err());
+        c.platform=None;assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok());
+        c.action=history_wire::Action::AbandonInputs;
+        assert!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_err());
+        c.candidate_operation_id=None;c.stage_operation_id=Some("12345678-1234-4234-8234-123456789abc".into());
+        for platform in [history_wire::CandidatePlatform::Android,history_wire::CandidatePlatform::Ios]{
+            c.platform=Some(platform);
+            for action in [history_wire::Action::ReviewStagePrepared,history_wire::Action::ReviewStageExecution]{
+                c.action=action;let r=review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).unwrap();
+                assert!(r.stage_operation_id.is_some()&&r.candidate_operation_id.is_none());
+            }
+            c.action=history_wire::Action::ReviewExternalReadiness;
+            assert_eq!(review(&Context::LocalReleaseHistory(c.clone()),&"a".repeat(32),&"b".repeat(32),1).is_ok(),platform==history_wire::CandidatePlatform::Ios);
+        }
+
     }
     #[test]
     fn local_history_terminal_projection_requires_actual_retirement_and_original_ids() {
@@ -742,4 +812,22 @@ mod tests {
         assert!(value["candidateInputs"].is_null());
         assert!(backing_bytes().is_some());
     }
+    #[test]
+    fn actual_native_prepared_file_decoder_projects_only_bounded_current_file_summary(){
+        use serde_json::json;
+        let id="12345678-1234-4234-8234-123456789abc";
+        let c=history_wire::Context{project_id:"runtime-p1".into(),execution_mode:history_wire::ExecutionMode::Local,action:history_wire::Action::ReviewPrepared,platform:None,candidate_operation_id:Some(id.into()),stage_operation_id:None};
+        let summary=json!({"operationId":id,"candidateSha256":"a".repeat(64),"intentSha256":"b".repeat(64),"storePreconditionSha256":"c".repeat(64),"sourceCommit":"d".repeat(40),"sourceTree":"e".repeat(40),"applicationId":"dev.example.app","version":{"name":"1.2","build":12},"destination":{"channel":"internal","releaseStatus":"completed"},"observedAt":"2026-10-16T20:00:00Z","limitations":["non-publishing","prepare-not-execute","temporary-edit-may-expire","current-bundle-not-historical-finality","saved-inputs-not-atomic"],"observation":"current-prepared-files-only","priorPrepareFinality":"not-established"});
+        let raw=json!({"schemaVersion":1,"context":c,"outcome":"complete","reason":"none","result":{"schemaVersion":1,"scope":"local-release-history","enrolled":true,"headSequence":5,"history":[{"operationId":id,"phase":"prepared","recoveryRequired":true}],"preparedIntent":summary,"limitations":p::LIMITATIONS},"lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":false,"commands":0,"profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}});
+        let mut decoder=history_wire::Decoder::new();let mut frame=|sequence:u32,kind:&str,payload:serde_json::Value|{
+            let mut bytes=serde_json::to_vec(&json!({"protocol":history_wire::PROTOCOL,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),"requestSha256":"d".repeat(64),"sequence":sequence,"kind":kind,"payload":payload})).unwrap();bytes.push(b'\n');
+            decoder.decode(&bytes,&"a".repeat(32),&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64))};
+        frame(0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();frame(1,"lease-ready",json!({})).unwrap();frame(2,"history-head",json!({"sequence":5,"sha256":"e".repeat(64)})).unwrap();
+        let t=match frame(3,"terminal",raw).unwrap(){history_wire::Frame::Terminal(t)=>t,_=>panic!("terminal")};assert!(decoder.finish());
+        let selected=review(&Context::LocalReleaseHistory(c),&"a".repeat(32),&"b".repeat(32),1).unwrap();let mut public=report(&Terminal::LocalReleaseHistory(t),&selected).unwrap();assert!(public.bounded(&selected));
+        let value=serde_json::to_value(&public).unwrap();assert_eq!(value["reviewedFiles"]["application"],"dev.example.app");assert_eq!(value["reviewedFiles"]["priorFinality"],"not-established");assert!(value["candidateInputs"].is_null());
+        for field in ["storePreconditionSha256","observedAt","authorizationId","appStoreAppId","rawJournal"]{assert!(value["reviewedFiles"].get(field).is_none());}
+        let files=public.reviewed_files.as_mut().unwrap();let original=files.application.clone();files.application.reserve(4096);assert_eq!(files.application,original);assert!(!public.bounded(&selected));
+    }
+
 }

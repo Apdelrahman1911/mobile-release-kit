@@ -62,6 +62,8 @@ mod service_version_reserve_protocol;
 mod service_store_protocol;
 #[path="../src/service_local_history_protocol.rs"]
 mod service_local_history_protocol;
+#[path="../src/service_local_history_prepare_protocol.rs"]
+mod service_local_history_prepare_protocol;
 #[path="../src/service_store_prepare_protocol.rs"]
 mod service_store_prepare_protocol;
 #[path="../src/service_store_inventory_protocol.rs"]

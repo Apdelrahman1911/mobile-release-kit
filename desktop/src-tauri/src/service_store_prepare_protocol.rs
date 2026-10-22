@@ -8,7 +8,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub(crate) const RAW_LIMIT: usize = 8192;
-// All thirteen closed Prepare shapes fit below this existing strict-reader limit.
+// All closed Prepare shapes must fit below this existing strict-reader limit.
 pub(crate) const RAW_NODES: usize = 128;
 pub(crate) const RAW_DEPTH: usize = 8;
 pub(crate) const STATUS_LIMIT: usize = store::STATUS_LIMIT;
@@ -40,6 +40,14 @@ pub(crate) enum Kind {
     IosProductionSubmit,
     AndroidCandidateUpload,
     IosCandidateUpload,
+    AndroidExternalTestingExecute,
+    IosExternalTestingExecute,
+    AndroidProductionSubmitExecute,
+    IosProductionSubmitExecute,
+    AndroidCurrentInternal,
+    IosCurrentInternal,
+    AndroidRecoverySettlement,
+    IosExternalReadiness,
 }
 impl Kind {
     pub fn inventory(self) -> bool {
@@ -71,8 +79,26 @@ impl Kind {
             _ => None,
         }
     }
+    /// Only the eight additional lifecycle selections. Existing candidate
+    /// upload and intent Prepare keep their original encodings and predicates.
+    pub fn release_mode(self) -> Option<(store::Kind, store::Platform, store::release::Mode)> {
+        use store::{Kind::{Execute, Reconcile}, Platform::{Android, Ios}, release::Mode};
+        match self {
+            Self::AndroidExternalTestingExecute => Some((Execute, Android, Mode::ExternalTesting)),
+            Self::IosExternalTestingExecute => Some((Execute, Ios, Mode::ExternalTesting)),
+            Self::AndroidProductionSubmitExecute => Some((Execute, Android, Mode::ProductionSubmit)),
+            Self::IosProductionSubmitExecute => Some((Execute, Ios, Mode::ProductionSubmit)),
+            Self::AndroidCurrentInternal => Some((Reconcile, Android, Mode::CurrentInternal)),
+            Self::IosCurrentInternal => Some((Reconcile, Ios, Mode::CurrentInternal)),
+            Self::AndroidRecoverySettlement => Some((Reconcile, Android, Mode::RecoverySettlement)),
+            Self::IosExternalReadiness => Some((Reconcile, Ios, Mode::ExternalReadiness)),
+            _ => None,
+        }
+    }
     pub fn native_kind(self) -> store::Kind {
-        if self.candidate_upload().is_some() {
+        if let Some((kind, _, _)) = self.release_mode() {
+            kind
+        } else if self.candidate_upload().is_some() {
             store::Kind::Execute
         } else if self.prepares_intent() {
             store::Kind::CandidatePrepare
@@ -95,14 +121,18 @@ impl Kind {
             Self::IosProductionSubmit => "agent-ios-production-submit-prepare-once-v1",
             Self::AndroidCandidateUpload => "agent-android-store-execute-candidate-upload-once-v1",
             Self::IosCandidateUpload => "agent-ios-store-execute-candidate-upload-once-v1",
+            Self::AndroidExternalTestingExecute => "agent-android-store-execute-external-testing-once-v1",
+            Self::IosExternalTestingExecute => "agent-ios-store-execute-external-testing-once-v1",
+            Self::AndroidProductionSubmitExecute => "agent-android-store-execute-production-submit-once-v1",
+            Self::IosProductionSubmitExecute => "agent-ios-store-execute-production-submit-once-v1",
+            Self::AndroidCurrentInternal => "agent-android-store-reconcile-current-internal-once-v1",
+            Self::IosCurrentInternal => "agent-ios-store-reconcile-current-internal-once-v1",
+            Self::AndroidRecoverySettlement => "agent-android-store-reconcile-recovery-settlement-once-v1",
+            Self::IosExternalReadiness => "agent-ios-store-reconcile-external-readiness-once-v1",
         }
     }
     pub fn action(self) -> crate::service_protocol::Action {
-        if self.prepares_intent() || self.candidate_upload().is_some() {
-            crate::service_protocol::Action::Release
-        } else {
-            crate::service_protocol::Action::ObserveProject
-        }
+        self.native_kind().action()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,19 +191,25 @@ pub(crate) struct Selection {
     pub later: Option<StageSelection>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub execute: Option<ExecuteSelection>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub release: Option<store::release::Review>,
 }
 impl Selection {
     pub fn valid(&self) -> bool {
         self.saved_config.valid()
             && self.saved_version.valid()
-            && if self.kind.candidate_upload().is_some() {
-                self.later.is_none()
+            && if let Some((kind, platform, mode)) = self.kind.release_mode() {
+                self.later.is_none() && self.execute.is_none()
+                    && self.release.as_ref().is_some_and(|r| r.mode == mode
+                        && self.candidate.as_ref().is_some_and(|c| r.valid_for(kind, platform, c)))
+            } else if self.kind.candidate_upload().is_some() {
+                self.release.is_none() && self.later.is_none()
                     && self.execute.as_ref().is_some_and(|e| store::sha(&e.intent_sha256))
                     && self.candidate.as_ref().is_some_and(|c| {
                         store::uuid(&c.operation_id) && store::sha(&c.sha256)
                     })
             } else {
-                self.execute.is_none()
+                self.release.is_none() && self.execute.is_none()
                     && match (&self.candidate, &self.later, self.kind.stage()) {
                         (Some(c), None, None) => {
                             self.kind.candidate() && store::uuid(&c.operation_id) && store::sha(&c.sha256)
@@ -197,6 +233,12 @@ impl Selection {
                 .is_none_or(|c| c.operation_id.capacity() <= 36 && c.sha256.capacity() <= 64)
             && self.later.as_ref().is_none_or(StageSelection::bounded_capacity)
             && self.execute.as_ref().is_none_or(|e| e.intent_sha256.capacity() <= 64)
+            && self.release.as_ref().is_none_or(|r| {
+                r.intent_sha256.capacity() <= 64
+                    && r.stage_operation_id.as_ref().is_none_or(|id| id.capacity() <= 36)
+                    && r.basis.as_ref().is_none_or(|b| b.operation_id.capacity() <= 36
+                        && b.receipt_sha256.capacity() <= 64)
+            })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,17 +373,16 @@ impl Report {
                         && store_precondition_sha256.capacity() <= 64
                         && limitations.capacity() <= 8
                 }
-                store::Report::Execute { release } => {
-                    release.mode == store::release::Mode::CandidateUpload
-                        && release.basis.is_none()
-                        && release.operation_id.capacity() <= 36
+                store::Report::Execute { release } | store::Report::Reconcile { release } => {
+                    release.operation_id.capacity() <= 36
                         && release.candidate_operation_id.capacity() <= 36
                         && release.candidate_sha256.capacity() <= 64
                         && release.intent_sha256.capacity() <= 64
                         && release.receipt_sha256.capacity() <= 64
+                        && release.basis.as_ref().is_none_or(|b| b.operation_id.capacity() <= 36
+                            && b.receipt_sha256.capacity() <= 64)
                         && release.limitations.capacity() <= 8
                 }
-                _ => false, // Reconcile still uses only its original facade.
             },
         }
     }
@@ -367,7 +408,9 @@ pub(crate) fn ordinary_review(s: &Selection, r: &Review) -> Option<store::Review
     if !s.valid() {
         return None;
     }
-    let (kind, platform) = match s.kind {
+    let (kind, platform) = if let Some((kind, platform, _)) = s.kind.release_mode() {
+        (kind, platform)
+    } else { match s.kind {
         Kind::AndroidAccess => (store::Kind::AccessCheck, store::Platform::Android),
         Kind::IosAccess => (store::Kind::AccessCheck, store::Platform::Ios),
         Kind::AndroidCandidate => (store::Kind::CandidatePrepare, store::Platform::Android),
@@ -375,7 +418,7 @@ pub(crate) fn ordinary_review(s: &Selection, r: &Review) -> Option<store::Review
         Kind::AndroidCandidateUpload => (store::Kind::Execute, store::Platform::Android),
         Kind::IosCandidateUpload => (store::Kind::Execute, store::Platform::Ios),
         _ => return None,
-    };
+    }};
     Some(store::Review {
         kind,
         platform,
@@ -385,12 +428,12 @@ pub(crate) fn ordinary_review(s: &Selection, r: &Review) -> Option<store::Review
         saved_config: s.saved_config.clone(),
         saved_version: s.saved_version.clone(),
         candidate: s.candidate.clone(),
-        release: s.execute.as_ref().map(|e| store::release::Review {
+        release: s.release.clone().or_else(|| s.execute.as_ref().map(|e| store::release::Review {
             mode: store::release::Mode::CandidateUpload,
             intent_sha256: e.intent_sha256.clone(),
             stage_operation_id: None,
             basis: None,
-        }),
+        })),
     })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

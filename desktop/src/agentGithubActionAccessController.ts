@@ -24,7 +24,7 @@ export class AgentGithubActionAccessController {
   whenSettled=()=>Promise.all([this.normal?.completion,this.revokeWork?.completion]).then(()=>undefined);
   private read():AgentGithubActionContext {
     try{const c=this.source.current(),p=c.port;
-      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>6)return absent();
+      if(!c.epoch||typeof c.epoch!=='object'||c.nativeSession!==null&&typeof c.nativeSession!=='object'||typeof c.preview!=='boolean'||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>GITHUB_ACTION_KINDS.length)return absent();
       const reviews=c.reviews.map(parseGithubActionSelection).filter((r):r is GithubActionSelection=>r!==null);
       if(new Set(reviews.map(r=>r.kind)).size!==reviews.length)return absent();
       return {...c,port:p&&['access','allow','request','revoke'].every(k=>typeof p[k as keyof AgentGithubActionPort]==='function')?p:null,

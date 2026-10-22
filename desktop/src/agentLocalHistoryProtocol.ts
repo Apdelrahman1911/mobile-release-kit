@@ -1,7 +1,8 @@
 import { validStorePermissionRevision } from './agentStorePermissionRevision.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
-export type LocalHistoryKind='enroll'|'verify'|'review-inputs';
-export interface LocalHistoryReview {readonly kind:LocalHistoryKind;readonly operationId:string;readonly ownerGeneration:string;readonly statusRevision:number;readonly platform?:'ios';readonly candidateOperationId?:string}
+import { validLocalHistoryReview as review, sameLocalHistoryOriginal, validLocalHistoryComparison, parseLocalHistoryOrigin, validLocalHistoryReviewedFiles } from './agentLocalHistoryPreparation.ts';
+import type { LocalHistoryReview, LocalHistoryPreparationComparison, LocalHistoryOrigin } from './agentLocalHistoryPreparation.ts';
+export type { LocalHistoryKind, LocalHistoryReview } from './agentLocalHistoryPreparation.ts';
 export interface LocalHistoryRequestStatus {
   readonly origin: { readonly projectId: string; readonly serviceInstance: string; readonly requestId: string };
   readonly grantId: string; readonly reviewId: string; readonly revision: number; readonly review: LocalHistoryReview;
@@ -13,11 +14,12 @@ export interface LocalHistoryRequestStatus {
 }
 export interface AgentLocalHistoryAccess {
   readonly permissionRevision:string; // MAIN comparison only; not CLI request authority.
+  readonly preparation:LocalHistoryPreparationComparison|null;
   readonly serviceInstance: string | null; readonly projectId: string | null; readonly grantId: string | null; readonly reviewId: string | null;
   readonly review: LocalHistoryReview | null; readonly enabled: boolean; readonly remainingMs: number; readonly consumed: boolean;
   readonly pending: boolean; readonly unknown: boolean; readonly requestId: string | null; readonly status: LocalHistoryRequestStatus | null;
 }
-export interface AgentLocalHistoryPort { status(): Promise<unknown>; allow(review: LocalHistoryReview, expectedPermissionRevision:string): Promise<unknown>; revoke(): Promise<unknown> }
+export interface AgentLocalHistoryPort { status(origin?:LocalHistoryOrigin): Promise<unknown>; allow(review: LocalHistoryReview, expectedPermissionRevision:string, preparationOrigin?:LocalHistoryOrigin): Promise<unknown>; revoke(): Promise<unknown> }
 const id = (v: unknown): v is string => typeof v === 'string' && v.length === 32 && /^[a-f0-9]{32}$/.test(v) && v !== '0'.repeat(32);
 const sha = (v: unknown): v is string => typeof v === 'string' && v.length === 64 && /^[a-f0-9]{64}$/.test(v);
 const uuid = (v: unknown) => typeof v === 'string' && v.length === 36 && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v) && v !== '00000000-0000-0000-0000-000000000000';
@@ -25,23 +27,36 @@ const number = (v: unknown, min: number, max: number): v is number => typeof v =
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const keys = (v: unknown, names: readonly string[]): v is Record<string, unknown> => record(v) && Object.keys(v).length === names.length && names.every(k => Object.hasOwn(v, k));
 const oneOf = (v: unknown, a: readonly string[]) => typeof v === 'string' && a.includes(v);
-export const localHistoryDelegateConsent=(r:LocalHistoryReview):string=>r.kind==='review-inputs'?`agent-local-history-${r.platform==='ios'?'ios':'android'}-inputs-once-v1`:`agent-local-history-${r.kind}-once-v1`;
-function review(v:unknown):v is LocalHistoryReview{
- if(!record(v)||!oneOf(v.kind,['enroll','verify','review-inputs']))return false;
- const input=v.kind==='review-inputs';
- return keys(v,['kind','operationId','ownerGeneration','statusRevision',...(input?['candidateOperationId']:[]),...(input&&v.platform==='ios'?['platform']:[])])&&
-  id(v.operationId)&&id(v.ownerGeneration)&&number(v.statusRevision,1,0xffff_fffe)&&(!input||uuid(v.candidateOperationId));
-}
+export const localHistoryDelegateConsent=(r:LocalHistoryReview):string=>{
+ if(r.kind==='enroll'||r.kind==='verify')return `agent-local-history-${r.kind}-once-v1`;
+ const suffix=r.kind==='review-reconcile'?'reconcile-files':r.kind==='review-recovery'?'recovery-files':r.kind==='review-external-readiness'?'readiness-files':r.kind.slice('review-'.length);
+ return `agent-local-history-${r.platform==='ios'?'ios':'android'}-${suffix}-once-v1`;
+};
 // Only after the bounded copy has removed accessors/prototypes/cycles.
 function freeze<T>(v:T):T {if(v&&typeof v==='object'){for(const item of Object.values(v))freeze(item);Object.freeze(v);}return v;}
 export function parseLocalHistoryReview(raw: unknown): LocalHistoryReview | null { try { const v=copyBoundedComparisonData(raw,1024,24); return review(v) ? freeze(v) : null; } catch { return null; } }
-export const sameLocalHistoryReview = (a: LocalHistoryReview | null, b: LocalHistoryReview | null) => !!a && !!b && a.kind===b.kind && a.operationId===b.operationId && a.ownerGeneration===b.ownerGeneration && a.statusRevision===b.statusRevision && a.platform===b.platform && a.candidateOperationId===b.candidateOperationId;
+export const sameLocalHistoryReview = (a:LocalHistoryReview|null,b:LocalHistoryReview|null)=>sameLocalHistoryOriginal(a,b)&&a!.statusRevision===b!.statusRevision;
 const historyPhases=['inputs-pending','inputs-ready','prepare-pending','promotion-pending','prepared','execute-pending','settled-success','settled-failure','reconciliation-required','target-reconciled','external-ready'];
 const limits=['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'];
 function result(v:unknown,r:LocalHistoryReview):boolean{
- if(!keys(v,['enrolled','headSequence','history','candidateInputs','limitations'])||v.enrolled!==true||!number(v.headSequence,1,513)||!Array.isArray(v.history)||v.history.length>64||v.history.length>=v.headSequence||JSON.stringify(v.limitations)!==JSON.stringify(limits))return false;
+ if(!keys(v,['enrolled','headSequence','history','candidateInputs','limitations',...(!['enroll','verify','review-inputs'].includes(r.kind)?['reviewedFiles']:[])])||v.enrolled!==true||!number(v.headSequence,1,513)||!Array.isArray(v.history)||v.history.length>64||v.history.length>=v.headSequence||JSON.stringify(v.limitations)!==JSON.stringify(limits))return false;
  if(!v.history.every(row=>keys(row,['operationId','phase','recoveryRequired'])&&uuid(row.operationId)&&oneOf(row.phase,historyPhases)&&typeof row.recoveryRequired==='boolean'&&row.recoveryRequired!==oneOf(row.phase,['settled-success','settled-failure','target-reconciled','external-ready']))||new Set(v.history.map(row=>row.operationId)).size!==v.history.length)return false;
- if(r.kind!=='review-inputs')return v.candidateInputs===null;
+ if(r.kind==='enroll'||r.kind==='verify')return v.candidateInputs===null;
+ if(r.kind!=='review-inputs'){
+  if(v.candidateInputs!==null||!validLocalHistoryReviewedFiles(v.reviewedFiles,r))return false;
+  const selected=r.stageOperationId??r.candidateOperationId,row=v.history.find(row=>row.operationId===selected),stage=(v.reviewedFiles as Record<string,unknown>).stage;
+  if(!row)return false;
+  switch(r.kind){
+   case 'review-prepared':return v.headSequence>=5&&row.phase==='prepared';
+   case 'review-execution':return v.headSequence>=7&&row.phase==='settled-success';
+   case 'review-reconcile':return v.headSequence>=6&&v.history.at(-1)===row&&oneOf(row.phase,['execute-pending','settled-success','settled-failure','reconciliation-required']);
+   case 'review-recovery':return v.headSequence>=7&&row.phase==='target-reconciled';
+   case 'review-stage-prepared':return v.headSequence>=(stage==='external-testing'?9:13)&&row.phase==='prepared';
+   case 'review-stage-execution':return v.headSequence>=(stage==='external-testing'?11:15)&&row.phase==='settled-success';
+   case 'review-external-readiness':return v.headSequence>=12&&row.phase==='external-ready';
+  }
+ }
+
  const row=v.history.find(row=>row.operationId===r.candidateOperationId);if(!row)return false;
  if(['inputs-pending','settled-failure'].includes(row.phase))return v.candidateInputs===null;
  const c=v.candidateInputs,ios=r.platform==='ios';
@@ -69,8 +84,8 @@ function status(v: unknown): v is LocalHistoryRequestStatus {
 export function parseAgentLocalHistoryAccess(raw: unknown): AgentLocalHistoryAccess | null {
   try {
     const v=copyBoundedComparisonData(raw,24576,1024);
-    if(!keys(v,['permissionRevision','serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status']) ||
-      !validStorePermissionRevision(v.permissionRevision) || !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
+    if(!keys(v,['permissionRevision','serviceInstance','projectId','grantId','reviewId','review','enabled','remainingMs','consumed','pending','unknown','requestId','status','preparation']) ||
+      !validStorePermissionRevision(v.permissionRevision) || !(v.preparation===null||validLocalHistoryComparison(v.preparation)) || !['enabled','consumed','pending','unknown'].every(k=>typeof v[k]==='boolean') || !number(v.remainingMs,0,300000) || !(v.requestId===null||id(v.requestId)))return null;
     const present=['serviceInstance','projectId','grantId','reviewId'].every(k=>id(v[k])) && review(v.review);
     if(!present && !['serviceInstance','projectId','grantId','reviewId','review'].every(k=>v[k]===null))return null;
     if(v.enabled!==(present&&!v.consumed&&!v.pending&&!v.unknown&&v.remainingMs>0)||!v.enabled&&v.remainingMs!==0||v.consumed!==(v.requestId!==null)||v.consumed!==(v.status!==null)||!present&&(v.pending||v.unknown||v.consumed))return null;
@@ -84,10 +99,14 @@ export function parseAgentLocalHistoryAccess(raw: unknown): AgentLocalHistoryAcc
 }
 export function createAgentLocalHistoryPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentLocalHistoryPort {
   const send=(name:string,body:object)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));return bytes.length<=1024?invoke(name,bytes):Promise.reject({code:'agent_local_history_invalid'});};
-  return Object.freeze({status:()=>send('agent_local_history_access',{}),revoke:()=>send('revoke_agent_local_history',{}),allow:(raw:LocalHistoryReview,expectedPermissionRevision:string)=>{
-    const r=parseLocalHistoryReview(raw);return r&&validStorePermissionRevision(expectedPermissionRevision)?send('allow_agent_local_history',{expectedPermissionRevision,kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:localHistoryDelegateConsent(r)}):Promise.reject({code:'agent_local_history_invalid'});
+  return Object.freeze({status:(origin?:LocalHistoryOrigin)=>{
+    if(origin===undefined)return send('agent_local_history_access',{});
+    const query=parseLocalHistoryOrigin(origin);return query?send('agent_local_history_access',query):Promise.reject({code:'agent_local_history_invalid'});
+   },revoke:()=>send('revoke_agent_local_history',{}),allow:(raw:LocalHistoryReview,expectedPermissionRevision:string,preparationOrigin?:LocalHistoryOrigin)=>{
+    const r=parseLocalHistoryReview(raw),query=preparationOrigin===undefined?undefined:parseLocalHistoryOrigin(preparationOrigin);
+    return r&&validStorePermissionRevision(expectedPermissionRevision)&&query!==null?send('allow_agent_local_history',{expectedPermissionRevision,kind:r.kind,operationId:r.operationId,ownerGeneration:r.ownerGeneration,expectedStatusRevision:r.statusRevision,consentVersion:localHistoryDelegateConsent(r),...(query===undefined?{}:{preparationOrigin:query})}):Promise.reject({code:'agent_local_history_invalid'});
   }});
 }
-export function localHistoryCommands(raw:AgentLocalHistoryAccess|null):readonly string[]{const s=parseAgentLocalHistoryAccess(raw);if(!s?.grantId)return [];
+export function localHistoryCommands(raw:AgentLocalHistoryAccess|null):readonly string[]{const s=parseAgentLocalHistoryAccess(raw);if(!s)return [];if(!s.grantId){const o=s.preparation?.request.origin;return o?[`mrk local-history-status ${o.projectId} ${o.serviceInstance} ${o.requestId}`,`mrk local-history-cancel ${o.projectId} ${o.serviceInstance} ${o.requestId}`]:[];}
   const ids=`${s.projectId} ${s.serviceInstance}`;return s.requestId?[`mrk local-history-status ${ids} ${s.requestId}`,`mrk local-history-cancel ${ids} ${s.requestId}`]:s.enabled?[`mrk local-history-submit ${ids} ${s.grantId} ${s.reviewId} --reviewed`]:[];
 }

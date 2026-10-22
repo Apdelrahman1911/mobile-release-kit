@@ -20,6 +20,7 @@ fn status() -> flow::Status {
             candidate: None,
             later: None,
             execute: None,
+            release: None,
         },
         phase: flow::Phase::Queued,
         settlement: p::Settlement::Pending,
@@ -77,7 +78,7 @@ fn store_prepare_cli_later_stage_results_keep_fixed_calls_and_nonpublishing_limi
         assert!(output(&r, &q, Some((&id(9), &native)), true).is_err()); // old store-submit cannot adopt it.
     }
     let catalogue: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
-    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 13);
+    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 21);
     assert_eq!(catalogue["store"]["stagePreparationIsExecution"], false);
     assert_eq!(catalogue["store"]["kinds"], serde_json::json!(["access-check","candidate-prepare","execute","reconcile"]));
 }
@@ -237,10 +238,49 @@ fn store_prepare_cli_candidate_upload_keeps_candidate_receipt_and_separate_start
     assert!(caps.len() <= crate::installed_cli::CAPABILITIES_BYTES);
     let catalogue: serde_json::Value = serde_json::from_slice(&caps).unwrap();
     let kinds = catalogue["store"]["nativePrepareKinds"].as_array().unwrap();
-    assert_eq!(kinds.len(), 13);
+    assert_eq!(kinds.len(), 21);
     for k in ["android-candidate-upload", "ios-candidate-upload"] { assert!(kinds.iter().any(|v| v == k)); }
-    assert!(!kinds.iter().any(|v| v.as_str().unwrap().contains("reconcile")));
+    for unsupported in ["ios-recovery-settlement", "android-external-readiness", "android-production-reconcile", "ios-production-reconcile"] { assert!(!kinds.iter().any(|v|v==unsupported)); }
     assert_eq!(catalogue["store"]["prepareAuthorizesStart"], false);
     assert_eq!(catalogue["store"]["automaticRetry"], false);
     assert_eq!(catalogue["store"]["nativeAvailabilityChecked"], false);
+}
+#[test]
+fn store_prepare_cli_lifecycle_receipts_keep_same_id_only_output_and_closed_catalogue() {
+    use flow::Kind::*;
+    use store::release::{Mode,ResultKind,StoreState};
+    let kinds=[AndroidExternalTestingExecute,IosExternalTestingExecute,AndroidProductionSubmitExecute,IosProductionSubmitExecute,
+        AndroidCurrentInternal,IosCurrentInternal,AndroidRecoverySettlement,IosExternalReadiness];
+    let catalogue:serde_json::Value=serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+    let names=catalogue["store"]["nativePrepareKinds"].as_array().unwrap();assert_eq!(names.len(),21);
+    for kind in kinds {
+        let (domain,platform,mode)=kind.release_mode().unwrap();let mut s=status();
+        let candidate="12345678-1234-4234-8234-123456789abc";
+        let stage=match mode {Mode::ExternalTesting|Mode::ExternalReadiness=>Some("22345678-1234-4234-8234-123456789abc"),Mode::ProductionSubmit=>Some("32345678-1234-4234-8234-123456789abc"),_=>None};
+        let basis=stage.map(|_|store::release::Basis{operation_id:if mode==Mode::ExternalTesting{candidate}else{"22345678-1234-4234-8234-123456789abc"}.into(),receipt_sha256:"f".repeat(64)});
+        s.selection.kind=kind;s.selection.candidate=Some(store::Candidate{operation_id:candidate.into(),sha256:"a".repeat(64)});
+        s.selection.release=Some(store::release::Review{mode,intent_sha256:"b".repeat(64),stage_operation_id:stage.map(str::to_owned),basis:basis.clone()});
+        let review=flow::Review{review_id:id(10),operation:store::Operation{operation_id:id(10),owner_generation:id(11),status_revision:3}};
+        s.prepared=Some(review.clone());s.operation=Some(review.operation);s.phase=flow::Phase::Final;s.settlement=p::Settlement::Settled;
+        s.prepare_returned=true;s.start_grant_id=Some(id(9));s.start_submitted=true;s.outcome=Some(store::Outcome::Complete);
+        let release=store::release::Receipt{mode,head_sequence:*mode.heads().start(),operation_id:stage.unwrap_or(candidate).into(),candidate_operation_id:candidate.into(),
+            candidate_sha256:"a".repeat(64),intent_sha256:"b".repeat(64),receipt_sha256:"c".repeat(64),basis,target:mode.target(platform),
+            result:if domain==store::Kind::Execute{ResultKind::Accepted}else if mode==Mode::ExternalReadiness{ResultKind::Ready}else{ResultKind::Reconciled},
+            state:match(domain,platform,mode){(store::Kind::Execute,store::Platform::Ios,_)=>Some(StoreState::SubmittedForReview),
+                (store::Kind::Execute,store::Platform::Android,Mode::ProductionSubmit)=>Some(StoreState::Draft),
+                (store::Kind::Execute,store::Platform::Android,_)|(_,_,Mode::ExternalReadiness)=>Some(StoreState::AvailableToTesters),_=>None},limitations:mode.limitations()};
+        s.result=Some(flow::Report::Ordinary{report:if domain==store::Kind::Execute{store::Report::Execute{release}}else{store::Report::Reconcile{release}}});
+        s.validate().unwrap();let query=s.origin.clone();let r=response(s);
+        for json in [false,true] {
+            let (code,bytes)=preparation::output(&r,&query,Some((true,&id(9),&id(10))),json).unwrap();assert_eq!(code,0);assert!(!bytes.is_empty());
+            if json {let parsed=p::decode_response(&bytes[..bytes.len()-1],&r.request_id,&r.service_instance).unwrap();assert_eq!(parsed.response,r.response);}
+        }
+        assert!(preparation::output(&r,&query,Some((false,&id(3),&id(4))),true).is_err());
+        assert!(output(&r,&query,Some((&id(9),&id(10))),true).is_err()); // no old Submit adoption
+        assert!(names.contains(&serde_json::to_value(kind).unwrap()));
+    }
+    assert_eq!(catalogue["store"]["prepareAuthorizesStart"],false);
+    assert_eq!(catalogue["store"]["automaticRetry"],false);
+    assert_eq!(catalogue["store"]["nativeAvailabilityChecked"],false);
+    assert!(capabilities(false).unwrap().len()<=crate::installed_cli::CAPABILITIES_BYTES);
 }

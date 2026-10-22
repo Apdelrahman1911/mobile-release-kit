@@ -1,6 +1,9 @@
 //! MAIN-only explicit one-use delegation of the SAME prepared History intent.
 //! Off-Doc service lookup uses the genuine READ facet, not saved Store inputs.
-use super::agent_store::permission::{self, MainAccess};
+use super::agent_store::permission;
+use crate::service_local_history_prepare_protocol::{MainAccess,Comparison};
+#[path="asset_session_agent_local_history_prepare.rs"]
+pub(crate) mod preparation;
 use super::*;
 use crate::{
     application_service::ApplicationService,
@@ -39,7 +42,14 @@ pub(crate) struct Allow {
     owner_generation: Id,
     expected_status_revision: u32,
     consent_version: String,
+    #[serde(default,deserialize_with="present")]
+    preparation_origin:Option<p::Query>,
 }
+fn present<'de,D:serde::Deserializer<'de>,T:serde::Deserialize<'de>>(d:D)->Result<Option<T>,D::Error>{T::deserialize(d).map(Some)}
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum AccessQuery { Exact(p::Query), Empty(crate::asset_session::agent_identity::Empty) }
+impl AccessQuery {pub(crate) fn exact(&self)->Option<&p::Query>{match self{Self::Exact(q)=>Some(q),Self::Empty(_)=>None}}}
 pub(super) struct Grant {
     pub(in crate::asset_session) scope: Arc<requests::Scope>,
     binding: Arc<AgentHistoryBinding>,
@@ -98,30 +108,32 @@ impl DocumentBinding {
         }
         Ok(())
     }
-    pub(crate) fn agent_local_history_access(
-        &self,
-        window: &str,
-    ) -> Result<MainAccess<p::Access>, BridgeError> {
-        if window != MAIN {
-            return Err(BridgeError::invalid());
-        }
-        let _state = self.lock();
-        let revision = self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
-        let access = match self.agent_history_service()? {
-            Some(s) => s.store_requests().history_access().map_err(public)?,
-            None => p::Access::empty(),
-        };
-        Ok(MainAccess::new(access, revision))
+    pub(crate) fn agent_local_history_access(&self,window:&str,query:Option<&p::Query>)->Result<MainAccess,BridgeError>{
+        if window!=MAIN{return Err(BridgeError::invalid());}
+        let service=self.history_listening_service()?;
+        let entry=service.as_ref().map(|s|s.store_requests().selected_history_preparation(query)).transpose().map_err(public)?.flatten();
+        if query.is_some()&&entry.is_none(){return Err(public(Error::Conflict));}
+        let current=match (&service,&entry){(Some(s),Some(e))=>s.version_reserve_point(&e.scope().saved.runtime_id)
+            .is_ok_and(|p|e.scope().matches(&p.saved,&p.read)),_=>false};
+        let mut state=self.lock();
+        let revision=self.inner.agent_store_revoke_epoch.load(Ordering::Acquire);
+        let access=match service{Some(s)=>s.store_requests().history_access().map_err(public)?,None=>p::Access::empty()};
+        let preparation=entry.map(|e|self.history_comparison(&mut state,e,current)).transpose()?;
+        Ok(MainAccess::new(access,revision,preparation))
     }
     pub(crate) fn allow_agent_local_history(
         &self,
         window: &str,
         args: Allow,
-    ) -> Result<MainAccess<p::Access>, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
         let expected = permission::parse(&args.expected_permission_revision).map_err(public)?;
+        // First-use lookup is OFF Doc and grants no permission.
+        let listening=self.history_listening_service()?;
+        let preparation=args.preparation_origin.as_ref().map(|q|listening.as_ref().ok_or_else(||public(Error::Unavailable))?
+            .store_requests().history_preparation(q).map_err(public)).transpose()?;
         let (native, stamp, approval, epoch) = {
             let mut state = self.lock();
             permission::next(&self.inner.agent_store_revoke_epoch, expected).map_err(public)?;
@@ -141,11 +153,13 @@ impl DocumentBinding {
             {
                 return Err(public(Error::Busy));
             }
-            let approval = self.history_delegate_owner().history_approval(
+            if let Some(s)=&listening{s.store_requests().can_allow_history_from(preparation.as_ref()).map_err(public)?;}
+            let approval = self.history_delegate_owner().history_approval_from(
                 args.kind,
                 &args.operation_id,
                 &args.owner_generation,
                 args.expected_status_revision,
+                preparation.as_ref(),
             )?;
             if args.consent_version.as_str() != approval.review().consent() {
                 return Err(BridgeError::invalid());
@@ -182,7 +196,9 @@ impl DocumentBinding {
         let point = service
             .version_reserve_point(&native.runtime_id)
             .map_err(public)?;
+        if preparation.as_ref().is_some_and(|e|!e.scope().matches(&point.saved,&point.read)) {return Err(public(Error::Conflict));}
         let scope = Arc::new(requests::Scope {
+            preparation:preparation.as_ref().map(Arc::downgrade),
             project_id: point.saved.project_id.clone(),
             runtime_id: native.runtime_id.clone(),
             review_id: Id::random().map_err(public)?,
@@ -251,7 +267,7 @@ impl DocumentBinding {
         }
         service
             .store_requests()
-            .can_allow_history()
+            .can_allow_history_from(preparation.as_ref())
             .map_err(public)?;
         if let Some(old) = self.inner.agent_store_service.get() {
             if old.as_ptr() != Arc::as_ptr(&service) {
@@ -279,7 +295,7 @@ impl DocumentBinding {
         });
         state.agent_local_history = Some(grant.clone());
         match service.store_requests().allow_history(scope, grant_id) {
-            Ok(access) => Ok(MainAccess::new(access, revision)),
+            Ok(access) => Ok(MainAccess::new(access, revision,None)),
             Err(e) => {
                 self.history_delegate_owner().stop_agent_history(
                     &grant.binding,
@@ -293,11 +309,11 @@ impl DocumentBinding {
     pub(crate) fn revoke_agent_local_history(
         &self,
         window: &str,
-    ) -> Result<MainAccess<p::Access>, BridgeError> {
+    ) -> Result<MainAccess, BridgeError> {
         // Same shared epoch/revoke stops all three Store-book families, including
         // an in-flight first Allow before it can attach. No new permission owner.
         self.revoke_agent_store(window)?;
-        self.agent_local_history_access(window)
+        self.agent_local_history_access(window,None)
     }
     pub(in crate::asset_session) fn stop_history_grant(
         &self,

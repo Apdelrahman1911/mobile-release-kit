@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc};
 
 #[path = "installed_shell_observation_macos_cli_fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 pub(super) const NAME: &str = "installed-cli-local-check";
 pub(super) const SECONDS: u64 = 120;
 const WINDOW: &str = "main";
@@ -30,7 +30,9 @@ pub(super) fn admitted() -> bool {
         cfg!(target_arch = "aarch64"),
     )
 }
-pub(super) fn application(uid: u32) -> Option<PathBuf> {
+pub(super) fn application(uid: u32) -> Option<PathBuf> { application_for(uid,NAME) }
+pub(super) fn application_for(uid: u32, name: &str) -> Option<PathBuf> {
+    if name!=NAME && name!=super::vault::upload_key::cli::SCOPE { return None; }
     if !admitted() {
         return None;
     }
@@ -43,7 +45,7 @@ pub(super) fn application(uid: u32) -> Option<PathBuf> {
         option_env!("GITHUB_RUN_ID")?,
         option_env!("GITHUB_RUN_ATTEMPT")?,
     );
-    let tag = super::digest(format!("{s}/{r}/{a}/{NAME}").as_bytes());
+    let tag = super::digest(format!("{s}/{r}/{a}/{name}").as_bytes());
     let home = user.dir.join(format!(".c-{}", &tag[..12]));
     let app = home.join("Library/Application Support/dev.mobile-release-kit.desktop");
     if app.join("service-v1/s").as_os_str().len() >= 104
@@ -329,6 +331,7 @@ impl Observation {
         &self,
         report: &crate::application_service_host::HostShutdownReport,
     ) -> bool {
+        if super::vault::upload_key::cli::selected(self.case) { return self.backup_cli_host_return(report); }
         if self.case != Case::Cli {
             return true;
         }

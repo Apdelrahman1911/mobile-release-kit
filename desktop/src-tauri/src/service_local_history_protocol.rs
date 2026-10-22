@@ -1,4 +1,4 @@
-//! Closed DATA for the three already Desktop-prepared local history steps.
+//! Closed DATA for the sixteen non-destructive local history contexts.
 //! No config/Store requirement, key, journal parser, native consent or file bytes.
 use crate::service_protocol::{Error, Id, Settlement};
 pub(crate) use crate::service_store_protocol::{Outcome, Query, Reason, State, Submit};
@@ -19,11 +19,35 @@ pub(crate) enum Kind {
     Enroll,
     Verify,
     ReviewInputs,
+    ReviewPrepared,
+    ReviewExecution,
+    ReviewReconcile,
+    ReviewRecovery,
+    ReviewStagePrepared,
+    ReviewStageExecution,
+    ReviewExternalReadiness,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Platform {
+    Android,
     Ios,
+}
+impl Kind {
+    pub(crate) fn stage(self) -> bool {
+        matches!(self, Self::ReviewStagePrepared | Self::ReviewStageExecution | Self::ReviewExternalReadiness)
+    }
+}
+pub(crate) fn selection_valid(kind: Kind, platform: Option<Platform>, candidate: Option<&str>, stage: Option<&str>) -> bool {
+    match kind {
+        Kind::Enroll | Kind::Verify => platform.is_none() && candidate.is_none() && stage.is_none(),
+        Kind::ReviewInputs | Kind::ReviewPrepared | Kind::ReviewExecution | Kind::ReviewReconcile =>
+            platform != Some(Platform::Android) && candidate.is_some_and(uuid) && stage.is_none(),
+        Kind::ReviewRecovery => platform.is_none() && candidate.is_some_and(uuid) && stage.is_none(),
+        Kind::ReviewStagePrepared | Kind::ReviewStageExecution =>
+            platform.is_some() && candidate.is_none() && stage.is_some_and(uuid),
+        Kind::ReviewExternalReadiness => platform == Some(Platform::Ios) && candidate.is_none() && stage.is_some_and(uuid),
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -45,39 +69,48 @@ pub(crate) struct Review {
         skip_serializing_if = "Option::is_none"
     )]
     pub candidate_operation_id: Option<String>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub stage_operation_id: Option<String>,
 }
 impl Review {
     pub fn valid(&self) -> bool {
         (1..u32::MAX).contains(&self.status_revision)
-            && match self.kind {
-                Kind::Enroll | Kind::Verify => {
-                    self.platform.is_none() && self.candidate_operation_id.is_none()
-                }
-                Kind::ReviewInputs => self.candidate_operation_id.as_deref().is_some_and(uuid),
-            }
+            && selection_valid(self.kind, self.platform, self.candidate_operation_id.as_deref(), self.stage_operation_id.as_deref())
+    }
+    pub(crate) fn selected_id(&self) -> Option<&str> {
+        if self.kind.stage() { self.stage_operation_id.as_deref() } else { self.candidate_operation_id.as_deref() }
     }
     pub fn consent(&self) -> &'static str {
         match (self.kind, self.platform) {
-            (Kind::Enroll, _) => "agent-local-history-enroll-once-v1",
-            (Kind::Verify, _) => "agent-local-history-verify-once-v1",
+            (Kind::Enroll, None) => "agent-local-history-enroll-once-v1",
+            (Kind::Verify, None) => "agent-local-history-verify-once-v1",
             (Kind::ReviewInputs, None) => "agent-local-history-android-inputs-once-v1",
             (Kind::ReviewInputs, Some(Platform::Ios)) => "agent-local-history-ios-inputs-once-v1",
+            (Kind::ReviewPrepared, None) => "agent-local-history-android-prepared-once-v1",
+            (Kind::ReviewPrepared, Some(Platform::Ios)) => "agent-local-history-ios-prepared-once-v1",
+            (Kind::ReviewExecution, None) => "agent-local-history-android-execution-once-v1",
+            (Kind::ReviewExecution, Some(Platform::Ios)) => "agent-local-history-ios-execution-once-v1",
+            (Kind::ReviewReconcile, None) => "agent-local-history-android-reconcile-files-once-v1",
+            (Kind::ReviewReconcile, Some(Platform::Ios)) => "agent-local-history-ios-reconcile-files-once-v1",
+            (Kind::ReviewRecovery, None) => "agent-local-history-android-recovery-files-once-v1",
+            (Kind::ReviewStagePrepared, Some(Platform::Android)) => "agent-local-history-android-stage-prepared-once-v1",
+            (Kind::ReviewStagePrepared, Some(Platform::Ios)) => "agent-local-history-ios-stage-prepared-once-v1",
+            (Kind::ReviewStageExecution, Some(Platform::Android)) => "agent-local-history-android-stage-execution-once-v1",
+            (Kind::ReviewStageExecution, Some(Platform::Ios)) => "agent-local-history-ios-stage-execution-once-v1",
+            (Kind::ReviewExternalReadiness, Some(Platform::Ios)) => "agent-local-history-ios-readiness-files-once-v1",
+            _ => "unsupported-local-history-context",
         }
     }
     pub fn action(&self) -> crate::service_protocol::Action {
-        match self.kind {
-            Kind::Enroll => crate::service_protocol::Action::LocalHistoryEnroll,
-            Kind::Verify | Kind::ReviewInputs => {
-                crate::service_protocol::Action::LocalHistoryReview
-            }
-        }
+        if self.kind == Kind::Enroll { crate::service_protocol::Action::LocalHistoryEnroll }
+        else { crate::service_protocol::Action::LocalHistoryReview }
     }
     pub fn heap(&self) -> usize {
-        self.candidate_operation_id
-            .as_ref()
-            .map_or(0, String::capacity)
+        self.candidate_operation_id.as_ref().map_or(0, String::capacity)
+            .saturating_add(self.stage_operation_id.as_ref().map_or(0, String::capacity))
     }
 }
+
 pub(crate) fn uuid(v: &str) -> bool {
     crate::service_store_protocol::uuid(v)
         && v.as_bytes().get(14) == Some(&b'4')
@@ -224,6 +257,8 @@ pub(crate) struct Report {
     pub history: Vec<HistoryRow>,
     #[serde(deserialize_with = "nullable")]
     pub candidate_inputs: Option<Inputs>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub reviewed_files: Option<Box<crate::service_local_history_prepare_protocol::ReviewedFiles>>,
     pub limitations: [Limitation; 3],
 }
 impl Report {
@@ -253,9 +288,26 @@ impl Report {
         }) {
             return false;
         }
-        if r.kind != Kind::ReviewInputs {
-            return self.candidate_inputs.is_none();
+        if matches!(r.kind, Kind::Enroll | Kind::Verify) {
+            return self.candidate_inputs.is_none() && self.reviewed_files.is_none();
         }
+        if r.kind != Kind::ReviewInputs {
+            if self.candidate_inputs.is_some() { return false; }
+            let Some(files) = &self.reviewed_files else { return false; };
+            let Some(row) = self.history.iter().find(|v| Some(v.operation_id.as_str()) == r.selected_id()) else { return false; };
+            let (head, phase) = match r.kind {
+                Kind::ReviewPrepared => (5, row.phase == HistoryPhase::Prepared),
+                Kind::ReviewExecution => (7, row.phase == HistoryPhase::SettledSuccess),
+                Kind::ReviewReconcile => (6, self.history.last()==Some(row) && matches!(row.phase, HistoryPhase::ExecutePending | HistoryPhase::SettledSuccess | HistoryPhase::SettledFailure | HistoryPhase::ReconciliationRequired)),
+                Kind::ReviewRecovery => (7, row.phase == HistoryPhase::TargetReconciled),
+                Kind::ReviewStagePrepared => (if files.stage==Some(crate::service_local_history_prepare_protocol::Stage::ProductionSubmit){13}else{9}, row.phase == HistoryPhase::Prepared),
+                Kind::ReviewStageExecution => (if files.stage==Some(crate::service_local_history_prepare_protocol::Stage::ProductionSubmit){15}else{11}, row.phase == HistoryPhase::SettledSuccess),
+                Kind::ReviewExternalReadiness => (12, row.phase == HistoryPhase::ExternalReady),
+                _ => return false,
+            };
+            return self.head_sequence >= head && phase && files.bounded(r);
+        }
+        if self.reviewed_files.is_some() { return false; }
         match self
             .history
             .iter()
@@ -300,6 +352,9 @@ impl Report {
                     .checked_add(a.directory.capacity())?
                     .checked_add(a.sha256.capacity())?;
             }
+        }
+        if let Some(files) = &self.reviewed_files {
+            n = n.checked_add(std::mem::size_of_val(files.as_ref()))?.checked_add(files.heap()?)?;
         }
         Some(n)
     }
@@ -485,6 +540,7 @@ mod tests {
     fn review() -> Review {
         Review {
             kind: Kind::ReviewInputs,
+            stage_operation_id: None,
             operation_id: id('a'),
             owner_generation: id('b'),
             status_revision: 1,
@@ -542,6 +598,7 @@ mod tests {
         }
         let report = Report {
             enrolled: true,
+            reviewed_files: None,
             head_sequence: 513,
             history,
             candidate_inputs: Some(Inputs {
@@ -679,6 +736,7 @@ mod tests {
         s.validate().unwrap();
         s.result = Some(Report {
             enrolled: true,
+            reviewed_files: None,
             head_sequence: 1,
             history: vec![],
             candidate_inputs: None,

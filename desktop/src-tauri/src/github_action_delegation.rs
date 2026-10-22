@@ -13,6 +13,7 @@ pub(crate) struct Review {
     pub(crate) end: Instant,
     pub(crate) data: p::Review,
     pub(crate) activity: Option<super::activity::delegation::Capture>,
+    pub(crate) dispatch: Option<dispatch::Capture>,
 }
 struct Hash {
     sha: Sha256,
@@ -53,6 +54,7 @@ pub(super) fn review<T: Serialize>(
         end,
         data,
         activity: None,
+        dispatch: None,
     })
 }
 pub(super) fn origin(scope: &Option<Weak<r::NativeScope>>, entry: Option<&Arc<r::Entry>>) -> bool {
@@ -74,7 +76,7 @@ pub(super) fn unknown(entry: &Option<Arc<r::Entry>>) {
         e.unknown(p::Reason::CleanupUnknown)
     }
 }
-fn reason(s: &str) -> p::Reason {
+pub(super) fn reason(s: &str) -> p::Reason {
     match s {
         "none" => p::Reason::None,
         "cancelled" => p::Reason::UserCancelled,
@@ -114,3 +116,6 @@ pub(crate) use p::Selection;
 #[cfg(test)]
 #[path = "github_action_delegation_tests.rs"]
 mod tests;
+
+#[path="github_dispatch_delegation.rs"]
+pub(crate) mod dispatch;

@@ -23,6 +23,40 @@ pub(super) fn qualification(document: &DocumentBinding) -> Result<(), AssetError
     Ok(())
 }
 
+// Native-only closed admission. Ordinary calls/projection never inspect an
+// installed registration and retain the false qualification bit above.
+#[derive(Clone)]
+pub(in crate::asset_session) enum Qualification {
+    Ordinary,
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Installed(Arc<super::backup_picker_observation::Admission>),
+}
+impl Qualification {
+    pub(in crate::asset_session) fn check(&self, document: &DocumentBinding) -> Result<(), AssetError> {
+        match self {
+            Self::Ordinary => qualification(document),
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::Installed(a) => a.current(document),
+        }
+    }
+    pub(in crate::asset_session) fn extra_bytes(&self) -> usize {
+        match self {
+            Self::Ordinary => 0,
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::Installed(a) => a.retained_bytes(),
+        }
+    }
+    pub(super) fn attach(&self, document: &DocumentBinding, state: &DocumentState, slot: &Slot,
+        link: Option<&Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<(), AssetError> {
+        let _ = (document, state, slot, link);
+        match self {
+            Self::Ordinary => Ok(()),
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::Installed(a) => a.attach(document, state, slot, link),
+        }
+    }
+}
+
 // Closed scope comparisons only. Callers still require the SAME current
 // context/full reference, native qualification and original owner gates.
 pub(super) fn require_android_context(context: &NativeContext) -> Result<(), AssetError> {

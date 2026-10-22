@@ -61,6 +61,7 @@ pub(super) struct PendingRead {
     pub(super) stamp: SavedEditStamp,
     pub(super) end: Instant,
     pub(super) agent: Option<std::sync::Weak<request::NativeScope>>,
+    producer:Option<action_delegation::dispatch::Producer>,
     rows_sha256: [u8; 32],
 }
 pub(super) struct SelectedRow<'a> {
@@ -92,12 +93,13 @@ impl PendingRead {
         let end = settled_at
             .checked_add(Duration::from_secs(120))
             .ok_or_else(BridgeError::protocol)?
-            .min(session_end);
+            .min(session_end).min(active.agent.as_ref().map_or(session_end,|e|e.scope().read.end()));
         if now >= end {
             return Err(refused(p::Reason::ConsentExpired));
         }
         let rows_sha256 = roster(rows)?;
         Ok(Self {
+            producer:active.agent.as_ref().map(|e|action_delegation::dispatch::Producer::new(e,active.ticket.operation_id())),
             identity: Arc::new(()),
             original_id: active.ticket.operation_id().to_owned(),
             session_id: active.session_id,
@@ -128,7 +130,7 @@ impl PendingRead {
         generation == self.generation && root == &self.root && edit.matches(&self.stamp)
     }
     fn view(&self, view: &p::Status) -> bool {
-        view.session_id.as_deref() == Some(self.session_id.as_str())
+        action_delegation::dispatch::producer_ready(&self.producer) && view.session_id.as_deref() == Some(self.session_id.as_str())
             && view.operation.as_ref().is_some_and(|op| {
                 op.id == self.original_id
                     && op.kind == p::Kind::Pending
@@ -164,7 +166,8 @@ impl PendingRead {
             .checked_add(self.session_id.capacity())?
             .checked_add(self.project_id.capacity())?
             .checked_add(self.root.path.capacity())?
-            .checked_add(2 * std::mem::size_of::<usize>()) // Arc<()> allocation
+            .checked_add(2 * std::mem::size_of::<usize>())? // Arc<()> allocation
+            .checked_add(self.producer.as_ref().map_or(0,action_delegation::dispatch::Producer::heap))
     }
 }
 
@@ -192,7 +195,7 @@ impl ConnectionState {
                     .consent
                     .as_ref()
                     .ok_or_else(|| refused(p::Reason::ConsentExpired))?;
-                if consent.prepared.setup().is_none()
+                if !action_delegation::dispatch::producer_ready(&consent.producer) || consent.prepared.setup().is_none()
                     || consent.agent.is_some()
                     || value.session_id != consent.session_id
                     || value.consent_id != consent.id
@@ -244,6 +247,7 @@ impl ConnectionState {
                     end: read.end,
                     data,
                     activity: None,
+                    dispatch: None,
                 })
             }
             _ => Err(refused(p::Reason::InvalidInput)),
@@ -509,3 +513,6 @@ mod tests {
         assert!(control.retained());
     }
 }
+
+#[path="github_counter_delegation.rs"]
+mod counter;

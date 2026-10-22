@@ -1283,8 +1283,11 @@ pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
 mod agent_store;
 #[path="saved_command_agent_local_history.rs"]
 mod agent_history;
+#[path="saved_command_agent_local_history_prepare.rs"]
+mod history_preparation;
+pub(crate) use history_preparation::Link as HistoryPreparationLink;
 pub(crate) use agent_history::{Approval as AgentHistoryApproval,Binding as AgentHistoryBinding};
-pub(crate) fn agent_history_backing_bytes()->Option<usize>{agent_history::backing_bytes()}
+pub(crate) fn agent_history_backing_bytes()->Option<usize>{agent_history::backing_bytes()?.checked_add(history_preparation::backing_bytes()?)}
 pub(crate) fn agent_apple_mode(mode:crate::apple_provisioning_protocol::Mode)->Result<crate::service_apple_provisioning_protocol::Mode,BridgeError>{apple_provisioning::agent::mode(mode)}
 pub(crate) use apple_provisioning::preparation::{Link as AgentApplePrepareLink,Selection as AgentApplePrepareSelection};
 pub(crate) use apple_provisioning::agent::{Approval as AgentAppleApproval,Binding as AgentAppleBinding};
@@ -1292,7 +1295,7 @@ pub(crate) use agent_store::preparation::Input as AgentStorePreparationInput;
 pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding,AgentStoreAdmitted};
 pub(crate) use tool_acquisition::{AgentToolAcquisitionApproval,AgentToolAcquisitionBinding,AgentToolInspectApproval,AgentToolInspectBinding};
 
-struct Prepared { agent_history:Option<Arc<agent_history::Binding>>, agent_store_preparation:Option<Arc<agent_store::preparation::Binding>>, agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+struct Prepared { agent_history_preparation:Option<Arc<history_preparation::Link>>, agent_history:Option<Arc<agent_history::Binding>>, agent_store_preparation:Option<Arc<agent_store::preparation::Binding>>, agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
@@ -2352,11 +2355,19 @@ impl SavedCommandOwner {
         tools: Option<tool_acquisition::agent::inspect::Preparation>, apple: Option<apple_provisioning::preparation::Commit>) -> Result<Status, BridgeError> {
         self.prepare_bound_preparations(context,registration,project,gate,material,artifact_tools,agent_entry,agent_build,tools,None,apple)
     }
-    fn prepare_bound_preparations(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+    fn prepare_bound_preparations(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
         material: Option<PrivateSigningMaterial>, artifact_tools: Option<Arc<ArtifactToolLoan>>,
         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>,
         tools: Option<tool_acquisition::agent::inspect::Preparation>, store_preparation: Option<Arc<crate::service_store_requests::preparation::PrepareEntry>>,
         apple: Option<apple_provisioning::preparation::Commit>) -> Result<Status, BridgeError> {
+        self.prepare_bound_preparations_history(context,registration,project,gate,material,artifact_tools,agent_entry,agent_build,tools,store_preparation,apple,None)
+    }
+    fn prepare_bound_preparations_history(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<PrivateSigningMaterial>, artifact_tools: Option<Arc<ArtifactToolLoan>>,
+        agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_build::Preparation>,
+        tools: Option<tool_acquisition::agent::inspect::Preparation>, store_preparation: Option<Arc<crate::service_store_requests::preparation::PrepareEntry>>,
+        apple: Option<apple_provisioning::preparation::Commit>, history:Option<history_preparation::Commit>) -> Result<Status, BridgeError> {
+        if history.is_some() && (store_preparation.is_some() || apple.is_some() || agent_entry.is_some() || agent_build.is_some() || tools.is_some()) { return Err(self.inner.domain.invalid_owner()); }
         if store_preparation.is_some() && apple.is_some() { return Err(self.inner.domain.invalid_owner()); }
         if artifact_tools.is_some()&&!matches!(&context,Context::ArtifactInspection(c) if c.format==artifact_wire::Format::Aab){return Err(self.inner.domain.invalid_owner());}
         if artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(self.inner.domain.unavailable());}
@@ -2439,12 +2450,14 @@ impl SavedCommandOwner {
         if let Some(original) = &tools { expires = original.clip_expiry(expires)?; }
         let tools = tools.map(|original| original.link(&self.inner, &r, &context, registration, &project, &id, &generation, expires)).transpose()?;
         if let Some(commit)=&apple{expires=commit.admit(&context,registration,&project,expires)?;}
+        if let Some(commit)=&history{expires=commit.admit(&context,registration,&project,expires)?;}
         let projection = RunProjection { agent_build: agent_build.as_ref().map(|link| link.projection_origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
-            phase: Phase::AwaitingConsent, intent_usable: apple.is_none(), outcome: None, reason: Reason::None, result: None, stage: None };
+            phase: Phase::AwaitingConsent, intent_usable: apple.is_none() && history.as_ref().is_none_or(|h|h.link.is_none()), outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
         let android_selection = r.android_catalog.selection().cloned();
-        let prepared = Prepared { agent_history:None, agent_store_preparation, agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:apple.as_ref().map(|v|v.intent.clone()), tools, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools };
+        let prepared = Prepared { agent_history_preparation:history.as_ref().and_then(|h|h.link.clone()), agent_history:None, agent_store_preparation, agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:apple.as_ref().map(|v|v.intent.clone()), tools, local_history:history.as_ref().map(|h|h.consent.clone()), projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools };
         apple_provisioning::preparation::commit_prepared(&self.inner,&mut r,prepared,apple.as_ref())?;
+        history_preparation::committed(&self.inner,&mut r)?;
         agent_store::preparation::installed(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
         if r.prepared.as_ref().is_some_and(|p| p.tools.is_some()) { r.tool_acquisition.clear_completed_sources(); }
         self.inner.bump(&mut r);
@@ -3302,6 +3315,7 @@ impl Inner {
         }
     }
     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
+        if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_history_preparation.as_ref()).and_then(|l|l.stop_at(now)){self.retire_prepared(r,reason);}
         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|tool_acquisition::agent::stop_prepared(p,now)){self.retire_prepared(r,reason);}
         if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref().and_then(|link|link.stop_at(now)).or_else(||p.agent_store_preparation.as_ref().and_then(|link|link.stop_at(now))).or_else(||p.agent_history.as_ref().and_then(|link|link.stop_at(now)))){self.retire_prepared(r,reason);}
         if let Some((reason,_))=r.prepared.as_ref().and_then(apple_provisioning::agent::prepared_binding).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
@@ -5914,7 +5928,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
     let expiry = SavedCommandOwner::project_recovery(runtime);
     {
         let mut r = expiry.inner.lock(); let expires = t + INTENT;
-        r.prepared = Some(Prepared { agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+        r.prepared = Some(Prepared { agent_history_preparation:None, agent_history:None, agent_store_preparation:None, agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });

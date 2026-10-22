@@ -10,10 +10,12 @@ fn selected() -> h::Review {
         status_revision: 3,
         platform: None,
         candidate_operation_id: None,
+        stage_operation_id: None,
     }
 }
 fn scope(f: &Fixture) -> Arc<queue::Scope> {
     Arc::new(queue::Scope {
+        preparation: None,
         project_id: id('1'),
         runtime_id: "p1".into(),
         review_id: id('4'),
@@ -37,6 +39,7 @@ fn report() -> h::Report {
         head_sequence: 1,
         history: vec![],
         candidate_inputs: None,
+        reviewed_files: None,
         limitations: h::LIMITATIONS,
     }
 }
@@ -222,7 +225,13 @@ fn local_history_shared32_and_discovery_use_one_namespace_without_reading_or_exp
     for index in 1..=32 {
         let mut input = f.input();
         input.origin.request_id = Id::parse(&format!("{index:032x}")).unwrap();
-        if index % 2 == 0 {
+        if index % 4 == 0 {
+            use crate::service_local_history_prepare_protocol as hp;
+            let h=scope(&f);
+            f.inbox.prepare_history(hp::Request{origin:input.origin,selection:hp::Selection{kind:hp::Kind::Verify,platform:None,candidate_operation_id:None,stage_operation_id:None}},queue::preparation::Scope{saved:crate::agent_identity_requests::SavedPoint{project_id:id('1'),runtime_id:"p1".into(),root:h.root.clone(),device:1,inode:2,revision:0,fresh:false},read:h.read.clone()},Instant::now()).unwrap();
+            let c=f.inbox.claim_history_preparation().unwrap().unwrap();let e=c.entry().clone();
+            e.refused(h::Reason::NativeRefused);c.returned();e.claim_history().unwrap().unwrap().returned(Ok(())).unwrap();
+        } else if index % 2 == 0 {
             f.inbox.allow_history(scope(&f), id('3')).unwrap();
             f.inbox.submit_history(input, Instant::now()).unwrap();
             let c = f.inbox.claim_local_history().unwrap().unwrap();
@@ -318,6 +327,7 @@ fn local_history_and_existing_store_preparation_exclude_only_live_originals() {
         candidate: None,
         later: None,
         execute: None,
+        release: None,
     };
     let ps = crate::service_store_requests::preparation::Scope::new(
         id('1'),

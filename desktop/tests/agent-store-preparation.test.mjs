@@ -2,13 +2,15 @@
 // No IPC, credentials, Store, native admission, synthetic joins or UI automation.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {parseStorePreparationInput,storePreparationInput,storePreparationSelection,parseStorePreparationStatus,parseStorePreparationAccess,createStorePreparationPort,storePreparationCommands,storePreparationPeerReason,storePreparationStage,storePreparationPreparesIntent,storePreparationExecutesCandidate,storePreparationNativeOperation,storePreparationKinds,storePreparationConsent} from '../src/agentStorePreparation.ts';
+import {parseStorePreparationInput,storePreparationInput,storePreparationSelection,parseStorePreparationStatus,parseStorePreparationAccess,createStorePreparationPort,storePreparationCommands,storePreparationPeerReason,storePreparationStage,storePreparationPreparesIntent,storePreparationExecutesCandidate,storePreparationNativeOperation,storePreparationKinds,storePreparationConsent,storePreparationRelease,storePreparationLifecycleEffect} from '../src/agentStorePreparation.ts';
 import {StorePreparationController} from '../src/agentStorePreparationController.ts';
 import {LocalStorePreflightController,localStoreOwnerReason} from '../src/localStorePreflight.ts';
 import {LocalStorePrepareController,localStorePrepareOwnerReason} from '../src/localStorePrepare.ts';
 import {LocalStoreExecuteController,localStoreExecuteOwnerReason} from '../src/localStoreExecute.ts';
 import {parseLocalStoreExecuteRequest} from '../src/localStoreExecuteProtocol.ts';
-import {storeReleaseLimitations} from '../src/agentStoreRelease.ts';
+import {storeReleaseLimitations,storeReleaseTarget,storeReleaseFromContext} from '../src/agentStoreRelease.ts';
+import {LocalStoreReconcileController,localStoreReconcileOwnerReason} from '../src/localStoreReconcile.ts';
+import {parseLocalStoreReconcileRequest,reconcileRequestContext} from '../src/localStoreReconcileProtocol.ts';
 import {STAGE_PREPARE_LIMITS,STAGE_EXECUTE_LIMITS,nativeStageOperationId} from '../src/localStoreStageProtocol.ts';
 import {parseLocalHistoryStatus} from '../src/localReleaseHistoryProtocol.ts';
 const id=c=>c.repeat(32),A=id('a'),B=id('b'),P=id('1'),S=id('2'),G=id('3'),R=id('4'),Q=id('5'),START=id('6'),H='c'.repeat(64),UUID='12345678-1234-4234-8234-123456789abc';
@@ -22,6 +24,7 @@ const history=()=>({mode:'native',historical:false,pending:false,blocked:false,u
 function iosHistory(){const h=history(),v=h.status.operation.result.candidateInputs;delete v.applicationId;v.bundleId='org.example.ios-app';v.files[0].fileName='export/App.ipa';v.archive={directory:'archive.xcarchive',entries:4,bytes:500,sha256:H};h.status.operation.context.platform='ios';return h;}
 const STAGES=['android-external-testing','ios-external-testing','android-production-submit','ios-production-submit'];
 const UPLOADS=['android-candidate-upload','ios-candidate-upload'];
+const LIFECYCLE=['android-external-testing-execute','ios-external-testing-execute','android-production-submit-execute','ios-production-submit-execute','android-current-internal','ios-current-internal','android-recovery-settlement','ios-external-readiness'];
 const EXTERNAL='22345678-1234-4234-8234-123456789abc',PRODUCTION='32345678-1234-4234-8234-123456789abc';
 function uploadFixture(kind){
  const ios=kind.startsWith('ios'),saved={...project(),...(ios?{}:{selection:{module:'app',variant:'release',applicationId:'dev.example.app'}})},selected=assets(ios?'ios':'android');
@@ -59,7 +62,31 @@ function stageFixture(kind) {
    limitations:['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'],executionReceipt:receipt}})};
  return{saved,selected,currentHistory};
 }
-const input=(kind='android-access')=>{if(storePreparationExecutesCandidate(kind)||storePreparationStage(kind)){const f=storePreparationExecutesCandidate(kind)?uploadFixture(kind):stageFixture(kind);return storePreparationInput(kind,f.saved,f.selected,f.currentHistory,f.tools??null);}return storePreparationInput(kind,project(),assets(kind.startsWith('ios')?'ios':kind==='paired-versions'?'both':'android'),kind==='ios-candidate'?iosHistory():history());};
+// Reuse the same parsed current History/source shapes as the original lifecycle
+// controllers. No fixture receipt is a native retirement or provider witness.
+function lifecycleFixture(kind){
+ const r=storePreparationRelease(kind);assert.ok(r);
+ if(r.kind==='execute'){
+  const intentKind=kind.replace(/-execute$/,''),f=stageFixture(intentKind),p=f.currentHistory.status.operation.result.executionReceipt;
+  const stage=r.mode,operationId=stage==='external-testing'?EXTERNAL:PRODUCTION;
+  const prepared={operationId,stage,candidateOperationId:UUID,candidateSha256:H,predecessorOperationId:p.operationId,predecessorReceiptSha256:p.receiptSha256,
+   intentSha256:'d'.repeat(64),storePreconditionSha256:'e'.repeat(64),sourceCommit:p.sourceCommit,sourceTree:p.sourceTree,version:p.version,observedAt:p.observedAt,
+   limitations:[...STAGE_PREPARE_LIMITS],observation:'current-prepared-files-only',priorPrepareFinality:'not-established',
+   ...(r.platform==='ios'?{bundleId:p.bundleId,appStoreAppId:p.appStoreAppId,destination:stage==='external-testing'?{channel:'testflight-external'}:{channel:'app-store-review',automaticRelease:false}}:
+    {applicationId:p.applicationId,destination:stage==='external-testing'?{channel:'Closed testing team',releaseStatus:'completed'}:{channel:'production',releaseStatus:'draft'}})};
+  const old=f.currentHistory.status.operation;
+  f.currentHistory.status=nativeStatus(1,{...old,context:{projectId:'p1',executionMode:'local',platform:r.platform,action:'review-stage-prepared',stageOperationId:operationId},
+   result:{schemaVersion:1,scope:'local-release-history',enrolled:true,headSequence:stage==='external-testing'?9:13,
+    history:[...old.result.history,{operationId,phase:'prepared',recoveryRequired:true}],limitations:old.result.limitations,preparedIntent:prepared}});
+  return f;
+ }
+ if(r.mode==='external-readiness'){
+  const f=stageFixture('ios-production-submit');f.selected.scope.stage='external-testing';f.selected.status.context.stage='external-testing';return f;
+ }
+ const f=uploadFixture(`${r.platform}-candidate-upload`),op=f.currentHistory.status.operation;
+ op.context.action='review-reconcile';op.result.headSequence=6;op.result.history[0].phase='execute-pending';f.tools=null;return f;
+}
+const input=(kind='android-access')=>{if(storePreparationRelease(kind)||storePreparationExecutesCandidate(kind)||storePreparationStage(kind)){const f=storePreparationRelease(kind)?lifecycleFixture(kind):storePreparationExecutesCandidate(kind)?uploadFixture(kind):stageFixture(kind);return storePreparationInput(kind,f.saved,f.selected,f.currentHistory,f.tools??null);}return storePreparationInput(kind,project(),assets(kind.startsWith('ios')?'ios':kind==='paired-versions'?'both':'android'),kind==='ios-candidate'?iosHistory():history());};
 const review=()=>({reviewId:A,operation:{operationId:A,ownerGeneration:B,statusRevision:3}});
 const stageReview=kind=>{const operationId=(storePreparationStage(kind)==='production-submit'?PRODUCTION:EXTERNAL).replaceAll('-','');return{reviewId:operationId,operation:{operationId,ownerGeneration:B,statusRevision:3}};};
 const origin=()=>({projectId:P,serviceInstance:S,requestId:Q});
@@ -70,7 +97,10 @@ function observed(s,armed=false){return {permissionRevision:s.startGrantId?'2':'
 const ios=()=>({observation:'observed',coverage:'asc-ios-current-inventory/1',revision:H,counts:{builds:0,buildUploads:0,appStoreVersions:1},maxBuild:0,marketingVersion:'2.0.0',historicalUniqueness:'not-established'});
 const android=()=>({observation:'observed',coverage:'play-android-current-inventory/1',revision:H,counts:{tracks:2,releases:2,versionCodes:3,bundles:0,apks:1},maxBuild:40,marketingVersion:null,temporaryEdit:'deleted',historicalUniqueness:'not-established'});
 const uploadResult=kind=>({kind:'ordinary',report:{kind:'execute',release:{mode:'candidate-upload',headSequence:7,operationId:UUID,candidateOperationId:UUID,candidateSha256:H,intentSha256:'d'.repeat(64),receiptSha256:'e'.repeat(64),basis:null,target:kind.startsWith('ios')?'testflight-internal':'play-internal',result:'accepted',state:null,limitations:[...storeReleaseLimitations('candidate-upload')]}}});
-const result=(kind='android-access')=>storePreparationExecutesCandidate(kind)?uploadResult(kind):kind.endsWith('-versions')?{kind:'current-versions',inventory:kind==='paired-versions'?{platform:'both',android:android(),ios:ios()}:kind==='ios-versions'?{platform:'ios',current:ios()}:{platform:'android',current:android()}}:{kind:'ordinary',report:{kind:'access-check',findings:[{check:'store-access',status:'FAIL'}],limitations:['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic']}};
+const lifecycleResult=kind=>{const r=storePreparationRelease(kind),s=storePreparationSelection(input(kind)),{stageOperationId,...release}=s.release;return{kind:'ordinary',report:{kind:r.kind,release:{...release,headSequence:({
+ 'external-testing':11,'production-submit':15,'current-internal':6,'recovery-settlement':7,'external-readiness':12})[r.mode],operationId:stageOperationId??s.candidate.operationId,candidateOperationId:s.candidate.operationId,candidateSha256:s.candidate.sha256,receiptSha256:'e'.repeat(64),target:storeReleaseTarget(r.mode,r.platform),
+ result:r.kind==='execute'?'accepted':r.mode==='external-readiness'?'ready':'reconciled',state:r.mode==='external-readiness'?'available-to-testers':r.kind==='reconcile'?null:r.platform==='ios'?'submitted-for-review':r.mode==='production-submit'?'draft':'available-to-testers',limitations:[...storeReleaseLimitations(r.mode)]}}};};
+const result=(kind='android-access')=>storePreparationRelease(kind)?lifecycleResult(kind):storePreparationExecutesCandidate(kind)?uploadResult(kind):kind.endsWith('-versions')?{kind:'current-versions',inventory:kind==='paired-versions'?{platform:'both',android:android(),ios:ios()}:kind==='ios-versions'?{platform:'ios',current:ios()}:{platform:'android',current:android()}}:{kind:'ordinary',report:{kind:'access-check',findings:[{check:'store-access',status:'FAIL'}],limitations:['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic']}};
 const final=(kind='android-access')=>status(kind,{revision:9,phase:'final',settlement:'settled',operation:{...review().operation,statusRevision:8},startGrantId:START,startSubmitted:true,outcome:'complete',result:result(kind)});
 const stageFinal=kind=>{const s=status(kind),stage=s.selection.later.stage,c=s.selection.candidate,ios=kind.startsWith('ios');return{...s,revision:9,phase:'final',settlement:'settled',operation:{...s.operation,statusRevision:8},startGrantId:START,startSubmitted:true,outcome:'complete',result:{kind:'stage-prepare',report:{platform:ios?'ios':'android',stage,
  operationId:nativeStageOperationId(s.operation.operationId),headSequence:stage==='external-testing'?9:13,candidateOperationId:c.operationId,candidateSha256:c.sha256,...s.selection.later,
@@ -163,14 +193,14 @@ test('real final triple-cut projection permits a new explicit Prepare, not autom
 });
 
 async function mounted(kind='android-access'){
- const upload=storePreparationExecutesCandidate(kind),{saved,selected,currentHistory,tools}=upload?uploadFixture(kind):storePreparationStage(kind)?stageFixture(kind):{saved:project(),selected:assets(),currentHistory:history()};let latest=nativeStatus(),listener,permission=null;const calls=[];
+ const domain=storePreparationRelease(kind),upload=storePreparationExecutesCandidate(kind)||domain?.kind==='execute',reconcile=domain?.kind==='reconcile',{saved,selected,currentHistory,tools}=domain?lifecycleFixture(kind):upload?uploadFixture(kind):storePreparationStage(kind)?stageFixture(kind):{saved:project(),selected:assets(),currentHistory:history()};let latest=nativeStatus(),listener,permission=null;const calls=[];
  const candidate=storePreparationPreparesIntent(kind),source={project:()=>saved,assets:()=>selected,history:()=>currentHistory,tools:()=>tools??null,otherOperationReason:()=>permission?.ownerReason()??null,now:()=>100};
- const original=upload?new LocalStoreExecuteController(source):candidate?new LocalStorePrepareController(source):new LocalStorePreflightController(source);
- const suffix=upload?'LocalStoreExecute':candidate?'LocalStorePrepare':'LocalStorePreflight';let pendingPrepare=null;
+ const original=reconcile?new LocalStoreReconcileController(source):upload?new LocalStoreExecuteController(source):candidate?new LocalStorePrepareController(source):new LocalStorePreflightController(source);
+ const suffix=reconcile?'LocalStoreReconcile':upload?'LocalStoreExecute':candidate?'LocalStorePrepare':'LocalStorePreflight';let pendingPrepare=null;
  const api={mode:'native',[`subscribe${suffix}`]:async f=>{listener=f;return()=>{};},[suffix[0].toLowerCase()+suffix.slice(1)+'Status']:async()=>clone(latest),[`prepare${suffix}`]:async()=>{calls.push('gui-prepare');return pendingPrepare?.promise??clone(latest);},[`start${suffix}`]:async()=>{calls.push('gui-start');return clone(latest);},[`cancel${suffix}`]:async()=>{calls.push('gui-cancel');return clone(latest);}};
- await original.connect(api);original.syncProject();const h=harness(kind);const epoch={},nativeSession={};
- permission=new StorePreparationController({current:()=>{const peer=permission?.peer(),reason=upload?localStoreExecuteOwnerReason(original.getSnapshot()):candidate?localStorePrepareOwnerReason(original.getSnapshot()):localStoreOwnerReason(original.getSnapshot());return{port:h.port,epoch,nativeSession,projectId:'p1',preview:false,input:storePreparationInput(kind,saved,selected,currentHistory,tools??null),blockedReason:storePreparationPeerReason(peer?.input??null,peer?.review??null,original.getSnapshot(),reason)};},now:()=>100});permission.choose(kind);h.controller=permission;
- return{...h,original,callsNative:calls,emit:()=>{const request=input(kind).prepare,r=storePreparationStage(kind)?stageReview(kind):review();latest=nativeStatus(3,{operationId:r.operation.operationId,ownerGeneration:B,context:{...clone(request),platform:request.platform??'android',operation:storePreparationNativeOperation(kind)},phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});listener(clone(latest));},defer:()=>pendingPrepare=deferred(),close:()=>{original.dispose();permission.dispose();}};
+ await original.connect(api);original.syncProject();if(domain?.mode==='recovery-settlement')assert.equal(original.setSettlement(true),true);if(domain?.mode==='external-readiness')assert.equal(original.setExternalReadiness(true),true);const h=harness(kind);const epoch={},nativeSession={};
+ permission=new StorePreparationController({current:()=>{const peer=permission?.peer(),reason=reconcile?localStoreReconcileOwnerReason(original.getSnapshot()):upload?localStoreExecuteOwnerReason(original.getSnapshot()):candidate?localStorePrepareOwnerReason(original.getSnapshot()):localStoreOwnerReason(original.getSnapshot());return{port:h.port,epoch,nativeSession,projectId:'p1',preview:false,input:storePreparationInput(kind,saved,selected,currentHistory,tools??null),blockedReason:storePreparationPeerReason(peer?.input??null,peer?.review??null,original.getSnapshot(),reason)};},now:()=>100});permission.choose(kind);h.controller=permission;
+ return{...h,original,callsNative:calls,emit:()=>{const request=input(kind).prepare,r=storePreparationStage(kind)?stageReview(kind):review();latest=nativeStatus(3,{operationId:r.operation.operationId,ownerGeneration:B,context:reconcile?reconcileRequestContext(request):{...clone(request),platform:request.platform??'android',operation:storePreparationNativeOperation(kind)},phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});listener(clone(latest));},defer:()=>pendingPrepare=deferred(),close:()=>{original.dispose();permission.dispose();}};
 }
 test('actual two-controller composition permits only same service-created Prepared; GUI has no Attempt or timer',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
@@ -328,8 +358,8 @@ test('candidate upload inputs require the original current prepared intent and p
 });
 
 test('eleven old selections omit Execute while new candidate upload cannot borrow later or Reconcile input',()=>{
- assert.equal(storePreparationKinds.length,13);
- for(const kind of storePreparationKinds.filter(k=>!storePreparationExecutesCandidate(k))){
+ assert.equal(storePreparationKinds.length,21);
+ for(const kind of storePreparationKinds.filter(k=>!storePreparationExecutesCandidate(k)&&!storePreparationRelease(k))){
   const s=status(kind);assert.equal(Object.hasOwn(s.selection,'execute'),false);assert.equal(JSON.stringify(s.selection).includes('execute'),false);
   s.selection.execute=null;assert.equal(parseStorePreparationStatus(s),null);
  }
@@ -403,5 +433,111 @@ test('candidate upload actual Execute peer stays unowned by GUI and rechecks ful
    current.set({input:next});current.controller.syncContext();assert.equal(current.controller.acknowledge(true),false);assert.equal(await current.controller.allow(),false);
    assert.equal(current.calls.filter(c=>c.kind==='start').length,0);current.controller.dispose();
   }
+ }
+});
+
+// Eight additional fixed shapes; existing factories remain the only renderer
+// eligibility source. Original native material/currentness is a separate cut.
+test('lifecycle eight use actual stage or Reconcile factories and refuse stale lineage or unsupported transforms',()=>{
+ for(const kind of LIFECYCLE){
+  const f=lifecycleFixture(kind),r=storePreparationRelease(kind);assert.ok(parseLocalHistoryStatus(f.currentHistory.status),kind);
+  const v=storePreparationInput(kind,f.saved,f.selected,f.currentHistory,null);assert.ok(v,kind);
+  assert.deepEqual(clone(r.kind==='execute'?parseLocalStoreExecuteRequest(v.prepare):parseLocalStoreReconcileRequest(v.prepare)),clone(v.prepare));
+  const c=r.kind==='reconcile'?reconcileRequestContext(v.prepare):{...v.prepare,operation:'local-store-execute'};
+  assert.deepEqual(clone(storePreparationSelection(v).release),clone(storeReleaseFromContext(c,r.kind)));
+  assert.equal(Object.hasOwn(v.prepare,'toolchainSelection'),false);
+  for(const extra of [{toolchainSelection:null},{uploadSelection:{}},{authorizationId:UUID},{token:'not-allowed'}])assert.equal(parseStorePreparationInput({kind,prepare:{...v.prepare,...extra}}),null,kind);
+  for(const change of [f=>f.currentHistory.historical=true,f=>f.currentHistory.status.operation.context.projectId='foreign',f=>f.saved.savedVersion.build++,
+   f=>f.selected.status.context.revision++,f=>f.selected.status.records[0].revision++,f=>f.currentHistory.status.operation.result.history.at(-1).phase='preparing']){
+   const bad=lifecycleFixture(kind);change(bad);assert.equal(storePreparationInput(kind,bad.saved,bad.selected,bad.currentHistory,null),null,kind);
+  }
+  if(kind==='android-current-internal'||kind==='android-recovery-settlement'){
+   for(const change of [f=>delete f.saved.selection,f=>f.saved.selection.applicationId='wrong.app']){const bad=lifecycleFixture(kind);change(bad);assert.equal(storePreparationInput(kind,bad.saved,bad.selected,bad.currentHistory,null),null);}
+  }
+  if(kind==='android-recovery-settlement'){
+   for(const change of [f=>f.currentHistory.status.operation.result.history.at(-1).phase='settled-success',f=>f.currentHistory.status.operation.result.headSequence=513]){const bad=lifecycleFixture(kind);change(bad);assert.equal(storePreparationInput(kind,bad.saved,bad.selected,bad.currentHistory),null);}
+  }
+  if(kind==='ios-external-readiness'){
+   for(const change of [f=>f.currentHistory.status.operation.result.headSequence=509,f=>f.currentHistory.status.operation.result.history.at(-1).phase='execute-pending',f=>f.selected.status.assignments.splice(1,1),f=>f.saved.iosDemoRequired=true]){const bad=lifecycleFixture(kind);change(bad);assert.equal(storePreparationInput(kind,bad.saved,bad.selected,bad.currentHistory),null);}
+  }
+ }
+ const settlement=clone(input('android-recovery-settlement'));settlement.kind='ios-current-internal';settlement.prepare.platform='ios';settlement.prepare.confirmation='candidate:ios:1.2.3:42';assert.equal(parseStorePreparationInput(settlement),null);
+ const readiness=clone(input('ios-external-readiness'));readiness.kind='android-current-internal';readiness.prepare.platform='android';assert.equal(parseStorePreparationInput(readiness),null);
+ const stage=clone(input('ios-external-testing-execute'));stage.kind='ios-external-testing';assert.equal(parseStorePreparationInput(stage),null);
+});
+test('lifecycle present-only release tuples preserve old thirteen and require every inner null and exact mode',()=>{
+ for(const kind of storePreparationKinds.filter(k=>!storePreparationRelease(k))){
+  const s=status(kind);assert.equal(Object.hasOwn(s.selection,'release'),false);s.selection.release=null;assert.equal(parseStorePreparationStatus(s),null);
+ }
+ for(const kind of LIFECYCLE){
+  const s=status(kind);assert.ok(parseStorePreparationStatus(s),kind);assert.ok(JSON.stringify(s).length<8192);
+  assert.equal(Object.hasOwn(s.selection,'later'),false);assert.equal(Object.hasOwn(s.selection,'execute'),false);
+  for(const change of [v=>delete v.selection.release,v=>v.selection.release=null,v=>delete v.selection.release.basis,v=>delete v.selection.release.stageOperationId,
+   v=>v.selection.release.mode='candidate-upload',v=>v.selection.release.private='not-allowed',v=>v.selection.later=null,v=>v.selection.execute=null,
+   v=>v.selection.kind=kind.startsWith('ios')?'ios-candidate-upload':'android-candidate-upload']){
+   const bad=clone(s);change(bad);assert.equal(parseStorePreparationStatus(bad),null,kind);
+  }
+  if(s.selection.release.basis){const bad=clone(s);bad.selection.release.basis.operationId=PRODUCTION;assert.equal(parseStorePreparationStatus(bad),null);}
+  else {const bad=clone(s);bad.selection.release.stageOperationId=EXTERNAL;assert.equal(parseStorePreparationStatus(bad),null);}
+ }
+});
+test('lifecycle receipt DATA preserves original candidate stage basis and never grants earlier finality or availability',()=>{
+ for(const kind of LIFECYCLE){
+  const s=final(kind),r=storePreparationRelease(kind),parsed=parseStorePreparationStatus(s);assert.ok(parsed,kind);
+  assert.equal(parsed.result.report.kind,r.kind);assert.deepEqual(parsed.result.report.release.limitations,storeReleaseLimitations(r.mode));
+  assert.notEqual(parsed.result.report.release.operationId.replaceAll('-',''),s.prepared.operation.operationId);
+  for(const change of [v=>v.result.report.kind=r.kind==='execute'?'reconcile':'execute',v=>v.result.report.release.operationId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+   v=>v.result.report.release.intentSha256='0'.repeat(64),v=>v.result.report.release.headSequence=5,v=>v.result.report.release.priorExecutionFinality='complete',
+   v=>v.result.report.release.limitations=[],v=>v.result.report.release.state='released',v=>v.prepareReturned=false]){
+   const bad=clone(s);change(bad);assert.equal(parseStorePreparationStatus(bad),null,kind);
+  }
+  if(s.result.report.release.basis){const bad=clone(s);bad.result.report.release.basis.receiptSha256='0'.repeat(64);assert.equal(parseStorePreparationStatus(bad),null);}
+  if(kind==='android-production-submit-execute')assert.equal(parsed.result.report.release.state,'draft');
+  if(r.mode==='recovery-settlement'||r.mode==='external-readiness')assert.ok(parsed.result.report.release.limitations.includes('local-checkpoint-not-prior-finality'));
+ }
+});
+test('lifecycle Start has eight separate fixed consents and explicit effects after a separately returned Prepare',async()=>{
+ const calls=[],port=createStorePreparationPort(async(n,b)=>{calls.push([n,JSON.parse(new TextDecoder().decode(b))]);return null;}),consents=new Set();
+ for(const kind of LIFECYCLE){
+  await port.allowPrepare(input(kind),'7');assert.equal(calls.at(-1)[1].consentVersion,'agent-store-native-prepare-once-v1');assert.equal(calls.at(-1)[1].expectedPermissionRevision,'7');
+  await port.allowStart(status(kind),'8');assert.equal(calls.at(-1)[0],'allow_agent_store_preparation_start');assert.equal(calls.at(-1)[1].consentVersion,storePreparationConsent(kind));
+  assert.equal(calls.at(-1)[1].expectedPermissionRevision,'8');assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(),['consentVersion','expectedPermissionRevision','origin','review']);
+  consents.add(calls.at(-1)[1].consentVersion);await assert.rejects(port.allowStart(status(kind,{prepareReturned:false}),'8'));
+  assert.ok(storePreparationLifecycleEffect(kind));assert.ok(!storePreparationExecutesCandidate(kind)&&!storePreparationPreparesIntent(kind));
+ }
+ assert.equal(consents.size,8);assert.equal(calls.length,16);
+ assert.match(storePreparationLifecycleEffect('android-production-submit-execute'),/draft.*not served/);
+ assert.match(storePreparationLifecycleEffect('ios-production-submit-execute'),/manual release/);
+ assert.match(storePreparationLifecycleEffect('android-current-internal'),/temporary uncommitted edit.*invalidate/);
+ assert.match(storePreparationLifecycleEffect('android-recovery-settlement'),/old files and fences.*unknown owner.*retry/);
+ assert.match(storePreparationLifecycleEffect('ios-external-readiness'),/No upload, notification or resubmission/);
+});
+test('actual Execute and Reconcile peers keep returned Prepare then fresh Start and retain lost caller',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ for(const kind of LIFECYCLE){
+  const h=await mounted(kind);await allow(h,kind);h.emit();await check(h,observed(status(kind)));
+  assert.equal(h.controller.consentReason(),null,kind);assert.equal(h.original.getSnapshot().acknowledged,false);assert.deepEqual(h.callsNative,[]);
+  h.original.setVisible(false);t.mock.timers.tick(300001);await flush();assert.deepEqual(h.callsNative,[]);
+  assert.equal(h.controller.acknowledge(true),true);const start=h.controller.allow();assert.equal(h.last('start').args[1],'1');
+  // A native-looking terminal cannot replace this original caller's return.
+  let joined=false;const wait=h.controller.whenSettled().then(()=>joined=true);await flush();assert.equal(joined,false);assert.equal(await h.controller.status(),false);
+  h.last('start').reject(Error('inert lost original lifecycle Start reply'));await start;await wait;
+  assert.equal(h.controller.getSnapshot().unknown,true);await check(h,observed(final(kind)));assert.equal(h.controller.getSnapshot().unknown,true);
+  assert.equal(await h.controller.allow(),false);assert.equal(h.calls.filter(c=>c.kind==='start').length,1);assert.deepEqual(h.callsNative,[]);h.close();
+ }
+});
+test('lifecycle peer matching never hides a real GUI caller or changed full credential comparison',async()=>{
+ for(const kind of LIFECYCLE){
+  const h=await mounted(kind),d=h.defer(),gui=h.original.prepare();h.emit();assert.ok(h.original.getSnapshot().pending,kind);
+  const snap=h.original.getSnapshot();assert.equal(storePreparationPeerReason(input(kind),review(),snap,'busy'),'busy');
+  d.resolve(nativeStatus(4,snap.status.operation));await gui;
+  const idle={...h.original.getSnapshot(),pending:false,callersPending:0,acknowledged:false,consentUntil:null,blocked:false,unconfirmed:false};
+  assert.equal(storePreparationPeerReason(input(kind),review(),idle,'busy'),null,kind);
+  const foreign=clone(idle);foreign.status.operation.context.recordRevision++;assert.equal(storePreparationPeerReason(input(kind),review(),foreign,'busy'),'busy');
+  if(kind==='android-recovery-settlement'){const wrong=clone(idle);wrong.status.operation.context.operation='local-store-reconcile';assert.equal(storePreparationPeerReason(input(kind),review(),wrong,'busy'),'busy');}
+  h.close();
+  const current=harness(kind);await allow(current,kind);await check(current,observed(status(kind)));assert.equal(current.controller.acknowledge(true),true);
+  const changed=clone(input(kind));changed.prepare.credentialContextRevision++;assert.deepEqual(clone(storePreparationSelection(changed)),clone(storePreparationSelection(input(kind))));
+  current.set({input:changed});current.controller.syncContext();assert.equal(await current.controller.allow(),false);assert.equal(current.calls.filter(c=>c.kind==='start').length,0);current.controller.dispose();
  }
 });

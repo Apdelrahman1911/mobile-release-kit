@@ -175,6 +175,8 @@ impl Fact {
         }
     }
 }
+#[path="service_github_dispatch_requests.rs"]
+mod dispatch;
 struct Row {
     revision: u32,
     claimed: bool,
@@ -188,7 +190,7 @@ struct Row {
     history_claim: Option<Fact>,
     unknown: Option<p::Reason>,
     observed_stop: Option<p::Reason>,
-    snapshot: Option<Arc<p::activity::Snapshot>>,
+    snapshot: Option<Arc<dispatch::Snapshot>>,
 }
 pub(crate) struct Entry {
     input: p::Submit,
@@ -334,8 +336,13 @@ impl Entry {
     pub(crate) fn returned_native(&self, id: &str, reason: p::Reason, effect: p::Effect) {
         self.returned_native_snapshot(id, reason, effect, None)
     }
-    fn returned_native_snapshot(&self, id: &str, reason: p::Reason, mut effect: p::Effect,
+    fn returned_native_snapshot(&self, id: &str, reason: p::Reason, effect: p::Effect,
         snapshot: Option<Arc<p::activity::Snapshot>>) {
+        // Existing Activity call consumes its sole Arc; never keep both result types.
+        let snapshot = snapshot.map(|s| Arc::new(dispatch::Snapshot::Activity(Arc::unwrap_or_clone(s))));
+        self.returned_native_value(id,reason,effect,snapshot)
+    }
+    fn returned_native_value(&self,id:&str,reason:p::Reason,mut effect:p::Effect,snapshot:Option<Arc<dispatch::Snapshot>>) {
         let Ok(mut r) = self.lock() else { return };
         if r.unknown.is_some() {
             return;
@@ -345,8 +352,8 @@ impl Entry {
                 .as_ref()
                 .is_none_or(|f| f.admission != Admission::Running)
             || !effect.valid_for(self.scope.review.kind())
-            || !activity::snapshot_for(&self.scope.review, reason, snapshot.as_deref())
-            || self.scope.review.kind() == p::Kind::ActivityOverview && reason == p::Reason::None && !r.go
+            || !dispatch::valid(&self.scope.review, reason, snapshot.as_deref())
+            || (self.scope.review.kind() == p::Kind::ActivityOverview || self.scope.review.kind().dispatch_family()) && reason == p::Reason::None && !r.go
             || matches!(
                 reason,
                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
@@ -496,7 +503,8 @@ impl Entry {
             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
                 && state != p::State::Unknown,
             do_not_replay: true,
-            snapshot: if state == p::State::Complete { r.snapshot.as_deref().cloned() } else { None },
+            snapshot: if state == p::State::Complete { match r.snapshot.as_deref() { Some(dispatch::Snapshot::Activity(s))=>Some(s.clone()),_=>None } } else { None },
+            result: if state == p::State::Complete { match r.snapshot.as_deref() { Some(dispatch::Snapshot::Dispatch(s))=>Some(s.clone()),_=>None } } else { None },
         };
         s.validate().map_err(|_| Error::StateUnknown)?;
         Ok(s)
