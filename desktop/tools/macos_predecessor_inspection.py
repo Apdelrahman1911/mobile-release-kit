@@ -437,6 +437,29 @@ def release_data(stager, descriptor, inventory, package_info):
     return release, policies[0], len(rows), sum(row["size"] for row in rows.values())
 
 
+def inspection_failure_data(error, stager):
+    """Finite public source locations, never exception text or frame locals."""
+    kind = {Refused: "inspection-refused", ValueError: "value-error", TypeError: "type-error",
+            KeyError: "key-error", AttributeError: "attribute-error", RuntimeError: "runtime-error"}.get(type(error), "other")
+    if type(error) is vars(stager).get("Refused"): kind = "staging-refused"
+    number = None
+    if isinstance(error, OSError):
+        kind = "os-error"; value = OSError.errno.__get__(error)
+        if type(value) is int and 0 <= value <= 65535: number = value
+    origins = ((globals(), __file__, "macos_predecessor_inspection.py"),
+               (vars(stager), str(Path(__file__).with_name("stage_macos_installed.py")), "stage_macos_installed.py"))
+    frames, tb = [], BaseException.__traceback__.__get__(error)
+    for _ in range(32):
+        if tb is None: break
+        for namespace, path, name in origins:
+            if (tb.tb_frame.f_globals is namespace and namespace.get("__file__") == path
+                    and tb.tb_frame.f_code.co_filename == path and type(tb.tb_lineno) is int and 0 < tb.tb_lineno < 1000000):
+                frames.append({"file": name, "line": tb.tb_lineno}); frames = frames[-4:]
+                break
+        tb = tb.tb_next
+    return {"kind": kind, "errno": number, "locations": frames}
+
+
 def inspect(root, fd, original, context):
     work_end = time.monotonic() + 600; cleanup_end = work_end + 60
     raw, _ = read_at(fd, "acquisition.json", 8 * KIB, work_end)
@@ -526,7 +549,14 @@ def inspect(root, fd, original, context):
                 try: os.close(mounted)
                 except OSError as caught:
                     if error is None: error = caught
-    if error is not None: raise error
+    if error is not None:
+        # Only after the original cleanup attempt; this DATA never grants a
+        # detach/return/completion or replaces the retained first failure.
+        try:
+            print("MRK_PREDECESSOR_INSPECTION_FAILURE=" + encoded(inspection_failure_data(error, stager)).decode("ascii").rstrip("\n"),
+                  file=sys.stderr, flush=True)
+        except BaseException: pass
+        raise error
     need(returned is not None and [row["role"] for row in calls] == ["memory", "attach", "expand", "detach"]
          and all(row["returned"] and row["pipesClosed"] and row["returncode"] == 0 for row in calls), "inspection-incomplete")
     point(work_end); same_root(root, fd, original)
