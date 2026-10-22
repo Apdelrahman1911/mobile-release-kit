@@ -5,6 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub(crate) mod activity;
 #[path = "service_github_dispatch_protocol.rs"]
 pub(crate) mod dispatch;
+#[path = "service_counter_enrollment_protocol.rs"]
+pub(crate) mod enrollment;
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
@@ -48,10 +50,13 @@ pub(crate) enum Kind {
     CounterCreate,
     PublicationPending,
     CounterReconcile,
+    CounterEnrollmentReview,
+    CounterEnrollmentConnect,
 }
 impl Kind {
+    pub(crate) fn enrollment_family(self) -> bool { matches!(self, Self::CounterEnrollmentReview | Self::CounterEnrollmentConnect) }
     pub(crate) fn dispatch_family(self)->bool { matches!(self,Self::PreflightPrepare | Self::PreflightDispatch | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleaseDispatch | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::CounterCreate | Self::PublicationPending | Self::CounterReconcile) }
-    pub(crate) fn mutation(self)->bool { !matches!(self, Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
+    pub(crate) fn mutation(self)->bool { !matches!(self, Self::CounterEnrollmentReview | Self::SetupReconcile | Self::ActivityOverview | Self::PreflightPrepare | Self::PreflightPending | Self::PreflightObserve | Self::ReleasePrepare | Self::ReleasePending | Self::ReleaseObserve | Self::SetupPrepare | Self::CounterPrepare | Self::PublicationPending | Self::CounterReconcile) }
     pub(crate) fn prefix(self) -> &'static str {
         match self {
             Self::ActivityOverview => "github-activity-",
@@ -68,6 +73,7 @@ impl Kind {
             Self::CounterCreate => "github-publication-",
             Self::PublicationPending => "github-publication-",
             Self::CounterReconcile => "github-publication-",
+            Self::CounterEnrollmentReview | Self::CounterEnrollmentConnect => "version-enrollment-",
 
             Self::RepositoryCreate => "repository-create-",
             Self::DraftPrCreate | Self::PrCreate => "github-pull-request-",
@@ -91,6 +97,8 @@ impl Kind {
             Self::CounterCreate => "agent-counter-create-once-v1",
             Self::PublicationPending => "agent-publication-pending-once-v1",
             Self::CounterReconcile => "agent-counter-reconcile-once-v1",
+            Self::CounterEnrollmentReview => "agent-counter-enrollment-review-once-v1",
+            Self::CounterEnrollmentConnect => "agent-counter-enrollment-connect-once-v1",
 
             Self::RepositoryCreate => "agent-repository-create-once-v1",
             Self::DraftPrCreate => "agent-draft-pr-create-once-v1",
@@ -116,6 +124,8 @@ impl Kind {
             Self::CounterCreate => crate::service_protocol::Action::GitHubCounterCreate,
             Self::PublicationPending => crate::service_protocol::Action::GitHubPublicationPending,
             Self::CounterReconcile => crate::service_protocol::Action::GitHubCounterReconcile,
+            Self::CounterEnrollmentReview => crate::service_protocol::Action::GitHubCounterEnrollmentReview,
+            Self::CounterEnrollmentConnect => crate::service_protocol::Action::GitHubCounterEnrollmentConnect,
 
             Self::RepositoryCreate => crate::service_protocol::Action::GitHubRepositoryCreate,
             Self::DraftPrCreate => crate::service_protocol::Action::GitHubDraftPrCreate,
@@ -132,6 +142,7 @@ impl Kind {
         if self.mutation() { Effect::PotentiallyApplied } else { Effect::None }
     }
     pub(crate) fn operation(self, s: &str) -> bool {
+        if self.enrollment_family() { return hex(s, 32); }
         s.strip_prefix(self.prefix()).is_some_and(|n| {
             !n.is_empty()
                 && n.len() <= 20
@@ -184,6 +195,8 @@ pub(crate) enum Review {
     CounterCreate(PreparedReference),
     PublicationPending(dispatch::RequestReference),
     CounterReconcile(PendingReference),
+    CounterEnrollmentReview(enrollment::ReviewReference),
+    CounterEnrollmentConnect(enrollment::ConnectReference),
 
 }
 fn original(session: &str, revision: u32) -> bool {
@@ -227,6 +240,8 @@ impl Review {
             Self::CounterCreate(_) => Kind::CounterCreate,
             Self::PublicationPending(_) => Kind::PublicationPending,
             Self::CounterReconcile(_) => Kind::CounterReconcile,
+            Self::CounterEnrollmentReview(_) => Kind::CounterEnrollmentReview,
+            Self::CounterEnrollmentConnect(_) => Kind::CounterEnrollmentConnect,
 
         }
     }
@@ -246,6 +261,8 @@ impl Review {
     pub(crate) fn valid(&self) -> bool {
         match self {
             Self::ActivityOverview(v) => v.valid(),
+            Self::CounterEnrollmentReview(v) => v.valid(),
+            Self::CounterEnrollmentConnect(v) => v.valid(),
             Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.valid(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.valid(),
             Self::SetupReconcile(v) | Self::CounterReconcile(v) => original(&v.session_id, v.expected_revision) && hex(&v.marker, 32) && hex(&v.record_sha256, 64),
@@ -256,6 +273,8 @@ impl Review {
         // Same exact three string-allocation bounds as the original profile.
         match self {
             Self::ActivityOverview(v) => v.retained_fits(),
+            Self::CounterEnrollmentReview(v) => v.retained_fits(),
+            Self::CounterEnrollmentConnect(v) => v.retained_fits(),
             Self::PreflightPrepare(v) | Self::PreflightPending(v) | Self::ReleasePrepare(v) | Self::ReleasePending(v) | Self::SetupPrepare(v) | Self::CounterPrepare(v) | Self::PublicationPending(v) => v.retained_fits(),
             Self::PreflightObserve(v) | Self::ReleaseObserve(v) => v.retained_fits(),
             Self::SetupReconcile(v) | Self::CounterReconcile(v) => v.session_id.capacity() <= 128 && v.marker.capacity() <= 64 && v.record_sha256.capacity() <= 128,
@@ -358,9 +377,15 @@ pub(crate) enum Effect {
     BranchObserved,
     DraftPrObserved,
     CounterObserved,
+    LocalMappingObserved,
 }
 impl Effect {
     pub(crate) fn valid_for(self, k: Kind) -> bool {
+        if k.enrollment_family() { return match self {
+            Self::None => k == Kind::CounterEnrollmentReview,
+            Self::NotSent | Self::PotentiallyApplied | Self::LocalMappingObserved => k == Kind::CounterEnrollmentConnect,
+            _ => false,
+        }; }
         if k.dispatch_family() { return match self {
             Self::None=>!k.mutation(),
             Self::NotSent|Self::PotentiallyApplied=>k.mutation(),
@@ -370,7 +395,7 @@ impl Effect {
             _=>false,
         }; }
         match self {
-            Self::CounterObserved=>false,
+            Self::CounterObserved | Self::LocalMappingObserved=>false,
             Self::None => matches!(k, Kind::SetupReconcile | Kind::ActivityOverview),
             Self::NotSent | Self::PotentiallyApplied => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupPublish),
             Self::Unresolved => matches!(k, Kind::RepositoryCreate | Kind::DraftPrCreate | Kind::PrCreate | Kind::FailedJobsRetry | Kind::SetupReconcile),
@@ -420,7 +445,7 @@ pub(crate) struct Status {
 }
 impl Status {
     pub(crate) fn limit(&self) -> usize {
-        if self.review.kind() == Kind::ActivityOverview || self.review.kind().dispatch_family() { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
+        if self.review.kind() == Kind::ActivityOverview || self.review.kind().dispatch_family() || self.review.kind().enrollment_family() { activity::RESPONSE_LIMIT } else { STATUS_LIMIT }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let snapshot_valid = match (&self.review, &self.snapshot) {
@@ -431,6 +456,8 @@ impl Status {
             _ => false,
         };
         let result_valid = match &self.result {
+            Some(dispatch::Snapshot::Enrollment(result)) => self.snapshot.is_none()
+                && result.valid_row(self.review.kind(), self.state, self.operation_id.as_deref(), self.effect),
             Some(result)=>self.snapshot.is_none() && self.state==State::Complete && result.valid_for(self.review.kind()),
             None=>self.state!=State::Complete || !dispatch::requires_result(self.review.kind()),
         };
@@ -442,6 +469,7 @@ impl Status {
             || !(1..u32::MAX).contains(&self.revision)
             || !self.do_not_replay
             || !self.effect.valid_for(self.review.kind())
+            || self.effect == Effect::LocalMappingObserved && self.state != State::Complete
             || self
                 .operation_id
                 .as_ref()

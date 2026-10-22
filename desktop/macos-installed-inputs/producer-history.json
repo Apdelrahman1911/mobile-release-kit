@@ -2,8 +2,35 @@
   "schemaVersion": 1,
   "targets": {
     "aarch64-apple-darwin": {
-      "acceptedPredecessors": [],
-      "signingPolicies": []
+      "acceptedPredecessors": [
+        {
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "inventorySha256": "9ba42c36e3b4f332e64300ce6de881b220886b5454335065813c3c40add4d586",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "packageSha256": "98edbc4f965800be699972db523e6a25c9b47a6051068b2bcf02a5c173a7720a",
+          "packageVersion": "0.1.2",
+          "profile": "fixed-macos26-arm64-maintenance-v2",
+          "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+          "release": "macos26-arm64-desktop-02",
+          "runtimeManifestSha256": "4b45dc85aac03b7b5883045d89e8bd6f8ea642d5368d715a45ec84e807509c1c",
+          "signingPolicySha256": "c33cb173b7cb29c3ee82d6265e2c2eb720e3b9e2de0e4da0c173150734fedacb",
+          "sourceCommit": "bf9d397bde641aae4b4cd205f3c962e899557650"
+        }
+      ],
+      "signingPolicies": [
+        {
+          "policy": {
+            "entitlements": "empty",
+            "hardenedRuntime": true,
+            "kind": "mrk-macos-developer-id-code-policy-v1",
+            "leafCertificateSha1": "5effa7d19bbe005b19c1617833cbe22186c2af96",
+            "leafCertificateSha256": "e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72",
+            "schemaVersion": 1,
+            "teamIdentifier": "7CGZ2343AA"
+          },
+          "sha256": "c33cb173b7cb29c3ee82d6265e2c2eb720e3b9e2de0e4da0c173150734fedacb"
+        }
+      ]
     },
     "x86_64-apple-darwin": {
       "acceptedPredecessors": [],

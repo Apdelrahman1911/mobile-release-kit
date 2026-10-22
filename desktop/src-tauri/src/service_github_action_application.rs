@@ -70,6 +70,7 @@ mod tests {
 
     #[test]
     fn copied_status_presend_rechecks_project_alias_and_same_read_grant() {
+        for kind in [wire::Kind::RepositoryCreate, wire::Kind::CounterEnrollmentReview, wire::Kind::CounterEnrollmentConnect] {
         // Actual original Service/private StatePort; no socket, native owner,
         // provider or Desktop consent is entered. Only the queued metadata
         // scope is inert DATA. In particular there is no retirement receipt.
@@ -94,12 +95,20 @@ mod tests {
             point.saved.device,
             point.saved.inode,
             point.saved.revision,
-            wire::Review::from_prepared(wire::Kind::RepositoryCreate, wire::PreparedReference {
-                session_id: "github-connection-1".into(),
-                consent_id: "a".repeat(32),
-                expected_revision: 1,
-                prepared_sha256: "b".repeat(64),
-            }).unwrap(),
+            match kind {
+                wire::Kind::CounterEnrollmentReview => wire::Review::CounterEnrollmentReview(wire::enrollment::ReviewReference {
+                    session_id: "github-connection-1".into(), expected_revision: 1,
+                    expected_connection_revision: 3, request_sha256: "b".repeat(64),
+                }),
+                wire::Kind::CounterEnrollmentConnect => wire::Review::CounterEnrollmentConnect(wire::enrollment::ConnectReference {
+                    session_id: "github-connection-1".into(), expected_revision: 1,
+                    expected_connection_revision: 3, review_id: "a".repeat(32), review_sha256: "b".repeat(64),
+                }),
+                _ => wire::Review::from_prepared(kind, wire::PreparedReference {
+                    session_id: "github-connection-1".into(), consent_id: "a".repeat(32),
+                    expected_revision: 1, prepared_sha256: "b".repeat(64),
+                }).unwrap(),
+            },
             Arc::new(()),
             Instant::now() + Duration::from_secs(20),
             point.read,
@@ -146,7 +155,7 @@ mod tests {
         assert_eq!(view.origin, origin);
         assert_eq!(view.state, wire::State::Queued);
         assert!(view.operation_id.is_none());
-        assert_eq!(view.effect, wire::Effect::NotSent);
+        assert_eq!(view.effect, kind.initial_effect());
         assert_eq!(view.settlement, p::Settlement::Pending);
         let presend = |client: &ClientSession| {
             service.android_tools_client_current(client, &view.origin.project_id)
@@ -202,13 +211,34 @@ mod tests {
         assert_eq!(next.reason, wire::Reason::PermissionRevoked);
         assert_eq!(next.state, wire::State::Stopping);
         assert!(next.operation_id.is_none());
-        assert_eq!(next.effect, wire::Effect::NotSent);
+        assert_eq!(next.effect, kind.initial_effect());
         assert_eq!(next.settlement, p::Settlement::Pending);
         assert_eq!(service.github_action_requests().entries().unwrap().len(), 1);
         let after = store.read(Namespace::Projects).unwrap();
         assert_eq!(before.revision, after.revision);
         assert_eq!(before.bytes, after.bytes);
+        if kind.enrollment_family() {
+            // The stopped, unclaimed precursor follows the real nonentry
+            // relay path and writes ONLY the existing durable operation DATA.
+            // No native Control/receipt is created by this fixture.
+            let caller = service.github_action_requests().claim().unwrap().unwrap();
+            let entry = caller.entry().clone();
+            caller.returned(Err(wire::Reason::PermissionRevoked));
+            let history = entry.claim_history().unwrap().unwrap();
+            let result = service.begin_operation("project-1", origin.request_id.clone(),
+                kind.action(), history.fact.state(), history.fact.settlement());
+            history.returned(result).unwrap();
+            assert!(entry.status().unwrap().never_admitted);
+            assert_eq!(entry.status().unwrap().settlement, p::Settlement::Settled);
+            let state = service.state.lock().unwrap();
+            let recorded = state.saved.operations.iter().find(|v| v.operation_id == origin.request_id).unwrap();
+            assert_eq!(recorded.action, kind.action());
+            assert_eq!(recorded.state, p::OperationState::Cancelled);
+            assert_eq!(recorded.settlement, p::Settlement::Settled);
+            assert!(serde_json::to_vec(recorded).unwrap().len() < 255);
+        }
         service.stop().unwrap();
         store.close().unwrap();
+        }
     }
 }

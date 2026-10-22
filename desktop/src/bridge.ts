@@ -110,6 +110,7 @@ import { createApplePreparationPort } from './agentApplePreparation.ts';
 import { createAppleCliPort } from './agentAppleProvisioning.ts';
 import { createAgentStoreAccessPort } from './agentStoreAccess.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+import { createAgentVersionEnrollmentPort } from './agentVersionEnrollment.ts';
 import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
 import { createGitHubActivityPort } from './githubActivityProtocol.ts';
 import { createGitHubPullRequestPort } from './githubPullRequestProtocol.ts';
@@ -449,6 +450,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentLocalHistory: mode === 'native' ? createAgentLocalHistoryPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentVersionEnrollment: mode === 'native' ? createAgentVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     githubPullRequest: createGitHubPullRequestPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),

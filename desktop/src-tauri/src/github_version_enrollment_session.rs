@@ -108,6 +108,17 @@ impl ConnectionState {
             credential_end: private.clock.end,
         })
     }
+    /// Read-only capture from the SAME verified private Connection. No token
+    /// leaves its existing owner and no staged approval is consumed here.
+    pub(crate) fn capture_version_enrollment_pins(&self, project: &str, generation: u32,
+        binding: &str, session: &str, revision: u32, now: Instant) -> Result<Pins, BridgeError> {
+        if self.status.revision != revision || self.native_work_pending() || self.enrollment.is_some() {
+            return Err(p::refused(p::Reason::TargetChanged));
+        }
+        let pins = self.enrollment_pins(project, generation, binding, now)?;
+        if pins.session_id != session { return Err(p::refused(p::Reason::TargetChanged)); }
+        Ok(pins)
+    }
     pub(crate) fn begin_version_enrollment(
         &mut self,
         project_id: &str,
@@ -297,10 +308,32 @@ mod tests {
             .registration()
             .map(|(id, g)| (id.to_owned(), g))
             .unwrap();
+        let session = state.private.as_ref().unwrap().id.clone();
+        let revision = state.status.revision;
+        let binding = "a".repeat(64);
+        let captured = state.capture_version_enrollment_pins(
+            &id, generation, &binding, &session, revision, now).unwrap();
+        assert!(state.enrollment.is_none() && !state.native_work_pending());
+        for (g, s, r, at) in [
+            (generation + 1, session.clone(), revision, now),
+            (generation, format!("{session}-other"), revision, now),
+            (generation, session.clone(), revision + 1, now),
+            (generation, session.clone(), revision, captured.credential_end),
+        ] {
+            assert!(state.capture_version_enrollment_pins(&id, g, &binding, &s, r, at).is_err());
+        }
+        state.private.as_mut().unwrap().account_pin = Some("12".into());
+        assert!(state.capture_version_enrollment_pins(&id, generation, &binding, &session, revision, now).is_err());
+        state.private.as_mut().unwrap().account_pin = Some("11".into());
+        state.private.as_mut().unwrap().repository_pin = Some("23".into());
+        assert!(state.capture_version_enrollment_pins(&id, generation, &binding, &session, revision, now).is_err());
+        state.private.as_mut().unwrap().repository_pin = Some("22".into());
         let control = Arc::new(VersionEnrollmentControl::new());
         let pins = state
             .begin_version_enrollment(&id, generation, &"a".repeat(64), control.clone(), None, now)
             .unwrap();
+        assert!(pins == captured);
+        assert!(state.capture_version_enrollment_pins(&id, generation, &binding, &session, revision, now).is_err());
         assert!(state.native_work_pending());
         state
             .version_enrollment_current(&pins, &control, now)

@@ -47,7 +47,7 @@ def nomination():
                    "bundleIdentifier": STAGER.BUNDLE_ID, "packageVersion": "0.1.1", "release": "macos26-" + arch + "-desktop-01",
                    "sourceCommit": "a" * 40, "protocolSha256": STAGER.CURRENT_PROTOCOL, "runtimeManifestSha256": "7" * 64,
                    "inventorySha256": "6" * 64, "signingPolicySha256": policy_hash, "packageSha256": "3" * 64},
-               "signingPolicy": {"sha256": policy_hash, "policy": policy}, "qualificationEvidenceSha256": "8" * 64}
+               "signingPolicy": {"sha256": policy_hash, "policy": policy}, "publicControlsSha256": "8" * 64}
         row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
         result["targets"][target] = row
     return result
@@ -243,19 +243,29 @@ class UpdateDataTests(unittest.TestCase):
                 with self.subTest(target=target, fault=fault), self.assertRaises((ValueError, STAGER.Refused)):
                     read(body)
 
-    def test_closed_nomination_requires_real_independent_qualified_source(self):
+    def test_closed_nomination_requires_source_controls_and_independent_release(self):
         source = nomination()
         for target in DATA.TARGETS:
             self.assertEqual(DATA.nomination_data(source, target, STAGER), source["targets"][target])
         with self.assertRaisesRegex(ValueError, "unconfigured"):
             DATA.nomination_data({"schemaVersion": 1, "mode": "unconfigured"}, DATA.TARGETS[0], STAGER)
         for key, value in (("source", "a" * 39), ("artifactId", "0"), ("artifactBytes", True),
-                           ("qualificationEvidenceSha256", "0" * 64), ("resources", {"reviewed": False}),
+                           ("publicControlsSha256", "0" * 64), ("resources", {"reviewed": False}),
                            ("package", {"name": "../Install.pkg", "bytes": 100, "sha256": "3" * 64})):
             bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]][key] = value
             with self.assertRaises((ValueError, STAGER.Refused)): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
         bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]]["members"] *= 2
         with self.assertRaises(ValueError): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        # The reference labels actual public DATA, not a historical qualification.
+        # Old-only, both-key, missing and malformed spellings cannot become an alias.
+        for fault in ("old-only", "both", "missing", "malformed"):
+            bad = copy.deepcopy(source); row = bad["targets"][DATA.TARGETS[0]]
+            if fault == "old-only": row["qualificationEvidenceSha256"] = row.pop("publicControlsSha256")
+            elif fault == "both": row["qualificationEvidenceSha256"] = row["publicControlsSha256"]
+            elif fault == "missing": del row["publicControlsSha256"]
+            else: row["publicControlsSha256"] = "not-public-controls"
+            with self.subTest(provenance=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
         self.assertEqual(DATA.REPOSITORY, "Apdelrahman1911/mobile-release-kit")
         # Installed-only carrier retention keeps one binary image and one
         # finite binding in the existing flat contract; neither qualifies P0.
@@ -292,6 +302,37 @@ class UpdateDataTests(unittest.TestCase):
                     DATA.nomination_data(bad, target, STAGER)
         # The mounted package parser never acquires the new artifact path grant.
         with self.assertRaises(ValueError): DATA.member_data(source["targets"][DATA.TARGETS[0]]["image"])
+
+    def test_target_subset_requires_the_selected_platform_and_validates_every_supplied_row(self):
+        source = nomination()
+        for target in DATA.TARGETS:
+            with self.subTest(single_target=target):
+                single = copy.deepcopy(source)
+                single["targets"] = {target: single["targets"][target]}
+                self.assertEqual(DATA.nomination_data(single, target, STAGER), single["targets"][target])
+                missing = next(value for value in DATA.TARGETS if value != target)
+                with self.assertRaisesRegex(ValueError, "update-source-target-unconfigured"):
+                    DATA.nomination_data(single, missing, STAGER)
+        for targets in ({}, {"unsupported-platform": source["targets"][DATA.TARGETS[0]]},
+                        {**source["targets"], "unsupported-platform": source["targets"][DATA.TARGETS[0]]}):
+            with self.subTest(targets=tuple(targets)):
+                bad = copy.deepcopy(source)
+                bad["targets"] = targets
+                with self.assertRaisesRegex(ValueError, "update-nomination-fields"):
+                    DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        # The unselected platform remains fully checked, including the exact
+        # release tuple, signing policy and resource bounds—not just its keys.
+        for fault in ("row", "identity", "release", "signing", "resources"):
+            with self.subTest(unselected_fault=fault):
+                bad = copy.deepcopy(source)
+                row = bad["targets"][DATA.TARGETS[1]]
+                if fault == "row": row["extra"] = True
+                elif fault == "identity": row["artifactSha256"] = "0" * 64
+                elif fault == "release": row["release"]["sourceCommit"] = "b" * 40
+                elif fault == "signing": row["signingPolicy"]["policy"]["hardenedRuntime"] = False
+                else: row["resources"]["additionalDiskBytes"] = 1
+                with self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
 
     def test_complete_artifact_originals_keep_nested_namespaces_and_post(self):
         # Real existing descriptor-bound owner IO, hashes, POST and consuming

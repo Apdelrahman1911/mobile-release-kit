@@ -5,6 +5,8 @@ use crate::{service_upload_key_protocol as agent, service_upload_key_requests as
 use crate::asset_session::vault::backup_delegation;
 #[path = "credential_upload_key_reuse.rs"]
 mod reuse;
+#[path = "credential_cli_delegation.rs"]
+pub(in crate::asset_session) mod credential;
 
 pub(in crate::asset_session) struct Proof {
     context: Weak<NativeContext>,
@@ -280,6 +282,7 @@ pub(in crate::asset_session) fn capture_qualified(document: &DocumentBinding, st
         agent::Selection::BackupEncrypted { .. } | agent::Selection::RestoreEncrypted { .. } => {
             Selected::Backup(backup_delegation::Selection::capture_qualified(document, state, selected, qualification)?)
         }
+        _ => return Err(AssetError::new(Reason::SourceRefused)),
     };
     let proof = Proof {
         context: Arc::downgrade(context),

@@ -75,6 +75,10 @@ Usage:\n\
   mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
   mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk credential-scope PROJECT_ID [--json]\n\
+  mrk credential-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n\
+  mrk credential-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk credential-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk metadata-images-read PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk metadata-images-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID --stdin [--json]\n\
   mrk metadata-images-scope PROJECT_ID [--json]\n\
@@ -184,6 +188,8 @@ iOS uses the same four archive commands for unsigned archive, signed export, or 
 The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
 Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
 Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
+Supported changes: source branches, enabled Android/iOS build selections, or metadata root/languages (32 total across both platforms; no asset creation/move/upload).\n\
+configuration-read requires fresh format-valid saved settings. Use observe PROJECT_ID --json for existing saved state/setup guidance; fix missing/invalid settings or refresh stale/unavailable observations in Desktop. Omitted metadata is not a default.\n\
 Release-project initialization uses the running Desktop's explicit valid draft and toolkit selection, not CLI paths/JSON or Git init. Full native preview and separate Apply consent are required; differing existing targets refuse, recovery stays in Desktop.\n\
 No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
 Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
@@ -333,8 +339,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "metadataImages":{"commands":["metadata-images-read","metadata-images-prepare","metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":false,"nativeOpenedCliProfileOnly":true,"read":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":true,"recovery":false,"storeUpload":false,"headless":false},
             "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
             "initialization":{"commands":["initialization-prepare","initialization-apply","initialization-status","initialization-cancel"],"arguments":"see --help","requiresSelectedDesktopDraftAndToolkit":true,"readAuthorizesPrepareOnly":true,"applyRequiresSeparateNativePreviewConsent":true,"existingTargetOverwrite":false,"recovery":false,"headless":false,"nativeAvailabilityChecked":false},
-            "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection"],
+            "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection","metadata-root-locales"],
                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
+                "requiresFreshFormatValidSavedConfiguration":true,"metadataLocalesTotal":32,"metadataAssetsChanged":false,"configurationRepair":false,
                 "excludes":["identity","version","enabled-platforms","commands","credentials","signing","recovery"],"nativeAvailabilityChecked":false},
             "gitIndex": {"scope":"desktop-selected-stage-or-unstage", "defaultEnabled":false,"oneUse":true,
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
@@ -348,9 +355,9 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "oldCleanupGrantAuthorizes":false,"tagTriggeredBuilds":false,"force":false,"automaticRetry":false,
                 "dispatchAcknowledgementIsTagReceipt":false,"nativeAvailabilityChecked":false},
             "githubActions":{"scope":"one-desktop-approved-github-action-or-activity-read","commands":github_action::COMMANDS,
-                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview","preflight-prepare","preflight-dispatch","preflight-pending","preflight-observe","release-prepare","release-dispatch","release-pending","release-observe","setup-prepare","counter-prepare","counter-create","publication-pending","counter-reconcile"],"defaultEnabled":false,"oneUse":true,
+                "kinds":["repository-create","draft-pr-create","pr-create","failed-jobs-retry","setup-publish","setup-reconcile","activity-overview","preflight-prepare","preflight-dispatch","preflight-pending","preflight-observe","release-prepare","release-dispatch","release-pending","release-observe","setup-prepare","counter-prepare","counter-create","publication-pending","counter-reconcile","counter-enrollment-review","counter-enrollment-connect"],"defaultEnabled":false,"oneUse":true,
                 "requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresExactDesktopConsent":true,
-                "mutating":true,"readOnlyKinds":["setup-reconcile","activity-overview","preflight-pending","preflight-observe","release-pending","release-observe","publication-pending","counter-reconcile"],"counterSetup":true,"firstCounterOnly":true,"counterPrepareMayCreateLocalState":true,"cliPendingLoad":true,
+                "mutating":true,"readOnlyKinds":["setup-reconcile","activity-overview","preflight-pending","preflight-observe","release-pending","release-observe","publication-pending","counter-reconcile","counter-enrollment-review"],"counterEnrollment":{"reviewRequiresSeparateConsent":true,"connectRequiresNewConsent":true,"explicitCheckAfterSubmit":true,"reviewGrantWithdrawalBeforeConnect":true,"localMappingOnly":true,"counterCreation":false,"reservation":false,"automaticConnect":false},"counterSetup":true,"firstCounterOnly":true,"counterPrepareMayCreateLocalState":true,"cliPendingLoad":true,
                 "cliPrepare":true,"prepareKinds":["preflight-prepare","release-prepare","counter-prepare","setup-prepare"],"prepareAuthorizesDispatch":false,"privateArguments":false,"readGrantAuthorizesWrites":false,
                 "normalPrCreation":true,"merge":false,"workflowDispatch":true,"dispatchMayRunProjectCode":true,"automaticRetry":false,"nativeAvailabilityChecked":false,"freshActivityOverview":true,"activityReadRequiresSeparateConsent":true,"activityRowsPerSection":30,"activityIncludesHeadsJobsLogsArtifacts":false},
             "playCleanup": {"scope":"desktop-reviewed-known-id-hosted-cleanup","commands":play_cleanup::COMMANDS,
@@ -364,6 +371,11 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "backupRestoreScope":"android-keystore-only","restoreNewUnassigned":true,"implicitAssignment":false,
                 "rememberAssignment":false,"recoveryAcknowledgment":false,
                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
+            "credentials":{"actions":["credential-import-prepared","credential-assess-existing","credential-assign-reviewed"],
+                "commands":upload_key::CREDENTIAL_COMMANDS,"namespace":"android-upload-key","sharedInbox":"androidUploadKey","maxRetainedRequestsShared":crate::service_upload_key_protocol::REQUEST_LIMIT,
+                "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,"requiresSeparateExactDesktopConsent":true,
+                "desktopChooseAndPrivateFieldsRequired":true,"cliChoose":false,"headless":false,"preparedImportNewOnly":true,"freshAssessmentBeforeAssignment":true,
+                "privateArguments":false,"automaticFollowOn":false,"replace":false,"rememberAssignment":false,"accountVerification":false,"nativeAvailabilityChecked":false},
             "appleProvisioning":{"scope":"one-desktop-selected-preparation-or-prepared-apple-step","commands":apple_provisioning::COMMANDS,
                 "modeCount":16,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":true,"prepareRequiresDesktopSelection":true,"prepareIsStart":false,"headless":false,
                 "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
@@ -436,10 +448,11 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Later Execute and current/recovery/readiness Reconcile preparation also retain the exact original intent and credentials, without HTTP; a fresh separate Start approves only the reviewed promotion/draft/submission or readback/checkpoint. Checkpoints do not prove earlier finality or permit retry. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
-        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop permission and IDs only. Prepare ordinary five-file setup, preflight/release or FIRST Counter through the original owner; separately approve Publish, Dispatch or Create. Pending/Observe/Reconcile never resend. No token/URL/file payloads; remote settings and local workflow editing remain Desktop-only. Uncertain requests must not be replayed.\n");
+        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop permission and IDs only. Prepare ordinary five-file setup, preflight/release or FIRST Counter through the original owner; separately approve Publish, Dispatch or Create. Pending/Observe/Reconcile never resend. Counter enrollment uses separate Review and Connect permissions. After each github-submit, Check its retained Desktop permission to run it once. After the original Review/caller/history return, Revoke and Check that old permission before approving a fresh Connect. Connect saves only this computer’s mapping to that exact reviewed counter/account; it neither creates a counter nor reserves a version. No token/URL/file payloads; remote settings and local workflow editing remain Desktop-only. Uncertain requests must not be replayed.\n");
         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("  mrk credential-scope PROJECT_ID [--json]\n  mrk credential-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk credential-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk credential-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("  mrk version-reserve-review PROJECT_ID SERVICE_INSTANCE --stdin [--json]\n  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
@@ -749,6 +762,16 @@ mod tests {
         assert_eq!(value["protocolVersion"], p::VERSION);
         assert_eq!(value["scope"], "compiled-interface");
         assert_eq!(value["runtimeChecked"], false);
+        let credentials = &value["credentials"];
+        assert_eq!(credentials["actions"], serde_json::json!(["credential-import-prepared", "credential-assess-existing", "credential-assign-reviewed"]));
+        assert_eq!(credentials["commands"], serde_json::json!(upload_key::CREDENTIAL_COMMANDS));
+        assert_eq!(credentials["maxRetainedRequestsShared"], value["androidUploadKey"]["maxRetainedRequests"]);
+        for field in ["defaultEnabled", "cliChoose", "headless", "privateArguments", "automaticFollowOn", "replace", "rememberAssignment", "accountVerification", "nativeAvailabilityChecked"] {
+            assert_eq!(credentials[field], false);
+        }
+        for field in ["desktopChooseAndPrivateFieldsRequired", "preparedImportNewOnly", "freshAssessmentBeforeAssignment", "requiresSeparateExactDesktopConsent"] {
+            assert_eq!(credentials[field], true);
+        }
         assert_eq!(value["supportsDirectMutationCommands"], false);
         assert_eq!(value["supportsNamedProjectExecution"], true);
         assert_eq!(value["localChecks"]["oneUse"], true);

@@ -115,6 +115,109 @@ fn relative(s: &str) -> bool {
         && s.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
+// Exact core metadata vocabulary (config.py), with this CLI's additional
+// finite 32-total/2KiB profile. These are values, never path handles.
+fn metadata_root(s: &str) -> bool {
+    fn core_space(c: char) -> bool {
+        c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+    }
+    !s.is_empty()
+        && s.len() <= 4 * 512
+        && s.chars().count() <= 512
+        && s.chars().any(|c| !core_space(c))
+        && !s.contains(['\0', '\n', '\r', '\\'])
+        && !s.starts_with('/')
+        && !(s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && s.as_bytes().get(1) == Some(&b':'))
+        && s.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
+}
+fn locale(s: &str) -> bool {
+    let mut parts = s.split('-');
+    let language = parts.next().unwrap_or("");
+    if !(2..=3).contains(&language.len()) || !language.bytes().all(|c| c.is_ascii_lowercase()) {
+        return false;
+    }
+    let mut region = parts.next();
+    if region.is_some_and(|p| {
+        p.len() == 4
+            && p.as_bytes()[0].is_ascii_uppercase()
+            && p.as_bytes()[1..].iter().all(u8::is_ascii_lowercase)
+    }) {
+        region = parts.next();
+    }
+    region.is_none_or(|p| {
+        p.len() == 2 && p.bytes().all(|c| c.is_ascii_uppercase())
+            || p.len() == 3 && p.bytes().all(|c| c.is_ascii_digit())
+    }) && parts.next().is_none()
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Metadata {
+    // Fixed admitted DATA, not growable collections. Boxed strings/slices
+    // retain their actual lengths across all five original Row copies.
+    pub root: Box<str>,
+    pub android_locales: Box<[Box<str>]>,
+    pub ios_locales: Box<[Box<str>]>,
+}
+impl Metadata {
+    fn valid(&self) -> bool {
+        metadata_root(&self.root)
+            && self
+                .android_locales
+                .len()
+                .saturating_add(self.ios_locales.len())
+                <= 32
+            && [&self.android_locales, &self.ios_locales]
+                .into_iter()
+                .all(|values| {
+                    values.len() <= 32
+                        && values
+                            .iter()
+                            .enumerate()
+                            .all(|(n, value)| locale(value) && !values[..n].contains(value))
+                })
+            && bounded(self, CHANGE_BYTES - b"\"kind\":\"metadata\",".len()).is_ok()
+    }
+    fn valid_for(&self, android: bool, ios: bool) -> bool {
+        self.valid()
+            && (!android || !self.android_locales.is_empty())
+            && (!ios || !self.ios_locales.is_empty())
+    }
+    fn from_value(value: &Value, android: bool, ios: bool) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.len() != 3 {
+            return None;
+        }
+        let root = object.get("root")?.as_str()?;
+        let a = object.get("androidLocales")?.as_array()?;
+        let i = object.get("iosLocales")?.as_array()?;
+        // Bound all borrowed data BEFORE allocating its typed copy. An absent
+        // projection never means an absent/default metadata configuration.
+        if !metadata_root(root)
+            || a.len().saturating_add(i.len()) > 32
+            || a.iter().chain(i).any(|v| !v.as_str().is_some_and(locale))
+        {
+            return None;
+        }
+        let result = Self {
+            root: root.into(),
+            android_locales: a
+                .iter()
+                .map(|v| Box::<str>::from(v.as_str().unwrap()))
+                .collect(),
+            ios_locales: i
+                .iter()
+                .map(|v| Box::<str>::from(v.as_str().unwrap()))
+                .collect(),
+        };
+        result.valid_for(android, ios).then_some(result)
+    }
+}
+fn optional_metadata<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Metadata>, D::Error> {
+    // Missing is the old projection. Explicit null is not an omission.
+    Metadata::deserialize(d).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Source {
@@ -166,6 +269,8 @@ pub struct Settings {
     pub android: Option<Android>,
     #[serde(deserialize_with = "nullable")]
     pub ios: Option<Ios>,
+    #[serde(default, deserialize_with = "optional_metadata", skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Metadata>,
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), Error> {
@@ -182,6 +287,7 @@ impl Settings {
                         .as_deref()
                         .is_some_and(|s| !text(s, 255))
             })
+            || self.metadata.as_ref().is_some_and(|m| !m.valid_for(self.android.is_some(), self.ios.is_some()))
         {
             return Err(Error::InvalidRequest);
         }
@@ -238,12 +344,17 @@ impl Settings {
             }
             None => return Err(Error::Conflict),
         };
-        let result = Self {
+        let mut result = Self {
             source,
             android,
             ios,
+            metadata: None,
         };
         result.validate()?;
+        result.metadata = Metadata::from_value(&base["metadata"], result.android.is_some(), result.ios.is_some());
+        // Preserve the old three-group reader even if an otherwise valid
+        // metadata value cannot fit the same original projection ceiling.
+        if result.validate().is_err() { result.metadata = None; }
         Ok(result)
     }
 }
@@ -269,6 +380,7 @@ pub enum Change {
         scheme: String,
         archive_configuration: String,
     },
+    Metadata(Metadata),
 }
 impl std::fmt::Debug for Change {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -291,6 +403,7 @@ impl Change {
                 scheme,
                 archive_configuration,
             } => container.valid() && text(scheme, 255) && text(archive_configuration, 255),
+            Self::Metadata(m) => m.valid(),
         };
         if !valid {
             return Err(Error::InvalidRequest);
@@ -304,6 +417,11 @@ impl Change {
         self.validate()?;
         derivation_bound(base)?;
         let prior = Settings::from_base(base)?;
+        if let Self::Metadata(m) = self {
+            if prior.metadata.is_none() || !m.valid_for(prior.android.is_some(), prior.ios.is_some()) {
+                return Err(Error::Conflict);
+            }
+        }
         let mut next = base.clone();
         match self {
             Self::Source {
@@ -342,8 +460,14 @@ impl Change {
                     Value::String(archive_configuration.clone()),
                 );
             }
+            Self::Metadata(m) => {
+                next["metadata"] = serde_json::to_value(m).map_err(|_| Error::InvalidRequest)?;
+            }
         }
-        Settings::from_base(&next)?;
+        let after = Settings::from_base(&next)?;
+        if matches!(self, Self::Metadata(m) if after.metadata.as_ref() != Some(m)) {
+            return Err(Error::Conflict);
+        }
         Ok(next)
     }
 }
@@ -548,7 +672,14 @@ impl Status {
             c.validate()?
         }
         if let Some(r) = &self.review {
-            r.validate()?
+            r.validate()?;
+            if let Some(Change::Metadata(m)) = &self.change {
+                if r.before.metadata.is_none() || r.after.metadata.as_ref() != Some(m)
+                    || r.before.source != r.after.source || r.before.android != r.after.android
+                    || r.before.ios != r.after.ios {
+                    return Err(Error::InvalidRequest);
+                }
+            }
         }
         bounded(self, STATUS_BYTES)
     }

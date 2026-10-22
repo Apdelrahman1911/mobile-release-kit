@@ -113,6 +113,9 @@ pub(super) fn human(s: &c::Status) -> String {
             out.push_str(&value);
             out.push('\n')
         }
+        if settings.metadata.is_none() {
+            out.push_str("Listing settings were not projected; this does not mean missing values or defaults. Use Desktop for metadata outside the bounded CLI profile after this original settles.\n");
+        }
     }
     if let Some(r) = &s.review {
         out.push_str("Exact safe-settings comparison (all other fields preserved):\n");
@@ -141,6 +144,7 @@ pub(super) fn human(s: &c::Status) -> String {
     if s.result.as_ref().is_some_and(c::Final::saved) {
         out.push_str("Original native save settled. A newer or dirty Desktop draft is preserved as a conflict.\n")
     }
+    out.push_str("Metadata changes update listing-root/language settings only; they do not create, move or upload listing files.\n");
     out.push_str("No identity, version, enabled-platform, command, signing, credential, recovery or release-readiness changes are authorized here.\n");
     out
 }
@@ -175,6 +179,27 @@ fn unconfirmed(q: &c::Query, json: bool) -> (u8, Vec<u8>) {
     bytes.push(b'\n');
     (6, bytes)
 }
+fn configuration_error(error: Error, json: bool) -> Vec<u8> {
+    if error != Error::InvalidRequest {
+        return error_bytes(error, json);
+    }
+    // Fixed guidance only; never echo stdin, a path or an exception. The same
+    // error code/envelope and all old routes are retained.
+    const MESSAGE: &str = "Invalid or unsupported configuration CLI profile. Use one source, enabled-Android, enabled-iOS, or metadata change. Metadata requires root/androidLocales/iosLocales, at most 32 locales TOTAL, valid enabled-platform lists, and at most 2048 encoded bytes. Omitted metadata is not a default. See mrk --help; use Desktop for unsupported settings after the original settles.";
+    if json {
+        let mut bytes = serde_json::to_vec(
+            &serde_json::json!({"version":p::VERSION,"ok":false,"error":error,"message":MESSAGE}),
+        )
+        .unwrap_or_else(|_| error_bytes(error, true));
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        bytes
+    } else {
+        format!("{MESSAGE}\n").into_bytes()
+    }
+}
+
 fn execute(parsed: Parsed) -> Result<(u8, Vec<u8>), Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -258,7 +283,7 @@ pub(super) fn run(args: Vec<OsString>) -> u8 {
     let json = args.iter().any(|s| s == "--json");
     let (code, bytes) = parse(&args)
         .and_then(execute)
-        .unwrap_or_else(|e| (exit_code(e), error_bytes(e, json)));
+        .unwrap_or_else(|e| (exit_code(e), configuration_error(e, json)));
     if std::io::stdout().write_all(&bytes).is_err() {
         6
     } else {

@@ -2007,7 +2007,7 @@ jobs:
           (root / "update-predecessor").mkdir(mode=0o700)
           PY_UPDATE_SPACE
 
-      - name: Download only SOURCE-nominated qualified predecessor DATA
+      - name: Download only SOURCE-nominated predecessor DATA
         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'
         timeout-minutes: 5
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -2021,7 +2021,7 @@ jobs:
           digest-mismatch: error
           skip-decompress: 'false'
 
-      - name: Install the exact qualified predecessor once before the existing current Installer original
+      - name: Install the exact predecessor once before the existing current Installer original
         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'
         id: update_baseline
         timeout-minutes: 9

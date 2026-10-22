@@ -253,6 +253,8 @@ pub(super) struct SlotData {
     upload_key_new_published: bool,
     apple_profile_new_published: bool,
     upload_key_context: Option<(u32, StoredRef)>,
+    // Fixed same-NEW descriptor comparison; no plaintext/source or assignment authority.
+    credential_import: Option<upload_key_controls::delegation::credential::ImportStamp>,
     upload_key_recovery: Option<Arc<upload_key_recovery::Completion>>,
     // Nonsecret current-display stamp; the ordinary private working reference
     // is cleared by retirement. This grants no loan, retry or disposal right.
@@ -488,6 +490,19 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
         slot.staged = Some(super::Staged::Vault(staged)); slot.error = Some(AssetError::new(reason).into());
         slot.stop(reason, Instant::now()); return;
     }
+    let credential_stamp = if slot.owner.agent_upload_key.get().is_some_and(|link|
+        link.entry().scope().kind == crate::service_upload_key_protocol::Kind::CredentialImportPrepared) {
+        let observed = (|| {
+            let Staged::Mutated { record, row, .. } = &staged else { return Err(Reason::SourceChanged); };
+            let session = state.vault.as_ref().ok_or(Reason::Closed)?;
+            let stamp = upload_key_controls::delegation::credential::new_import_stamp(session, slot, *record, row.as_ref())?;
+            super::agent_upload_key::credential_import_publication(document, state, slot, stamp)
+        })();
+        match observed { Ok(stamp) => Some(stamp), Err(reason) => {
+            slot.staged = Some(super::Staged::Vault(staged)); slot.error = Some(AssetError::new(reason).into());
+            slot.stop(reason, Instant::now()); return;
+        } }
+    } else { None };
     let session = state.vault.as_mut().expect("validated retained vault");
     match staged {
         Staged::Opened { observation, generation } => {
@@ -531,6 +546,9 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             slot.settlement = Settlement::Known;
         },
         Staged::Mutated { record, row, generation } => {
+            // The exact original NEW/full descriptor readback was validated above.
+            // Capture before publish_saved_revision drains the ordinary preview.
+            slot.vault.credential_import = credential_stamp;
             if slot.operation == Operation::ImportBackup {
                 match backup_delegation::import_publication(slot, row.as_ref(), session.identity) {
                     Ok(stamp) => { slot.vault.backup_import_context = stamp; slot.vault.backup_new_published = true; },
@@ -2405,7 +2423,11 @@ impl DocumentBinding {
     pub(super) fn prepare_stored_vault_agent(&self, state: &mut DocumentState, key: RecordKey, context: Arc<NativeContext>,
         agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<(u32, oneshot::Sender<()>), AssetError> {
         self.durable_gate(state, true)?; idle(state)?;
-        if let Some(link) = &agent { agent_upload_key::consume(self, state, link, crate::service_upload_key_protocol::Kind::PrepareExisting)?; }
+        if let Some(link) = &agent {
+            let kind = link.entry().scope().kind;
+            if !kind.prepares() { return Err(AssetError::invalid()); }
+            agent_upload_key::consume(self, state, link, kind)?;
+        }
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
@@ -2417,7 +2439,13 @@ impl DocumentBinding {
         let mut slot = self.vault_owner(state, Operation::Prepare, Some(context.clone()), Some(key), Some(Instant::now() + REVIEW), true)?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference); slot.vault.generation = Some(roster.generation);
         if let Some(link) = &agent {
-            if kind != Kind::AndroidKeystore { return Err(AssetError::new(Reason::SourceRefused)); }
+            let matched = match link.entry().scope().kind {
+                crate::service_upload_key_protocol::Kind::PrepareExisting => kind == Kind::AndroidKeystore,
+                crate::service_upload_key_protocol::Kind::CredentialAssessExisting =>
+                    upload_key_controls::delegation::credential::public_kind(kind).is_some_and(|k| k.general_assessment()),
+                _ => false,
+            };
+            if !matched { return Err(AssetError::new(Reason::SourceRefused)); }
             slot.review_end = slot.review_end.map(|end| end.min(link.entry().scope().end));
             agent_upload_key::attach_prepared(state, &slot, link)?;
         }
@@ -2448,8 +2476,22 @@ impl DocumentBinding {
         self.commit_vault_selected(token, Qualification::Ordinary)
     }
     pub(super) fn commit_vault_selected(&self, token: &str, selection: Qualification) -> Result<AssetStatus, AssetError> {
+        self.commit_vault_original(token, selection, None)
+    }
+    pub(super) fn commit_vault_delegated(&self, token: &str, agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus, AssetError> {
+        self.commit_vault_original(token, Qualification::Ordinary, agent)
+    }
+    fn commit_vault_original(&self, token: &str, selection: Qualification,
+        agent: Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus, AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate_selected(&state, false, selection, QualifiedAction::Initialize, None)?;
+        // BEFORE the destructive take: an ordinary click cannot steal a linked
+        // NEW preview. Initialize/Delete/Replace retain their ordinary grammar.
+        if let Some(link) = &agent {
+            super::agent_upload_key::consume(self, &state, link, crate::service_upload_key_protocol::Kind::CredentialImportPrepared)?;
+        } else if state.slot.as_ref().and_then(|s| s.preview.as_ref()).is_some_and(|p| p.action == Action::Save) {
+            super::agent_upload_key::credential_save_available(&state)?;
+        }
         let preview = self.consume_preview(&mut state, token, false)?;
         let decision = (|| -> Result<(Slot, Job), AssetError> {
             let roster = self.vault_roster(&mut state)?;
@@ -2508,6 +2550,11 @@ impl DocumentBinding {
             let context = old.context.clone(); let target = old.target.clone(); let review = old.review_end; let label = old.vault.label.clone();
             let mut slot = self.vault_owner(&mut state, Operation::Commit, context, target, review, true)?;
             slot.kind = Some(kind); slot.phase = Phase::Mutating; slot.vault.generation = Some(roster.generation);
+            if let Some(link) = &agent {
+                if operation != format::Mutation::New || expected.is_some() || slot.target.is_some() { return Err(AssetError::invalid()); }
+                slot.review_end = slot.review_end.map(|end| end.min(link.entry().scope().end));
+                super::agent_upload_key::attach(&state, &slot.owner, link)?;
+            }
             let available = pending_allowance(&state, &slot).map_err(AssetError::new)?;
             slot.owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.outcome = Some(store::StorageOutcome {
                 effect: store::Effect::NotStarted, durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending });
@@ -2527,7 +2574,11 @@ impl DocumentBinding {
     }
     pub(super) fn bind_vault_delegated(&self, token:&str, agent:Option<Arc<crate::service_upload_key_requests::NativeLink>>) -> Result<AssetStatus,AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, true)?;
-        if let Some(link)=&agent { super::agent_upload_key::consume(self,&state,link,crate::service_upload_key_protocol::Kind::BindReviewed)?; }
+        if let Some(link)=&agent {
+            let kind = link.entry().scope().kind;
+            if !matches!(kind, crate::service_upload_key_protocol::Kind::BindReviewed | crate::service_upload_key_protocol::Kind::CredentialAssignReviewed) { return Err(AssetError::invalid()); }
+            super::agent_upload_key::consume(self,&state,link,kind)?;
+        }
         else { super::agent_upload_key::gui_available(&state)?; }
         let preview = self.consume_preview(&mut state, token, true)?;
         let decision = (|| -> Result<(Slot, Job), AssetError> {

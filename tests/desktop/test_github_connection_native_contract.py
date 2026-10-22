@@ -138,6 +138,11 @@ class GitHubNativeWiringTests(unittest.TestCase):
             "artifact_inspection_prepare", "artifact_inspection_start",
             "artifact_inspection_cancel", "artifact_inspection_status",
             "artifact_inspection_discard",
+            "github_play_cleanup_status", "github_play_cleanup_prepare",
+            "github_play_cleanup_start", "github_play_cleanup_pending",
+            "github_play_cleanup_observe", "github_play_cleanup_discard",
+            "github_play_cleanup_cancel", "github_play_cleanup_allow_agent",
+            "agent_local_history_access", "allow_agent_local_history", "revoke_agent_local_history",
         )
         for command in fixed:
             self.assertEqual(handlers.count(command), 1)

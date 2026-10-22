@@ -19,6 +19,9 @@ use crate::{
 };
 use std::path::Path;
 use tokio::sync::Mutex as AsyncMutex;
+#[path = "asset_session_version_enrollment_agent.rs"]
+pub(crate) mod agent;
+use crate::service_github_action_requests::Entry as AgentEntry;
 
 struct Original {
     root: asset_source::RegisteredRoot,
@@ -28,12 +31,15 @@ struct Original {
 }
 struct Review {
     id: String,
+    identity: Arc<()>,
+    producer: Option<Weak<AgentEntry>>,
     original: Arc<Original>,
     offer: p::Offer,
     end: Instant,
 }
 pub(super) struct Lane {
     id: String,
+    agent: Option<Arc<AgentEntry>>,
     original: Arc<Original>,
     control: Arc<VersionEnrollmentControl>,
     end: Instant,
@@ -51,6 +57,7 @@ pub(super) struct State {
     view: p::Status,
     lane: Option<Arc<Lane>>,
     review: Option<Review>,
+    permission: Option<agent::Permission>,
 }
 impl State {
     pub(super) fn new() -> Self {
@@ -58,6 +65,7 @@ impl State {
             view: p::Status::idle(),
             lane: None,
             review: None,
+            permission: None,
         }
     }
     fn bump(&mut self) {
@@ -72,6 +80,7 @@ impl State {
     fn unknown(&mut self) {
         if let Some(lane) = &self.lane {
             lane.control.unknown();
+            agent::unknown(lane);
         }
         self.review = None;
         self.view.review = None;
@@ -129,7 +138,7 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     if pending(state) {
         return None;
     } // In-flight quote stays owned; no new partition credit.
-    let mut bytes = std::mem::size_of::<State>();
+    let mut bytes = std::mem::size_of::<State>().checked_add(agent::native_backing()?)?;
     if s.lane.is_some() {
         bytes = bytes.checked_add(p::RETAINED_LIMIT)?;
     }
@@ -254,6 +263,16 @@ impl VersionEnrollmentGoGate {
             Instant::now(),
             claim,
         );
+        if result.is_ok() {
+            if let Some(entry) = &lane.agent {
+                // Native GO is a conservative possible-effect fact, recorded
+                // before the only protected bytes leave this original gate.
+                if entry.go(&lane.id).is_err() {
+                    entry.unknown(crate::service_github_action_protocol::Reason::CleanupUnknown);
+                    return Err(BridgeError::cleanup_unknown());
+                }
+            }
+        }
         drop(edit);
         result
     }
@@ -267,6 +286,7 @@ impl Drop for WaitGuard {
     fn drop(&mut self) {
         if !self.returned {
             self.lane.control.unknown();
+            agent::unknown(&self.lane);
             self.document.inner.changes.send_modify(|_| {});
         }
     }
@@ -331,6 +351,7 @@ impl DocumentBinding {
         &self,
         project: &str,
         review_id: Option<&str>,
+        entry: Option<&Arc<AgentEntry>>,
     ) -> Result<(Arc<Lane>, Option<p::Offer>), BridgeError> {
         let started = Instant::now();
         if !crate::protocol::valid_id(project) {
@@ -345,6 +366,7 @@ impl DocumentBinding {
             .checked_add(Duration::from_secs(60))
             .ok_or_else(BridgeError::invalid)?;
         let mut state = self.lock();
+        self.enrollment_origin_allowed(&state, project, review_id, entry)?;
         state.version_enrollment.status(started);
         if pending(&state) {
             return Err(busy());
@@ -366,8 +388,11 @@ impl DocumentBinding {
             .native_project(project)
             .map_err(|_| changed())?;
         let binding = github_setup_project_binding(&root)?; // Correlation only, never Setup authority.
+        let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+        self.enrollment_origin_current(&state, project, review_id, entry, generation, &root, &edit, started)?;
                                                             // The previous known-returned lane may retire only on this NEW explicit
                                                             // action. Pending/uncertain jobs never turn into a smaller clone credit.
+        drop(edit);
         state.version_enrollment.lane = None;
         #[cfg(all(
             target_os = "macos",
@@ -387,11 +412,8 @@ impl DocumentBinding {
                 .ok_or_else(busy)?;
             crate::macos_history_inventory::admission_bytes(bytes, future).ok_or_else(busy)?;
         }
-        let edit = self
-            .inner
-            .bridge
-            .edits
-            .saved_registration_guard(&self.inner.session_identity)?;
+        let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+        self.enrollment_origin_current(&state, project, review_id, entry, generation, &root, &edit, started)?;
         let reviewed = match review_id {
             Some(id) => {
                 if !state.version_enrollment.review.as_ref().is_some_and(|r| {
@@ -400,6 +422,7 @@ impl DocumentBinding {
                         && r.original.pins.project_id == project
                         && r.original.root == root
                         && edit.matches(&r.original.stamp)
+                        && agent::producer_ready(r)
                         && self
                             .inner
                             .android_registration_control
@@ -425,6 +448,7 @@ impl DocumentBinding {
         };
         let input_epoch = self.inner.android_registration_control.epoch()?;
         let control = Arc::new(VersionEnrollmentControl::new());
+        if let Some(entry) = entry { control.bind_agent(entry.scope())?; }
         let pins = state.github.begin_version_enrollment(
             project,
             generation,
@@ -445,6 +469,7 @@ impl DocumentBinding {
         };
         let lane = Arc::new(Lane {
             id: id.clone(),
+            agent: entry.cloned(),
             original,
             control,
             end,
@@ -459,6 +484,13 @@ impl DocumentBinding {
             state_failure: Mutex::new(None),
         });
         state.version_enrollment.lane = Some(lane.clone());
+        if let Some(entry) = &lane.agent {
+            if entry.enrollment_attached(&lane.id).is_err() {
+                lane.control.unknown();
+                agent::unknown(&lane);
+                return Err(BridgeError::cleanup_unknown());
+            }
+        }
         state.version_enrollment.view.project_id = Some(project.into());
         state.version_enrollment.view.operation_id = Some(id);
         state.version_enrollment.view.review = None;
@@ -540,12 +572,14 @@ impl DocumentBinding {
             .filter(|_| reply.result.reason == p::Reason::None)
             .ok_or_else(|| p::refused(reply.result.reason))
     }
-    pub(crate) async fn review_version_enrollment(
-        &self,
-        project: &str,
+    pub(crate) async fn review_version_enrollment(&self, project: &str) -> Result<p::Status, BridgeError> {
+        self.review_version_enrollment_original(project, None).await
+    }
+    pub(in crate::asset_session) async fn review_version_enrollment_original(
+        &self, project: &str, entry: Option<Arc<AgentEntry>>,
     ) -> Result<p::Status, BridgeError> {
         let (lane, _) = self
-            .enrollment_begin(project, None)
+            .enrollment_begin(project, None, entry.as_ref())
             .map_err(p::not_started)?;
         let mut guard = WaitGuard {
             document: self.clone(),
@@ -558,13 +592,15 @@ impl DocumentBinding {
             review: None,
             previous: None,
         };
-        let outcome = match self.enrollment_read(&lane, request).await {
-            Ok(joined) => self.enrollment_offer(&lane, &joined),
-            Err(e) => Err(e),
-        };
-        let status = self.enrollment_finish(&lane, outcome, false).await?;
-        guard.returned = true;
-        Ok(status)
+        agent::drive(self, &lane, async {
+            let outcome = match self.enrollment_read(&lane, request).await {
+                Ok(joined) => self.enrollment_offer(&lane, &joined),
+                Err(e) => Err(e),
+            };
+            let status = self.enrollment_finish(&lane, outcome, false).await?;
+            guard.returned = true;
+            Ok(status)
+        }).await
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn enrollment_native(&self, lane: &Arc<Lane>) -> Result<NativeProject, BridgeError> {
@@ -733,36 +769,35 @@ impl DocumentBinding {
         })?;
         Ok(offer)
     }
-    pub(crate) async fn confirm_version_enrollment(
-        &self,
-        project: &str,
-        review_id: &str,
-        app_data: &Path,
+    pub(crate) async fn confirm_version_enrollment(&self, project: &str,
+        review_id: &str, app_data: &Path) -> Result<p::Status, BridgeError> {
+        self.confirm_version_enrollment_original(project, review_id, app_data, None).await
+    }
+    pub(in crate::asset_session) async fn confirm_version_enrollment_original(
+        &self, project: &str, review_id: &str, app_data: &Path,
+        entry: Option<Arc<AgentEntry>>,
     ) -> Result<p::Status, BridgeError> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (lane, offer) = self
-                .enrollment_begin(project, Some(review_id))
+                .enrollment_begin(project, Some(review_id), entry.as_ref())
                 .map_err(p::not_started)?;
             let mut guard = WaitGuard {
                 document: self.clone(),
                 lane: lane.clone(),
                 returned: false,
             };
-            let outcome = self
-                .enrollment_connect(
-                    &lane,
-                    offer.ok_or_else(BridgeError::cleanup_unknown)?,
-                    app_data,
-                )
-                .await;
-            let status = self.enrollment_finish(&lane, outcome, true).await?;
-            guard.returned = true;
-            Ok(status)
+            agent::drive(self, &lane, async {
+                let outcome = self.enrollment_connect(&lane,
+                    offer.ok_or_else(BridgeError::cleanup_unknown)?, app_data).await;
+                let status = self.enrollment_finish(&lane, outcome, true).await?;
+                guard.returned = true;
+                Ok(status)
+            }).await
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (project, review_id, app_data);
+            let _ = (project, review_id, app_data, entry);
             Err(p::not_started(p::refused(p::Reason::RuntimeUnavailable)))
         }
     }
@@ -860,6 +895,8 @@ impl DocumentBinding {
                 });
                 s.review = Some(Review {
                     id: lane.id.clone(),
+                    identity: Arc::new(()),
+                    producer: lane.agent.as_ref().map(Arc::downgrade),
                     original: lane.original.clone(),
                     offer,
                     end,
@@ -881,7 +918,9 @@ impl DocumentBinding {
         }
         s.bump();
         let result = s.status(Instant::now());
+        drop(ticket);
         drop(state);
+        agent::returned(lane, &result, connect);
         self.inner.changes.send_modify(|_| {});
         Ok(result)
     }

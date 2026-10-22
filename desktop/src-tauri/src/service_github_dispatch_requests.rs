@@ -46,6 +46,9 @@ impl Entry {
 pub(super) fn valid(review: &p::Review, reason: p::Reason, snapshot: Option<&Snapshot>) -> bool {
     match snapshot {
         Some(Snapshot::Activity(s)) => activity::snapshot_for(review, reason, Some(s)),
+        Some(Snapshot::Dispatch(p::dispatch::Snapshot::Enrollment(s))) => s.valid_for(review.kind())
+            && (s.phase != p::enrollment::Phase::Refused) == (reason == p::Reason::None)
+            && !matches!(reason, p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable),
         Some(Snapshot::Dispatch(s)) => reason == p::Reason::None && s.valid_for(review.kind()),
         None => {
             activity::snapshot_for(review, reason, None)

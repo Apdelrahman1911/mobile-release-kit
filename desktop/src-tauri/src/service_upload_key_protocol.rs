@@ -5,6 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[path = "service_upload_key_preparation_protocol.rs"]
 mod preparation;
 pub use preparation::Prepared;
+#[path = "service_credential_protocol.rs"]
+mod credential;
+pub use credential::CredentialKind;
 
 pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const CONSENT_LIMIT: usize = 32;
@@ -26,8 +29,15 @@ pub enum Kind {
     BindReviewed,
     BackupEncrypted,
     RestoreEncrypted,
+    CredentialImportPrepared,
+    CredentialAssessExisting,
+    CredentialAssignReviewed,
 }
 impl Kind {
+    pub(crate) fn credential(self) -> bool {
+        matches!(self, Self::CredentialImportPrepared | Self::CredentialAssessExisting | Self::CredentialAssignReviewed)
+    }
+    pub(crate) fn prepares(self) -> bool { matches!(self, Self::PrepareExisting | Self::CredentialAssessExisting) }
     pub(crate) fn consent(self) -> &'static str {
         match self {
             Self::PrepareExisting => "agent-android-upload-key-prepare-once-v1",
@@ -35,6 +45,9 @@ impl Kind {
             Self::BindReviewed => "agent-android-upload-key-bind-once-v1",
             Self::BackupEncrypted => "agent-android-upload-key-backup-once-v1",
             Self::RestoreEncrypted => "agent-android-upload-key-restore-once-v1",
+            Self::CredentialImportPrepared => "agent-credential-import-once-v1",
+            Self::CredentialAssessExisting => "agent-credential-assess-once-v1",
+            Self::CredentialAssignReviewed => "agent-credential-assign-once-v1",
         }
     }
 }
@@ -66,6 +79,9 @@ pub(crate) enum Selection {
     RestoreEncrypted {
         declaration: String,
     },
+    CredentialImportPrepared { credential_kind: CredentialKind, preview_operation_id: u32, preview_token: String },
+    CredentialAssessExisting { credential_kind: CredentialKind, record_id: Id, expected_revision: u32 },
+    CredentialAssignReviewed { credential_kind: CredentialKind, preview_operation_id: u32, preview_token: String },
 }
 impl Selection {
     pub(crate) fn kind(&self) -> Kind {
@@ -75,6 +91,9 @@ impl Selection {
             Self::BindReviewed { .. } => Kind::BindReviewed,
             Self::BackupEncrypted { .. } => Kind::BackupEncrypted,
             Self::RestoreEncrypted { .. } => Kind::RestoreEncrypted,
+            Self::CredentialImportPrepared { .. } => Kind::CredentialImportPrepared,
+            Self::CredentialAssessExisting { .. } => Kind::CredentialAssessExisting,
+            Self::CredentialAssignReviewed { .. } => Kind::CredentialAssignReviewed,
         }
     }
     pub(crate) fn valid(&self) -> bool {
@@ -89,6 +108,12 @@ impl Selection {
                 (1..u32::MAX).contains(expected_revision)
             }
             Self::RestoreEncrypted { declaration } => declaration == RESTORE_DECLARATION,
+            Self::CredentialImportPrepared { preview_operation_id, preview_token, .. } =>
+                (1..u32::MAX).contains(preview_operation_id) && Id::parse(preview_token).is_ok(),
+            Self::CredentialAssessExisting { credential_kind, expected_revision, .. } =>
+                credential_kind.general_assessment() && (1..u32::MAX).contains(expected_revision),
+            Self::CredentialAssignReviewed { credential_kind, preview_operation_id, preview_token } =>
+                credential_kind.general_assessment() && (1..u32::MAX).contains(preview_operation_id) && Id::parse(preview_token).is_ok(),
         }
     }
 }
@@ -183,8 +208,11 @@ impl Access {
             || self.remaining_ms > ALLOW_SECONDS * 1000
             || self.request_id.is_some() != self.consumed
             || self.consumed && !fields[0]
-            || self.prepared.as_ref().is_some_and(|p| !p.valid() || self.kind != Some(Kind::PrepareExisting)
-                || !self.consumed || self.enabled)
+            || self.prepared.as_ref().is_some_and(|p| !p.valid() || !match (self.kind, p.credential_kind) {
+                    (Some(Kind::PrepareExisting), None) => true,
+                    (Some(Kind::CredentialAssessExisting), Some(kind)) => kind.general_assessment(),
+                    _ => false,
+                } || !self.consumed || self.enabled)
         {
             Err(Error::InvalidRequest)
         } else {
@@ -201,6 +229,7 @@ pub enum State {
     StopRequested,
     ReviewReady,
     SavedUnassigned,
+    ImportedUnassigned,
     Assigned,
     BackupDelivered,
     RestoredUnassigned,
@@ -212,7 +241,7 @@ pub enum State {
 }
 impl State {
     pub(crate) fn success(self) -> bool {
-        matches!(self, Self::ReviewReady | Self::SavedUnassigned | Self::Assigned | Self::BackupDelivered | Self::RestoredUnassigned)
+        matches!(self, Self::ReviewReady | Self::SavedUnassigned | Self::ImportedUnassigned | Self::Assigned | Self::BackupDelivered | Self::RestoredUnassigned)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +278,7 @@ impl Status {
         use State::*;
         let settled = matches!(
             self.state,
-            ReviewReady | SavedUnassigned | Assigned | BackupDelivered | RestoredUnassigned | Refused | Cancelled | Failed
+            ReviewReady | SavedUnassigned | ImportedUnassigned | Assigned | BackupDelivered | RestoredUnassigned | Refused | Cancelled | Failed
         );
         if self.schema_version != 1
             || !self.do_not_replay
@@ -265,12 +294,14 @@ impl Status {
             || self.state == RecoveryRequired
                 && !matches!(self.settlement, Settlement::Settled | Settlement::Unknown)
             || self.state == SavedUnassigned && self.kind != Kind::GenerateNew
-            || self.state == ReviewReady && self.kind != Kind::PrepareExisting
-            || self.state == Assigned && self.kind != Kind::BindReviewed
+            || self.state == ReviewReady && !self.kind.prepares()
+            || self.state == Assigned && !matches!(self.kind, Kind::BindReviewed | Kind::CredentialAssignReviewed)
+            || self.state == ImportedUnassigned && (self.kind != Kind::CredentialImportPrepared
+                || self.key.as_ref().is_some_and(|k| k.revision_counter != 1))
             || self.state == BackupDelivered && self.kind != Kind::BackupEncrypted
             || self.state == RestoredUnassigned && self.kind != Kind::RestoreEncrypted
             || self.state == RestoredUnassigned && self.key.as_ref().is_some_and(|k| k.revision_counter != 1)
-            || matches!(self.state, SavedUnassigned | Assigned | RestoredUnassigned) != self.key.is_some()
+            || matches!(self.state, SavedUnassigned | ImportedUnassigned | Assigned | RestoredUnassigned) != self.key.is_some()
             || self.state.success()
                 && (self.asset_operation_id.is_none() || self.reason != Reason::None)
             || matches!(self.state, Queued | Running) && self.reason != Reason::None

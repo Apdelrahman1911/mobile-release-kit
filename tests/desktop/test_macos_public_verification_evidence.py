@@ -89,7 +89,7 @@ def update_documents():
     old_facts = {"previous": {"invocation": "a" * 32, "sha256": "a" * 64},
                  "rootIdentity": {"private": SENTINEL}, "generation": {"instance": "a" * 32}}
     old = {"schemaVersion": 1, **{key: CONTEXT[key] for key in ("source", "workflowSource", "runId", "runAttempt", "target")},
-        "predecessorSource": "2" * 40, "predecessorPackageSha256": "3" * 64, "qualificationEvidenceSha256": "4" * 64,
+        "predecessorSource": "2" * 40, "predecessorPackageSha256": "3" * 64, "publicControlsSha256": "4" * 64,
         "expectedCurrentDescriptorSha256": "5" * 64, "readback": old_facts, "productReady": False,
         "originalInstallerReturnedZero": True, "originalMountDetached": True, "freshCurrentBytesReadback": True,
         "privatePath": SENTINEL}
@@ -97,9 +97,9 @@ def update_documents():
     op = SimpleNamespace(image_source=CONTEXT["source"], target=CONTEXT["target"], receipt=current,
         environment={"GITHUB_SHA": CONTEXT["source"], "GITHUB_RUN_ID": CONTEXT["runId"], "GITHUB_RUN_ATTEMPT": CONTEXT["runAttempt"]},
         installer_zero=True, installation_readback=True, mount_detached=True, package_settled=lambda: True,
-        update={"baseline": old, "facts": {**old_facts, "previous": {"invocation": "b" * 32, "sha256": "b" * 64},
+        update={"baseline": old, "credentialBootstrapSha256": "6" * 64, "facts": {**old_facts, "previous": {"invocation": "b" * 32, "sha256": "b" * 64},
             "generation": {"instance": "b" * 32}}, "nomination": {"source": "2" * 40,
-            "package": {"sha256": "3" * 64}, "qualificationEvidenceSha256": "4" * 64}})
+            "package": {"sha256": "3" * 64}, "publicControlsSha256": "4" * 64}})
     namespace["current_complete"](op)
     assert op.update["complete"] is True
     return baseline, current
@@ -2817,6 +2817,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(result["positiveUpdate"]["receiptState"], "observed")
             self.assertFalse(result["positiveUpdate"]["productReady"])
             old, new = result["positiveUpdate"]["baseline"], result["positiveUpdate"]["current"]
+            self.assertEqual(old["publicControlsSha256"], "4" * 64)
+            self.assertEqual(old["publicControlsSha256"], new["predecessorPublicControlsSha256"])
+            self.assertNotIn("qualificationEvidenceSha256", old)
+            self.assertNotIn("predecessorQualificationEvidenceSha256", new)
             self.assertEqual(old["expectedCurrentDescriptorSha256"], new["currentDescriptorSha256"])
             self.assertEqual(old["invocation"], new["baselineInvocation"])
             self.assertNotEqual(new["baselineInvocation"], new["currentInvocation"])
@@ -2829,7 +2833,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
 
     def test_positive_update_refuses_conflicting_originals_context_and_lineage(self):
         for fault in ("status", "status-bool", "unknown", "close", "retired", "source", "baseline-invocation", "package", "descriptor",
-                      "qualification", "same-instance", "payload-claim", "missing-current", "missing-baseline", "role", "native-bool"):
+                      "public-controls", "missing-controls", "old-controls", "both-controls", "same-instance", "payload-claim", "missing-current", "missing-baseline", "role", "native-bool"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); old, new = update_documents()
                 if fault == "unknown": old["originalCalls"][1]["returned"] = False
@@ -2839,7 +2843,14 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 elif fault == "baseline-invocation": new["positiveUpdate"]["baselineInvocation"] = "f" * 32
                 elif fault == "package": new["positiveUpdate"]["predecessorPackageSha256"] = "f" * 64
                 elif fault == "descriptor": new["positiveUpdate"]["currentDescriptorSha256"] = "f" * 64
-                elif fault == "qualification": new["positiveUpdate"]["predecessorQualificationEvidenceSha256"] = "f" * 64
+                elif fault == "public-controls": new["positiveUpdate"]["predecessorPublicControlsSha256"] = "f" * 64
+                elif fault == "missing-controls": del old["updateBaseline"]["publicControlsSha256"]
+                elif fault == "old-controls":
+                    row = old["updateBaseline"]
+                    row["qualificationEvidenceSha256"] = row.pop("publicControlsSha256")
+                elif fault == "both-controls":
+                    row = new["positiveUpdate"]
+                    row["predecessorQualificationEvidenceSha256"] = row["predecessorPublicControlsSha256"]
                 elif fault == "same-instance": new["positiveUpdate"]["generationInstancesDistinct"] = False
                 elif fault == "payload-claim": new["positiveUpdate"]["retainedPayloadRehashed"] = True
                 elif fault == "missing-current": del new["positiveUpdate"]

@@ -285,7 +285,7 @@ fn scope_and_existing_request_catalogue_expose_only_bounded_original_addresses()
     assert!(
         String::from_utf8(scope_output(&empty, &q.project_id, false).unwrap().1)
             .unwrap()
-            .contains("No upload-key consent")
+            .contains("No credential consent")
     );
     let a = key::Access {
         prepared: None,
@@ -357,4 +357,26 @@ fn existing_prepare_output_is_review_only_and_has_no_cli_record_selector() {
             id('d').as_str(), "--reviewed", word].into_iter().map(OsString::from).collect();
         assert!(parse(&args).is_err());
     }
+}
+
+#[test]
+fn credential_aliases_use_same_ids_only_parser_and_original_new_unassigned_output() {
+    for (old, alias) in COMMANDS.into_iter().zip(CREDENTIAL_COMMANDS) {
+        let suffix: Vec<&str> = match old {
+            "upload-key-scope" => vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            "upload-key-submit" => vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "dddddddddddddddddddddddddddddddd", "--reviewed"],
+            _ => vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccc"],
+        };
+        let args: Vec<OsString> = std::iter::once(alias).chain(suffix).map(OsString::from).collect();
+        assert!(recognizes(&args)); assert!(parse(&args).unwrap().credential);
+        for extra in ["--path", "--password", "--kind", "--auto-bind", "--replace", "--choose"] {
+            let mut bad=args.clone();bad.push(extra.into());assert!(parse(&bad).is_err());
+        }
+    }
+    let mut value=row();value.kind=key::Kind::CredentialImportPrepared;value.state=key::State::ImportedUnassigned;
+    value.asset_operation_id=Some(7);value.key=Some(reference());value.settlement=p::Settlement::Settled;
+    let (code,bytes)=output(&response(p::ResponseBody::UploadKeyRequest(value)),&origin(),Some(&id('d')),false).unwrap();
+    assert_eq!(code,0);let text=String::from_utf8(bytes).unwrap();
+    assert!(text.contains("NEW encrypted, unassigned"));assert!(text.contains("not a fresh payload assessment"));
+    assert!(text.contains("credential-status"));assert!(text.contains("separately review and allow Assign"));
 }

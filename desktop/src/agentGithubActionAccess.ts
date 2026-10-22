@@ -1,4 +1,6 @@
 import { GITHUB_DISPATCH_KINDS, isGithubDispatchKind, parseGithubDispatchSelection, parseGithubDispatchReference, parseGithubDispatchSnapshot, githubDispatchReferenceMatches, githubDispatchEffect, githubDispatchInitial } from './githubDispatchDelegation.ts';
+import { ENROLLMENT_ACTION_KINDS, isEnrollmentActionKind, enrollmentActionId, parseEnrollmentActionSelection, parseEnrollmentActionReference, sameEnrollmentActionSelection, parseEnrollmentActionResult } from './agentVersionEnrollment.ts';
+import type { EnrollmentActionSelection, EnrollmentActionReference, EnrollmentActionResult } from './agentVersionEnrollment.ts';
 import type { GithubDispatchSelection, GithubDispatchReference, GithubDispatchSnapshot } from './githubDispatchDelegation.ts';
 // Closed comparison DATA, never native consent.
 import { permissionRevision, parseGithubActivitySelection, parseGithubActivityReference, sameGithubActivitySelection, parseGithubActivitySnapshot } from './githubActivityDelegation.ts';
@@ -7,18 +9,18 @@ import { parseGithubPublicationSelection, parseGithubPublicationReference, sameG
 import type { GithubPublicationSelection, GithubPublicationReference } from './githubPublicationDelegation.ts';
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { connectionKeys as keys, sameConnectionData as same } from './githubConnectionProtocol.ts';
-export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview',...GITHUB_DISPATCH_KINDS] as const;
+export const GITHUB_ACTION_KINDS = ['repository-create','draft-pr-create','pr-create','failed-jobs-retry','setup-publish','setup-reconcile','activity-overview',...GITHUB_DISPATCH_KINDS,...ENROLLMENT_ACTION_KINDS] as const;
 export type GithubActionKind = typeof GITHUB_ACTION_KINDS[number];
 interface PreparedSelection { readonly kind:'repository-create'|'draft-pr-create'|'pr-create'|'failed-jobs-retry'; readonly sessionId:string; readonly consentId:string; readonly expectedRevision:number }
-export type GithubActionSelection = PreparedSelection | GithubPublicationSelection | GithubActivitySelection | GithubDispatchSelection;
-export type GithubActionReview = (PreparedSelection & { readonly preparedSha256:string }) | GithubPublicationReference | GithubActivityReference | GithubDispatchReference;
+export type GithubActionSelection = PreparedSelection | GithubPublicationSelection | GithubActivitySelection | GithubDispatchSelection | EnrollmentActionSelection;
+export type GithubActionReview = (PreparedSelection & { readonly preparedSha256:string }) | GithubPublicationReference | GithubActivityReference | GithubDispatchReference | EnrollmentActionReference;
 export interface GithubActionQuery { readonly projectId:string; readonly serviceInstance:string; readonly requestId:string }
 export interface GithubActionStatus {
   readonly origin:GithubActionQuery; readonly grantId:string; readonly review:GithubActionReview; readonly revision:number;
   readonly state:'queued'|'starting'|'running'|'stopping'|'finishing'|'complete'|'refused'|'cancelled'|'unknown';
   readonly settlement:'pending'|'settled'|'unknown'; readonly operationId:string|null; readonly reason:string;
-  readonly effect:'none'|'branch-observed'|'draft-pr-observed'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'unresolved'|'found-unattributed'|'accepted-unconfirmed'|'accepted'|'advanced-unattributed'|'counter-observed';
-  readonly neverAdmitted:boolean; readonly doNotReplay:true; readonly snapshot?:GithubActivitySnapshot; readonly result?:GithubDispatchSnapshot;
+  readonly effect:'none'|'branch-observed'|'draft-pr-observed'|'not-sent'|'potentially-applied'|'acknowledged-unconfirmed'|'created-observed'|'unresolved'|'found-unattributed'|'accepted-unconfirmed'|'accepted'|'advanced-unattributed'|'counter-observed'|'local-mapping-observed';
+  readonly neverAdmitted:boolean; readonly doNotReplay:true; readonly snapshot?:GithubActivitySnapshot; readonly result?:GithubDispatchSnapshot|EnrollmentActionResult;
 }
 export interface AgentGithubActionAccess {
   readonly permissionRevision:string;
@@ -39,6 +41,7 @@ const number=(v:unknown,a:number,b:number):v is number=>typeof v==='number'&&Num
 function selection(v:unknown,review:true):v is GithubActionReview;
 function selection(v:unknown,review?:false):v is GithubActionSelection;
 function selection(v:unknown,review=false):boolean {
+  if(v&&typeof v==='object'&&'kind'in v&&isEnrollmentActionKind(v.kind))return !!(review?parseEnrollmentActionReference(v):parseEnrollmentActionSelection(v));
   if(v&&typeof v==='object'&&'kind'in v&&isGithubDispatchKind(v.kind))return !!(review?parseGithubDispatchReference(v):parseGithubDispatchSelection(v));
   if(v&&typeof v==='object'&&('kind' in v)&&v.kind==='activity-overview')return !!(review?parseGithubActivityReference(v):parseGithubActivitySelection(v));
   if(v&&typeof v==='object'&&('kind' in v)&&(v.kind==='setup-publish'||v.kind==='setup-reconcile'))return !!(review?parseGithubPublicationReference(v):parseGithubPublicationSelection(v));
@@ -50,6 +53,7 @@ function freeze<T>(v:T):T {if(v&&typeof v==='object'){Object.values(v).forEach(f
 export function parseGithubActionSelection(raw:unknown):GithubActionSelection|null {try{const v=copyBoundedComparisonData(raw,4096,80);return selection(v)?freeze(v):null;}catch{return null;}}
 export function sameGithubActionSelection(a:GithubActionSelection|GithubActionReview|null,b:GithubActionSelection|GithubActionReview|null):boolean {
   if(!a||!b||a.kind!==b.kind)return false;
+  if(isEnrollmentActionKind(a.kind)||isEnrollmentActionKind(b.kind))return isEnrollmentActionKind(a.kind)&&isEnrollmentActionKind(b.kind)&&sameEnrollmentActionSelection(a as EnrollmentActionSelection,b as EnrollmentActionSelection);
   if(isGithubDispatchKind(a.kind)){
     const ar=parseGithubDispatchReference(a),br=parseGithubDispatchReference(b),sa=parseGithubDispatchSelection(a),bs=parseGithubDispatchSelection(b);
     return ar&&bs?githubDispatchReferenceMatches(ar,bs):br&&sa?githubDispatchReferenceMatches(br,sa):ar&&br?same(ar,br):!!sa&&!!bs&&same(sa,bs);
@@ -59,8 +63,9 @@ export function sameGithubActionSelection(a:GithubActionSelection|GithubActionRe
   return 'consentId'in a&&'consentId'in b&&a.sessionId===b.sessionId&&a.consentId===b.consentId&&a.expectedRevision===b.expectedRevision;
 }
 export const sameGithubActionReview=(a:GithubActionReview|null,b:GithubActionReview|null):boolean=>!!a&&!!b&&same(a,b);
-const prefixes:Readonly<Record<GithubActionKind,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-','activity-overview':'github-activity-','preflight-prepare':'github-preflight-','preflight-dispatch':'github-preflight-','preflight-pending':'github-preflight-','preflight-observe':'github-preflight-','release-prepare':'github-release-','release-dispatch':'github-release-','release-pending':'github-release-','release-observe':'github-release-','setup-prepare':'github-publication-','counter-prepare':'github-publication-','counter-create':'github-publication-','publication-pending':'github-publication-','counter-reconcile':'github-publication-'};
+const prefixes:Readonly<Record<Exclude<GithubActionKind,import('./agentVersionEnrollment.ts').EnrollmentActionKind>,string>>={'repository-create':'repository-create-','draft-pr-create':'github-pull-request-','pr-create':'github-pull-request-','failed-jobs-retry':'github-actions-retry-','setup-publish':'github-publication-','setup-reconcile':'github-publication-','activity-overview':'github-activity-','preflight-prepare':'github-preflight-','preflight-dispatch':'github-preflight-','preflight-pending':'github-preflight-','preflight-observe':'github-preflight-','release-prepare':'github-release-','release-dispatch':'github-release-','release-pending':'github-release-','release-observe':'github-release-','setup-prepare':'github-publication-','counter-prepare':'github-publication-','counter-create':'github-publication-','publication-pending':'github-publication-','counter-reconcile':'github-publication-'};
 function operation(v:unknown,k:GithubActionKind):v is string {
+  if(isEnrollmentActionKind(k))return enrollmentActionId(v);
   if(typeof v!=='string'||!v.startsWith(prefixes[k]))return false;const n=v.slice(prefixes[k].length);
   return /^[1-9][0-9]{0,19}$/.test(n)&&BigInt(n)<=18446744073709551615n;
 }
@@ -70,16 +75,22 @@ function status(v:unknown):v is GithubActionStatus {
     !selection(v.review,true)||!number(v.revision,1,0xffff_fffe)||v.doNotReplay!==true||typeof v.neverAdmitted!=='boolean'||!one(v.reason,reasons)||
     !one(v.state,['queued','starting','running','stopping','finishing','complete','refused','cancelled','unknown'])||!one(v.settlement,['pending','settled','unknown'])||
     v.operationId!==null&&!operation(v.operationId,v.review.kind))return false;
-  const activity=v.review.kind==='activity-overview',dispatch=isGithubDispatchKind(v.review.kind);
+  const activity=v.review.kind==='activity-overview',dispatch=isGithubDispatchKind(v.review.kind),enrollment=isEnrollmentActionKind(v.review.kind);
   if(activity){
     if(v.state==='complete'){if(!parseGithubActivitySnapshot(v.snapshot,v.review as GithubActivityReference))return false;}
     else if('snapshot' in v)return false;
   }else if('snapshot' in v||!dispatch&&new TextEncoder().encode(JSON.stringify(v)).length>2048)return false;
-  if(dispatch){if(v.state==='complete'&&!['preflight-dispatch','release-dispatch'].includes(v.review.kind)){if(!parseGithubDispatchSnapshot(v.result,v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind))return false;}
+  if(enrollment){
+    const result='result'in v?parseEnrollmentActionResult(v.result,v.review.kind as import('./agentVersionEnrollment.ts').EnrollmentActionKind,v.operationId):null;
+    if('result'in v&&(!result||v.neverAdmitted||!one(v.state,['complete','refused','cancelled']))||
+      v.state==='complete'&&(!result||result.phase!==(v.review.kind==='counter-enrollment-review'?'reviewed':'connected'))||
+      one(v.state,['refused','cancelled'])&&result&&result.phase!=='refused')return false;
+    if(v.review.kind==='counter-enrollment-review'?v.effect!=='none':v.state==='complete'?v.effect!=='local-mapping-observed':!one(v.effect,['not-sent','potentially-applied']))return false;
+  }else if(dispatch){if(v.state==='complete'&&!['preflight-dispatch','release-dispatch'].includes(v.review.kind)){if(!parseGithubDispatchSnapshot(v.result,v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind))return false;}
     else if('result'in v)return false;}else if('result'in v)return false;
-  const initial=dispatch?githubDispatchInitial(v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind):v.review.kind==='setup-reconcile'||activity?'none':'not-sent';
+  const initial=dispatch?githubDispatchInitial(v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind):v.review.kind==='setup-reconcile'||activity||v.review.kind==='counter-enrollment-review'?'none':'not-sent';
   const effects=['not-sent','potentially-applied','unresolved',...(v.review.kind==='failed-jobs-retry'?['accepted-unconfirmed','accepted','advanced-unattributed']:['created-observed','found-unattributed']),...((v.review.kind==='draft-pr-create'||v.review.kind==='pr-create')?['acknowledged-unconfirmed']:[])];
-  const effectValid=dispatch?githubDispatchEffect(v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind,v.effect):activity?v.effect==='none':v.review.kind==='setup-publish'||v.review.kind==='setup-reconcile'?githubPublicationEffect(v.review.kind,v.effect):one(v.effect,effects);
+  const effectValid=enrollment?true:dispatch?githubDispatchEffect(v.review.kind as import('./githubDispatchDelegation.ts').GithubDispatchKind,v.effect):activity?v.effect==='none':v.review.kind==='setup-publish'||v.review.kind==='setup-reconcile'?githubPublicationEffect(v.review.kind,v.effect):one(v.effect,effects);
   if(!effectValid||v.effect!==initial&&v.operationId===null)return false;
   const terminal=one(v.state,['complete','refused','cancelled']);
   if(terminal!==(v.settlement==='settled')||(v.state==='unknown')!==(v.settlement==='unknown')||
@@ -101,7 +112,7 @@ export function parseAgentGithubActionAccess(raw:unknown):AgentGithubActionAcces
     return freeze(v) as unknown as AgentGithubActionAccess;
   }catch{return null;}
 }
-const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1','activity-overview':'agent-activity-overview-once-v1','preflight-prepare':'agent-preflight-prepare-once-v1','preflight-dispatch':'agent-preflight-dispatch-once-v1','preflight-pending':'agent-preflight-pending-once-v1','preflight-observe':'agent-preflight-observe-once-v1','release-prepare':'agent-release-prepare-once-v1','release-dispatch':'agent-release-dispatch-once-v1','release-pending':'agent-release-pending-once-v1','release-observe':'agent-release-observe-once-v1','setup-prepare':'agent-setup-prepare-once-v1','counter-prepare':'agent-counter-prepare-once-v1','counter-create':'agent-counter-create-once-v1','publication-pending':'agent-publication-pending-once-v1','counter-reconcile':'agent-counter-reconcile-once-v1'};
+const consents:Readonly<Record<GithubActionKind,string>>={'repository-create':'agent-repository-create-once-v1','draft-pr-create':'agent-draft-pr-create-once-v1','pr-create':'agent-pr-create-once-v1','failed-jobs-retry':'agent-failed-jobs-retry-once-v1','setup-publish':'agent-setup-publish-once-v1','setup-reconcile':'agent-setup-reconcile-once-v1','activity-overview':'agent-activity-overview-once-v1','preflight-prepare':'agent-preflight-prepare-once-v1','preflight-dispatch':'agent-preflight-dispatch-once-v1','preflight-pending':'agent-preflight-pending-once-v1','preflight-observe':'agent-preflight-observe-once-v1','release-prepare':'agent-release-prepare-once-v1','release-dispatch':'agent-release-dispatch-once-v1','release-pending':'agent-release-pending-once-v1','release-observe':'agent-release-observe-once-v1','setup-prepare':'agent-setup-prepare-once-v1','counter-prepare':'agent-counter-prepare-once-v1','counter-create':'agent-counter-create-once-v1','publication-pending':'agent-publication-pending-once-v1','counter-reconcile':'agent-counter-reconcile-once-v1','counter-enrollment-review':'agent-counter-enrollment-review-once-v1','counter-enrollment-connect':'agent-counter-enrollment-connect-once-v1'};
 export function createAgentGithubActionPort(invoke:(name:string,body:Uint8Array)=>Promise<unknown>):AgentGithubActionPort {
   const send=(name:string,body:object,limit=1024)=>{const bytes=new TextEncoder().encode(JSON.stringify(body));if(bytes.length>limit)throw new Error('Invalid GitHub delegation DATA');return invoke(name,bytes);};
   return Object.freeze({access:()=>send('agent_github_action_access',{}),revoke:()=>send('revoke_agent_github_action',{}),allow:(raw:GithubActionSelection,revision:string)=>{

@@ -1,8 +1,9 @@
 """SOURCE-nominated two-generation update, using the existing packaging owner.
 
 No command runner, credential owner, arbitrary URL or historical status authority.
-The checked-in nomination is deliberately unconfigured. Qualification/enrollment
-and actual pair resource/path admission precede activation, not merely hashes.
+The public-controls digest is DATA provenance, not historical qualification.
+Actual signature/source-policy, original baseline installation and credential
+journey, and complete pair resource/path admission remain required.
 """
 import argparse
 import hashlib
@@ -86,16 +87,21 @@ def nomination_data(document, target, stager):
     need(target in TARGETS and type(document) is dict and type(document.get("schemaVersion")) is int
          and document["schemaVersion"] == 1, "update-nomination-schema")
     if document == {"schemaVersion": 1, "mode": "unconfigured"}:
-        raise ValueError("update-qualified-predecessor-unconfigured")
+        raise ValueError("update-source-predecessor-unconfigured")
     need(set(document) == {"schemaVersion", "mode", "targets"} and document["mode"] == "configured"
-         and type(document["targets"]) is dict and set(document["targets"]) == set(TARGETS), "update-nomination-fields")
+         and type(document["targets"]) is dict and bool(document["targets"])
+         and set(document["targets"]).issubset(TARGETS), "update-nomination-fields")
+    need(target in document["targets"], "update-source-target-unconfigured")
+    # Each platform may be source-nominated independently. Every supplied row still has
+    # to validate; selecting ARM is not permission to ignore a malformed Intel
+    # predecessor (or vice versa).
     for selected, row in document["targets"].items():
         need(type(row) is dict and set(row) == {"source", "runId", "runAttempt", "jobId", "artifactId", "artifactBytes",
              "artifactSha256", "members", "image", "package", "descriptor", "signature", "inventory", "release",
-             "signingPolicy", "qualificationEvidenceSha256", "resources"}, "update-nomination-row")
+             "signingPolicy", "publicControlsSha256", "resources"}, "update-nomination-row")
         need(hx(row["source"], 40) and all(positive(row[k]) for k in ("runId", "runAttempt", "jobId", "artifactId"))
              and scalar(row["artifactBytes"], LIMIT) and hx(row["artifactSha256"], 64)
-             and hx(row["qualificationEvidenceSha256"], 64), "update-nomination-identity")
+             and hx(row["publicControlsSha256"], 64), "update-nomination-identity")
         members, nested = artifact_members_data(row["members"])
         artifact_member_data(row["image"])
         for key in ("package", "descriptor", "signature", "inventory"):
@@ -433,7 +439,7 @@ def baseline(op):
     phase_credit(op.calls, phase=PHASE)
     op.update["complete"] = True
     op.receipt["updateBaseline"] = {"schemaVersion": 1, **context(op), "predecessorSource": selected["source"],
-        "nominationSha256": sha(stager.canonical(selected)), "qualificationEvidenceSha256": selected["qualificationEvidenceSha256"],
+        "nominationSha256": sha(stager.canonical(selected)), "publicControlsSha256": selected["publicControlsSha256"],
         "requestId": request, "readback": facts, "census": after, "sentinel": sentinel,
         "expectedCurrentDescriptorSha256": sha(expected), "predecessorPackageSha256": selected["package"]["sha256"],
         "freshCurrentBytesReadback": True, "aggregate": aggregate,
@@ -660,7 +666,7 @@ def current_complete(op):
     baseline, facts = op.update["baseline"], op.update["facts"]
     op.receipt["positiveUpdate"] = {"schemaVersion": 1, **context(op), "predecessorSource": op.update["nomination"]["source"],
         "predecessorPackageSha256": op.update["nomination"]["package"]["sha256"],
-        "predecessorQualificationEvidenceSha256": op.update["nomination"]["qualificationEvidenceSha256"],
+        "predecessorPublicControlsSha256": op.update["nomination"]["publicControlsSha256"],
         "currentDescriptorSha256": baseline["expectedCurrentDescriptorSha256"],
         "credentialBootstrapSha256": op.update["credentialBootstrapSha256"],
         "baselineInvocation": baseline["readback"]["previous"]["invocation"], "currentInvocation": facts["previous"]["invocation"],
@@ -788,7 +794,7 @@ def main(arguments):
         document = source_document(checkout)
         # This default refuses before downloading P0, native preparation, user
         # data creation or loading a process owner. No synthetic predecessor.
-        need(document != {"schemaVersion": 1, "mode": "unconfigured"}, "update-qualified-predecessor-unconfigured")
+        need(document != {"schemaVersion": 1, "mode": "unconfigured"}, "update-source-predecessor-unconfigured")
         path = checkout / "desktop/tools/stage_macos_installed.py"
         spec = importlib.util.spec_from_file_location("mrk_update_selection_stager", path)
         module = importlib.util.module_from_spec(spec)

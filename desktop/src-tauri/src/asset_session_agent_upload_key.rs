@@ -29,7 +29,8 @@ pub(super) use reuse::{attach_prepared, prepare_completion, prepared_reply};
         any(target_arch = "aarch64", target_arch = "x86_64")
     )
 ))]
-use vault::upload_key_controls::delegation as proof;
+#[path = "asset_session_agent_credential.rs"]
+mod proof;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -150,6 +151,23 @@ impl State {
         Ok(())
     }
 }
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+pub(in crate::asset_session) fn grant_allocation_bytes(proof_bytes: usize, runtime_bytes: usize, root_bytes: usize) -> Option<usize> {
+    std::mem::size_of::<Grant>().checked_add(4 * std::mem::size_of::<usize>() + 32)?
+        .checked_add(proof_bytes)?.checked_add(runtime_bytes)?.checked_add(root_bytes)
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(in crate::asset_session) fn allow_backing_bytes(document: &DocumentBinding, state: &DocumentState,
+    grant: usize) -> Result<usize, Reason> {
+    // SAME held Doc: the lookup census does not include the retained saved
+    // lanes, evidence or extra control cells. Busy/unknown is never zero credit.
+    let retained = lookup_memory::retained_document_bytes(&document.inner, state)
+        .map_err(|_| Reason::Capacity)?;
+    let additional = installation_memory::additional_document_bytes(document, state)?;
+    retained.checked_add(additional).and_then(|n| n.checked_add(grant))
+        .filter(|n| *n <= crate::vault_store::RESIDENT_BYTES).ok_or(Reason::Capacity)
+}
 pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     let a = &state.agent_upload_key;
     let mut n = std::mem::size_of::<State>()
@@ -211,6 +229,12 @@ pub(super) fn gui_available(s: &DocumentState) -> Result<(), AssetError> {
     } else {
         Ok(())
     }
+}
+// The first Allow cut already captured this preview while its Host lookup is
+// pending. Do not consume an ordinary Save before the second cut can refuse it.
+pub(super) fn credential_save_available(state: &DocumentState) -> Result<(), AssetError> {
+    if state.agent_upload_key.pending_allow.is_some() { return Err(AssetError::new(Reason::Busy)); }
+    gui_available(state)
 }
 pub(super) fn stop(state: &DocumentState, at: Instant) {
     let a = &state.agent_upload_key;
@@ -364,6 +388,13 @@ impl UploadKeyAgentRetired {
             .then(|| (self.id, self.state, self.reason, self.key.clone()))
     }
 }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(super) fn credential_import_publication(document: &DocumentBinding, state: &DocumentState, slot: &Slot,
+    stamp: vault::upload_key_controls::delegation::credential::ImportStamp)
+    -> Result<vault::upload_key_controls::delegation::credential::ImportStamp, Reason> {
+    proof::import_publication(document,state,slot,stamp)
+}
 pub(super) fn retired(document: &DocumentBinding, state: &DocumentState) {
     let Some(slot) = &state.slot else {
         return;
@@ -491,25 +522,12 @@ impl DocumentBinding {
                 .edits
                 .saved_registration_guard(&self.inner.session_identity)?;
             let context = state.context.as_ref().ok_or_else(BridgeError::invalid)?;
-            self.upload_key_saved_input(&state, context, &edit)?;
+            if !args.selection.kind().credential() { self.upload_key_saved_input(&state, context, &edit)?; }
             let stamp = edit.stamp()?;
             drop(edit);
-            let live = lookup_memory::retained_document_bytes(&self.inner, &state)
-                .map_err(|_| public(Error::Busy))?
-                .checked_add(proof.retained_bytes())
-                .and_then(|n| {
-                    n.checked_add(
-                        std::mem::size_of::<Grant>()
-                            + 4 * std::mem::size_of::<usize>()
-                            + 32
-                            + native.runtime_id.capacity()
-                            + native.canonical_root.as_os_str().len(),
-                    )
-                })
-                .ok_or_else(|| public(Error::Busy))?;
-            if live > crate::vault_store::RESIDENT_BYTES {
-                return Err(public(Error::Busy));
-            }
+            allow_backing_bytes(self, &state, grant_allocation_bytes(proof.retained_bytes(), native.runtime_id.capacity(),
+                native.canonical_root.as_os_str().len()).ok_or_else(|| public(Error::Busy))?)
+                .map_err(|_| public(Error::Busy))?;
             let epoch = state
                 .agent_upload_key
                 .begin_allow(&args.consent_id)
@@ -762,6 +780,9 @@ mod tests {
                 serde_json::json!({"kind":"restore-encrypted","declaration":p::RESTORE_DECLARATION}),
                 p::Kind::RestoreEncrypted.consent(),
             ),
+            (serde_json::json!({"kind":"credential-import-prepared","credentialKind":"apple-p12","previewOperationId":7,"previewToken":"a".repeat(32)}), p::Kind::CredentialImportPrepared.consent()),
+            (serde_json::json!({"kind":"credential-assess-existing","credentialKind":"asc-p8","recordId":"c".repeat(32),"expectedRevision":1}), p::Kind::CredentialAssessExisting.consent()),
+            (serde_json::json!({"kind":"credential-assign-reviewed","credentialKind":"project-read-token","previewOperationId":7,"previewToken":"a".repeat(32)}), p::Kind::CredentialAssignReviewed.consent()),
         ] {
             let mut value = serde_json::json!({"projectId":"project-1","consentId":"b".repeat(32),"contextRevision":1,"expectedStatusRevision":2,"selection":selection,"consentVersion":consent});
             assert!(decode_allow(&serde_json::to_vec(&value).unwrap()).is_ok());
@@ -781,6 +802,16 @@ mod tests {
         assert!(decode_allow(&vec![b' '; p::RAW_LIMIT]).is_err());
         assert!(decode_empty(br#"{"enabled":true}"#).is_err());
         assert!(decode_empty(b"{}").is_ok());
+    }
+    #[test]
+    fn ordinary_credential_save_refuses_pending_allow_before_any_preview_take() {
+        let mut state=crate::asset_session::tests::empty_state();
+        assert!(credential_save_available(&state).is_ok());
+        state.agent_upload_key.begin_allow(&Id::parse(&"a".repeat(32)).unwrap()).unwrap();
+        assert!(credential_save_available(&state).is_err());
+        assert!(state.slot.is_none());
+        state.agent_upload_key.revoke_consent(&Id::parse(&"a".repeat(32)).unwrap()).unwrap();
+        assert!(credential_save_available(&state).is_ok());
     }
     #[test]
     fn exact_revoke_is_an_address_only_and_duplicate_or_foreign_fields_refuse() {

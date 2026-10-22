@@ -25,8 +25,10 @@ export function ServiceConfigurationAccess({controller, detailed, onShow}: {cont
       <button className="button secondary" type="button" disabled={!request || state.revokePending} onClick={() => void controller.revoke()}>Stop original request</button>
       {!detailed && <button className="button secondary" type="button" onClick={onShow}>Show configuration review</button>}
     </div>
-    {detailed && <details><summary>Supported CLI settings</summary><p>Candidate/production branches, enabled Android module/variant, or enabled iOS container/scheme/archive configuration. No application identity, versions, platform enablement, commands, signing, credentials or recovery. Other fields stay unchanged.</p>
+    {detailed && <details><summary>Supported CLI settings</summary><p>Candidate/production branches, enabled Android module/variant, enabled iOS container/scheme/archive configuration, or listing root and languages (up to 32 total across both platforms). No application identity, versions, platform enablement, commands, signing, credentials or recovery. Other fields stay unchanged.</p>
+      <p>Listing settings do not create, move or upload listing files. If metadata is omitted from the comparison, no defaults are assumed; use the ordinary editor after this original settles.</p>
       <p><code>mrk configuration-read PROJECT_ID OBSERVATION_REVISION --json</code> returns the original IDs. Then use <code>mrk configuration-prepare … --stdin --json</code> with one closed change. Apply uses the same reviewed IDs. See <code>mrk --help</code>.</p>
+      <p>A fresh, format-valid saved configuration is required. <code>mrk observe PROJECT_ID --json</code> reports the existing saved state and setup guidance, not a new check. Fix missing or invalid settings in Desktop; refresh stale or unavailable observations there.</p>
       <p>No unattended/headless writer. Dirty or newer forms are preserved after a completed CLI save; inspect saved files before continuing. A missing acknowledgement never permits a retry.</p>
       <p>Large or unusually complex configurations may exceed this bounded CLI path. Keep your draft and use the ordinary editor only after the original work settles; Unknown still needs its existing recovery.</p></details>}
   </section>;

@@ -44,6 +44,7 @@ pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agen
 #[path = "asset_session_version_enrollment.rs"]
 mod version_enrollment;
 pub(crate) use version_enrollment::VersionEnrollmentGoGate;
+pub(crate) use version_enrollment::agent::Capture as CounterEnrollmentCapture;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "asset_session_application_service.rs"]
 pub(crate) mod application_service;

@@ -1457,6 +1457,8 @@ def project_update(value, context, phase):
          and value.get("targetRetired") is True and row.get("productReady") is False)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
         need(type(row.get(name)) is str and row[name] == context[name])
+    # No legacy qualification alias or silent migration of old update receipts.
+    need("qualificationEvidenceSha256" not in row and "predecessorQualificationEvidenceSha256" not in row)
     predecessor = hex_value(row.get("predecessorSource"), 40)
     need(predecessor != context["source"])
     calls = value.get("originalCalls")
@@ -1477,7 +1479,7 @@ def project_update(value, context, phase):
         need(type(previous) is dict and set(previous) == {"invocation", "sha256"})
         return {**common, "invocation": hex_value(previous.get("invocation"), 32),
                 "stateSha256": hex_value(previous.get("sha256")),
-                "qualificationEvidenceSha256": hex_value(row.get("qualificationEvidenceSha256")),
+                "publicControlsSha256": hex_value(row.get("publicControlsSha256")),
                 "expectedCurrentDescriptorSha256": hex_value(row.get("expectedCurrentDescriptorSha256")),
                 "predecessorPackageSha256": hex_value(row.get("predecessorPackageSha256")),
                 "freshCurrentBytesReadback": True, "originalMountDetached": True}
@@ -1494,7 +1496,7 @@ def project_update(value, context, phase):
     need(old != new)
     return {**common, "baselineInvocation": old, "currentInvocation": new,
             "predecessorPackageSha256": hex_value(row.get("predecessorPackageSha256")),
-            "predecessorQualificationEvidenceSha256": hex_value(row.get("predecessorQualificationEvidenceSha256")),
+            "predecessorPublicControlsSha256": hex_value(row.get("predecessorPublicControlsSha256")),
             "currentDescriptorSha256": hex_value(row.get("currentDescriptorSha256")),
             **{k: True for k in required_true}, **{k: False for k in required_false}, "exportCount": 2}
 
@@ -1510,7 +1512,7 @@ def update_join(baseline, current):
              and type(phase.get("updateObservation")) is dict)
     old, new = baseline["updateObservation"], current["updateObservation"]
     need(old["predecessorSource"] == new["predecessorSource"] and old["invocation"] == new["baselineInvocation"]
-         and old["qualificationEvidenceSha256"] == new["predecessorQualificationEvidenceSha256"]
+         and old["publicControlsSha256"] == new["predecessorPublicControlsSha256"]
          and old["predecessorPackageSha256"] == new["predecessorPackageSha256"]
          and old["expectedCurrentDescriptorSha256"] == new["currentDescriptorSha256"])
     return {"receiptState": "observed", "baseline": old, "current": new,

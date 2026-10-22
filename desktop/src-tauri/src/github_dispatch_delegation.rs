@@ -104,8 +104,17 @@ pub(crate) enum Selection {
     CounterCreate(publication::PublishArgs),
     PublicationPending(publication::PendingArgs),
     CounterReconcile(publication::ReconcileArgs),
+    CounterEnrollmentReview(p::enrollment::ReviewSelection),
+    CounterEnrollmentConnect(p::enrollment::ConnectSelection),
 }
 impl Selection {
+    pub(crate) fn enrollment_input(&self) -> Option<p::enrollment::Input> {
+        Some(match self {
+            Self::CounterEnrollmentReview(v) => p::enrollment::Input::CounterEnrollmentReview(v.clone()),
+            Self::CounterEnrollmentConnect(v) => p::enrollment::Input::CounterEnrollmentConnect(v.clone()),
+            _ => return None,
+        })
+    }
     pub(crate) fn prepared(&self) -> Option<&p::PreparedSelection> {
         match self {
             Self::RepositoryCreate(v)
@@ -168,14 +177,23 @@ impl Selection {
             Self::CounterCreate(_) => p::Kind::CounterCreate,
             Self::PublicationPending(_) => p::Kind::PublicationPending,
             Self::CounterReconcile(_) => p::Kind::CounterReconcile,
+            Self::CounterEnrollmentReview(_) => p::Kind::CounterEnrollmentReview,
+            Self::CounterEnrollmentConnect(_) => p::Kind::CounterEnrollmentConnect,
         }
     }
     pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::CounterEnrollmentReview(v) => return v.valid(),
+            Self::CounterEnrollmentConnect(v) => return v.valid(),
+            _ => {}
+        }
         self.legacy()
             .map_or_else(|| self.input().is_some_and(|v| v.valid()), |v| v.valid())
     }
     pub(crate) fn retained_fits(&self) -> bool {
         let bytes = match self {
+            Self::CounterEnrollmentReview(v) => Some(v.session_id.capacity()),
+            Self::CounterEnrollmentConnect(v) => v.session_id.capacity().checked_add(v.review_id.capacity()),
             Self::PreflightPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.branch.capacity()]),
             Self::ReleasePrepare(v) => release_input_heap(v),
             Self::SetupPrepare(v) => sum_capacities(&[v.session_id.capacity(),v.base.capacity()]),

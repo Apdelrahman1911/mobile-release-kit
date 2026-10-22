@@ -632,8 +632,44 @@ selected_tests=(
   runtime::git_push::tests::two_closed_push_slots_do_not_inherit_another_build_or_partial_list
   runtime::git_fetch::tests::upstream_source_or_installed_version_does_not_supply_missing_clt_nomination
   runtime::git_push::tests::fetch_or_public_source_evidence_never_nominates_a_push_provider
+  # Metadata configuration and same-pool counter enrollment: new, still-unrun contracts.
+  service_configuration_protocol::tests::metadata_change_reuses_original_derivation_without_other_fields_or_asset_authority
+  service_configuration_protocol::tests::metadata_root_and_locale_grammar_match_core_enabled_and_disabled_platform_policy
+  service_configuration_protocol::tests::metadata_omission_preserves_old_groups_without_inventing_a_new_before_image
+  service_configuration_protocol::tests::metadata_status_requires_exact_paired_review_not_a_legacy_or_foreign_projection
+  service_configuration_requests::tests::metadata_five_retained_copies_and_max_width_rows_fit_the_unchanged_cell
+  service_configuration_requests::tests::metadata_configuration_still_uses_the_same_joint_thirty_two_editor_slots
+  installed_cli::configuration::tests::metadata_stdin_uses_the_same_small_frame_and_closed_unsupported_profile_diagnostic
+  service_github_action_requests::enrollment::tests::closed_enrollment_data_keeps_old_ids_and_refuses_authority_fields
+  service_github_action_requests::enrollment::tests::exact_foreground_claim_precedes_no_other_kind_and_cannot_be_replayed
+  service_github_action_requests::enrollment::tests::real_native_caller_and_latest_history_are_all_needed_for_enrollment_result
+  service_github_action_requests::enrollment::tests::possible_cas_unknown_or_missing_returns_never_say_not_sent_or_supply_review
+  service_github_action_requests::enrollment::tests::quiet_cancelled_queue_closes_only_as_real_unclaimed_nonentry_and_keeps_first_read
+  service_github_action_requests::enrollment::tests::original_stop_poison_is_absorbing_before_a_later_native_or_caller_return
+  service_github_action_requests::enrollment::tests::compact_results_require_nulls_exact_original_and_owned_physical_capacity
+  service_github_action_requests::enrollment::tests::all_mixed_thirty_two_rows_keep_original_snapshots_and_no_extra_capacity
+  asset_session::version_enrollment::agent::tests::foreign_gui_or_other_kind_cannot_take_the_linked_origin_before_its_old_tail
+  asset_session::version_enrollment::agent::tests::completed_exact_review_withdrawal_preserves_offer_but_never_uses_a_later_capture
+  asset_session::version_enrollment::agent::tests::missing_history_or_unknown_withdrawal_retains_the_original_and_cannot_supply_connect
+  asset_session::version_enrollment::agent::tests::original_quiet_read_and_late_earlier_stop_contract_same_control_without_renewal
+  asset_session::version_enrollment::agent::tests::original_native_unknown_propagates_without_waiting_for_status_or_another_settle
+  asset_session::version_enrollment::agent::tests::native_capture_uses_real_edit_stamp_bounded_capacity_and_full_private_pins
+  asset_session::version_enrollment::agent::tests::enrollment_public_reason_roster_matches_original_native_codes_not_provider_messages
+  asset_session::version_enrollment::agent::tests::enrollment_uses_complete_actual_document_and_original_code_plus_data_admission
+  asset_session::agent_github_action::enrollment::tests::fixed_enrollment_raw_handoffs_keep_original_ids_and_no_private_authority
+  installed_cli::github_action::tests::enrollment_cli_output_keeps_exact_review_or_connected_data_without_new_authority
+  # General credential delegation: six new and three previously unselected affected contracts.
+  service_upload_key_protocol::credential::tests::credential_actions_are_new_only_scalar_data_and_distinct_from_android_authority
+  service_upload_key_protocol::credential::tests::imported_reference_is_new_unassigned_only_and_never_a_review_or_assignment
+  asset_session::vault::assignment_native::upload_key::controls::delegation::credential::tests::ordinary_credential_weak_quote_preserves_actual_document_and_payload_charges
+  asset_session::agent_upload_key::tests::ordinary_credential_save_refuses_pending_allow_before_any_preview_take
+  service_upload_key_requests::tests::general_credentials_share_old_capacity_and_lost_returns_never_replay
+  installed_cli::upload_key::tests::credential_aliases_use_same_ids_only_parser_and_original_new_unassigned_output
+  asset_session::agent_upload_key::tests::exact_revoke_before_first_allow_cut_is_retained_without_stopping_another_nonce
+  installed_cli::upload_key::tests::scope_and_existing_request_catalogue_expose_only_bounded_original_addresses
+  installed_cli::upload_key::tests::actual_collector_admits_only_four_ids_only_commands_and_explicit_submit_review
 )
-[[ "${#selected_tests[@]}" == 600 ]] || exit 1
+[[ "${#selected_tests[@]}" == 634 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -651,9 +687,9 @@ for test_name in "${selected_tests[@]}"; do
   fi
 done
 (( missing == 0 )) || exit 1
-/usr/bin/grep -Fx '600 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '634 tests, 0 benchmarks' "$list_log"
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 600 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 634 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

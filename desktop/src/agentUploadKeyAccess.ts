@@ -6,13 +6,16 @@ import type { AgentUploadKeyBackupKind, AgentUploadKeyBackupSelection } from './
 import { agentUploadKeyReuseSelection, parseAgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
 import type { AgentUploadKeyPrepared, AgentUploadKeyReuseSelection } from './agentUploadKeyReuse.ts';
 
+import { agentCredentialAction, agentCredentialSelection, parseAgentCredentialSelection, parseAgentCredentialPrepared } from './agentCredentialAccess.ts';
+import type { AgentCredentialAction, AgentCredentialSelection, AgentCredentialPrepared } from './agentCredentialAccess.ts';
+
 // Permission and comparison DATA only. No private input or native credential
 // capability is transported by this panel or by the installed CLI.
-export type AgentUploadKeyKind = 'prepare-existing' | 'generate-new' | 'bind-reviewed' | AgentUploadKeyBackupKind;
+export type AgentUploadKeyKind = 'prepare-existing' | 'generate-new' | 'bind-reviewed' | AgentUploadKeyBackupKind | AgentCredentialAction;
 export type AgentUploadKeySelection =
   | { readonly kind: 'generate-new'; readonly declaration: 'new-application-no-existing-upload-key' }
   | { readonly kind: 'bind-reviewed'; readonly previewOperationId: number; readonly previewToken: string }
-  | AgentUploadKeyBackupSelection | AgentUploadKeyReuseSelection;
+  | AgentUploadKeyBackupSelection | AgentUploadKeyReuseSelection | AgentCredentialSelection;
 export interface AgentUploadKeyAccess {
   readonly schemaVersion: 1;
   readonly serviceInstance: string | null;
@@ -23,7 +26,7 @@ export interface AgentUploadKeyAccess {
   readonly enabled: boolean;
   readonly remainingMs: number;
   readonly consumed: boolean;
-  readonly prepared?: AgentUploadKeyPrepared;
+  readonly prepared?: AgentUploadKeyPrepared | AgentCredentialPrepared;
 }
 export interface AgentUploadKeyAllow {
   readonly projectId: string;
@@ -46,22 +49,25 @@ export function agentUploadKeyConsent(kind: AgentUploadKeyKind): string {
     case 'bind-reviewed': return 'agent-android-upload-key-bind-once-v1';
     case 'backup-encrypted': return 'agent-android-upload-key-backup-once-v1';
     case 'restore-encrypted': return 'agent-android-upload-key-restore-once-v1';
+    case 'credential-import-prepared': return 'agent-credential-import-once-v1';
+    case 'credential-assess-existing': return 'agent-credential-assess-once-v1';
+    case 'credential-assign-reviewed': return 'agent-credential-assign-once-v1';
   }
 }
 const fields = ['schemaVersion', 'serviceInstance', 'projectId', 'grantId', 'kind', 'requestId', 'enabled', 'remainingMs', 'consumed'];
 const integer = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && !Object.is(v, -0) && v >= 0 && v <= max;
 export const uploadKeyRevision = (v: unknown): v is number => integer(v, 0xffff_fffe) && v > 0;
-const kind = (v: unknown): v is AgentUploadKeyKind => v === 'prepare-existing' || v === 'generate-new' || v === 'bind-reviewed' || v === 'backup-encrypted' || v === 'restore-encrypted';
+const kind = (v: unknown): v is AgentUploadKeyKind => v === 'prepare-existing' || v === 'generate-new' || v === 'bind-reviewed' || v === 'backup-encrypted' || v === 'restore-encrypted' || agentCredentialAction(v);
 
 export function parseAgentUploadKeyAccess(raw: unknown): AgentUploadKeyAccess | null {
   try {
-    // Nine ordinary fields (19 nodes), plus the one fixed seven-field stamp
-    // (16 nodes). No other extension or free nested value is admitted below.
-    const v = copyBoundedComparisonData(raw, 4096, 19 + 16);
+    // Nine ordinary fields plus at most the fixed eight-field general stamp.
+    // Old Android stamps remain exact seven-field values, never generalized.
+    const v = copyBoundedComparisonData(raw, 4096, 19 + 18);
     if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== fields.length + Number(Object.hasOwn(v, 'prepared')) || !fields.every((k) => Object.hasOwn(v, k))) return null;
     const d = v as Record<string, unknown>;
-    const prepared = Object.hasOwn(d, 'prepared') ? parseAgentUploadKeyPrepared(d.prepared) : undefined;
-    if (prepared === null || prepared && (d.kind !== 'prepare-existing' || d.enabled !== false || d.consumed !== true)) return null;
+    const prepared = Object.hasOwn(d, 'prepared') ? (d.kind === 'credential-assess-existing' ? parseAgentCredentialPrepared(d.prepared) : parseAgentUploadKeyPrepared(d.prepared)) : undefined;
+    if (prepared === null || prepared && (d.kind !== 'prepare-existing' && d.kind !== 'credential-assess-existing' || d.enabled !== false || d.consumed !== true)) return null;
     if (d.schemaVersion !== 1 || typeof d.enabled !== 'boolean' || typeof d.consumed !== 'boolean' ||
         !integer(d.remainingMs, AGENT_UPLOAD_KEY_MAX_MS) || !(d.requestId === null || reserveId(d.requestId)) ||
         d.consumed !== (d.requestId !== null) || d.enabled && (d.consumed || d.remainingMs === 0) || !d.enabled && d.remainingMs !== 0) return null;
@@ -77,7 +83,7 @@ export function parseAgentUploadKeyAccess(raw: unknown): AgentUploadKeyAccess | 
 }
 export function parseAgentUploadKeySelection(raw: unknown): AgentUploadKeySelection | null {
   try {
-    const v = copyBoundedComparisonData(raw, 256, 8);
+    const v = copyBoundedComparisonData(raw, 256, 10);
     if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
     const d = v as Record<string, unknown>, keys = Object.keys(d);
     if (keys.length === 2 && d.kind === 'generate-new' && d.declaration === AGENT_UPLOAD_KEY_DECLARATION)
@@ -90,7 +96,7 @@ export function parseAgentUploadKeySelection(raw: unknown): AgentUploadKeySelect
       return Object.freeze({ kind: 'prepare-existing', recordId: d.recordId, expectedRevision: d.expectedRevision });
     if (keys.length === 2 && d.kind === 'restore-encrypted' && d.declaration === AGENT_UPLOAD_KEY_RESTORE_DECLARATION)
       return Object.freeze({ kind: 'restore-encrypted', declaration: AGENT_UPLOAD_KEY_RESTORE_DECLARATION });
-    return null;
+    return parseAgentCredentialSelection(d);
   } catch { return null; }
 }
 export function createAgentUploadKeyAccessPort(invoke: (command: string, body: Uint8Array) => Promise<unknown>): AgentUploadKeyAccessPort {
@@ -118,6 +124,7 @@ export function createAgentUploadKeyAccessPort(invoke: (command: string, body: U
 // StoredRef, OriginalWork, source and assessment; this is not a Bind factory.
 export function agentUploadKeySelection(assets: AssetDisplayState, selected: AgentUploadKeyKind, generateReady: boolean, now: number,
   backupRecord: Readonly<AssetRecordRef> | null = null): AgentUploadKeySelection | null {
+  if (agentCredentialAction(selected)) return agentCredentialSelection(assets, selected, now, backupRecord);
   const s = assets.status, c = s?.context;
   if (!Number.isFinite(now) || now < 0 || assets.mode !== 'native' || assets.blocked || assets.observationFailed || !assets.contextCurrent ||
       assets.busy || assets.updatingContext || assets.originPending || !s || s.mode !== 'encrypted' ||
@@ -144,7 +151,7 @@ export function agentUploadKeySelection(assets: AssetDisplayState, selected: Age
 export function agentUploadKeyCommands(access: AgentUploadKeyAccess): readonly string[] {
   const a = parseAgentUploadKeyAccess(access);
   if (!a?.grantId) return [];
-  const origin = `${a.projectId} ${a.serviceInstance}`;
-  return a.requestId ? [`mrk upload-key-status ${origin} ${a.requestId} --json`, `mrk upload-key-cancel ${origin} ${a.requestId} --json`] :
-    a.enabled ? [`mrk upload-key-submit ${origin} ${a.grantId} --reviewed --json`] : [];
+  const origin = `${a.projectId} ${a.serviceInstance}`, family = agentCredentialAction(a.kind) ? 'credential' : 'upload-key';
+  return a.requestId ? [`mrk ${family}-status ${origin} ${a.requestId} --json`, `mrk ${family}-cancel ${origin} ${a.requestId} --json`] :
+    a.enabled ? [`mrk ${family}-submit ${origin} ${a.grantId} --reviewed --json`] : [];
 }

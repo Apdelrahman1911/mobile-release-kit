@@ -122,6 +122,7 @@ impl ConnectionState {
             data,
             activity: None,
             dispatch: Some(capture),
+            enrollment: None,
         })
     }
     pub(crate) fn preflight_agent_allow(

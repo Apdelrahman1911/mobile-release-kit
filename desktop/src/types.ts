@@ -451,6 +451,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly agentLocalHistory?: import('./agentLocalHistoryProtocol.ts').AgentLocalHistoryPort | null;
   readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+  readonly agentVersionEnrollment?: import('./agentVersionEnrollment.ts').AgentVersionEnrollmentPort | null;
   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
   readonly githubPullRequest?: import('./githubPullRequestProtocol.ts').PullRequestPort | null;

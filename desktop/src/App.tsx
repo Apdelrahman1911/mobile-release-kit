@@ -8,6 +8,7 @@ import { VersionCounterSetup } from './components/VersionCounterSetup.tsx';
 import { GitHubPublicationAccess } from './components/GitHubPublicationAccess.tsx';
 import { AgentGithubActionAccessController } from './agentGithubActionAccessController.ts';
 import type { GithubActionSelection } from './agentGithubActionAccess.ts';
+import { isEnrollmentActionKind } from './agentVersionEnrollment.ts';
 import { AgentGithubActionAccess } from './components/AgentGithubActionAccess.tsx';
 import { AgentToolSetupController } from './agentToolSetupController.ts';
 import { AgentToolSetup } from './components/AgentToolSetup.tsx';
@@ -643,12 +644,12 @@ export function App() {
   actionsRetryRef.current = githubActionsRetry;
   const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
   const [agentGithubAction]=useState(()=>new AgentGithubActionAccessController({
-    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();githubPreflightControllerRef.current?.syncContext();githubReleaseControllerRef.current?.syncContext();githubPublicationControllerRef.current?.syncCounterSource();},
-    delegate:(r)=>r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile'||r.kind==='setup-prepare'||r.kind==='counter-prepare'||r.kind==='counter-create'||r.kind==='publication-pending'||r.kind==='counter-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('preflight-')?githubPreflightControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('release-')?githubReleaseControllerRef.current?.delegatePrepared(r)??null:null,
+    syncOriginal:()=>{activityRef.current?.syncContext();repositoryCreateRef.current?.syncContext();pullRequestRef.current?.syncContext();actionsRetryRef.current?.syncContext();githubPublicationControllerRef.current?.syncContext();githubPreflightControllerRef.current?.syncContext();githubReleaseControllerRef.current?.syncContext();githubPublicationControllerRef.current?.syncCounterSource();versionEnrollmentRef.current?.syncContext();},
+    delegate:(r)=>isEnrollmentActionKind(r.kind)?versionEnrollmentRef.current?.agentDelegate(r)??null:r.kind==='activity-overview'?activityRef.current?.delegateOverview(r)??null:r.kind==='repository-create'?repositoryCreateRef.current?.delegatePrepared(r)??null:(r.kind==='draft-pr-create'||r.kind==='pr-create')?pullRequestRef.current?.delegatePrepared(r)??null:r.kind==='failed-jobs-retry'?actionsRetryRef.current?.delegatePrepared(r)??null:(r.kind==='setup-publish'||r.kind==='setup-reconcile'||r.kind==='setup-prepare'||r.kind==='counter-prepare'||r.kind==='counter-create'||r.kind==='publication-pending'||r.kind==='counter-reconcile')?githubPublicationControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('preflight-')?githubPreflightControllerRef.current?.delegatePrepared(r)??null:r.kind.startsWith('release-')?githubReleaseControllerRef.current?.delegatePrepared(r)??null:null,
     current:()=>{const service=pathService.current;return {
       port:service.api?.mode==='native'?service.api.agentGithubAction??null:null,nativeSession:service.api?.mode==='native'?service:null,
       projectId:connectionPicking.current?null:workspaceRef.current.selectedId,epoch:connectionHelpGeneration.current,preview:service.api?.mode==='preview',
-      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile'),githubPreflightControllerRef.current?.agentSelection('preflight-prepare'),githubPreflightControllerRef.current?.agentSelection('preflight-dispatch'),githubPreflightControllerRef.current?.agentSelection('preflight-pending'),githubPreflightControllerRef.current?.agentSelection('preflight-observe'),githubReleaseControllerRef.current?.agentSelection('release-prepare'),githubReleaseControllerRef.current?.agentSelection('release-dispatch'),githubReleaseControllerRef.current?.agentSelection('release-pending'),githubReleaseControllerRef.current?.agentSelection('release-observe'),githubPublicationControllerRef.current?.dispatchSelection('setup-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-create'),githubPublicationControllerRef.current?.dispatchSelection('publication-pending'),githubPublicationControllerRef.current?.dispatchSelection('counter-reconcile')].filter((r):r is GithubActionSelection=>!!r),
+      reviews:[activityRef.current?.agentSelection(),repositoryCreateRef.current?.agentSelection(),pullRequestRef.current?.agentSelection(),actionsRetryRef.current?.agentSelection(),githubPublicationControllerRef.current?.agentSelection('setup-publish'),githubPublicationControllerRef.current?.agentSelection('setup-reconcile'),githubPreflightControllerRef.current?.agentSelection('preflight-prepare'),githubPreflightControllerRef.current?.agentSelection('preflight-dispatch'),githubPreflightControllerRef.current?.agentSelection('preflight-pending'),githubPreflightControllerRef.current?.agentSelection('preflight-observe'),githubReleaseControllerRef.current?.agentSelection('release-prepare'),githubReleaseControllerRef.current?.agentSelection('release-dispatch'),githubReleaseControllerRef.current?.agentSelection('release-pending'),githubReleaseControllerRef.current?.agentSelection('release-observe'),githubPublicationControllerRef.current?.dispatchSelection('setup-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-prepare'),githubPublicationControllerRef.current?.dispatchSelection('counter-create'),githubPublicationControllerRef.current?.dispatchSelection('publication-pending'),githubPublicationControllerRef.current?.dispatchSelection('counter-reconcile'),versionEnrollmentRef.current?.agentSelection('counter-enrollment-review'),versionEnrollmentRef.current?.agentSelection('counter-enrollment-connect')].filter((r):r is GithubActionSelection=>!!r),
       blockedReason:agentGithubActionAdmission.current(),
     };},
   }));
@@ -664,8 +665,10 @@ export function App() {
   playCleanupRef.current = githubPlayCleanup;
   const playCleanupState = useSyncExternalStore(githubPlayCleanup.subscribe, githubPlayCleanup.getSnapshot, githubPlayCleanup.getSnapshot);
   const [versionEnrollment] = useState(() => new VersionEnrollmentController({ current: () => {
-    const service = pathService.current;
+    const service = pathService.current, status = connectionControllerRef.current?.getSnapshot().status;
     return { port: service.api?.mode === 'native' ? service.api.versionEnrollment ?? null : null,
+      agentPort: service.api?.mode === 'native' ? service.api.agentVersionEnrollment ?? null : null,
+      connection: status?.session?.state === 'connected' ? { sessionId: status.session.id, revision: status.revision } : null,
       nativeSession: service.api?.mode === 'native' ? service : null,
       projectId: connectionPicking.current ? null : workspaceRef.current.selectedId,
       preview: service.api?.mode === 'preview', blockedReason: versionEnrollmentAdmission.current() };
@@ -831,7 +834,8 @@ export function App() {
     return { port: service.api?.mode === 'native' ? service.api.agentUploadKeyAccess ?? null : null,
       nativeSession: service.api?.mode === 'native' ? service : null, projectId: project ? selected : null, project, assets,
       generateReady: assetSession.canConfirmUploadKey(assets), blockedReason: savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) };
-  }, prepareExisting: (record) => assetSession.prepareExistingForCli(record) }));
+  }, prepareExisting: (record) => assetSession.prepareExistingForCli(record),
+    prepareCredential: (record, kind) => assetSession.prepareCredentialForCli(record, kind) }));
   useSyncExternalStore(agentUploadKey.subscribe, agentUploadKey.getSnapshot, agentUploadKey.getSnapshot);
   useEffect(() => { agentUploadKey.syncContext(); });
   // Evidence selection has deliberately no source-project or draft callback.
@@ -907,7 +911,10 @@ export function App() {
   // This one action borrows the current authenticated connection, not a
   // saved-code grant. Exclude only enrollment itself from reciprocal busy checks.
   versionEnrollmentAdmission.current = () => {
-    const blocked = versionReserveRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+    const peer = agentGithubActionRef.current?.peerSelection() ?? versionEnrollmentRef.current?.agentPeerSelection() ?? null;
+    const ownDelegation = !!peer && isEnrollmentActionKind(peer.kind) && versionEnrollmentRef.current?.agentSelected(peer) === true;
+    const blocked = versionReserveRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ??
+      savedOwnersBusy(false, false, false, false, false, false, false, false, false, false, false, false, false, ownDelegation) ??
       savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ??
       cliReadAccessControllerRef.current?.pendingReason();
     if (blocked) return blocked;
@@ -962,14 +969,20 @@ export function App() {
       ? null : 'Connect the intended GitHub repository and account first.';
   };
   agentGithubActionAdmission.current=()=>{
-    const selected=agentGithubActionRef.current?.peerSelection()??null;
+    const selected=agentGithubActionRef.current?.peerSelection()??versionEnrollmentRef.current?.agentPeerSelection()??null;
+    const enrollment=!!selected&&isEnrollmentActionKind(selected.kind)&&versionEnrollmentRef.current?.agentSelected(selected)===true;
     const repository=!!selected&&selected.kind==='repository-create'&&repositoryCreateRef.current?.agentSelected(selected)===true;
     const pr=!!selected&&(selected.kind==='draft-pr-create'||selected.kind==='pr-create')&&pullRequestRef.current?.agentSelected(selected)===true;
     const retry=!!selected&&selected.kind==='failed-jobs-retry'&&actionsRetryRef.current?.agentSelected(selected)===true;
     const publication=!!selected&&githubPublicationControllerRef.current?.agentSelected(selected)===true;
     const preflight=!!selected&&githubPreflightControllerRef.current?.agentSelected(selected)===true;
     const release=!!selected&&githubReleaseControllerRef.current?.agentSelected(selected)===true;
-    const blocked=savedCommandBusy(false,preflight,release,false,false,false,false,publication,repository,false,pr,retry,false,true)??
+    // Only the SAME private enrollment delegate can exclude itself here; all
+    // other source/material/passive owners and the READ control stay gates.
+    const busy=enrollment?(versionReserveRef.current?.ownerReason()??gitBusy()??githubGhBusy()??identityBusy()??
+      savedOwnersBusy(false,false,false,false,false,false,false,false,false,false,false,false,false,true)??externalBusy()??cliReadAccessControllerRef.current?.pendingReason()??null):
+      savedCommandBusy(false,preflight,release,false,false,false,false,publication,repository,false,pr,retry,false,true);
+    const blocked=busy??
       savedOwnersPrerequisiteReason(false,false,undefined,false,true);
     if(blocked)return blocked;
     if(!preflight&&githubPreflightControllerRef.current?.getSnapshot().status?.prepared||!release&&githubReleaseControllerRef.current?.getSnapshot().status?.prepared)return 'Finish the other prepared GitHub release review first.';

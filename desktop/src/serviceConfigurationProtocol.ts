@@ -6,14 +6,18 @@ export const CONFIGURATION_CONSENT = 'agent-exact-configuration-preview-v1';
 export interface ConfigurationOrigin { serviceInstance: string; projectId: string; requestId: string }
 export interface ConfigurationOriginal { sessionId: string; ownerGeneration: string; revision: string }
 export type ConfigurationContainer = { kind: 'project' | 'workspace'; path: string };
+export interface ConfigurationMetadata { root: string; androidLocales: string[]; iosLocales: string[] }
 export interface ConfigurationSettings {
   source: { candidateBranch: string; productionBranch: string };
   android: { module: string | null; variant: string | null } | null;
   ios: { container: ConfigurationContainer | null; scheme: string | null; archiveConfiguration: string | null } | null;
+  // Omitted means outside the bounded projection, never missing/default data.
+  metadata?: ConfigurationMetadata;
 }
 export type ConfigurationChange = { kind: 'source'; candidateBranch: string; productionBranch: string } |
   { kind: 'android'; module: string; variant: string } |
-  { kind: 'ios'; container: ConfigurationContainer; scheme: string; archiveConfiguration: string };
+  { kind: 'ios'; container: ConfigurationContainer; scheme: string; archiveConfiguration: string } |
+  ({ kind: 'metadata' } & ConfigurationMetadata);
 export interface ConfigurationFile { path: 'release/mobile-release.json' | '.gitignore'; action: 'create' | 'preserve' | 'replace' | 'append'; beforeBytes: number | null; afterBytes: number }
 export interface ConfigurationReview {
   planToken: string; nativeStatusRevision: number; before: ConfigurationSettings; after: ConfigurationSettings;
@@ -51,11 +55,34 @@ const relative = (v: unknown): v is string => text(v, 512) && !v.startsWith('/')
 const container = (v: unknown): v is ConfigurationContainer => keys(v, ['kind', 'path']) && ['project', 'workspace'].includes(String(v.kind)) && relative(v.path) &&
   v.path.endsWith(v.kind === 'project' ? '.xcodeproj' : '.xcworkspace');
 const nullable = <T>(v: unknown, check: (x: unknown) => x is T): v is T | null => v === null || check(v);
+// Match core config.py metadata policy, including Unicode relative paths and
+// Python's whitespace-only refusal. No path is resolved or asset moved here.
+const metadataRoot = (v: unknown): v is string => typeof v === 'string' && v.length <= 1024 &&
+  Array.from(v).length <= 512 && /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(v) &&
+  !/[\0\n\r\\\ud800-\udfff]/u.test(v) && !v.startsWith('/') && !/^[A-Za-z]:/.test(v) &&
+  v.split('/').every(p=>p!=='' && p!=='.' && p!=='..');
+const locales = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 32 && v.every((s,n)=>
+  typeof s === 'string' && /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]{3})?$(?![\s\S])/.test(s) && v.indexOf(s)===n);
+function metadata(v: unknown): v is ConfigurationMetadata {
+  return keys(v,['root','androidLocales','iosLocales']) && metadataRoot(v.root) && locales(v.androidLocales) && locales(v.iosLocales) &&
+    v.androidLocales.length + v.iosLocales.length <= 32 &&
+    new TextEncoder().encode(JSON.stringify(v)).length <= 2048 - '"kind":"metadata",'.length;
+}
+const metadataFor = (m: ConfigurationMetadata, a: boolean, i: boolean) => (!a || m.androidLocales.length > 0) && (!i || m.iosLocales.length > 0);
+const sameMetadata = (a: ConfigurationMetadata | undefined, b: ConfigurationMetadata) => !!a && a.root === b.root &&
+  a.androidLocales.length===b.androidLocales.length && a.androidLocales.every((s,n)=>s===b.androidLocales[n]) &&
+  a.iosLocales.length===b.iosLocales.length && a.iosLocales.every((s,n)=>s===b.iosLocales[n]);
+const unchangedSelections = (a: ConfigurationSettings, b: ConfigurationSettings) =>
+  a.source.candidateBranch===b.source.candidateBranch && a.source.productionBranch===b.source.productionBranch &&
+  (a.android===null ? b.android===null : b.android!==null && a.android.module===b.android.module && a.android.variant===b.android.variant) &&
+  (a.ios===null ? b.ios===null : b.ios!==null && a.ios.scheme===b.ios.scheme && a.ios.archiveConfiguration===b.ios.archiveConfiguration &&
+    (a.ios.container===null ? b.ios.container===null : b.ios.container!==null && a.ios.container.kind===b.ios.container.kind && a.ios.container.path===b.ios.container.path));
 export function configurationSettings(value: unknown): value is ConfigurationSettings {
-  if (!keys(value, ['source', 'android', 'ios']) || !keys(value.source, ['candidateBranch', 'productionBranch']) || !branch(value.source.candidateBranch) || !branch(value.source.productionBranch)) return false;
+  if ((!keys(value, ['source', 'android', 'ios']) && !keys(value, ['source', 'android', 'ios', 'metadata'])) || !keys(value.source, ['candidateBranch', 'productionBranch']) || !branch(value.source.candidateBranch) || !branch(value.source.productionBranch)) return false;
   if (value.android !== null && (!keys(value.android, ['module', 'variant']) || !nullable(value.android.module, moduleName) || !nullable(value.android.variant, variant))) return false;
   if (value.ios !== null && (!keys(value.ios, ['container', 'scheme', 'archiveConfiguration']) || !nullable(value.ios.container, container) ||
       !nullable(value.ios.scheme, (s): s is string => text(s, 255)) || !nullable(value.ios.archiveConfiguration, (s): s is string => text(s, 255)))) return false;
+  if (Object.hasOwn(value,'metadata') && (!metadata(value.metadata) || !metadataFor(value.metadata,value.android!==null,value.ios!==null))) return false;
   return new TextEncoder().encode(JSON.stringify(value)).length <= 4096;
 }
 export function configurationChange(value: unknown): value is ConfigurationChange {
@@ -63,7 +90,8 @@ export function configurationChange(value: unknown): value is ConfigurationChang
   const v = value as Record<string, unknown>;
   const valid = v.kind === 'source' ? keys(v, ['kind', 'candidateBranch', 'productionBranch']) && branch(v.candidateBranch) && branch(v.productionBranch) :
     v.kind === 'android' ? keys(v, ['kind', 'module', 'variant']) && moduleName(v.module) && variant(v.variant) :
-    v.kind === 'ios' ? keys(v, ['kind', 'container', 'scheme', 'archiveConfiguration']) && container(v.container) && text(v.scheme, 255) && text(v.archiveConfiguration, 255) : false;
+    v.kind === 'ios' ? keys(v, ['kind', 'container', 'scheme', 'archiveConfiguration']) && container(v.container) && text(v.scheme, 255) && text(v.archiveConfiguration, 255) :
+    v.kind === 'metadata' ? keys(v,['kind','root','androidLocales','iosLocales']) && metadata({root:v.root,androidLocales:v.androidLocales,iosLocales:v.iosLocales}) : false;
   return valid && new TextEncoder().encode(JSON.stringify(v)).length <= 2048;
 }
 function origin(v: unknown): v is ConfigurationOrigin { return keys(v, ['serviceInstance', 'projectId', 'requestId']) && id(v.serviceInstance) && id(v.projectId) && id(v.requestId); }
@@ -94,6 +122,8 @@ function request(v: unknown): v is ConfigurationRequest {
     v.permissionLive && (v.cancelRequested || v.applyConsumed || v.phase !== 'reviewing') || (v.result !== null) !== (v.phase === 'final')) return false;
   if (v.original && (v.original.sessionId !== v.operationId || v.original.ownerGeneration !== v.ownerGeneration) ||
     v.settings && !v.original || v.review && (!v.change || !v.original) || ['queued-apply', 'applying'].includes(String(v.phase)) && (!v.applyConsumed || !v.review)) return false;
+  if (v.change?.kind === 'metadata' && v.review && (!v.review.before.metadata || !sameMetadata(v.review.after.metadata,v.change) ||
+      !unchangedSelections(v.review.before,v.review.after))) return false;
   if (v.result !== null && (!keys(v.result, ['effect', 'journal', 'cancelled', 'applySubmitted']) || !['not_started', 'unchanged', 'rolled_back', 'committed'].includes(String(v.result.effect)) ||
     !['not_created', 'clean', 'recovery_required'].includes(String(v.result.journal)) || typeof v.result.cancelled !== 'boolean' || typeof v.result.applySubmitted !== 'boolean')) return false;
   return true;
@@ -115,18 +145,29 @@ export function settingsFromConfig(base: JsonObject): ConfigurationSettings | nu
   const c = i.project !== undefined && i.workspace !== undefined ? false : i.project !== undefined ? {kind: 'project', path: i.project} : i.workspace !== undefined ? {kind: 'workspace', path: i.workspace} : null;
   const v = {source: {candidateBranch: s.candidateBranch, productionBranch: s.productionBranch}, android: a.enabled ? {module: a.module ?? null, variant: a.variant ?? null} : null,
     ios: i.enabled ? {container: c, scheme: i.scheme ?? null, archiveConfiguration: i.archiveConfiguration ?? null} : null};
-  return configurationSettings(v) ? v : null;
+  if (!configurationSettings(v)) return null;
+  const m=base.metadata;
+  if (metadata(m) && metadataFor(m,a.enabled,i.enabled)) {
+    const withMetadata={...v,metadata:{root:m.root,androidLocales:m.androidLocales.slice(),iosLocales:m.iosLocales.slice()}};
+    if (configurationSettings(withMetadata)) return withMetadata;
+  }
+  return v;
 }
 // Local display/adoption only. The native original derives independently and
 // checks expectedBase against actual source. This is never sent as a full draft.
 export function changedConfiguration(base: JsonObject, change: ConfigurationChange): JsonObject | null {
   const prior = settingsFromConfig(base); if (!prior || !configurationChange(change)) return null;
   if (change.kind === 'android' && !prior.android || change.kind === 'ios' && !prior.ios) return null;
+  if (change.kind === 'metadata' && (!prior.metadata || !metadataFor(change,prior.android!==null,prior.ios!==null))) return null;
   const next = structuredClone(base);
   if (change.kind === 'source') next.source = {...next.source as JsonObject, candidateBranch: change.candidateBranch, productionBranch: change.productionBranch};
   if (change.kind === 'android') next.android = {...next.android as JsonObject, module: change.module, variant: change.variant};
   if (change.kind === 'ios') { const ios = {...next.ios as JsonObject}; delete ios.project; delete ios.workspace;
     ios[change.container.kind] = change.container.path; ios.scheme = change.scheme; ios.archiveConfiguration = change.archiveConfiguration; next.ios = ios; }
+  if (change.kind === 'metadata') {
+    next.metadata={root:change.root,androidLocales:change.androidLocales.slice(),iosLocales:change.iosLocales.slice()};
+    if (!sameMetadata(settingsFromConfig(next)?.metadata,change)) return null;
+  }
   return next;
 }
 type Invoke = <T>(command: string, input?: Record<string, unknown> | Uint8Array) => Promise<T>;

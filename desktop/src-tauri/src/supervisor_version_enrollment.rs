@@ -11,6 +11,7 @@ pub(crate) struct VersionEnrollmentControl {
     live: AtomicBool,
     original: Mutex<Option<Weak<Owner>>>,
     cleanup_cutoff: watch::Sender<Option<Instant>>,
+    agent: std::sync::OnceLock<Weak<crate::service_github_action_requests::NativeScope>>,
 }
 impl VersionEnrollmentControl {
     pub(crate) fn new() -> Self {
@@ -20,12 +21,60 @@ impl VersionEnrollmentControl {
             live: AtomicBool::new(true),
             original: Mutex::new(None),
             cleanup_cutoff: watch::channel(None).0,
+            agent: std::sync::OnceLock::new(),
         }
     }
     pub(crate) fn current(&self) -> bool {
+        self.sample_agent();
         self.live.load(Ordering::SeqCst)
             && !self.stopped.load(Ordering::SeqCst)
             && !self.unknown.load(Ordering::SeqCst)
+    }
+    /// Bind once before the SAME original Owner is armed. The Lane, not this
+    /// Weak, retains the service Entry; this creates no second owner/permit.
+    pub(crate) fn bind_agent(&self, scope: &Arc<crate::service_github_action_requests::NativeScope>) -> Result<(), BridgeError> {
+        if !scope.review.kind().enrollment_family() || !self.never_admitted() || !self.current()
+            || scope.current(false).is_err() {
+            return Err(p::refused(p::Reason::Cancelled));
+        }
+        self.agent.set(Arc::downgrade(scope)).map_err(|_| BridgeError::cleanup_unknown())
+    }
+    // Inner GO/job/custody checks may only latch bounded facts. In particular
+    // this never calls stop_at (OwnerState), a Document or a Host/Store method.
+    fn sample_agent(&self) {
+        let Some(weak) = self.agent.get() else { return };
+        let Some(scope) = weak.upgrade() else {
+            self.unknown.store(true, Ordering::SeqCst);
+            self.stopped.store(true, Ordering::SeqCst);
+            return;
+        };
+        match scope.first(true, Instant::now()) {
+            Ok(Some((_, at))) => match at.checked_add(CLEANUP_TIME) {
+                Some(end) => self.retain_cleanup_endpoint(end),
+                None => {
+                    self.unknown.store(true, Ordering::SeqCst);
+                    self.stopped.store(true, Ordering::SeqCst);
+                    scope.enrollment_unknown();
+                }
+            },
+            Ok(None) => {},
+            Err(_) => {
+                self.unknown.store(true, Ordering::SeqCst);
+                self.stopped.store(true, Ordering::SeqCst);
+                scope.enrollment_unknown();
+            }
+        }
+    }
+    /// Used under Doc only to request STOP. The retained async original forwards
+    /// the same first instant to OwnerState after every guard has been released.
+    pub(crate) fn agent_stop_requested(&self, at: Instant) {
+        match at.checked_add(CLEANUP_TIME) {
+            Some(end) => self.retain_cleanup_endpoint(end),
+            None => {
+                self.unknown.store(true, Ordering::SeqCst);
+                self.stopped.store(true, Ordering::SeqCst);
+            }
+        }
     }
     pub(crate) fn pending(&self) -> bool {
         self.live.load(Ordering::SeqCst) || self.unknown.load(Ordering::SeqCst)
@@ -93,6 +142,7 @@ impl VersionEnrollmentControl {
     }
     pub(crate) fn unknown(&self) {
         self.unknown.store(true, Ordering::SeqCst);
+        if let Some(scope) = self.agent.get().and_then(Weak::upgrade) { scope.enrollment_unknown(); }
         self.stop();
     }
     pub(crate) fn never_admitted(&self) -> bool {
@@ -117,6 +167,7 @@ impl VersionEnrollmentControl {
     /// Original Document calls only after known nonentry OR actual HTTP and
     /// every native state-job return. No Drop/status/FIN calls this method.
     pub(crate) fn returned(&self, work_end: Instant) -> Result<(), BridgeError> {
+        self.sample_agent();
         self.check_cleanup(work_end)?;
         if !self.live.swap(false, Ordering::SeqCst) {
             self.unknown();

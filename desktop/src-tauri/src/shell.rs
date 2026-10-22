@@ -2821,6 +2821,34 @@ async fn version_enrollment_confirm(app: tauri::AppHandle, webview: Webview, req
     state.document.confirm_version_enrollment(&project_id, &review_id, &location).await
 }
 #[tauri::command]
+async fn agent_version_enrollment_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let args:crate::asset_session::agent_github_action::enrollment::ReviewArgs =
+            crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        state.document.agent_version_enrollment_review(args).await
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    { let _=(request,state); Err(BridgeError::unavailable("Counter enrollment delegation is unavailable.")) }
+}
+#[tauri::command]
+async fn agent_version_enrollment_confirm(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    edit_window(&webview)?;
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    {
+        let args:crate::asset_session::agent_github_action::enrollment::ConnectArgs =
+            crate::asset_session::agent_github_action::decode(project_identity_request_bytes(&request)?)?;
+        let location = app.path().app_local_data_dir().map_err(|_| crate::version_enrollment_protocol::not_started(
+            crate::version_enrollment_protocol::refused(crate::version_enrollment_protocol::Reason::RuntimeUnavailable)))?;
+        state.document.agent_version_enrollment_confirm(args, &location).await
+    }
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    { let _=(app,request,state); Err(BridgeError::unavailable("Counter enrollment delegation is unavailable.")) }
+}
+#[tauri::command]
 async fn version_enrollment_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
     let crate::version_enrollment_protocol::Command::Cancel(id) = version_enrollment_command("version_enrollment_cancel", &webview, &request)?
@@ -6226,6 +6254,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_device_status, github_device_start, github_device_check, github_device_open, github_device_cancel,
             git_read_status, git_read_start, git_read_cancel,
             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
+            agent_version_enrollment_review, agent_version_enrollment_confirm,
             version_reserve_status, version_reserve_review, version_reserve_start, version_reserve_cancel, version_reserve_edit,
             git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,

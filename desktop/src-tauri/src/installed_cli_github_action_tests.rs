@@ -92,12 +92,24 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
         "repository-create", "draft-pr-create", "pr-create", "failed-jobs-retry", "setup-publish", "setup-reconcile", "activity-overview",
         "preflight-prepare", "preflight-dispatch", "preflight-pending", "preflight-observe",
         "release-prepare", "release-dispatch", "release-pending", "release-observe",
-        "setup-prepare", "counter-prepare", "counter-create", "publication-pending", "counter-reconcile"
+        "setup-prepare", "counter-prepare", "counter-create", "publication-pending", "counter-reconcile",
+        "counter-enrollment-review", "counter-enrollment-connect"
     ]));
     assert_eq!(v["readOnlyKinds"], serde_json::json!([
         "setup-reconcile", "activity-overview", "preflight-pending", "preflight-observe",
-        "release-pending", "release-observe", "publication-pending", "counter-reconcile"
+        "release-pending", "release-observe", "publication-pending", "counter-reconcile", "counter-enrollment-review"
     ]));
+    let enrollment = &v["counterEnrollment"];
+    for key in ["reviewRequiresSeparateConsent", "connectRequiresNewConsent", "explicitCheckAfterSubmit",
+        "reviewGrantWithdrawalBeforeConnect", "localMappingOnly"] {
+        assert_eq!(enrollment[key], true, "{key}");
+    }
+    for key in ["counterCreation", "reservation", "automaticConnect"] {
+        assert_eq!(enrollment[key], false, "{key}");
+    }
+    let help = super::super::capabilities(false).unwrap();
+    assert!(help.len() <= crate::installed_cli::CAPABILITIES_BYTES);
+    assert!(std::str::from_utf8(&help).unwrap().contains("After each github-submit, Check"));
     assert_eq!(v["prepareKinds"], serde_json::json!(["preflight-prepare", "release-prepare", "counter-prepare", "setup-prepare"]));
     for key in ["oneUse", "mutating", "requiresExactDesktopConsent", "requiresRunningDesktop", "requiresProjectReadGrant",
         "normalPrCreation", "counterSetup", "firstCounterOnly", "counterPrepareMayCreateLocalState", "cliPendingLoad",
@@ -181,4 +193,45 @@ fn activity_cli_output_is_historical_compact_data_not_a_new_read_permission() {
     let mut wrong = q.clone(); wrong.request_id = id("e");
     assert!(output(&response, &wrong, None, true).is_err());
     assert!(output(&response, &q, Some(&id("f")), true).is_err());
+}
+
+#[test]
+fn enrollment_cli_output_keeps_exact_review_or_connected_data_without_new_authority() {
+    use github::enrollment as e;
+    let q = github::Query { project_id:id("a"), service_instance:id("b"), request_id:id("c") };
+    for connect in [false, true] {
+        let review = if connect { github::Review::CounterEnrollmentConnect(e::ConnectReference {
+            session_id:"session-a".into(), expected_revision:7, expected_connection_revision:9,
+            review_id:"a".repeat(32), review_sha256:"b".repeat(64),
+        }) } else { github::Review::CounterEnrollmentReview(e::ReviewReference {
+            session_id:"session-a".into(), expected_revision:7, expected_connection_revision:9,
+            request_sha256:"b".repeat(64),
+        }) };
+        let result = e::Snapshot {
+            operation:if connect {e::Operation::Connect}else{e::Operation::Review},
+            phase:if connect {e::Phase::Connected}else{e::Phase::Reviewed},
+            reason:if connect {e::OutcomeReason::Connected}else{e::OutcomeReason::None},
+            review:if connect {None}else{Some(e::ReviewView { id:"a".repeat(32), repository:"fixture/app".into(),
+                version:e::Version{name:"1.2.3".into(),build:7}, reservations:2 })},
+        };
+        let mut response=p::Response { version:1,request_id:id("e"),service_instance:id("b"),client_id:id("f"),session_id:id("a"),
+            response:p::ResponseBody::GitHubActionRequest(github::Status {
+                origin:q.clone(),grant_id:id("d"),review,revision:4,state:github::State::Complete,settlement:p::Settlement::Settled,
+                operation_id:Some("a".repeat(32)),reason:github::Reason::None,
+                effect:if connect {github::Effect::LocalMappingObserved}else{github::Effect::None},
+                never_admitted:false,do_not_replay:true,snapshot:None,result:Some(github::dispatch::Snapshot::Enrollment(result)),
+            }),
+        };
+        let (code, bytes)=output(&response,&q,Some(&id("d")),true).unwrap();assert_eq!(code,0);
+        assert!(bytes.len()<=github::activity::RESPONSE_LIMIT+1);
+        let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value,serde_json::to_value(&response).unwrap());
+        let (_, bytes)=output(&response,&q,None,false).unwrap();
+        let text=String::from_utf8(bytes).unwrap();
+        assert!(text.contains(q.request_id.as_str())&&text.contains("never resubmit automatically"));
+        assert!(output(&response,&q,Some(&id("f")),true).is_err());
+        let p::ResponseBody::GitHubActionRequest(row)=&mut response.response else {unreachable!()};
+        row.state=github::State::Finishing;row.settlement=p::Settlement::Pending;
+        assert!(output(&response,&q,None,true).is_err()); // result/observed mapping requires all returns
+    }
 }

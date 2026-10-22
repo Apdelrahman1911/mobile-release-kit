@@ -3264,10 +3264,11 @@ class CredentialUpdateInputs:
         need(type(baseline) is dict and all(baseline.get(k) == v for k, v in self.request["credentialContext"].items())
              and baseline.get("nominationSha256") == sha(self.stager.canonical(self.selected))
              and baseline.get("predecessorSource") == self.selected["source"]
-             and baseline.get("qualificationEvidenceSha256") == self.selected["qualificationEvidenceSha256"]
+             and baseline.get("publicControlsSha256") == self.selected["publicControlsSha256"]
+             and "qualificationEvidenceSha256" not in baseline
              and baseline.get("predecessorPackageSha256") == self.selected["package"]["sha256"]
              and all(baseline.get(k) is True for k in ("freshCurrentBytesReadback", "originalInstallerReturnedZero", "originalMountDetached"))
-             and baseline.get("productReady") is False, "update-credential-genuine-qualified-baseline")
+             and baseline.get("productReady") is False, "update-credential-genuine-observed-baseline")
         self.baseline = baseline
         self.case = self.work / "update-baseline-case"
         self.expected_current = self.read(self.case / "expected-current-producer.json", 16384, modes=(0o444,))
@@ -3320,7 +3321,8 @@ class CredentialUpdateInputs:
             self.status(self.normal / "update-p0-bootstrap-summary.status")
             need(positive.get("credentialBootstrapSha256") == sha(bootstrap_body)
                  and positive.get("predecessorSource") == self.selected["source"]
-                 and positive.get("predecessorQualificationEvidenceSha256") == self.selected["qualificationEvidenceSha256"]
+                 and positive.get("predecessorPublicControlsSha256") == self.selected["publicControlsSha256"]
+                 and "predecessorQualificationEvidenceSha256" not in positive
                  and positive.get("baselineInvocation") == self.baseline["readback"]["previous"]["invocation"],
                  "update-credential-exact-bootstrap-handoff")
             parent = self.work / "producer-root"

@@ -114,6 +114,11 @@ pub enum Action { LocalHistoryEnroll, LocalHistoryReview,
     GitHubCounterCreate,
     GitHubPublicationPending,
     GitHubCounterReconcile,
+    // New names remain inside the existing32-byte closed Action wire quote.
+    #[serde(rename = "counter-enrollment-review")]
+    GitHubCounterEnrollmentReview,
+    #[serde(rename = "counter-enrollment-connect")]
+    GitHubCounterEnrollmentConnect,
  GitStage, GitUnstage,
     GitCommit, GitFetch, GitPush, GitPushNewBranch, GitInitialize, GitBranchCreate, GitBranchSwitch, GitBranchRename, GitFastForward, GitSetUpstream, AssignCredential, GenerateCredential, PrepareTools, Build, Release, LocalProjectChecks,
 }

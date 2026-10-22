@@ -126,7 +126,7 @@ fn exact_duplicates_observe_only_and_never_alias_another_project_instance_or_gra
 }
 #[test]
 fn every_order_requires_actual_caller_native_and_continuation_returns() {
-    for kind in [p::Kind::GenerateNew, p::Kind::BindReviewed] {
+    for kind in [p::Kind::GenerateNew, p::Kind::BindReviewed, p::Kind::CredentialImportPrepared, p::Kind::CredentialAssessExisting, p::Kind::CredentialAssignReviewed] {
         for order in [
             [0, 1, 2],
             [0, 2, 1],
@@ -139,17 +139,19 @@ fn every_order_requires_actual_caller_native_and_continuation_returns() {
             let (claim, link) = r.claim();
             arm(&link);
             let mut claim = Some(claim);
-            let outcome = if kind == p::Kind::GenerateNew {
-                p::State::SavedUnassigned
-            } else {
-                p::State::Assigned
+            let outcome = match kind {
+                p::Kind::GenerateNew => p::State::SavedUnassigned,
+                p::Kind::CredentialImportPrepared => p::State::ImportedUnassigned,
+                p::Kind::CredentialAssessExisting => p::State::ReviewReady,
+                _ => p::State::Assigned,
             };
+            let reference = (outcome != p::State::ReviewReady).then(key);
             for (position, part) in order.into_iter().enumerate() {
                 match part {
                     0 => claim.take().unwrap().returned(Ok(())),
                     1 => link
                         .entry()
-                        .native_retired(7, outcome, p::Reason::None, Some(key())),
+                        .native_retired(7, outcome, p::Reason::None, reference.clone()),
                     _ => link.entry().continuation_joined(true),
                 }
                 let s = r.status();
@@ -158,7 +160,7 @@ fn every_order_requires_actual_caller_native_and_continuation_returns() {
                     assert!(s.key.is_none());
                 } else {
                     assert_eq!(s.state, outcome);
-                    assert_eq!(s.key, Some(key()));
+                    assert_eq!(s.key, reference);
                     assert!(!link.entry().pending());
                 }
             }
@@ -313,4 +315,27 @@ fn unknown_join_wrong_original_and_poison_cannot_become_finished_or_a_new_grant(
         r.inbox.allow(r.scope.clone(), id(5)).unwrap_err(),
         Error::StateUnknown
     );
+}
+
+#[test]
+fn general_credentials_share_old_capacity_and_lost_returns_never_replay() {
+    for kind in [p::Kind::CredentialImportPrepared,p::Kind::CredentialAssessExisting,p::Kind::CredentialAssignReviewed] {
+        let r=Rig::new(kind);let(c,l)=r.claim();arm(&l);drop(c);
+        l.entry().native_retired(7,p::State::Refused,p::Reason::Refused,None);
+        l.entry().continuation_joined(true);
+        assert_eq!(r.status().state,p::State::Unknown);assert!(l.entry().pending());
+        assert!(r.inbox.allow(r.scope.clone(),id(90)).is_err());
+    }
+    let r=Rig::new(p::Kind::CredentialImportPrepared);r.inbox.publish_read(&r.scope.read,0).unwrap();
+    let kinds=[p::Kind::CredentialImportPrepared,p::Kind::GenerateNew,p::Kind::CredentialAssessExisting,
+        p::Kind::PrepareExisting,p::Kind::CredentialAssignReviewed,p::Kind::BindReviewed,p::Kind::BackupEncrypted,p::Kind::RestoreEncrypted];
+    for n in 0..p::REQUEST_LIMIT {
+        let scope=Arc::new(NativeScope { kind:kinds[n%kinds.len()],project_id:r.scope.project_id.clone(),
+            runtime_id:r.scope.runtime_id.clone(),end:r.scope.end,read:r.scope.read.clone(),identity:r.scope.identity.clone(),changes:r.scope.changes.clone() });
+        let consent=id(100+n as u32);r.inbox.allow(scope,consent.clone()).unwrap();
+        let input=p::Submit { origin:p::Query {request_id:id(200+n as u32),..r.input.origin.clone()},grant_id:consent.clone() };
+        r.inbox.submit(input.clone()).unwrap();r.inbox.query(&input.origin,true).unwrap();r.inbox.revoke(&consent,Instant::now()).unwrap();
+    }
+    assert_eq!(r.inbox.retained_ids(&id(2)).unwrap().len(),32);
+    assert_eq!(r.inbox.allow(r.scope.clone(),id(999)).unwrap_err(),Error::Busy);
 }

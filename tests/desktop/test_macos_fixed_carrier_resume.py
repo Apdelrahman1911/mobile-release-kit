@@ -1622,7 +1622,7 @@ class FixedCarrierResumeData(unittest.TestCase):
         stage = types.SimpleNamespace(**namespace)
         current = stage.build_release_data((ROOT / "desktop/macos-installed-inputs/build-release.json").read_bytes())
         namespace.update(PACKAGE_VERSION=current["packageVersion"], RELEASE=current["release"])
-        self.assertEqual(stage.source_build_selection().package_version, "0.1.2")
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.3")
         manifest = "a" * 64
         paths = {"app/" + stage.ENTRY_BINARY, "app/" + stage.APP_BINARY, "app/" + stage.VAULT_HELPER,
                  "app/Contents/Info.plist", "app/" + stage.PAYLOAD_INFO, "runtime/python/bin/python3", "runtime/manifest.json"}
@@ -1667,7 +1667,7 @@ class FixedCarrierResumeData(unittest.TestCase):
                                expected_package=release["packageSha256"], input=Path("/synthetic-readback-input"), request_id="f" * 32)
         selection = stage.original_release_readback_selection(args, record)
         self.assertEqual(selection.package_version, "0.1.1")
-        self.assertEqual(stage.source_build_selection().package_version, "0.1.2")
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.3")
         self.assertEqual(len(stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest, selection=selection)), len(paths))
         with self.assertRaises(stage.Refused):
             stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest)

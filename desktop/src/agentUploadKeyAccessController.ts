@@ -3,8 +3,10 @@ import type { AgentUploadKeyAccess, AgentUploadKeyAccessPort, AgentUploadKeyKind
 import type { AssetDisplayState, AssetRecordRef } from './assetSessionTypes.ts';
 import { agentUploadKeyBackupOptions, agentUploadKeyBackupReason } from './agentUploadKeyBackup.ts';
 import type { AgentUploadKeyBackupOption } from './agentUploadKeyBackup.ts';
-import { agentUploadKeyReuseOptions, agentUploadKeyReuseReason, sameAgentUploadKeyPrepared } from './agentUploadKeyReuse.ts';
+import { agentUploadKeyReuseOptions, agentUploadKeyReuseReason } from './agentUploadKeyReuse.ts';
 import type { AgentUploadKeyPreparation, AgentUploadKeyReuseOption } from './agentUploadKeyReuse.ts';
+import { agentCredentialAction, agentCredentialOptions, agentCredentialReason, sameCredentialPrepared } from './agentCredentialAccess.ts';
+import type { AgentCredentialKind } from './agentCredentialAccess.ts';
 import { reserveId, reserveProject } from './versionReserve.ts';
 
 export interface AgentUploadKeyContext {
@@ -26,11 +28,12 @@ interface Work { kind: 'status' | 'allow' | 'revoke'; context: AgentUploadKeyCon
   address: Address | null; witness: Witness | null; sent: boolean; startedAt: number | null;
   original: Promise<unknown> | null; completion: Promise<void>; finish(): void }
 interface Source { current(): AgentUploadKeyContext; now?(): number; nonce?(): string;
-  prepareExisting?(record: Readonly<AssetRecordRef>): AgentUploadKeyPreparation | null }
+  prepareExisting?(record: Readonly<AssetRecordRef>): AgentUploadKeyPreparation | null;
+  prepareCredential?(record: Readonly<AssetRecordRef>, kind: AgentCredentialKind): AgentUploadKeyPreparation | null }
 const absent = (): AgentUploadKeyContext => ({ port: null, nativeSession: null, projectId: null, project: null,
-  assets: null, generateReady: false, blockedReason: 'Open the native app and select your Android project.' });
-const uncertain = 'CLI permission is unconfirmed. Keep the original request; check it or withdraw this exact permission. Do not repeat generation, assignment, backup or restore.';
-const hostReason = (c: AgentUploadKeyContext): string | null => !c.port || !c.nativeSession ? 'CLI signing-key permission requires the running native Desktop app.' : null;
+  assets: null, generateReady: false, blockedReason: 'Open the native app and select your project.' });
+const uncertain = 'CLI permission is unconfirmed. Keep the original request; check it or withdraw this exact permission. Do not repeat import, generation, assignment, backup or restore.';
+const hostReason = (c: AgentUploadKeyContext): string | null => !c.port || !c.nativeSession ? 'CLI credential permission requires the running native Desktop app.' : null;
 const sameHost = (a: AgentUploadKeyContext, b: AgentUploadKeyContext) => a.port === b.port && a.nativeSession === b.nativeSession;
 const sameContext = (a: AgentUploadKeyContext, b: AgentUploadKeyContext) => sameHost(a, b) && a.project === b.project && a.projectId === b.projectId &&
   a.assets?.entryGeneration === b.assets?.entryGeneration && a.assets?.status?.context === b.assets?.status?.context &&
@@ -64,7 +67,7 @@ export class AgentUploadKeyAccessController {
   whenSettled = (): Promise<void> => Promise.all([this.normal?.completion, this.revocation?.completion]).then(() => undefined);
   ownerReason = (): string | null => this.state.unknown ? uncertain : this.normal || this.revocation ?
     'Wait for the original CLI permission call. Withdrawal of that same permission stays available.' : this.state.access?.enabled ?
-      'A CLI signing-key permission was allowed. Check it or withdraw it before starting a different action.' :
+      'A CLI credential permission was allowed. Check it or withdraw it before starting a different action.' :
       this.state.access?.consumed && this.address !== null && this.withdrawn !== this.address ?
         'The previous CLI permission was used. Withdraw that exact permission before allowing another review; withdrawal does not prove its request completed.' : null;
   private read(): AgentUploadKeyContext {
@@ -104,13 +107,15 @@ export class AgentUploadKeyAccessController {
     const now = this.now(), a = c.assets;
     if (!a || !c.projectId || !c.project || hostReason(c) || c.blockedReason || now === null || a.status?.context?.projectId !== c.projectId) return null;
     const selection = agentUploadKeySelection(a, this.state.kind, c.generateReady, now,
-      this.state.kind === 'prepare-existing' ? this.state.prepareRecord : this.state.backupRecord), status = a.status;
+      this.state.kind === 'prepare-existing' || this.state.kind === 'credential-assess-existing' ? this.state.prepareRecord : this.state.backupRecord), status = a.status;
     if (!selection || !status?.context) return null;
-    const key = selection.kind === 'bind-reviewed' ? `bind:${c.projectId}:${status.context.revision}:${selection.previewOperationId}:${selection.previewToken}` :
+    const key = selection.kind === 'credential-import-prepared' || selection.kind === 'credential-assign-reviewed' ? `${selection.kind}:${selection.credentialKind}:${c.projectId}:${status.context.revision}:${selection.previewOperationId}:${selection.previewToken}` :
+      selection.kind === 'credential-assess-existing' ? `${selection.kind}:${selection.credentialKind}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}:${selection.recordId}:${selection.expectedRevision}` :
+      selection.kind === 'bind-reviewed' ? `bind:${c.projectId}:${status.context.revision}:${selection.previewOperationId}:${selection.previewToken}` :
       selection.kind === 'backup-encrypted' || selection.kind === 'prepare-existing' ? `${selection.kind === 'backup-encrypted' ? 'backup' : 'prepare'}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}:${selection.recordId}:${selection.expectedRevision}` :
       `${selection.kind === 'generate-new' ? 'generate' : 'restore'}:${c.projectId}:${status.context.revision}:${status.statusRevision}:${a.entryGeneration}`;
     return { context: c, revision: status.statusRevision, contextRevision: status.context.revision, entry: a.entryGeneration, selection,
-      end: selection.kind === 'bind-reviewed' ? Math.min(now + AGENT_UPLOAD_KEY_MAX_MS, a.previewDeadline!) : now + AGENT_UPLOAD_KEY_MAX_MS,
+      end: selection.kind === 'bind-reviewed' || selection.kind === 'credential-import-prepared' || selection.kind === 'credential-assign-reviewed' ? Math.min(now + AGENT_UPLOAD_KEY_MAX_MS, a.previewDeadline!) : now + AGENT_UPLOAD_KEY_MAX_MS,
       version: this.version, key };
   }
   private current(w: Witness): boolean {
@@ -121,7 +126,11 @@ export class AgentUploadKeyAccessController {
     const c = this.read(), w = this.witness(c);
     return this.disposed ? 'This permission controller is retired.' : this.ownerReason() ?? hostReason(c) ?? c.blockedReason ??
       (this.state.kind === 'prepare-existing' && !this.source.prepareExisting ? 'Use the original Desktop credential controller to prepare an existing key.' : null) ??
-      (!w ? this.state.kind === 'generate-new' ? 'Finish the ordinary new-app signing setup and tool checks in Desktop first. Any existing or uncertain key prevents generation.' :
+      (this.state.kind === 'credential-assess-existing' && !this.source.prepareCredential ? 'Use the original Desktop credential controller to load and assess this record.' : null) ??
+      (!w ? agentCredentialAction(this.state.kind) ? agentCredentialReason(c.assets) ?? (this.state.kind === 'credential-import-prepared' ?
+        'In Desktop, choose the source, enter private fields, and Prepare a NEW encrypted Save review first. Replacement and session-only records are not delegated.' : this.state.kind === 'credential-assess-existing' ?
+        'Finish or discard the previous review, then explicitly select an encrypted credential to load and assess. Android keys use their existing action.' :
+        'Load and assess the existing encrypted credential first. Assign requires its exact returned current review, not the preceding Save result.') : this.state.kind === 'generate-new' ? 'Finish the ordinary new-app signing setup and tool checks in Desktop first. Any existing or uncertain key prevents generation.' :
         this.state.kind === 'prepare-existing' ? agentUploadKeyReuseReason(c.assets) ?? 'Explicitly select the encrypted Android key to load and assess; assignment is a separate review.' :
         this.state.kind === 'backup-encrypted' || this.state.kind === 'restore-encrypted' ? agentUploadKeyBackupReason(c.assets) ?? 'Explicitly select the encrypted Android key to back up.' :
         'Select and assess an existing encrypted Android key in Desktop first, leaving its current Assign review open.' :
@@ -133,14 +142,14 @@ export class AgentUploadKeyAccessController {
       this.state.kind === 'generate-new' && !this.state.newApplication ? 'Confirm the separate permission for this exact action.' : null);
   }
   setKind(value: AgentUploadKeyKind): boolean {
-    if (this.disposed || !['prepare-existing', 'generate-new', 'bind-reviewed', 'backup-encrypted', 'restore-encrypted'].includes(value) || this.ownerReason()) return false;
+    if (this.disposed || (!['prepare-existing', 'generate-new', 'bind-reviewed', 'backup-encrypted', 'restore-encrypted'].includes(value) && !agentCredentialAction(value)) || this.ownerReason()) return false;
     if (value !== this.state.kind) { this.version = {}; this.consent = null; this.patch({ kind: value, acknowledged: false, newApplication: false, backupRecord: null, prepareRecord: null, stale: true }); }
     return true;
   }
-  prepareOptions(): readonly AgentUploadKeyReuseOption[] { return agentUploadKeyReuseOptions(this.read().assets); }
+  prepareOptions(): readonly AgentUploadKeyReuseOption[] { return this.state.kind === 'credential-assess-existing' ? agentCredentialOptions(this.read().assets) : agentUploadKeyReuseOptions(this.read().assets); }
   setPrepareRecord(value: Readonly<AssetRecordRef> | null): boolean {
     this.syncContext();
-    if (this.disposed || this.ownerReason() || this.state.kind !== 'prepare-existing') return false;
+    if (this.disposed || this.ownerReason() || this.state.kind !== 'prepare-existing' && this.state.kind !== 'credential-assess-existing') return false;
     const exact = value === null ? null : this.prepareOptions().find(r => r.recordId === value.recordId && r.expectedRevision === value.expectedRevision);
     if (value !== null && !exact) return false;
     this.version = {}; this.consent = null;
@@ -205,7 +214,7 @@ export class AgentUploadKeyAccessController {
     if (old?.grantId && old.grantId === a.grantId && (!sameGrant(old, a) || old.consumed && (!a.consumed || old.requestId !== a.requestId) ||
         !old.enabled && a.enabled)) { this.unknown(); return null; }
     if (old?.prepared && a.prepared && old.grantId === a.grantId) {
-      if (!sameAgentUploadKeyPrepared(old.prepared, a.prepared)) { this.unknown(); return null; }
+      if (!sameCredentialPrepared(old.prepared, a.prepared)) { this.unknown(); return null; }
       a = Object.freeze({ ...a, prepared: Object.freeze({ ...a.prepared, remainingMs: Math.min(old.prepared.remainingMs, a.prepared.remainingMs) }) });
     }
     if (a.grantId && !this.address && a.kind) this.address = { context: w.context, id: a.grantId, kind: a.kind }; // Stop address only, never consent.
@@ -223,14 +232,14 @@ export class AgentUploadKeyAccessController {
   }
   private async correlate(w: Work, a: AgentUploadKeyAccess | null): Promise<void> {
     const original = this.preparation;
-    if (!original || !original.allowJoined || !a?.prepared || a.kind !== 'prepare-existing') return;
+    if (!original || !original.allowJoined || !a?.prepared || a.kind !== 'prepare-existing' && a.kind !== 'credential-assess-existing') return;
     const current = () => {
       const c = this.read(), latest = this.state.access;
       return this.preparation === original && this.delivered(w) && !this.revocation && !this.state.unknown &&
         this.address === original.address && this.withdrawn !== original.address && sameHost(c, original.address.context) &&
         c.project === original.address.context.project && c.projectId === original.address.context.projectId && !c.blockedReason &&
         latest?.grantId === original.address.id && latest.requestId === a.requestId && !!latest.prepared &&
-        sameAgentUploadKeyPrepared(latest.prepared, a.prepared!);
+        sameCredentialPrepared(latest.prepared, a.prepared!);
     };
     // Anchor this returned countdown to its SAME Allow/Check call, not its
     // receipt or a later Asset callback. This is comparison only, not a lease.
@@ -249,8 +258,11 @@ export class AgentUploadKeyAccessController {
     if (!id || !this.current(witness)) return false;
     const c = witness.context, address: Address = { context: c, id, kind: witness.selection.kind };
     let attempt: AgentUploadKeyPreparation | null = null;
-    if (witness.selection.kind === 'prepare-existing') {
-      try { attempt = this.source.prepareExisting?.({ recordId: witness.selection.recordId, expectedRevision: witness.selection.expectedRevision }) ?? null; }
+    if (witness.selection.kind === 'prepare-existing' || witness.selection.kind === 'credential-assess-existing') {
+      try {
+        const selection = witness.selection, record = { recordId: selection.recordId, expectedRevision: selection.expectedRevision };
+        attempt = selection.kind === 'credential-assess-existing' ? this.source.prepareCredential?.(record, selection.credentialKind) ?? null : this.source.prepareExisting?.(record) ?? null;
+      }
       catch { return false; }
       if (!attempt || !attempt.current() || !this.current(witness)) { attempt?.invalidate(); return false; }
     }

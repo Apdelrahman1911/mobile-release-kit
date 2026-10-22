@@ -14,6 +14,8 @@ use std::{
 mod memory;
 #[path = "service_github_activity_requests.rs"]
 mod activity;
+#[path = "service_counter_enrollment_requests.rs"]
+pub(crate) mod enrollment;
 pub(crate) use memory::retained_document_backing;
 
 pub(crate) struct NativeScope {
@@ -353,7 +355,7 @@ impl Entry {
                 .is_none_or(|f| f.admission != Admission::Running)
             || !effect.valid_for(self.scope.review.kind())
             || !dispatch::valid(&self.scope.review, reason, snapshot.as_deref())
-            || (self.scope.review.kind() == p::Kind::ActivityOverview || self.scope.review.kind().dispatch_family()) && reason == p::Reason::None && !r.go
+            || (self.scope.review.kind() == p::Kind::ActivityOverview || self.scope.review.kind().dispatch_family() || self.scope.review.kind().enrollment_family()) && reason == p::Reason::None && !r.go
             || matches!(
                 reason,
                 p::Reason::CleanupUnknown | p::Reason::HistoryUnavailable
@@ -405,7 +407,7 @@ impl Entry {
     }
     pub(crate) fn claim_history(self: &Arc<Self>) -> Result<Option<History>, Error> {
         let mut r = self.lock()?;
-        if r.unknown.is_some() || r.history_claim.is_some() {
+        if self.scope.failed.load(Ordering::Acquire) || r.unknown.is_some() || r.history_claim.is_some() {
             return Ok(None);
         }
         let Some(f) = r
@@ -499,12 +501,23 @@ impl Entry {
             settlement,
             operation_id: r.operation.clone(),
             reason,
-            effect: f.map_or(self.scope.review.kind().initial_effect(), |f| f.effect),
+            effect: match f.map_or(self.scope.review.kind().initial_effect(), |f| f.effect) {
+                // Retain the native fact, but expose the new success label only
+                // after caller+history return. Unknown/Finishing remain honest
+                // about a possibly applied CAS, never NotSent after real GO.
+                p::Effect::LocalMappingObserved if state != p::State::Complete => p::Effect::PotentiallyApplied,
+                effect => effect,
+            },
             never_admitted: f.is_some_and(|f| f.admission == Admission::NeverAdmitted)
                 && state != p::State::Unknown,
             do_not_replay: true,
             snapshot: if state == p::State::Complete { match r.snapshot.as_deref() { Some(dispatch::Snapshot::Activity(s))=>Some(s.clone()),_=>None } } else { None },
-            result: if state == p::State::Complete { match r.snapshot.as_deref() { Some(dispatch::Snapshot::Dispatch(s))=>Some(s.clone()),_=>None } } else { None },
+            result: match r.snapshot.as_deref() {
+                Some(dispatch::Snapshot::Dispatch(s)) if state == p::State::Complete
+                    || matches!(s, p::dispatch::Snapshot::Enrollment(_))
+                       && matches!(state, p::State::Refused | p::State::Cancelled) => Some(s.clone()),
+                _ => None,
+            },
         };
         s.validate().map_err(|_| Error::StateUnknown)?;
         Ok(s)
@@ -735,7 +748,13 @@ impl Inbox {
         }
         for e in &b.entries {
             let mut r = e.lock()?;
-            if !r.claimed && r.unknown.is_none() {
+            // Foreground enrollment waits for its exact retained MAIN caller.
+            // A stopped, never-claimed row can still receive a real closed
+            // nonentry/caller/history return through this original relay.
+            let enrollment_waits = !r.claimed && r.unknown.is_none()
+                && e.scope.review.kind().enrollment_family()
+                && e.scope.first(false, Instant::now())?.is_none();
+            if !r.claimed && r.unknown.is_none() && !enrollment_waits {
                 r.claimed = true;
                 e.change(&mut r)?;
                 return Ok(Some(Claim {

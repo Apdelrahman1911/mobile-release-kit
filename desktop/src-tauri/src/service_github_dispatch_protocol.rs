@@ -241,6 +241,7 @@ pub(crate) enum Stage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Snapshot {
+    Enrollment(super::enrollment::Snapshot),
     #[serde(rename_all = "camelCase")]
     Prepared {
         marker: Hex<16>,
@@ -279,6 +280,7 @@ impl Snapshot {
             .checked_add(2 * size_of::<usize>())?
             .checked_add(match self {
                 Self::Pending { rows } => rows.capacity().checked_mul(size_of::<Pending>())?,
+                Self::Enrollment(value) => value.heap()?,
                 _ => 0,
             })
     }
@@ -287,6 +289,7 @@ impl Snapshot {
             return false;
         }
         match self {
+            Self::Enrollment(value) => value.valid_for(kind),
             Self::Prepared {
                 platform, stage, ..
             } => match kind {
@@ -339,7 +342,7 @@ pub(super) fn optional_snapshot<'de, D: Deserializer<'de>>(
     Snapshot::deserialize(d).map(Some)
 }
 pub(crate) fn requires_result(kind: Kind) -> bool {
-    kind.dispatch_family() && !matches!(kind, Kind::PreflightDispatch | Kind::ReleaseDispatch)
+    kind.enrollment_family() || kind.dispatch_family() && !matches!(kind, Kind::PreflightDispatch | Kind::ReleaseDispatch)
 }
 
 #[cfg(test)]

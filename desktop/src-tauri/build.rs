@@ -348,7 +348,7 @@ fn main() {
             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
             "github_device_status", "github_device_start", "github_device_check", "github_device_open", "github_device_cancel",
             "git_read_status", "git_read_start", "git_read_cancel",
-            "version_enrollment_status", "version_enrollment_review", "version_enrollment_confirm", "version_enrollment_cancel",
+            "version_enrollment_status", "version_enrollment_review", "version_enrollment_confirm", "agent_version_enrollment_review", "agent_version_enrollment_confirm", "version_enrollment_cancel",
             "version_reserve_status", "version_reserve_review", "version_reserve_start", "version_reserve_cancel", "version_reserve_edit",
             "git_local_status", "git_local_prepare", "git_local_apply", "git_local_discard", "git_local_cancel",
             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",

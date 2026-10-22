@@ -8,6 +8,7 @@ pub(super) const COMMANDS: [&str; 4] = [
     "upload-key-status",
     "upload-key-cancel",
 ];
+pub(super) const CREDENTIAL_COMMANDS: [&str; 4] = ["credential-scope", "credential-submit", "credential-status", "credential-cancel"];
 enum Command {
     Scope(Id),
     Submit {
@@ -21,11 +22,12 @@ enum Command {
 struct Parsed {
     command: Command,
     json: bool,
+    credential: bool,
 }
 pub(super) fn recognizes(args: &[OsString]) -> bool {
     args.first()
         .and_then(|s| s.to_str())
-        .is_some_and(|s| COMMANDS.contains(&s))
+        .is_some_and(|s| COMMANDS.contains(&s) || CREDENTIAL_COMMANDS.contains(&s))
 }
 fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     let mut words = args
@@ -38,6 +40,12 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     let json = words.last() == Some(&"--json");
     if json {
         words.pop();
+    }
+    // Fixed aliases to the SAME Inbox and request grammar. Kind/material may
+    // only come from the exact native Desktop grant, never the command name.
+    let credential = words.first().is_some_and(|s| CREDENTIAL_COMMANDS.contains(s));
+    if let Some(index) = words.first().and_then(|s| CREDENTIAL_COMMANDS.iter().position(|a| a == s)) {
+        words[0] = COMMANDS[index];
     }
     let command = match words.as_slice() {
         ["upload-key-scope", project] => Command::Scope(Id::parse(project)?),
@@ -60,10 +68,12 @@ fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         }
         _ => return Err(Error::InvalidRequest),
     };
-    Ok(Parsed { command, json })
+    Ok(Parsed { command, json, credential })
 }
-fn receipt(q: &key::Query) -> String {
-    format!("Request {}\nCheck: mrk upload-key-status {} {} {} --json\nStop: mrk upload-key-cancel {} {} {} --json\n",q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str())
+fn receipt(q: &key::Query) -> String { receipt_named(q, false) }
+fn receipt_named(q: &key::Query, credential: bool) -> String {
+    let family = if credential { "credential" } else { "upload-key" };
+    format!("Request {}\nCheck: mrk {family}-status {} {} {} --json\nStop: mrk {family}-cancel {} {} {} --json\n",q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str(),q.project_id.as_str(),q.service_instance.as_str(),q.request_id.as_str())
 }
 fn unconfirmed(q: &key::Query, error: Error, json: bool) -> Vec<u8> {
     if json {
@@ -108,20 +118,23 @@ fn output(
         b
     } else {
         let mut out = format!(
-            "Upload key: {:?}; {:?}.\n{}",
-            row.state,
+            "{}: {:?}; {:?}.\n{}",
+            if row.kind.credential() { "Credential" } else { "Upload key" }, row.state,
             row.settlement,
-            receipt(q)
+            receipt_named(q, row.kind.credential())
         );
         out.push_str(match row.state {
             key::State::ReviewReady => {
-                "The original existing-key Load and assessment returned. This is not assignment, a save, or private cleanup. In the same Desktop view, Check original permission for the current review, withdraw this permission, then separately review and allow Bind.\n"
+                "The original stored-record Load and assessment returned. This is not assignment, a save, or private cleanup. In the same Desktop view, Check original permission for the current review, withdraw this permission, then separately review and allow Bind.\n"
+            }
+            key::State::ImportedUnassigned => {
+                "The exact prepared import was saved as a NEW encrypted, unassigned record. Save authenticates its descriptor, not a fresh payload assessment: withdraw this permission, separately load and assess the stored record, then separately review and allow Assign.\n"
             }
             key::State::SavedUnassigned => {
                 "Encrypted key saved, not assigned. Review and assign in Desktop before use.\n"
             }
             key::State::Assigned => {
-                "The explicitly reviewed existing key is assigned in this Desktop session.\n"
+                "The explicitly reviewed existing record is assigned in this Desktop session.\n"
             }
             key::State::BackupDelivered => {
                 "The original encrypted backup and recovery-code file were delivered through Desktop's two native dialogs. Keep both safe and separate; no private output is returned here.\n"
@@ -160,7 +173,7 @@ fn scope_output(response: &p::Response, project: &Id, json: bool) -> Result<(u8,
         out.push(b'\n');
         Ok((0, out))
     } else {
-        let mut out=String::from("One exact Desktop-reviewed Android upload-key action; CLI read access alone never authorizes it.\n");
+        let mut out=String::from("One exact Desktop-reviewed credential action in the shared upload-key namespace; CLI read access alone never authorizes it.\n");
         if let (Some(kind), Some(instance), Some(grant)) =
             (a.kind, &a.service_instance, &a.grant_id)
         {
@@ -172,9 +185,10 @@ fn scope_output(response: &p::Response, project: &Id, json: bool) -> Result<(u8,
                 grant.as_str()
             ));
         } else {
-            out.push_str("No upload-key consent is retained. Prepare or review the existing key in Desktop, then explicitly allow one action.\n");
+            out.push_str("No credential consent is retained. Prepare or review the existing record in Desktop, then explicitly allow one action.\n");
         }
         out.push_str("Desktop may separately allow loading one selected existing encrypted Android key; review-ready is not Bind, and no record selector is accepted in CLI arguments. Never generate a replacement for an existing/reserved/unknown key. Encrypted backup/restore require separate exact Desktop consent and both genuine native dialogs; no CLI path, key, password or recovery code is accepted. Restore is NEW and unassigned, not a Bind or recovery acknowledgment. Native qualification is still required.\n");
+        out.push_str("General credential aliases reuse this same grant and 32-request inbox. Desktop must choose the source and enter private fields and prepare a NEW encrypted Save first; CLI Choose is not implemented. Prepared Save, fresh stored Load/assessment and Assign each need separate consent. Android Load/Bind keep their existing actions. No replacement, session-only import, automatic follow-on, credential/account verification or native availability is granted.\n");
         Ok((0, out.into_bytes()))
     }
 }
@@ -213,7 +227,7 @@ fn execute(options: Parsed) -> Result<(u8, Vec<u8>), Error> {
                 };
                 // Actual original request ID exists before any connection/send.
                 std::io::stderr()
-                    .write_all(receipt(&q).as_bytes())
+                    .write_all(receipt_named(&q, options.credential).as_bytes())
                     .map_err(|_| Error::Unavailable)?;
                 (
                     Some(q.clone()),
