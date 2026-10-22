@@ -9,6 +9,7 @@ import { copyIOSArchiveRequest } from './iosArchiveProtocol.ts';
 import type { PrepareIOSBuild } from './iosArchiveTypes.ts';
 export const AGENT_IOS_ARCHIVE_CONSENT = 'agent-saved-ios-unsigned-archive-v1';
 export const AGENT_IOS_SIGNED_EXPORT_CONSENT = 'agent-saved-ios-signed-export-v1';
+export const AGENT_IOS_CANDIDATE_CONSENT = 'agent-local-ios-candidate-inputs-v1';
 const REQUEST_LIMIT = 4096; // Same whole RAW GUI body / service frame limit, not stdin alone.
 export type IOSArchiveApproval = { input: PrepareIOSBuild } | IOSRecoveryApproval;
 export type IOSArchiveAccess = IOSRecoveryAccess; // MAIN-only revision DATA; never a reusable grant.
@@ -25,7 +26,7 @@ export function copyIOSArchiveApproval(value: unknown): IOSArchiveApproval | nul
     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
     if (!keys(v, ['input'])) return copyIOSRecoveryApproval(v);
     const input = copyIOSArchiveRequest('prepare_ios_archive', v.input) as PrepareIOSBuild | null;
-    if (!input || 'recovery' in input || input.action !== undefined) return null;
+    if (!input || 'recovery' in input || input.action !== undefined && input.action !== 'create') return null;
     Object.freeze(input.savedConfig); Object.freeze(input.savedVersion);
     if (input.signing) {
       for (const assignment of input.signing.assignments) Object.freeze(assignment);
@@ -47,7 +48,7 @@ export function encodeIOSArchiveAccessRequest(command: Command, value: unknown):
       } else {
         if(!keys(v,['input','consentVersion','expectedPermissionRevision']))return null;
         const approval=copyIOSArchiveApproval({input:v.input});
-        if(!approval||!('input' in approval)||v.consentVersion!==(approval.input.signing?AGENT_IOS_SIGNED_EXPORT_CONSENT:AGENT_IOS_ARCHIVE_CONSENT))return null;
+        if(!approval||!('input' in approval)||v.consentVersion!==(approval.input.action==='create'?AGENT_IOS_CANDIDATE_CONSENT:approval.input.signing?AGENT_IOS_SIGNED_EXPORT_CONSENT:AGENT_IOS_ARCHIVE_CONSENT))return null;
       }
     } else if ((command !== 'agent_ios_archive_access' && command !== 'revoke_agent_ios_archive') || !keys(v, [])) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= REQUEST_LIMIT ? bytes : null;
@@ -65,7 +66,7 @@ export function createAgentIOSArchiveApi(mode: string, invoke: Invoke): AgentIOS
     allow: (input: IOSArchiveApproval, expectedPermissionRevision: string) => {
       const safe = copyIOSArchiveApproval(input);
       return safe ? call('allow_agent_ios_archive', { ...safe, expectedPermissionRevision,
-        consentVersion: 'input' in safe?(safe.input.signing ? AGENT_IOS_SIGNED_EXPORT_CONSENT : AGENT_IOS_ARCHIVE_CONSENT):AGENT_IOS_RECOVERY_CONSENT,
+        consentVersion: 'input' in safe?(safe.input.action === 'create' ? AGENT_IOS_CANDIDATE_CONSENT : safe.input.signing ? AGENT_IOS_SIGNED_EXPORT_CONSENT : AGENT_IOS_ARCHIVE_CONSENT):AGENT_IOS_RECOVERY_CONSENT,
         ...(!('input' in safe)&&safe.recovery.action!=='inspect'?{confirmation:recoveryConfirmation(safe.recovery.action)}:{}) }) : Promise.reject(refusal());
     },
     revoke: () => call('revoke_agent_ios_archive', {}) });

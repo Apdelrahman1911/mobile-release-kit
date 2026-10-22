@@ -1,7 +1,7 @@
 // Closed DATA for one actual Desktop Prepared. No public material or Prepare.
 import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 export const appleCliModes = ['review','register','reconcile','profile-review','profile-reuse','profile-create','profile-reconcile',
-  'key-review','key-prepare','certificate-review','certificate-create','certificate-reconcile','p12-review','p12-reuse','p12-save'] as const;
+  'key-review','key-prepare','key-recover','certificate-review','certificate-create','certificate-reconcile','p12-review','p12-reuse','p12-save'] as const;
 type AppleCliMode = typeof appleCliModes[number];
 export interface AppleCliReview { readonly mode:AppleCliMode; readonly operationId:string; readonly ownerGeneration:string; readonly statusRevision:number;
   readonly savedConfig:{readonly bytes:number;readonly sha256:string}; readonly savedVersion:{readonly bytes:number;readonly sha256:string;readonly name:string;readonly build:number} }
@@ -35,7 +35,7 @@ export const sameAppleCliReview=(a:AppleCliReview|null,b:AppleCliReview|null)=>!
 const decisions:Record<AppleCliMode,readonly string[]>={
   review:['reuse','review-required','blocked'],register:['reuse','review-required','blocked','registration-confirmed','registration-unconfirmed'],reconcile:['comparison-only'],
   'profile-review':['reuse-available','create-available','blocked'],'profile-reuse':['download-returned','creation-unconfirmed','blocked'],'profile-create':['download-returned','creation-unconfirmed','blocked'],'profile-reconcile':['comparison-only'],
-  'key-review':['prepare-review','recover-existing-key','reuse-existing-identity','bundle-required','blocked'],'key-prepare':['produced','blocked'],
+  'key-review':['prepare-review','recover-existing-key','reuse-existing-identity','bundle-required','blocked'],'key-prepare':['produced','blocked'],'key-recover':['compared'],
   'certificate-review':['reuse','request-review','blocked'],'certificate-create':['reuse','request-confirmed','request-unconfirmed','blocked'],'certificate-reconcile':['comparison-only'],
   'p12-review':['assemble-review','reuse-review','blocked'],'p12-reuse':['reused','blocked'],'p12-save':['assembled','blocked']};
 function result(v:unknown,r:AppleCliReview):boolean{
@@ -95,6 +95,7 @@ export function appleCliEffect(mode:AppleCliMode):string {
   if(mode==='profile-create')return 'May request one profile and save the returned profile encrypted. No assignment or build.';
   if(mode==='certificate-create')return 'May request one Distribution certificate for the current saved key. No replacement key, P12, or retry.';
   if(mode==='key-prepare')return 'Generates and saves a local private key and CSR encrypted. No certificate request or public key export.';
+  if(mode==='key-recover')return 'Verifies the selected durably saved key against its exact original setup record and may append a local verification association. No replacement key, provider request, new vault record or automatic next step. Earlier setup history and unrelated uncertainty remain.';
   if(mode==='p12-save')return 'Uses the current key and fresh read-only certificate checks to assemble and save an encrypted P12. No assignment.';
   if(mode==='profile-reuse')return 'Downloads the reviewed existing profile and saves it encrypted. No new profile or assignment.';
   return 'Runs only this existing reviewed read/comparison step. May update local journal history; does not authorize the next step or clear earlier uncertainty.';

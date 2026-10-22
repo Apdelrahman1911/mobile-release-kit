@@ -34,6 +34,8 @@ impl Fixture {
     fn new() -> Self {
         let document = Arc::new(());
         let (changes, _) = tokio::sync::watch::channel(0);
+        let review = review();
+        let config = review.saved_config.clone();
         let scope = Arc::new(NativeScope {
             project_id: id(2),
             runtime_id: "project-1".into(),
@@ -44,10 +46,12 @@ impl Fixture {
             input_revision: 2,
             document: Arc::downgrade(&document),
             observation_revision: 5,
-            review: review().into(),
+            review: review.into(),
             read: None,
-            draft_revision: 1,
-            baseline_generation: 2,
+            input: crate::agent_build_requests::NativeInput::Saved {
+                draft_revision: 1,
+                baseline_generation: 2,
+            },
             changes,
         });
         let point = crate::agent_local_checks::SavedPoint {
@@ -58,7 +62,7 @@ impl Fixture {
             inode: scope.inode,
             revision: 5,
             fresh: true,
-            config: Some(scope.review.config().clone()),
+            config: Some(config),
         };
         Self {
             inbox: Arc::new(Inbox::new(id(1))),

@@ -504,10 +504,11 @@ export class IOSArchiveController {
       return copyIOSRecoveryApproval({projectId:p.projectId,recovery:selection});
     }
     if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||
-      (this.state.archiveMode!=='unsigned'&&this.state.archiveMode!=='signed')||this.state.keepCandidate)return null;
+      (this.state.archiveMode!=='unsigned'&&this.state.archiveMode!=='signed'))return null;
     return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,
       savedConfig:p.savedConfig,savedVersion:p.savedVersion,
-      ...(this.state.archiveMode==='signed'?{signing:this.state.signing.policy}:{})}});
+      ...(this.state.archiveMode==='signed'?{signing:this.state.signing.policy}:{}),
+      ...(this.state.keepCandidate?{action:'create'}:{})}});
   }
   /** Explicit UI selection only; the native owner, not this DATA, derives the
    * recovery session. Capturing the displayed pair prevents later substitution. */

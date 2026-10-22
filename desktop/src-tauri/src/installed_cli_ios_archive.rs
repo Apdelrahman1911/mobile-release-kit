@@ -47,6 +47,9 @@ fn saved_human(s: &build::Status) -> String {
     );
     match (&s.review.mode, &s.review.signing) {
         (build::Mode::SavedIosUnsignedArchive, None) => out.push_str("Scope: saved unsigned iOS archive observation. MRK supplies no signing credentials.\n"),
+        (build::Mode::SavedIosCandidateInputs, Some(_)) => {
+            out.push_str("Scope: one journalled local iOS candidate Create using the original assigned signing inputs and enrolled local history. Original READ and source/journal gates remain required; no conversion of an earlier IPA.\n");
+        },
         (build::Mode::SavedIosSignedExport, Some(signing)) => {
             out.push_str(&format!("Scope: separately approved local signed iOS export. Team {} / distribution certificate {}. Assigned Firebase: {}; project read token: {}.\n",
                 signing.team_id, signing.distribution_certificate_sha256, signing.firebase, signing.project_read_token));
@@ -54,7 +57,9 @@ fn saved_human(s: &build::Status) -> String {
         },
         _ => out.push_str("Unconfirmed iOS mode; do not start or replay.\n"),
     }
-    out.push_str("Project scripts may read/write files, use network or sign with their own configuration. Not a sandbox; no Store publishing or candidate provenance.\n");
+    out.push_str(if s.review.mode == build::Mode::SavedIosCandidateInputs {
+        "Project scripts may read/write files, use network or sign. Not a sandbox; candidate Create is not Store publishing or release approval.\n"
+    } else { "Project scripts may read/write files, use network or sign with their own configuration. Not a sandbox; no Store publishing or candidate provenance.\n" });
     if let Some(op) = &s.operation {
         out.push_str(&format!(
             "Operation {} / {} · {:?} · {:?}\n",
@@ -76,7 +81,8 @@ fn saved_human(s: &build::Status) -> String {
                 out.push_str(&format!("Original validated signed IPA: {} bytes; {} native paths / {} identities / {} present symbol slices.\n",
                     export.ipa_bytes, export.pairing.native_paths, export.pairing.native_identities, export.pairing.present_symbol_slices));
             } else { out.push_str("No signed IPA is reported by this unsigned mode.\n"); }
-            out.push_str("No digest or release approval is reported. Recovery uses the separate original Desktop route.\n");
+            if let Some(candidate) = &r.candidate { out.push_str(&candidate.human()); }
+            else { out.push_str("No digest or release approval is reported. Recovery uses the separate original Desktop route.\n"); }
         }
         if op.settlement == p::Settlement::Unknown {
             out.push_str(

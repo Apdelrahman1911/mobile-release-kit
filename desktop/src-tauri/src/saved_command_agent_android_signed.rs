@@ -23,15 +23,20 @@ pub(super) fn selection(s: &android_wire::SigningSelection) -> Result<data::Sele
     Ok(result)
 }
 pub(super) fn fixed(input: &android_wire::Prepare) -> bool {
-    input.operation.is_none() && input.action.is_none()
+    (input.operation.is_none() && input.action.is_none()
+        || input.operation == Some(android_wire::Operation::AndroidCandidateInputs)
+            && input.action == Some(android_wire::CreateAction::Create))
         && input.artifact_validation.mode == android_wire::ValidationMode::UploadSignature
         && input.artifact_validation.upload_certificate_sha256.as_deref().and_then(data::fingerprint).is_some()
         && input.signing.as_ref().is_some_and(|s| selection(s).is_ok())
 }
 pub(super) fn same(c: &android_wire::Context, review: &agent::Review) -> bool {
-    c.operation == android_wire::Operation::AndroidBuildSign && c.action.is_none()
+    (match (c.operation, c.action, &review.mode) {
+        (android_wire::Operation::AndroidBuildSign, None, agent::Mode::SavedAndroidLocalUploadKeySign)
+        | (android_wire::Operation::AndroidCandidateInputs, Some(android_wire::CreateAction::Create), agent::Mode::SavedAndroidCandidateInputs) => true,
+        _ => false,
+    })
         && c.artifact_validation.mode == android_wire::ValidationMode::UploadSignature
-        && review.mode == agent::Mode::SavedAndroidLocalUploadKeySign
         && c.signing.as_ref().and_then(|s| selection(s).ok()).as_ref() == review.signing.as_ref()
         && c.artifact_validation.upload_certificate_sha256.as_deref().and_then(data::fingerprint)
             == review.upload_certificate_sha256
@@ -74,7 +79,9 @@ mod tests {
             saved_version:version(&input.saved_version),tools:agent::Tools {instance:service::Id::parse(&"b".repeat(32)).unwrap(),catalog_generation:1,record_sha256:"c".repeat(64)} };
         assert!(same(&input.context(),&review));
         let mut changed=input.clone();changed.operation=Some(android_wire::Operation::AndroidCandidateInputs);changed.action=Some(android_wire::CreateAction::Create);
-        assert!(!fixed(&changed));assert!(!same(&changed.context(),&review));
+        assert!(fixed(&changed));assert!(!same(&changed.context(),&review));
+        let mut candidate = review.clone();candidate.mode=agent::Mode::SavedAndroidCandidateInputs;
+        assert!(same(&changed.context(),&candidate));assert!(!same(&input.context(),&candidate));
         changed=input.clone();changed.signing.as_mut().unwrap().assignments[0].record_revision+=1;
         assert!(!same(&changed.context(),&review));
         changed=input.clone();changed.signing.as_mut().unwrap().assignments[0].kind="apple-p12".into();assert!(!fixed(&changed));

@@ -37,6 +37,7 @@ pub(super) fn human(s: &build::Status) -> String {
     );
     text.push_str(match s.review.mode {
         build::Mode::SavedAndroidBuildStructureAndVersion => "Scope: existing Android build + structure/version inspection. Project code may read/write files, use network or sign itself; no toolkit signing credentials are supplied.\n",
+        build::Mode::SavedAndroidCandidateInputs => "Scope: one journalled local Android candidate Create with the Desktop-assigned existing upload key. Original READ and candidate source/journal gates remain required; no conversion of an earlier signed artifact.\n",
         build::Mode::SavedAndroidLocalUploadKeySign => "Scope: one local signed Android build with the Desktop's explicitly assigned existing upload key. Private key/password inputs never cross CLI. Original READ expiry/revoke still stops work; no key generation or rotation.\n",
     });
     text.push_str("No Store upload, release approval or automatic recovery is granted.\n");
@@ -63,6 +64,7 @@ pub(super) fn human(s: &build::Status) -> String {
             if let Some(signing) = &result.signing {
                 text.push_str(&format!("Returned signature: {:?}; signer: {:?}; upload certificate SHA-256 {}\n", signing.signature, signing.signer, signing.upload_certificate_sha256));
             }
+            if let Some(candidate) = &result.candidate { text.push_str(&candidate.human()); }
             for (status, count) in &result.summary.counts {
                 text.push_str(&format!("{status:?}: {count}\n"));
             }

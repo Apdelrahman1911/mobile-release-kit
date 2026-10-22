@@ -113,13 +113,14 @@ fn apple_cli_cli_lost_ack_has_only_original_status_cancel_and_no_replay() {
     assert_eq!(c["cliPrepare"],true);
     assert_eq!(c["prepareRequiresDesktopSelection"],true);
     assert_eq!(c["prepareIsStart"],false);
-    assert_eq!(c["modeCount"], 15);
+    assert_eq!(c["modeCount"], 16);
+    assert_eq!(c["keyRecover"], true);
+    assert_eq!(c["keyRecoverScope"], "known-durable-original-reference");
     for key in [
         "headless",
         "privateArguments",
         "savedIsAssigned",
         "statusGrantsNextStep",
-        "keyRecover",
         "p12Reconcile",
     ] {
         assert_eq!(c[key], false);

@@ -17,6 +17,8 @@ use crate::{
 use serde::Deserialize;
 #[path = "asset_session_agent_tool_inspect.rs"]
 mod inspect;
+#[path = "asset_session_agent_tool_acquire.rs"]
+mod acquire;
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BridgeError> {
     if bytes.is_empty() || bytes.len() > crate::environment_diagnostics_protocol::REQUEST_LIMIT {
         return Err(BridgeError::invalid());
@@ -294,7 +296,7 @@ impl DocumentBinding {
                 self.environment_gate(s)
                     == crate::environment_diagnostics_protocol::Availability::Available
             }
-            p::Kind::InspectRequirements | p::Kind::InspectSavedRequirements | p::Kind::AcquireMissing => {
+            p::Kind::InspectRequirements | p::Kind::InspectSavedRequirements | p::Kind::AcquireMissing | p::Kind::AcquireReviewedMissing => {
                 self.tool_acquisition_gate(s)
                     == crate::tool_acquisition_protocol::Availability::Available
             }
@@ -381,6 +383,7 @@ impl DocumentBinding {
                 )
             }
             p::Kind::InspectSavedRequirements => Approval::SavedInspect(self.saved_tool_inspect_approval(s, args, &edit, now)?),
+            p::Kind::AcquireReviewedMissing => Approval::SavedInspect(self.reviewed_tool_acquire_approval(s, args, &edit, now)?),
             p::Kind::InspectRequirements | p::Kind::AcquireMissing => {
                 if args.doctor_draft.is_some()
                     || args.source_context.is_some()

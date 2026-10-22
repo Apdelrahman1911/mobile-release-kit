@@ -182,7 +182,9 @@ fn projection(
             Some(Terminal::IOSArchive(t)) => (
                 t.disposition.as_ref().map(disposition).transpose()?,
                 if outcome == agent::Outcome::Complete {
-                    Some(signed_export::report(c,t.result.as_ref().ok_or_else(failure)?)?)
+                    Some(if c.candidate() {
+                        t.result.as_ref().ok_or_else(failure)?.agent_candidate_report(c, &p.operation_id)?
+                    } else { signed_export::report(c,t.result.as_ref().ok_or_else(failure)?)? })
                 } else {
                     None
                 },
@@ -708,4 +710,17 @@ mod tests {
             .unwrap()
             .contains("version.properties"));
     }
+    #[test]
+    fn candidate_terminal_projection_still_requires_original_retirement() {
+        let context=ios_wire::tests::candidate_context();let raw=ios_wire::tests::candidate_complete();
+        let terminal=ios_wire::terminal(&raw, &context, ios_wire::tests::CANDIDATE_ID).unwrap();
+        let mut p=RunProjection {agent_local_check:None,agent_build:None,operation_id:ios_wire::tests::CANDIDATE_ID.into(),owner_generation:"b".repeat(32),
+            context:Context::IOSArchive(context),phase:Phase::Stopping,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,
+            result:Some(Terminal::IOSArchive(terminal)),stage:Some(Stage::IOSArchive(ios_wire::Stage::DisposingWork))};
+        let pending=projection(&p,1,false).unwrap();assert!(pending.result.is_none());assert_eq!(pending.settlement,service::Settlement::Pending);
+        assert!(projection(&p,1,true).is_err());p.phase=Phase::Terminal;assert!(projection(&p,2,false).is_err());
+        let known=projection(&p,2,true).unwrap();assert!(known.result.as_ref().unwrap().candidate.is_some());assert_eq!(known.settlement,service::Settlement::Settled);
+        p.phase=Phase::Unknown;p.reason=Reason::CleanupUnknown;let unknown=projection(&p,3,false).unwrap();assert!(unknown.result.is_none());assert_eq!(unknown.settlement,service::Settlement::Unknown);
+    }
+
 }

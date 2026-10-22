@@ -29,7 +29,7 @@ pub(in crate::saved_command_owner) fn mode(v: apple_wire::Mode) -> Result<p::Mod
         A::P12Review => p::Mode::P12Review,
         A::P12Reuse => p::Mode::P12Reuse,
         A::P12Save => p::Mode::P12Save,
-        A::KeyRecover => return Err(refused()),
+        A::KeyRecover => p::Mode::KeyRecover,
     })
 }
 pub(super) fn review(

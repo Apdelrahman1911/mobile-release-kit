@@ -1390,5 +1390,11 @@ test('agent signed approval reuses actual saved policy and assigned key without 
   const changed=signingAssets();changed.status.records[0].revision++;h.setAssets(changed);
   assert.equal(h.controller.agentBuildApproval(),null);
   h.setAssets(signingAssets());h.controller.setRetainCandidateInputs(true);
-  assert.equal(h.controller.agentBuildApproval(),null);
+  const candidate=h.controller.agentBuildApproval();assert.ok(candidate,h.controller.prepareReason());
+  assert.equal(candidate.input.operation,'android-candidate-inputs');assert.equal(candidate.input.action,'create');
+  assert.deepEqual(candidate.input.savedConfig,approved.input.savedConfig);assert.deepEqual(candidate.input.savedVersion,approved.input.savedVersion);
+  assert.deepEqual(candidate.input.signing,approved.input.signing);assert.equal(h.state.consent,null);assert.equal(h.calls.length,0);
+  h.controller.setRetainCandidateInputs(false);assert.equal(h.controller.agentBuildApproval().input.action,undefined);
+  h.dispatch({type:'edit',projectId:'p1',path:'android.applicationId',value:'org.example.dirty'});
+  assert.equal(h.controller.agentBuildApproval(),null);assert.equal(h.calls.length,0);
 });

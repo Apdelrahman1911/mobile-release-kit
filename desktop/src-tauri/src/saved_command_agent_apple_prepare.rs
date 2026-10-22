@@ -375,11 +375,11 @@ mod tests {
         _doc: Arc<()>,
     }
     impl Fixture {
-        fn new() -> Self {
+        fn for_mode(mode: apple_wire::Mode) -> Self {
             let owner = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
                 "/never-opened-apple-prepare-runtime".into(),
             ));
-            let context = Input::census_context(apple_wire::Mode::Review);
+            let context = Input::census_context(mode);
             let selection = owner.apple_prepare_selection(&context).unwrap();
             let material =
                 crate::asset_session::SelectedStoreMaterial::apple_census_data(&context, 32, 32, 0);
@@ -408,7 +408,7 @@ mod tests {
             let scope = Scope::new(
                 point,
                 id('4'),
-                p::Mode::Review,
+                agent::mode(mode).unwrap(),
                 selection.expires(),
                 Arc::new(
                     crate::service_version_reserve_requests::ReadPermission::new(
@@ -508,7 +508,11 @@ mod tests {
     }
     #[test]
     fn delegated_common_prepared_commit_never_publishes_before_real_caller_and_history() {
-        let mut f = Fixture::new();
+        delegated_common_prepared_commit_never_publishes_before_real_caller_and_history_for_mode(apple_wire::Mode::Review);
+        delegated_common_prepared_commit_never_publishes_before_real_caller_and_history_for_mode(apple_wire::Mode::KeyRecover);
+    }
+    fn delegated_common_prepared_commit_never_publishes_before_real_caller_and_history_for_mode(mode: apple_wire::Mode) {
+        let mut f = Fixture::for_mode(mode);
         let call = f.entry.begin().unwrap();
         f.entry.host_entered().unwrap();
         f.install();
@@ -562,8 +566,12 @@ mod tests {
     }
     #[test]
     fn delegated_common_commit_foreign_intent_or_lost_history_cannot_enable_start() {
+        delegated_common_commit_foreign_intent_or_lost_history_cannot_enable_start_for_mode(apple_wire::Mode::Review);
+        delegated_common_commit_foreign_intent_or_lost_history_cannot_enable_start_for_mode(apple_wire::Mode::KeyRecover);
+    }
+    fn delegated_common_commit_foreign_intent_or_lost_history_cannot_enable_start_for_mode(mode: apple_wire::Mode) {
         for foreign in [false, true] {
-            let mut f = Fixture::new();
+            let mut f = Fixture::for_mode(mode);
             let call = f.entry.begin().unwrap();
             f.entry.host_entered().unwrap();
             if foreign {
@@ -593,7 +601,11 @@ mod tests {
     }
     #[test]
     fn delegated_gui_start_uses_actual_before_take_handoff_but_inert_material_still_refuses() {
-        let mut f = Fixture::new();
+        delegated_gui_start_uses_actual_before_take_handoff_but_inert_material_still_refuses_for_mode(apple_wire::Mode::Review);
+        delegated_gui_start_uses_actual_before_take_handoff_but_inert_material_still_refuses_for_mode(apple_wire::Mode::KeyRecover);
+    }
+    fn delegated_gui_start_uses_actual_before_take_handoff_but_inert_material_still_refuses_for_mode(mode: apple_wire::Mode) {
+        let mut f = Fixture::for_mode(mode);
         let call = f.entry.begin().unwrap();
         f.entry.host_entered().unwrap();
         f.install();
@@ -642,13 +654,30 @@ mod tests {
         assert!(f.input.current().is_err() && f.input.ready().begin_use().is_err());
     }
     #[test]
-    fn delegated_prepare_rejects_desktop_only_key_recover_without_changing_context() {
+    fn delegated_prepare_key_recover_keeps_selected_key_and_null_reference_without_authority() {
         let owner = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
             "/unopened-apple-mode-test".into(),
         ));
         let context = Input::census_context(apple_wire::Mode::KeyRecover);
         assert!(context.valid());
-        assert!(owner.apple_prepare_selection(&context).is_err());
+        let selection = owner.apple_prepare_selection(&context).unwrap();
+        assert!(selection.context == context && matches!(&selection.prior, Prior::None));
+        assert_eq!(agent::mode(context.mode).unwrap(), p::Mode::KeyRecover);
+        assert_eq!(context.mode.consent(), "local-ios-key-recover-v1");
+        for change in 0..5 {
+            let mut bad = context.clone();
+            match change {
+                0 => bad.reference = Some(apple_wire::Reference {
+                    operation_id: "1".repeat(32), owner_generation: "2".repeat(32),
+                }),
+                1 => bad.key_record_id = None,
+                2 => bad.key_record_revision = None,
+                3 => bad.key_record_revision = Some(0),
+                _ => bad.new_application = true,
+            }
+            assert!(!bad.valid());
+            assert!(owner.apple_prepare_selection(&bad).is_err());
+        }
         assert!(owner.inner.lock().prepared.is_none());
     }
 }

@@ -11,25 +11,23 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_review(p::Review { kind:p::Kind::Doctor,platform:p::Platform::Android,
+            draft_revision:1,baseline_generation:1,prepared:None,sources:None,acquisition:None })
+    }
+    fn with_review(review: p::Review) -> Self {
+        let saved = review.kind.saved();
         let now = Instant::now();
         let doc = Arc::new(());
         let scope = Arc::new(NativeScope {
             project_id: id('1'),
             runtime_id: "p1".into(),
             review_id: id('4'),
-            review: p::Review {
-                kind: p::Kind::Doctor,
-                platform: p::Platform::Android,
-                draft_revision: 1,
-                baseline_generation: 1,
-                prepared: None,
-                sources: None,
-            },
+            review,
             root: "/inert-never-opened".into(),
             device: 1,
             inode: 2,
             observation_revision: 1,
-            saved_config: None,
+            saved_config: saved.then(|| crate::agent_local_checks::Config { bytes:120,sha256:"a".repeat(64) }),
             expires: now + Duration::from_secs(120),
             read: Arc::new(
                 crate::service_version_reserve_requests::ReadPermission::new(
@@ -78,11 +76,9 @@ impl Fixture {
             state: OperationState::Succeeded,
             reason: p::Reason::None,
             outcome: Some(p::Outcome::Complete),
-            result: Some(p::Report::Doctor {
-                checks: vec![p::Finding {
-                    check: p::Check::Git,
-                    status: p::CheckStatus::Failed,
-                }],
+            result: Some(match self.scope.review.acquisition.as_ref() {
+                Some(a) => p::Report::AcquireReviewedMissing { staged:a.missing.clone() },
+                None => p::Report::Doctor { checks:vec![p::Finding { check:p::Check::Git,status:p::CheckStatus::Failed }] },
             }),
             retired: true,
         }
@@ -255,4 +251,43 @@ fn bounded_consent_exhaustion_and_document_loss_do_not_reset() {
     drop(f.doc);
     assert!(f.inbox.submit(input, Instant::now()).is_err());
     assert!(DOCUMENT_BACKING > p::REQUEST_LIMIT * ROW);
+}
+
+#[test]
+fn reviewed_acquisition_and_old_actions_share_original_32_rows_and_all_return_cuts() {
+    let inbox = Inbox::new(id('2'));
+    let mut originals = Vec::new();
+    let selected: p::Review = serde_json::from_value(serde_json::json!({"kind":"acquire-reviewed-missing","platform":"android",
+        "draftRevision":1,"baselineGeneration":1,"prepared":null,"sources":null,
+        "acquisition":{"operationId":id('c'),"ownerGeneration":id('d'),"requirementsSha256":"e".repeat(64),
+            "missing":["jdk","android-platform","android-build-tools","gradle"],"compatible":[]}})).unwrap();
+    for index in 1..=p::REQUEST_LIMIT {
+        let f = if index % 2 == 0 { Fixture::with_review(selected.clone()) } else { Fixture::new() };
+        let consent = Id::parse(&format!("{:032x}", index + 32)).unwrap();
+        inbox.allow(f.scope.clone(), consent.clone()).unwrap();
+        let mut input = f.input(); input.grant_id = consent;
+        input.origin.request_id = Id::parse(&format!("{:032x}", index + 64)).unwrap();
+        let original = inbox.submit(input.clone(), Instant::now()).unwrap();
+        assert_eq!(inbox.submit(input, Instant::now()).unwrap(), original);
+        let entry = inbox.entries().unwrap().last().unwrap().clone();
+        f.link.attach(&entry).unwrap();
+        let caller = inbox.claim().unwrap().unwrap();
+        entry.native(f.result());
+        assert!(entry.pending() && entry.claim_history().unwrap().is_none());
+        assert!(inbox.can_allow(&id('f')).is_err());
+        caller.returned();
+        assert!(entry.pending());
+        let history = entry.claim_history().unwrap().unwrap();
+        assert!(history.first); history.returned(Ok(())).unwrap();
+        let status = entry.status().unwrap();
+        assert!(!entry.pending() && status.validate().is_ok());
+        assert!(serde_json::to_vec(&status).unwrap().len() <= p::STATUS_LIMIT);
+        assert_eq!(status.result, f.result().result);
+        originals.push(f);
+    }
+    assert_eq!(inbox.entries().unwrap().len(),32);
+    assert_eq!(originals.len(),32);
+    assert!(matches!(inbox.can_allow(&id('f')),Err(Error::Busy)));
+    assert!(NATIVE_COMPARISONS >= 8 * (std::mem::size_of::<p::Acquisition>() + p::ACQUISITION_HEAP_BYTES));
+    assert!(DOCUMENT_BACKING >= p::REQUEST_LIMIT * ROW);
 }

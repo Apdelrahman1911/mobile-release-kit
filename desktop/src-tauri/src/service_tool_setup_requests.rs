@@ -20,7 +20,11 @@ const ARC: usize = 2 * std::mem::size_of::<usize>();
 // retired Acquisition Intents may retain their small comparison too. Charge
 // these native DATA fields for every retained row, even after current Grant
 // replacement. The ONE actual Doctor Value/frames stay in the Doc dynamic quote.
-const NATIVE_COMPARISONS: usize = 4 * 4096 + 8 * 64 + 128 * std::mem::size_of::<usize>();
+// Conservatively retain eight acquisition comparison copies across approval,
+// scope, returned/history/status DATA. Existing native Inspection custody is
+// still charged by the original Tool census, never credited to its new Weak.
+const NATIVE_COMPARISONS: usize = 4 * 4096 + 8 * 64 + 128 * std::mem::size_of::<usize>()
+    + 8 * (std::mem::size_of::<p::Acquisition>() + p::ACQUISITION_HEAP_BYTES);
 const ROW: usize = NATIVE_COMPARISONS
     + std::mem::size_of::<Entry>()
     + std::mem::size_of::<NativeScope>()

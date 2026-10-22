@@ -2,7 +2,7 @@
 // No native grant, tool, process, filesystem, credential or build is exercised.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AGENT_IOS_ARCHIVE_CONSENT, AGENT_IOS_SIGNED_EXPORT_CONSENT, AgentIOSArchivePermission, copyIOSArchiveApproval,
+import { AGENT_IOS_ARCHIVE_CONSENT, AGENT_IOS_SIGNED_EXPORT_CONSENT, AGENT_IOS_CANDIDATE_CONSENT, AgentIOSArchivePermission, copyIOSArchiveApproval,
   createAgentIOSArchiveApi, encodeIOSArchiveAccessRequest, parseIOSArchiveAccess } from '../src/agentIOSArchive.ts';
 import { canObserveAgentIOSArchive } from '../src/agentIOSArchiveOrigin.ts';
 import { IOSArchiveController } from '../src/iosArchive.ts';
@@ -179,7 +179,8 @@ test('signed export has separate exact consent, full returned revision and no ca
     assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...request,consentVersion:wrong}),null);
   for(const bad of [0,'00','01','0\n','1\r','18446744073709551616'])
     assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...request,expectedPermissionRevision:bad}),null);
-  for(const action of ['create','check-signing'])assert.equal(copyIOSArchiveApproval({input:{...signedApproval().input,action}}),null);
+  assert.equal(copyIOSArchiveApproval({input:{...signedApproval().input,action:'check-signing'}}),null);
+  assert.ok(copyIOSArchiveApproval({input:{...signedApproval().input,action:'create'}}));
   assert.equal(copyIOSArchiveApproval({input:{projectId:'p1',recovery:{action:'inspect'}}}),null);
   for(const field of ['password','p12','profile','token','native','file']){
     const changed=signedApproval();changed.input.signing[field]='not-authority';assert.equal(copyIOSArchiveApproval(changed),null);
@@ -211,11 +212,35 @@ test('signed native original is observe and STOP only; signature selection and G
   assert.ok(parseIOSArchiveStatus(incoming));
   const previous=status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')})));
   assert.equal(canObserveAgentIOSArchive(previous,incoming,true),false);
-  for(const change of [v=>{v.context.operation='ios-candidate-inputs';v.context.action='create';},
+  for(const change of [v=>{v.context.operation='ios-candidate-inputs';delete v.context.action;},
     v=>{v.context.operation='ios-signing-inputs-check';v.context.action='check-signing';},
     v=>{v.agentIosArchive.requestId+='\n';}]){const bad=clone(incoming);change(bad.operation);assert.equal(parseIOSArchiveStatus(bad),null);}
   const h=await nativeView(t,previous);h.emit(incoming);
   assert.equal(h.controller.getSnapshot().integrityFailed,false);assert.equal(h.controller.getSnapshot().consent,null);
   await h.controller.start(id('d'),id('e'));assert.equal(h.calls.length,0);
   assert.equal(h.controller.cancel(),true);await flush();assert.deepEqual(h.calls,[{kind:'cancel',operationId:id('d'),ownerGeneration:id('e')}]);
+});
+
+const candidateApproval=()=>({input:{...signedApproval().input,action:'create'}});
+test('candidate iOS uses exact Create consent and retains original pending Allow through revoke', async()=>{
+  const calls=[],api=createAgentIOSArchiveApi('native',async(command,raw)=>{calls.push({command,value:JSON.parse(new TextDecoder().decode(raw))});return enabled('1');});
+  const a=candidateApproval();await api.allow(a,'0');assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].value,{...a,consentVersion:AGENT_IOS_CANDIDATE_CONSENT,expectedPermissionRevision:'0'});
+  for(const consent of [AGENT_IOS_ARCHIVE_CONSENT,AGENT_IOS_SIGNED_EXPORT_CONSENT,'local-ios-candidate-inputs-v1'])
+    assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...a,consentVersion:consent,expectedPermissionRevision:'0'}),null);
+  for(const ordinary of [approval(),signedApproval()])assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...ordinary,consentVersion:AGENT_IOS_CANDIDATE_CONSENT,expectedPermissionRevision:'0'}),null);
+  for(const change of [v=>{v.input.action='check-signing';},v=>{delete v.input.signing;},v=>{v.input.recovery={action:'inspect'};}]){const v=candidateApproval();change(v);assert.equal(copyIOSArchiveApproval(v),null);}
+  const p=port(),c=new AgentIOSArchivePermission();c.bind(p.api,candidateApproval());const reading=c.status();p.calls[0].resolve(disabled());await reading;
+  c.acknowledge(true);const allowing=c.allow();assert.equal(p.calls[1].kind,'allow');const stopping=c.revoke();p.calls[2].resolve(disabled('1'));await stopping;
+  assert.equal(c.getState().pending,'allow');c.acknowledge(true);assert.equal(c.canAllow(),false);p.calls[1].resolve(enabled('1'));await allowing;
+  assert.equal(c.getState().access.enabled,false);assert.equal(p.calls.filter(x=>x.kind==='allow').length,1);
+});
+test('actual iOS candidate original may be observed and stopped but never starts from status', async t=>{
+  const op=operation({operationId:'33333333333343338333333333333333'},candidateApproval().input);op.context.operation='ios-candidate-inputs';
+  const incoming=status(3,op);incoming.modeCapabilities.signed=true;assert.ok(parseIOSArchiveStatus(incoming));
+  const prior=status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')})));
+  assert.equal(canObserveAgentIOSArchive(prior,incoming,true),false);
+  const h=await nativeView(t,prior);h.emit(incoming);assert.equal(h.controller.getSnapshot().integrityFailed,false);
+  assert.equal(h.controller.getSnapshot().consent,null);await h.controller.start(op.operationId,op.ownerGeneration);assert.equal(h.calls.length,0);
+  assert.equal(h.controller.cancel(),true);await flush();assert.deepEqual(h.calls,[{kind:'cancel',operationId:op.operationId,ownerGeneration:op.ownerGeneration}]);
 });

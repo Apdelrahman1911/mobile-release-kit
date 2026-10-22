@@ -2437,7 +2437,7 @@ impl SavedCommandOwner {
         let agent_store_preparation = agent_store::preparation::link(store_preparation, &self.inner, &context, registration, &project, &id, &generation,
             r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?, expires, material.as_ref())?;
         if let Some(original) = &tools { expires = original.clip_expiry(expires)?; }
-        let tools = tools.map(|original| original.link(&self.inner, &context, registration, &project, &id, &generation, expires)).transpose()?;
+        let tools = tools.map(|original| original.link(&self.inner, &r, &context, registration, &project, &id, &generation, expires)).transpose()?;
         if let Some(commit)=&apple{expires=commit.admit(&context,registration,&project,expires)?;}
         let projection = RunProjection { agent_build: agent_build.as_ref().map(|link| link.projection_origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: apple.is_none(), outcome: None, reason: Reason::None, result: None, stage: None };

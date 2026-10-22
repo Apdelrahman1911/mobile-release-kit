@@ -19,7 +19,9 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a,b)=
 const flush = async () => { for(let i=0;i<30;i++)await Promise.resolve(); };
 const review = (kind='doctor') => ({kind,platform:'android',draftRevision:2,baselineGeneration:3,
   prepared:['inspect-requirements','acquire-missing'].includes(kind)?{operationId:OP,ownerGeneration:OWNER,statusRevision:1}:null,
-  sources:kind.includes('sources')?{registrationGeneration:0,sourceGeneration:1,reviewId:kind==='register-reviewed-sources'?REVIEW:null}:null});
+  sources:kind.includes('sources')?{registrationGeneration:0,sourceGeneration:1,reviewId:kind==='register-reviewed-sources'?REVIEW:null}:null,
+  ...(kind==='acquire-reviewed-missing'?{acquisition:{operationId:ID(8),ownerGeneration:ID(9),requirementsSha256:'a'.repeat(64),
+    missing:['android-build-tools'],compatible:['jdk','android-platform','gradle']}}:{})});
 const empty = () => ({serviceInstance:null,projectId:null,grantId:null,reviewId:null,review:null,
   enabled:false,remainingMs:0,consumed:false,pending:false,unknown:false,requestId:null,status:null});
 const access = (r=review()) => ({serviceInstance:INSTANCE,projectId:PROJECT,grantId:GRANT,reviewId:REVIEW,review:clone(r),

@@ -175,6 +175,7 @@ Delegated identity edits need the original Desktop source review and separate on
 Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
 No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
 Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
+Apple key-recover verifies only the selected original durably saved key and may record a local verification association; no replacement key, restored-new reference, provider request or automatic next step.\n\
 There is no public-release command.\n";
 
 struct Options { request: p::Request, json: bool }
@@ -286,7 +287,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "commands": LOCAL_CHECK_COMMANDS,
             },
             "androidBuilds": {
-                "scope": "saved-android-build-structure-and-version", "scopes": ["saved-android-build-structure-and-version", "saved-android-local-upload-key-sign"], "defaultEnabled": false, "oneUse": true,
+                "scope": "saved-android-build-structure-and-version", "scopes": ["saved-android-build-structure-and-version", "saved-android-local-upload-key-sign", "saved-android-candidate-inputs"], "defaultEnabled": false, "oneUse": true,
+                "candidateScope":{"scope":"saved-android-candidate-inputs","createOnly":true,"requiresSeparateCandidateConsent":true,"requiresOriginalReadThroughCompletion":true,"requiresEnrolledLocalHistory":true,"summaryBytes":crate::agent_candidate_build::BYTES,"storePublishing":false,"nativeAvailabilityChecked":false},
                 "signedScope":{"scope":"saved-android-local-upload-key-sign","toolkitSigning":true,"separateConsent":true,"existingAssignedKeyOnly":true,"originalReadStopsWork":true,"cliSecrets":false,"keyGeneration":false,"nativeAvailabilityChecked":false},
                 "maxStartWindowSeconds": crate::agent_android_build::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_android_build::LIMIT,
                 "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
@@ -298,6 +300,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "scope": "saved-ios-archive", "defaultEnabled": false, "oneUse": true,
                 "modes": {"saved-ios-unsigned-archive":{"toolkitSigning":false},
                     "saved-ios-signed-export":{"toolkitSigning":true,"requiresSeparateSigningConsent":true,"requiresOriginalReadThroughCompletion":true},
+                    "saved-ios-candidate-inputs":{"toolkitSigning":true,"createOnly":true,"requiresSeparateCandidateConsent":true,"requiresOriginalReadThroughCompletion":true,"requiresEnrolledLocalHistory":true,"summaryBytes":crate::agent_candidate_build::BYTES},
                     "local-ios-recovery":{"toolkitSigning":false,"requiresSeparateRecoveryConsent":true,"requiresOriginalReadThroughCompletion":true,
                         "requiresSavedConfiguration":false,"restoreRequiresOriginalInspection":true,"automaticFollowOn":false,"manualRecovery":false}},
                 "maxStartWindowSeconds": crate::agent_build_requests::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_build_requests::LIMIT,
@@ -349,21 +352,21 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "rememberAssignment":false,"recoveryAcknowledgment":false,
                 "automaticRetry":false,"nativeAvailabilityChecked":false,"commands":upload_key::COMMANDS},
             "appleProvisioning":{"scope":"one-desktop-selected-preparation-or-prepared-apple-step","commands":apple_provisioning::COMMANDS,
-                "modeCount":15,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":true,"prepareRequiresDesktopSelection":true,"prepareIsStart":false,"headless":false,
+                "modeCount":16,"requiresDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":true,"prepareRequiresDesktopSelection":true,"prepareIsStart":false,"headless":false,
                 "privateArguments":false,"requiresExactOneUseDesktopConsent":true,"maxRetainedRequests":32,
                 "maxPreparedMs":300000,"nativeWorkMs":1200000,"nativeHardMs":1210000,"providerEffectsPossible":true,
-                "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":false,"p12Reconcile":false},
+                "savedIsAssigned":false,"statusGrantsNextStep":false,"keyRecover":true,"keyRecoverScope":"known-durable-original-reference","p12Reconcile":false},
             "toolSetup": {"scope":"one-desktop-approved-tool-step","commands":tool_setup::COMMANDS,
-                "kinds":["doctor","inspect-requirements","acquire-missing","inspect-picked-sources","register-reviewed-sources","inspect-saved-requirements"],
+                "kinds":["doctor","inspect-requirements","acquire-missing","inspect-picked-sources","register-reviewed-sources","inspect-saved-requirements","acquire-reviewed-missing"],
                 "readGrantRequired":true,"oneUseApprovalRequired":true,"requiresRunningDesktop":true,
-                "cliPrepare":false,"prepareSavedInspectOnSubmit":true,"privateArguments":false,"automaticNextStep":false,"publicationIsSelection":false},
+                "cliPrepare":false,"prepareSavedInspectOnSubmit":true,"prepareReviewedAcquireOnSubmit":true,"privateArguments":false,"automaticNextStep":false,"publicationIsSelection":false},
             "localHistory":{"scope":"desktop-prepared-local-history","commands":local_history::COMMANDS,"actions":["enroll","verify","review-inputs"],"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,"cliPrepare":false,"storeAuthority":false,"savedConfigRequired":false,"maxRetainedRequestsSharedWithStore":32,"nativeAvailabilityChecked":false},
             "store": {"scope":"one-existing-desktop-prepared-exact-store-step","commands":store::COMMANDS,
                 "kinds":["access-check","candidate-prepare","execute","reconcile"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
                 "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
                 "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
                 "nativePrepareCommand":"store-prepare","separateStartCommand":"store-start","prepareAuthorizesStart":false,
-                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit"],"stagePreparationIsExecution":false,
+                "nativePrepareKinds":["android-access","ios-access","android-candidate","ios-candidate","android-versions","ios-versions","paired-versions","android-external-testing","ios-external-testing","android-production-submit","ios-production-submit","android-candidate-upload","ios-candidate-upload"],"stagePreparationIsExecution":false,
                 "currentInventory":["android","ios","paired"],"inventoryIsAllocationAuthority":false,"pairedInventoryRequiresTwoCurrentLoans":true,
                 "execute":true,"reconcile":true,"upload":true,"promotion":true,"requiresSeparateExactModeConsent":true,
                 "oldAccessPrepareGrantsAuthorizeRelease":false,"automaticRetry":false,"publicRelease":false,"queryVariants":true,"oldSubmitQueryVariants":false,"nativeAvailabilityChecked":false},
@@ -417,7 +420,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
-        text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+        text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
         text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop review for empty repository creation, draft PR, failed-job retry, five-file setup Publish or GET-only original-intent Reconcile. Load/Prepare remain explicit Desktop actions; Counter setup is excluded. No token/URL/CLI Prepare; uncertain requests must not be replayed.\n");
@@ -798,6 +801,12 @@ mod tests {
         assert!(HELP.contains("separately approved local recovery")&&human.contains("Configless recovery"));
         assert_eq!(ios["commands"].as_array().unwrap().len(),4);
         assert_eq!(ios["storePublishing"],false);assert_eq!(ios["archiveDigestAvailable"],false);
+        for candidate in [&value["androidBuilds"]["candidateScope"], &ios["modes"]["saved-ios-candidate-inputs"]] {
+            assert_eq!(candidate["createOnly"],true);assert_eq!(candidate["requiresSeparateCandidateConsent"],true);
+            assert_eq!(candidate["requiresOriginalReadThroughCompletion"],true);assert_eq!(candidate["requiresEnrolledLocalHistory"],true);
+            assert_eq!(candidate["summaryBytes"],crate::agent_candidate_build::BYTES);
+        }
+
         assert_eq!(ios["maxRetainedRequests"],value["androidBuilds"]["maxRetainedRequests"]);
         assert_eq!(ios["sharesBuildGrantAndRequestLimitWithAndroid"],true);
         for command in ios["commands"].as_array().unwrap() {

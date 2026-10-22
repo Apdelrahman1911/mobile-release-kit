@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AppleProvisioningController } from '../src/appleProvisioningController.ts';
 import { AgentAppleProvisioningController } from '../src/agentAppleProvisioningController.ts';
-import { appleCliModes, appleCliConsent, parseAppleCliReview, parseAppleCliStatus, parseAppleCliAccess, createAppleCliPort, appleCliCommands } from '../src/agentAppleProvisioning.ts';
+import { appleCliModes, appleCliConsent, appleCliEffect, parseAppleCliReview, parseAppleCliStatus, parseAppleCliAccess, createAppleCliPort, appleCliCommands } from '../src/agentAppleProvisioning.ts';
 import { APPLE_PROVISIONING_LIMITATIONS, appleProvisioningContext } from '../src/appleProvisioningProtocol.ts';
 
 const clone = v => structuredClone(v), id = c => c.repeat(32);
@@ -17,19 +17,20 @@ const allowed = (r=review(), nonce=id('4')) => ({serviceInstance:id('8'),project
 const row = (r=review(), mode='running', revision=1, nonce=id('4')) => ({origin:{projectId:id('9'),serviceInstance:id('8'),requestId:id('5')},grantId:nonce,reviewId:r.operationId,revision,review:clone(r),state:mode,
   settlement:mode==='unknown'?'unknown':mode==='complete'||mode==='cancelled'?'settled':'pending',reason:mode==='unknown'?'cleanup-unknown':mode==='cancelled'?'user-cancelled':'none',
   operation:{operationId:r.operationId,ownerGeneration:r.ownerGeneration,statusRevision:3},outcome:mode==='unknown'?'unknown':mode==='complete'?'complete':mode==='cancelled'?'cancelled':null,
-  result:mode==='complete'?{decision:r.mode==='key-review'?'prepare-review':'review-required',comparison:null,attempt:null,certificateId:null,certificateSha256:null,doNotReplay:true,credentialReady:false}:null,recordAtCompletion:null});
+  result:mode==='complete'?{decision:r.mode==='key-recover'?'compared':r.mode==='key-review'?'prepare-review':'review-required',comparison:null,attempt:null,certificateId:null,certificateSha256:null,doNotReplay:true,credentialReady:false}:null,recordAtCompletion:null});
 const withRow = s => ({...allowed(s.review,s.grantId),enabled:false,remainingMs:0,consumed:true,pending:s.settlement!=='settled',unknown:s.state==='unknown',requestId:s.origin.requestId,status:clone(s)});
 const nativeStatus = (revision, operation=null) => ({schemaVersion:1,statusRevision:revision,availability:operation&&operation.phase!=='terminal'?'busy':'available',operation});
 function fixture(t, family='bundle') {
   let p={projectId:'fixture',draftRevision:1,baselineGeneration:2,observationGeneration:3,
     savedConfig:{bytes:100,sha256:'a'.repeat(64)},savedVersion:{source:'release/version.properties',bytes:30,sha256:'b'.repeat(64),name:'1.2.3',build:4},
     dirtyDraft:false,snapshotPending:false,versionPending:false,saveRecoveryRequired:false,inputIssue:null};
-  const scope={executionMode:'local',platform:'ios',stage:'candidate',purpose:family==='key'?'provisioning':'store'};
+  const scope={executionMode:'local',platform:'ios',stage:'candidate',purpose:family==='key'||family==='recover'?'provisioning':'store'};
   let assets={mode:'native',scope,contextCurrent:true,busy:null,updatingContext:false,observationFailed:false,blocked:false,originPending:false,entryGeneration:1,
     status:{schemaVersion:3,statusRevision:1,mode:'encrypted',persistence:{state:'unlocked',reason:'none',keyAccess:'read-write'},capability:{available:true,reason:'none'},
       modes:{session:{available:true},encrypted:{available:true}},operation:null,context:{revision:3,projectId:'fixture',...scope},
       assignments:[{kind:'asc-p8',recordId:id('c'),recordRevision:4,contextRevision:3,availability:'available'}],
       records:[{kind:'asc-p8',recordId:id('c'),revision:4,availability:'assigned',storage:'encrypted',label:null,payloadState:'assessed'}]}};
+  if(family==='recover')assets.status.records.push({kind:'apple-distribution-key',recordId:id('d'),revision:1,availability:'unassigned',storage:'encrypted',label:null,payloadState:'not-checked'});
   let current=nativeStatus(1), now=100, peer=null, epoch={}, service={}, preview=false;
   let access=empty(), queryStatus=null, allowWait=null, queryWait=null, revokeWait=null, nonce=id('4'), nextOperation=1;
   const calls=[], listeners=[], reads=[], promises=[];
@@ -49,23 +50,36 @@ function fixture(t, family='bundle') {
   t.after(async()=>{for(const pending of [allowWait,queryWait,revokeWait])pending?.reject(new Error('fixture closed'));await Promise.allSettled(promises);await permission.whenSettled();permission.dispose();controller.dispose();await flush();});
   return {controller,permission,ready,calls,reads,api,port,
     get state(){return controller.getSnapshot();},get native(){return clone(current);},get access(){return clone(access);},get view(){return permission.getSnapshot();},
-    async prepared(mode=family==='key'?'key-review':'review'){await ready;await controller.prepare(mode);permission.syncContext();assert.ok(controller.delegationReview());return controller.delegationReview();},
+    async prepared(mode=family==='recover'?'key-recover':family==='key'?'key-review':'review'){await ready;if(family==='recover')controller.selectCertificateKey(id('d'),1);await controller.prepare(mode);permission.syncContext();assert.ok(controller.delegationReview());return controller.delegationReview();},
     async allow(){permission.acknowledge(true);assert.equal(permission.allowReason(),null);await permission.allow();},
     grant(v){access=clone(v);},row(v){queryStatus=clone(v);access=withRow(v);},
-    complete(){const op=current.operation;const result=op.context.mode==='key-review'?{schemaVersion:1,scope:'local-ios-distribution-key',mode:'key-review',decision:'prepare-review',reason:'local-key-required',saved:false,certificateRequested:false,credentialReady:false}:
+    complete(){const op=current.operation;const result=op.context.mode==='key-recover'?{schemaVersion:1,scope:'local-ios-distribution-key',mode:'key-recover',decision:'compared',reason:'stored-key-checked',saved:false,certificateRequested:false,credentialReady:false}:op.context.mode==='key-review'?{schemaVersion:1,scope:'local-ios-distribution-key',mode:'key-review',decision:'prepare-review',reason:'local-key-required',saved:false,certificateRequested:false,credentialReady:false}:
       {schemaVersion:1,scope:'local-ios-bundle-provisioning',mode:'review',observation:'not-returned',decision:'review-required',attempt:null,comparison:null,limitations:[...APPLE_PROVISIONING_LIMITATIONS]};
       current=nativeStatus(current.statusRevision+1,{...op,phase:'terminal',intentUsable:false,outcome:'complete',reason:'none',result});for(const l of [...listeners])l(clone(current));},
     emit(value){current=clone(value);for(const l of [...listeners])l(clone(current));},
     change(patch){p={...p,...patch};controller.syncProject();permission.syncContext();},peer(v){peer=v;},time(v){now=v;},nonce(v){nonce=v;},epoch(){epoch={};permission.syncContext();},preview(){preview=true;permission.syncContext();},
     holdAllow(){return allowWait=wait();},holdQuery(){return queryWait=wait();},holdRevoke(){return revokeWait=wait();},
+    keyRevision(value){assets=clone(assets);assets.status.records.find(r=>r.kind==='apple-distribution-key').revision=value;controller.syncProject();permission.syncContext();},
     mutateKey(){assets=clone(assets);assets.contextCurrent=false;assets.status.persistence.state='mutating';assets.status.operation={operationId:5,operation:'prepare-apple-distribution-key',phase:'mutating',reason:'none',source:'captured',settlement:'pending',storageOutcome:{effect:'not-started',durability:'not-run',cleanup:'pending'},selectionToken:null,assessment:null,preview:null};for(const a of assets.status.assignments)a.availability='unavailable';controller.syncProject();},
   };
 }
 
-test('all fifteen exact modes have bounded IDs-only review and mode-specific consent; no KeyRecover or CLI Prepare',()=>{
-  assert.equal(appleCliModes.length,15);for(const mode of appleCliModes){assert.ok(parseAppleCliReview(review(mode)));assert.equal(appleCliConsent(mode),`agent-apple-${mode}-once-v1`);}
-  for(const mode of ['key-recover','p12-reconcile','prepare','certificate-rotate'])assert.equal(parseAppleCliReview(review(mode)),null);
+test('all sixteen exact modes have bounded IDs-only review and separate consent; no invented P12 reconcile',()=>{
+  assert.equal(appleCliModes.length,16);for(const mode of appleCliModes){assert.ok(parseAppleCliReview(review(mode)));assert.equal(appleCliConsent(mode),`agent-apple-${mode}-once-v1`);}
+  for(const mode of ['key-restore','p12-reconcile','prepare','certificate-rotate'])assert.equal(parseAppleCliReview(review(mode)),null);
   assert.equal(parseAppleCliReview({...review(),privateKey:'not allowed'}),null);
+});
+test('KeyRecover report is compared only with no NEW reference, issuer result or next-step authority',()=>{
+  const value=row(review('key-recover'),'complete');assert.ok(parseAppleCliStatus(value));assert.ok(parseAppleCliAccess(withRow(value)));
+  for(const decision of ['produced','blocked','comparison-only','reused','assembled'])assert.equal(parseAppleCliStatus({...value,result:{...value.result,decision}}),null);
+  for(const [field,data] of [['comparison','same-response'],['attempt',{operationId:id('1'),status:'succeeded',cancellationRequested:false}],['certificateId','existing'],['certificateSha256','a'.repeat(64)],['credentialReady',true],['doNotReplay',false],['recoverySha256','a'.repeat(64)]]){
+    assert.equal(parseAppleCliStatus({...value,result:{...value.result,[field]:data}}),null,field);
+  }
+  const saved={kind:'apple-distribution-key',reference:{vaultId:id('1'),generationId:id('2'),recordId:id('3'),revisionId:id('4'),revisionCounter:1}};
+  assert.equal(parseAppleCliStatus({...value,recordAtCompletion:saved}),null);
+  assert.equal(parseAppleCliStatus({...value,review:review('key-prepare')}),null);
+  assert.match(appleCliEffect('key-recover'),/may append a local verification association/);
+  assert.match(appleCliEffect('key-recover'),/Earlier setup history and unrelated uncertainty remain/);
 });
 test('strict status/access refuses getters, overbounds, foreign IDs, false saved/ref/finality and missing nullable fields',()=>{
   const s=row();assert.ok(parseAppleCliStatus(s));assert.ok(parseAppleCliAccess(withRow(s)));let called=0;
@@ -81,6 +95,10 @@ test('RAW facade has only fixed permission calls; commands take retained public 
   assert.deepEqual(calls.map(c=>c[0]),['agent_apple_provisioning_access','allow_agent_apple_provisioning','agent_apple_provisioning_request_status','revoke_agent_apple_provisioning']);
   assert.deepEqual(Object.keys(calls[1][1]),['consentId','mode','operationId','ownerGeneration','expectedStatusRevision','consentVersion']);
   assert.match(appleCliCommands(allowed())[0],/^mrk apple-provisioning-submit .* --reviewed$/);assert.equal(appleCliCommands({...allowed(),enabled:false,remainingMs:0}).length,0);
+  await p.allow(review('key-recover'),id('6'));
+  assert.equal(calls.at(-1)[1].consentVersion,'agent-apple-key-recover-once-v1');
+  assert.equal(calls.at(-1)[1].mode,'key-recover');
+  assert.deepEqual(Object.keys(calls.at(-1)[1]),Object.keys(calls[1][1]));
 });
 test('genuine Prepare delegates exactly once, blocks ordinary Start without fabricating GUI Start, and needs both original final reads',async t=>{
   const h=fixture(t),r=await h.prepared();await h.allow();assert.equal(h.state.consent,null);await h.controller.start(r.operationId,r.ownerGeneration);assert.equal(h.calls.filter(c=>c[0]==='start').length,0);
@@ -93,6 +111,25 @@ test('genuine Prepare delegates exactly once, blocks ordinary Start without fabr
 test('delegated key retains the original mutating Asset comparison without pretending GUI Start returned',async t=>{
   const h=fixture(t,'key'),r=await h.prepared();await h.allow();h.mutateKey();assert.equal(h.state.issue,null);assert.equal(h.state.historical,false);
   h.complete();await flush();assert.equal(h.state.keyTerminalRead,false);h.row(row(r,'complete',1));await h.permission.check();assert.equal(h.state.keyTerminalRead,true);assert.ok(h.state.keyReviewReference);
+});
+test('selected original KeyRecover delegates Start only and waits for native read plus original service history',async t=>{
+  const h=fixture(t,'recover'),r=await h.prepared();
+  const selection=h.calls.find(c=>c[0]==='prepare')[1];assert.equal(selection.mode,'key-recover');assert.equal(selection.reference,null);assert.equal(selection.keyRecordId,id('d'));assert.equal(selection.keyRecordRevision,1);
+  await h.allow();await h.controller.start(r.operationId,r.ownerGeneration);assert.equal(h.calls.filter(c=>c[0]==='start').length,0);
+  h.row(row(r));h.complete();await flush();assert.equal(h.state.keyResult,null);assert.equal(h.state.keyTerminalRead,false);
+  await h.permission.check();assert.equal(h.state.keyResult,null);
+  h.row(row(r,'complete',2));const d=h.holdQuery(),w=h.permission.check();await flush();assert.equal(h.state.keyTerminalRead,false);d.resolve(row(r,'complete',2));await w;
+  assert.equal(h.state.keyTerminalRead,true);assert.equal(h.state.keyResult.decision,'compared');assert.equal(h.state.savedKey,null);
+  assert.equal(h.state.keyReviewReference,null);assert.equal(h.state.certificateReviewReference,null);assert.equal(h.state.p12ReviewReference,null);
+  assert.equal(h.calls.filter(c=>c[0]==='allow').length,1);assert.equal(h.calls.filter(c=>c[0]==='prepare').length,1);
+  await h.controller.prepare('certificate-create');assert.equal(h.calls.filter(c=>c[0]==='prepare').length,1);
+});
+test('KeyRecover changed selected key and lost original permission never regenerate or become a new grant',async t=>{
+  for(const cut of ['key','lost']){const h=fixture(t,'recover');await h.prepared();
+    if(cut==='key'){h.permission.acknowledge(true);h.keyRevision(2);await h.permission.allow();assert.equal(h.calls.filter(c=>c[0]==='allow').length,0);}
+    else{const d=h.holdAllow();h.permission.acknowledge(true);const w=h.permission.allow();d.reject(new Error('inert lost KeyRecover permission'));await w;assert.equal(h.view.unknown,true);await h.permission.allow();assert.equal(h.calls.filter(c=>c[0]==='allow').length,1);}
+    assert.equal(h.state.keyResult,null);assert.equal(h.state.savedKey,null);assert.equal(h.calls.filter(c=>c[0]==='start').length,0);
+  }
 });
 test('follow-on freshness uses delegation time, never late Status receipt time',async t=>{
   const h=fixture(t),r=await h.prepared();h.time(500);await h.allow();h.time(300501);h.complete();h.row(row(r,'complete'));await h.permission.check();assert.equal(h.state.result?.decision,'review-required');assert.equal(h.state.reviewReference,null);

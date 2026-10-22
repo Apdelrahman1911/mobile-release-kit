@@ -23,6 +23,7 @@ pub(crate) const FAMILY: crate::agent_build_requests::Family =
 pub enum Mode {
     SavedIosUnsignedArchive,
     SavedIosSignedExport,
+    SavedIosCandidateInputs,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,7 +39,7 @@ impl Review {
         self.saved_config.valid() && self.saved_version.valid()
             && match self.mode {
                 Mode::SavedIosUnsignedArchive => self.signing.is_none(),
-                Mode::SavedIosSignedExport => self.signing.as_ref().is_some_and(signed::Review::valid),
+                Mode::SavedIosSignedExport | Mode::SavedIosCandidateInputs => self.signing.as_ref().is_some_and(signed::Review::valid),
             }
     }
 }
@@ -92,6 +93,9 @@ pub enum Reason {
     ResultLimit,
     WorkRetained,
     CleanupUnknown,
+    JournalUnavailable,
+    RecoveryRequired,
+    CandidateInputsUnavailable,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -114,6 +118,7 @@ pub enum Stage {
 pub enum Scope {
     LocalUnsignedIosArchiveObservation,
     LocalSignedIosArtifactValidation,
+    LocalIosCandidateInputs,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -125,6 +130,8 @@ pub struct Report {
     pub bytes: u64,
     #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
     pub export: Option<signed::Export>,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<crate::agent_candidate_build::Candidate>,
 }
 impl Report {
     pub fn valid(&self) -> bool {
@@ -133,8 +140,11 @@ impl Report {
             && (1..=100_000).contains(&self.entries)
             && (1..=8 * 1024u64.pow(3)).contains(&self.bytes)
             && match self.scope {
-                Scope::LocalUnsignedIosArchiveObservation => self.export.is_none(),
-                Scope::LocalSignedIosArtifactValidation => self.export.as_ref().is_some_and(signed::Export::valid),
+                Scope::LocalUnsignedIosArchiveObservation => self.export.is_none() && self.candidate.is_none(),
+                Scope::LocalSignedIosArtifactValidation => self.candidate.is_none() && self.export.as_ref().is_some_and(signed::Export::valid),
+                Scope::LocalIosCandidateInputs => self.export.as_ref().is_some_and(signed::Export::valid)
+                    && self.candidate.as_ref().is_some_and(|c| c.valid(crate::agent_candidate_build::IOS_PRIMARY_BYTES)
+                        && self.export.as_ref().is_some_and(|e| c.primary_bytes == e.ipa_bytes)),
             }
     }
 }
@@ -185,7 +195,9 @@ pub struct Operation {
 impl Operation {
     pub(crate) fn valid_for(&self, review: &Review) -> bool {
         self.valid() && review.valid()
-            && (review.mode == Mode::SavedIosSignedExport
+            && (review.mode == Mode::SavedIosCandidateInputs
+                || !matches!(self.reason, Reason::JournalUnavailable | Reason::RecoveryRequired | Reason::CandidateInputsUnavailable))
+            && (matches!(review.mode, Mode::SavedIosSignedExport | Mode::SavedIosCandidateInputs)
                 || !matches!(self.reason, Reason::SigningPolicyRequired | Reason::SigningInputMissing
                     | Reason::SigningInputInvalid | Reason::SigningValidationFailed | Reason::AccountAdmissionRefused
                     | Reason::ArtifactValidationFailed | Reason::SymbolsUploadNotRequested | Reason::RecoveryAttention)
@@ -196,6 +208,8 @@ impl Operation {
                     && match review.mode {
                         Mode::SavedIosUnsignedArchive => r.scope == Scope::LocalUnsignedIosArchiveObservation,
                         Mode::SavedIosSignedExport => r.scope == Scope::LocalSignedIosArtifactValidation,
+                        Mode::SavedIosCandidateInputs => r.scope == Scope::LocalIosCandidateInputs
+                            && r.candidate.as_ref().is_some_and(|c| c.matches_operation(self.operation_id.as_str())),
                     }
             })
     }

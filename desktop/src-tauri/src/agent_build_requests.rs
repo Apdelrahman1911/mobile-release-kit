@@ -84,8 +84,8 @@ impl Review {
     }
     pub(crate) fn requires_original_read(&self) -> bool {
         match self {
-            Self::Android(r) => r.mode == android::Mode::SavedAndroidLocalUploadKeySign,
-            Self::Ios(r) => r.mode == ios::Mode::SavedIosSignedExport,
+            Self::Android(r) => matches!(r.mode, android::Mode::SavedAndroidLocalUploadKeySign | android::Mode::SavedAndroidCandidateInputs),
+            Self::Ios(r) => matches!(r.mode, ios::Mode::SavedIosSignedExport | ios::Mode::SavedIosCandidateInputs),
             Self::IosRecovery(_) => true,
         }
     }
@@ -189,11 +189,13 @@ impl Operation {
                     .checked_add(r.findings.capacity().checked_mul(std::mem::size_of::<android::Finding>())?)?
                     .checked_add(SUMMARY_HEAP_BYTES)?;
                 if let Some(s) = &r.signing { n = n.checked_add(s.upload_certificate_sha256.capacity())?; }
+                if let Some(c) = &r.candidate { n = n.checked_add(c.heap_bytes()?)?; }
             },
             Self::Ios(o) => if let Some(r) = &o.result {
                 n = n.checked_add(r.used_config.sha256.capacity())?
                     .checked_add(r.used_version.sha256.capacity())?
                     .checked_add(r.used_version.name.capacity())?;
+                if let Some(c) = &r.candidate { n = n.checked_add(c.heap_bytes()?)?; }
             },
             Self::IosRecovery(o) => if let Some(r) = &o.report { n = n.checked_add(r.heap_bytes()?)?; },
         }
@@ -214,6 +216,7 @@ impl Operation {
             Self::Android(o) => if let Some(r) = &mut o.result {
                 compact_string(&mut r.used_config.sha256);
                 compact_version(&mut r.used_version);
+                if let Some(c) = &mut r.candidate { c.compact(); }
                 compact_string(&mut r.artifact.sha256);
                 if let Some(s) = &mut r.signing { compact_string(&mut s.upload_certificate_sha256); }
                 r.findings = std::mem::take(&mut r.findings).into_boxed_slice().into_vec();
@@ -222,6 +225,7 @@ impl Operation {
             Self::Ios(o) => if let Some(r) = &mut o.result {
                 compact_string(&mut r.used_config.sha256);
                 compact_version(&mut r.used_version);
+                if let Some(c) = &mut r.candidate { c.compact(); }
             },
             Self::IosRecovery(o) => if let Some(r) = &mut o.report { r.compact(); },
         }
@@ -533,7 +537,8 @@ const SCOPE_HEAP_CEILING: usize = ROOT_HEAP_BYTES + 2 * ID_HEAP_BYTES
 // One retained terminal payload, not a second copy of the complete public
 // Status (whose query IDs and Review are already charged in Scope/Entry).
 const OPERATION_HEAP_CEILING: usize = 2 * ID_HEAP_BYTES + 5 * 64
-    + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES;
+    + 128 * std::mem::size_of::<android::Finding>() + SUMMARY_HEAP_BYTES
+    + crate::agent_candidate_build::HEAP_BYTES;
 const PUBLIC_HEAP_CEILING: usize = 3 * ID_HEAP_BYTES + REVIEW_HEAP_CEILING
     + OPERATION_HEAP_CEILING;
 // Each genuine current signing approval/pin is capacity-checked in its native

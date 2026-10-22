@@ -1284,8 +1284,7 @@ pub(crate) struct Projection {
 }
 impl Projection {
     fn valid(&self) -> bool {
-        if self.agent_android_build.is_some() && (self.context.operation != Operation::AndroidBuildInspect || self.context.signed()
-            || self.context.artifact_validation.mode != ValidationMode::StructureAndVersion) { return false; }
+        if self.agent_android_build.is_some() && !self.context.agent_context() { return false; }
         if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
             || self.context.candidate() && !candidate_id(&self.operation_id)
             || !self.context.candidate() && self.reason.candidate_only()
@@ -2119,8 +2118,8 @@ pub(crate) mod tests {
     pub(crate) fn candidate_context() -> Context {
         let mut context=signed_context();context.operation=Operation::AndroidCandidateInputs;context.action=Some(CreateAction::Create);context
     }
-    const CANDIDATE_ID:&str="33333333333343338333333333333333";
-    fn candidate_complete()->Value{
+    pub(crate) const CANDIDATE_ID:&str="33333333333343338333333333333333";
+    pub(crate) fn candidate_complete()->Value{
         let mut value=signed_complete();value["context"]=json!(candidate_context());
         value["lifetime"]["commands"]=json!(14);
         for key in ["candidateInputsClosed","journalClosed","leaseClosed"]{value["lifetime"][key]=json!(true);}
@@ -2463,3 +2462,5 @@ pub(crate) fn assert_macos_toolchain_data_contract() {
 
 #[path = "android_build_agent_signed_projection.rs"]
 mod agent_signed;
+#[path = "android_build_agent_candidate_projection.rs"]
+mod agent_candidate;

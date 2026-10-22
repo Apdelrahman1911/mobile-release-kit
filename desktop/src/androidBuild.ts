@@ -1655,10 +1655,11 @@ export class AndroidBuildController {
     this.syncProject();
     const project = this.state.project, toolchainSelection = this.state.catalogStatus?.selected;
     if (this.prepareReason() || this.pendingGuiSubmissions !== 0 || !project || project.dirtyDraft || !project.savedConfig || !project.savedVersion ||
-        !toolchainSelection || this.state.retainCandidateInputs || this.state.buildMode === 'unsigned' && this.state.verifyUploadSignature) return null;
+        !toolchainSelection || this.state.buildMode === 'unsigned' && this.state.verifyUploadSignature) return null;
     return copyAndroidBuildApproval({ input: { projectId: project.projectId, draftRevision: project.draftRevision,
       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
-      artifactValidation: this.artifactValidation(), ...(this.state.buildMode === 'signed' ? { signing: this.state.signing.selection } : {}) }, toolchainSelection });
+      artifactValidation: this.artifactValidation(), ...(this.state.buildMode === 'signed' ? { signing: this.state.signing.selection } : {}),
+      ...(this.state.retainCandidateInputs ? { operation: 'android-candidate-inputs', action: 'create' } : {}) }, toolchainSelection });
   }
   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? androidBuildAvailabilityText.busy : null);

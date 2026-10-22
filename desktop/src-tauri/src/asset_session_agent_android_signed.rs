@@ -17,7 +17,7 @@ impl Pins {
     // Fixed comparison-only constructor used solely with the actual original
     // material above. No record/status DTO can call or recover this borrower.
     fn borrowed(native: &Arc<NativeContext>, keys: &[RecordKey], payloads: &[Arc<Payload>], context: &wire::Context) -> Result<Self, BridgeError> {
-        if context.operation != wire::Operation::AndroidBuildSign || context.action.is_some()
+        if !context.agent_context() || !context.signed()
             || !(1..=2).contains(&keys.len()) || keys.len() != payloads.len()
         { return Err(public(Error::Conflict)); }
         let mut held_keys = Vec::new(); let mut held_payloads = Vec::new();
@@ -113,7 +113,9 @@ mod tests {
         let mut changed=payloads.clone();changed[0]=Arc::new(Payload {kind:Kind::AndroidKeystore,material:None,fields:None});
         assert!(!pin.matches_borrow(&native,&keys,&changed));drop(changed);
         let mut candidate=context.clone();candidate.operation=wire::Operation::AndroidCandidateInputs;candidate.action=Some(wire::CreateAction::Create);
-        assert!(Pins::borrowed(&native,&keys,&payloads,&candidate).is_err());
+        let candidate_pin=Pins::borrowed(&native,&keys,&payloads,&candidate).unwrap();
+        assert!(candidate_pin.matches_borrow(&native,&keys,&payloads));assert_eq!(candidate_pin.backing(),Some(charge));
+        candidate.action=None;assert!(Pins::borrowed(&native,&keys,&payloads,&candidate).is_err());
         drop(native);drop(payloads);
         assert!(pin.native.upgrade().is_none()&&pin.payloads.iter().all(|w|w.upgrade().is_none()));
         assert_eq!(pin.backing(),Some(charge)); // Weak allocations survive their last strong owner.

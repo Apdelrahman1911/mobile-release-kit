@@ -17,13 +17,15 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
         <p>This returns the original native review without starting it. The ordinary Check button above still runs its own inspection.</p>
         {controller.prepareReason()&&<p className="save-note">{controller.prepareReason()}</p>}</>}
       {s.selected==='inspect-saved-requirements'&&<p>This permission pins the saved project inputs shown now. CLI Submit prepares and inspects them once. It cannot read newer inputs, download or register tools automatically.</p>}
+      {s.selected==='acquire-reviewed-missing'&&<p>First finish the current saved-requirements inspection above. This permission keeps that exact inspection and source selection; it cannot guess versions, choose another folder or replace working tools.</p>}
       {s.selected==='acquire-missing'&&<p>Use the original Review download control above first. This permission replaces only its GUI Start choice; it does not change the missing-component review or native expiry.</p>}
       {(s.selected==='inspect-picked-sources'||s.selected==='register-reviewed-sources')&&<p>First choose all three folders and check saved inputs in the existing controls. Protected copy also needs the current finalized inspection. Service registration, settings approval, catalogue recovery/selection and subsequent phases stay explicit Desktop actions.</p>}
       {r&&<p>{r.platform==='ios'?'iOS':'Android'} · Draft revision {r.draftRevision}, baseline {r.baselineGeneration}.
         {r.prepared&&<> Original review <code>{r.prepared.operationId}</code>.</>}{r.sources&&<> Chosen sources generation {r.sources.sourceGeneration}, registration {r.sources.registrationGeneration}.</>}</p>}
+      {r?.acquisition&&<p>Original inspection <code>{r.acquisition.operationId}</code>, generation <code>{r.acquisition.ownerGeneration}</code>; requirements <code>{r.acquisition.requirementsSha256}</code>. Download/cache-reuse only: {r.acquisition.missing.join(', ')}. Keep compatible: {r.acquisition.compatible.join(', ')||'none observed'}.</p>}
       <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/>
         {s.selected==='register-reviewed-sources'?' I acknowledge the vendor licenses and allow one local CLI to make this exact reviewed protected copy.':
-          s.selected==='acquire-missing'?' I approve this reviewed missing-only public download for one local CLI submission.':
+          (s.selected==='acquire-missing'||s.selected==='acquire-reviewed-missing')?' I approve this reviewed missing-only public download for one local CLI submission.':
           s.selected==='doctor'?' I allow one local CLI check using this copied draft; later edits will not change it.':' I allow one local CLI submission of this exact inspection.'}</label>
       <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this step once</button>
       {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}

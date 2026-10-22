@@ -19,6 +19,7 @@ fn status() -> flow::Status {
             saved_version: r.saved_version,
             candidate: None,
             later: None,
+            execute: None,
         },
         phase: flow::Phase::Queued,
         settlement: p::Settlement::Pending,
@@ -76,7 +77,7 @@ fn store_prepare_cli_later_stage_results_keep_fixed_calls_and_nonpublishing_limi
         assert!(output(&r, &q, Some((&id(9), &native)), true).is_err()); // old store-submit cannot adopt it.
     }
     let catalogue: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
-    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 11);
+    assert_eq!(catalogue["store"]["nativePrepareKinds"].as_array().unwrap().len(), 13);
     assert_eq!(catalogue["store"]["stagePreparationIsExecution"], false);
     assert_eq!(catalogue["store"]["kinds"], serde_json::json!(["access-check","candidate-prepare","execute","reconcile"]));
 }
@@ -195,4 +196,51 @@ fn store_prepare_cli_unknown_keeps_ids_and_catalogue_discloses_query_effects() {
         serde_json::from_slice(&unconfirmed(&q, Error::StateUnknown, true)).unwrap();
     assert_eq!(unknown["request"]["requestId"], q.request_id.as_str());
     assert_eq!(unknown["doNotReplay"], true);
+}
+
+#[test]
+fn store_prepare_cli_candidate_upload_keeps_candidate_receipt_and_separate_start_ids() {
+    for kind in [flow::Kind::AndroidCandidateUpload, flow::Kind::IosCandidateUpload] {
+        let mut s = status();
+        let candidate = "12345678-1234-4234-8234-123456789abc";
+        s.selection.kind = kind;
+        s.selection.candidate = Some(store::Candidate { operation_id: candidate.into(), sha256: "a".repeat(64) });
+        s.selection.execute = Some(flow::ExecuteSelection { intent_sha256: "b".repeat(64) });
+        s.phase = flow::Phase::Final; s.settlement = p::Settlement::Settled;
+        s.prepare_returned = true; s.start_submitted = true; s.start_grant_id = Some(id(9));
+        s.outcome = Some(store::Outcome::Complete);
+        let review = flow::Review { review_id: id(10), operation: store::Operation {
+            operation_id: id(10), owner_generation: id(11), status_revision: 3,
+        }};
+        s.prepared = Some(review.clone()); s.operation = Some(review.operation.clone());
+        let mode = store::release::Mode::CandidateUpload;
+        s.result = Some(flow::Report::Ordinary { report: store::Report::Execute { release: store::release::Receipt {
+            mode, head_sequence: 7, operation_id: candidate.into(), candidate_operation_id: candidate.into(),
+            candidate_sha256: "a".repeat(64), intent_sha256: "b".repeat(64), receipt_sha256: "c".repeat(64), basis: None,
+            target: mode.target(kind.candidate_upload().unwrap()), result: store::release::ResultKind::Accepted,
+            state: None, limitations: mode.limitations(),
+        }}});
+        s.validate().unwrap();
+        let query = s.origin.clone(); let r = response(s);
+        let (code, bytes) = preparation::output(&r, &query, Some((true, &id(9), &id(10))), true).unwrap();
+        assert_eq!(code, 0);
+        let decoded = p::decode_response(&bytes[..bytes.len()-1], &r.request_id, &r.service_instance).unwrap();
+        let p::ResponseBody::StorePreparation(s) = &decoded.response else { unreachable!() };
+        assert_eq!(s.selection.kind, kind);
+        assert_eq!(s.prepared.as_ref().unwrap().operation.operation_id, id(10));
+        let Some(flow::Report::Ordinary { report: store::Report::Execute { release } }) = &s.result else { unreachable!() };
+        assert_eq!(release.operation_id, candidate);
+        assert!(preparation::output(&r, &query, Some((true, &id(3), &id(4))), true).is_err());
+        assert!(output(&r, &query, Some((&id(9), &id(10))), true).is_err()); // old Submit still cannot adopt.
+    }
+    let caps = capabilities(true).unwrap();
+    assert!(caps.len() <= crate::installed_cli::CAPABILITIES_BYTES);
+    let catalogue: serde_json::Value = serde_json::from_slice(&caps).unwrap();
+    let kinds = catalogue["store"]["nativePrepareKinds"].as_array().unwrap();
+    assert_eq!(kinds.len(), 13);
+    for k in ["android-candidate-upload", "ios-candidate-upload"] { assert!(kinds.iter().any(|v| v == k)); }
+    assert!(!kinds.iter().any(|v| v.as_str().unwrap().contains("reconcile")));
+    assert_eq!(catalogue["store"]["prepareAuthorizesStart"], false);
+    assert_eq!(catalogue["store"]["automaticRetry"], false);
+    assert_eq!(catalogue["store"]["nativeAvailabilityChecked"], false);
 }

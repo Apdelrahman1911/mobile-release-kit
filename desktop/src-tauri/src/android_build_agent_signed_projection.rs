@@ -24,8 +24,14 @@ fn check(value: CheckId) -> agent::Check {
 impl ResultValue {
     pub(crate) fn agent_signed_report(&self, context: &Context) -> Result<agent::Report, BridgeError> {
         let Self::Build(value) = self else { return Err(protocol_error()); };
-        if context.operation != Operation::AndroidBuildSign || !self.valid()
-            || value.signing != Some(SigningMode::LocalUploadKey)
+        if context.operation != Operation::AndroidBuildSign || !context.valid() || !self.valid() {
+            return Err(protocol_error());
+        }
+        signed_build_report(value, context)
+    }
+}
+pub(super) fn signed_build_report(value: &ResultData, context: &Context) -> Result<agent::Report, BridgeError> {
+        if !value.valid() || value.signing != Some(SigningMode::LocalUploadKey)
             || value.used_config != context.saved_config || value.used_version != context.saved_version
             || value.artifact_validation != context.artifact_validation
         { return Err(protocol_error()); }
@@ -49,6 +55,7 @@ impl ResultValue {
             findings, summary: agent::Summary { total: value.summary.total, shown: value.summary.shown,
                 omitted: value.summary.omitted, counts },
             artifact: agent::Artifact { size: artifact.size, sha256: artifact.sha256.clone() },
+            candidate: None,
             signing: Some(signed::Report { mode: signed::SigningMode::LocalUploadKey, upload_certificate_sha256,
                 signature: signed::Signature::Passed, signer: signed::Signer::MatchesSavedUploadCertificate }),
         };
@@ -56,7 +63,6 @@ impl ResultValue {
         // signed success branch. A failed native result=None is never created.
         if !report.valid() { return Err(protocol_error()); }
         Ok(report)
-    }
 }
 
 

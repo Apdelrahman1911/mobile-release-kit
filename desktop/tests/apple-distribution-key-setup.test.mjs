@@ -410,13 +410,13 @@ test('known-durable recovery is selected-key/null-reference only, with a separat
   assert.match(appleDistributionKeyResultCopy(compared(), null, 'complete').detail, /Earlier setup history is preserved/);
 });
 
-test('explicit original recovery uses real Prepare/Start/read returns and cannot delegate unchanged CLI15 or mint next consent', async t => {
+test('explicit original recovery uses real Prepare/Start/read returns with separate CLI delegation and no next consent', async t => {
   const h = harness(t); await h.ready; selectRecoveryKey(h);
   const op = await prepared(h, 'key-recover');
   assert.equal(op.context.reference, null);
   assert.equal(op.context.keyRecordId, '8'.repeat(32));
   assert.equal(h.state.consent.acknowledged, false);
-  assert.equal(h.controller.delegationReview(), null);
+  assert.equal(h.controller.delegationReview()?.mode, 'key-recover');
   await h.controller.start(op.operationId, op.ownerGeneration);
   assert.equal(h.calls.length, 1);
   h.controller.acknowledge(op.operationId, op.ownerGeneration, true);

@@ -130,7 +130,9 @@ impl DocumentBinding {
         args: Allow,
     ) -> Result<MainAccess, BridgeError> {
         let signed = args.input.signing.is_some();
-        if window != MAIN || args.consent_version != if signed { agent::signed::CONSENT } else { agent::CONSENT } {
+        let consent = if args.input.context().candidate() { crate::agent_candidate_build::ANDROID_CONSENT }
+            else if signed { agent::signed::CONSENT } else { agent::CONSENT };
+        if window != MAIN || args.consent_version != consent {
             return Err(BridgeError::invalid());
         }
         let expected = permission_revision(&args.expected_permission_revision).map_err(public)?;
@@ -509,8 +511,13 @@ mod tests {
             "artifactValidation":{"mode":"structure-and-version","uploadCertificateSha256":null}})).unwrap();
         let selection=wire::MacToolchainSelection { instance:"c".repeat(32),owner_uid:501,catalog_generation:1,
             record_sha256:"d".repeat(64),inventory_sha256:"e".repeat(64),os_provider_sha256:"f".repeat(64) };
-        let args=Allow {input,toolchain_selection:selection,consent_version:agent::CONSENT.into(),expected_permission_revision:access.permission_revision};
-        assert_eq!(doc.allow_agent_android_build(MAIN,args).unwrap_err().code,public(Error::AccessDenied).code);
+        let mut candidate=serde_json::to_value(wire::tests::candidate_context()).unwrap();
+        candidate.as_object_mut().unwrap().remove("platform");
+        let candidate=wire::prepare(&candidate).unwrap();
+        for (input,consent) in [(input,agent::CONSENT),(candidate,crate::agent_candidate_build::ANDROID_CONSENT)] {
+            let args=Allow {input,toolchain_selection:selection.clone(),consent_version:consent.into(),expected_permission_revision:access.permission_revision.clone()};
+            assert_eq!(doc.allow_agent_android_build(MAIN,args).unwrap_err().code,public(Error::AccessDenied).code);
+        }
         assert!(doc.lock().agent_android_build_grant.is_none());assert!(doc.inner.agent_android_build_service.get().is_none());
         doc.inner.agent_android_build_revoke_epoch.store(u64::MAX,Ordering::Release);
         assert!(doc.revoke_agent_android_build(MAIN).is_err());

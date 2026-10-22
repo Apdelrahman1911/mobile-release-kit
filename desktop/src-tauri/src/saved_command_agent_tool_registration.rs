@@ -179,6 +179,7 @@ impl SavedCommandOwner {
             baseline_generation: request.context().baseline_generation,
             prepared: None,
             sources: Some(ids.clone()),
+            acquisition: None,
         };
         if !review.valid() {
             return Err(wire::invalid());

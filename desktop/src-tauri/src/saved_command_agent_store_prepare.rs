@@ -7,10 +7,13 @@ use crate::{service_store_prepare_protocol as flow, service_store_requests::prep
 pub(crate) enum Input {
     Access(store_wire::Context),
     Candidate(prepare_wire::Context),
+    Execute(execute_wire::Context),
 }
 impl Input {
     pub fn parse(kind: flow::Kind, value: &serde_json::Value) -> Result<Self, BridgeError> {
-        let input = if kind.prepares_intent() {
+        let input = if kind.candidate_upload().is_some() {
+            Self::Execute(execute_wire::prepare(value)?.context())
+        } else if kind.prepares_intent() {
             Self::Candidate(prepare_wire::prepare(value)?.context())
         } else {
             Self::Access(store_wire::prepare(value)?.context())
@@ -24,12 +27,14 @@ impl Input {
         match self {
             Self::Access(c) => &c.project_id,
             Self::Candidate(c) => &c.project_id,
+            Self::Execute(c) => &c.project_id,
         }
     }
     fn context(&self) -> Context {
         match self {
             Self::Access(c) => Context::LocalStorePreflight(c.clone()),
             Self::Candidate(c) => Context::LocalStorePrepare(c.clone()),
+            Self::Execute(c) => Context::LocalStoreExecute(c.clone()),
         }
     }
     pub fn selection(&self) -> Result<flow::Selection, BridgeError> {
@@ -38,7 +43,7 @@ impl Input {
 }
 fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
     use flow::Kind as K;
-    let (kind, config, v, candidate, later) = match c {
+    let (kind, config, v, candidate, later, execute) = match c {
         Context::LocalStorePreflight(c) => {
             use store_wire::AccessPlatform as P;
             let kind = match (c.platform, c.query.is_none(), c.ios_record.is_some()) {
@@ -60,6 +65,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                     sha256: c.saved_config.sha256.clone(),
                 },
                 version(&c.saved_version),
+                None,
                 None,
                 None,
             )
@@ -90,6 +96,24 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
                 predecessor_operation_id: l.predecessor_operation_id.clone(),
                 predecessor_receipt_sha256: l.predecessor_receipt_sha256.clone(),
             }),
+            None,
+        ),
+        Context::LocalStoreExecute(c) if c.later.is_none() && c.stage_operation_id.is_none() => (
+            match c.platform {
+                execute_wire::Platform::Android => K::AndroidCandidateUpload,
+                execute_wire::Platform::Ios => K::IosCandidateUpload,
+            },
+            p::Content {
+                bytes: c.saved_config.bytes,
+                sha256: c.saved_config.sha256.clone(),
+            },
+            version(&c.saved_version),
+            Some(p::Candidate {
+                operation_id: c.candidate_operation_id.clone(),
+                sha256: c.candidate_sha256.clone(),
+            }),
+            None,
+            Some(flow::ExecuteSelection { intent_sha256: c.intent_sha256.clone() }),
         ),
         _ => return Err(refused()),
     };
@@ -99,6 +123,7 @@ fn selection(c: &Context) -> Result<flow::Selection, BridgeError> {
         saved_version: v,
         candidate,
         later,
+        execute,
     };
     if !value.bounded_capacity() {
         return Err(refused());
@@ -498,6 +523,9 @@ impl SavedCommandOwner {
             Input::Candidate(_) => {
                 status.prepare()?;
             }
+            Input::Execute(_) => {
+                status.execute()?;
+            }
         }
         Ok(())
     }
@@ -536,13 +564,14 @@ impl SavedCommandOwner {
         registered: Option<(u32, RegisteredRoot)>,
         gate: store_wire::Availability,
         material: Arc<SelectedStoreMaterial>,
+        budget: Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
     ) -> Result<AgentStoreAdmitted, BridgeError> {
         let review = entry.installed_review().map_err(|_| refused())?;
         let held = self.store_preparation_current(entry, &review)?;
         if !Arc::ptr_eq(&held, &material) {
             return Err(refused());
         }
-        let (consent, intent) = {
+        let (consent, kind) = {
             let r = self.inner.lock();
             let p = r.prepared.as_ref().ok_or_else(refused)?;
             if !start_matches(p, Some(entry)) {
@@ -568,24 +597,29 @@ impl SavedCommandOwner {
                         }
                         _ => return Err(refused()),
                     },
-                    false,
+                    p::Kind::AccessCheck,
                 ),
-                Context::LocalStorePrepare(c) if entry.scope.selection.kind.prepares_intent() => (c.consent(), true),
+                Context::LocalStorePrepare(c) if entry.scope.selection.kind.prepares_intent() => (c.consent(), p::Kind::CandidatePrepare),
+                Context::LocalStoreExecute(c) if entry.scope.selection.kind.candidate_upload().is_some()
+                    && c.later.is_none() && c.stage_operation_id.is_none() => (c.consent(), p::Kind::Execute),
                 _ => return Err(refused()),
             }
         };
         let args = serde_json::json!({"operationId":review.operation.operation_id.as_str(), "ownerGeneration":review.operation.owner_generation.as_str(), "consentVersion":consent});
-        if intent {
-            if !material.accepts_prepare_consent(&prepare_wire::start(&args)?) {
-                return Err(refused());
-            }
-        } else if !material.accepts_access_consent(&store_wire::start(&args)?) {
+        if (kind == p::Kind::Execute) != budget.is_some() {
             return Err(refused());
         }
-        let witness = if intent {
-            None
-        } else {
+        let consent_matches = match kind {
+            p::Kind::AccessCheck => material.accepts_access_consent(&store_wire::start(&args)?),
+            p::Kind::CandidatePrepare => material.accepts_prepare_consent(&prepare_wire::start(&args)?),
+            p::Kind::Execute => material.accepts_execute_consent(&execute_wire::start(&args)?),
+            p::Kind::Reconcile => false,
+        };
+        if !consent_matches { return Err(refused()); }
+        let witness = if kind == p::Kind::AccessCheck {
             material.version_inventory_witness()?
+        } else {
+            None
         };
         let input = Start {
             operation_id: review.operation.operation_id.as_str().into(),
@@ -597,7 +631,7 @@ impl SavedCommandOwner {
             registered,
             Availability::from_store(gate),
             Some(PrivateSigningMaterial::Store(material)),
-            None,
+            budget,
             None,
             None,
             None,

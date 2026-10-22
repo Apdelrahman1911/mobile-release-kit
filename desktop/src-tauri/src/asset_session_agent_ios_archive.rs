@@ -153,6 +153,8 @@ impl DocumentBinding {
         let consent = match args.input.context().operation {
             wire::Operation::IOSUnsignedArchive => agent::CONSENT,
             wire::Operation::IOSSignedExport if args.input.action.is_none() && args.input.recovery.is_none() => agent::signed::CONSENT,
+            wire::Operation::IOSCandidateInputs if args.input.action == Some(wire::CreateAction::Create)
+                && args.input.recovery.is_none() => crate::agent_candidate_build::IOS_CONSENT,
             _ => return Err(BridgeError::invalid()),
         };
         if window != MAIN || args.consent_version != consent { return Err(BridgeError::invalid()); }
@@ -485,13 +487,13 @@ mod tests {
         assert_eq!(original.permission_revision,"0");
         assert_eq!(doc.revoke_agent_ios_archive(MAIN).unwrap().permission_revision,"1");
         let context=wire::tests::signed_context();
-        for signing in [None,context.signing.clone()] {
+        for (signing,action) in [(None,None),(context.signing.clone(),None),(context.signing.clone(),Some(wire::CreateAction::Create))] {
             let signed=signing.is_some();
             let input=wire::Prepare{project_id:context.project_id.clone(),draft_revision:context.draft_revision,
                 baseline_generation:context.baseline_generation,saved_config:context.saved_config.clone(),
-                saved_version:context.saved_version.clone(),signing,recovery:None,action:None};
+                saved_version:context.saved_version.clone(),signing,recovery:None,action};
             let result=doc.allow_agent_ios_archive(MAIN,Allow::Saved(SavedAllow{input,
-                consent_version:if signed{agent::signed::CONSENT}else{agent::CONSENT}.into(),
+                consent_version:if action.is_some(){crate::agent_candidate_build::IOS_CONSENT}else if signed{agent::signed::CONSENT}else{agent::CONSENT}.into(),
                 expected_permission_revision:original.permission_revision.clone()}));
             assert_eq!(result.unwrap_err(),public(Error::AccessDenied));
         }

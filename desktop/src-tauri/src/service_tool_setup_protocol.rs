@@ -18,6 +18,7 @@ pub(crate) enum Kind {
     InspectRequirements,
     InspectSavedRequirements,
     AcquireMissing,
+    AcquireReviewedMissing,
     InspectPickedSources,
     RegisterReviewedSources,
 }
@@ -28,20 +29,21 @@ impl Kind {
             Self::InspectRequirements => "agent-tool-requirements-once-v1",
             Self::InspectSavedRequirements => "agent-tool-inspect-saved-once-v1",
             Self::AcquireMissing => "agent-tool-acquire-missing-once-v1",
+            Self::AcquireReviewedMissing => "agent-tool-acquire-reviewed-missing-once-v1",
             Self::InspectPickedSources => "agent-tool-inspect-picked-once-v1",
             Self::RegisterReviewedSources => "agent-tool-register-reviewed-once-v1",
         }
     }
     pub(crate) fn action(self) -> crate::service_protocol::Action {
         match self {
-            Self::AcquireMissing | Self::RegisterReviewedSources => {
+            Self::AcquireMissing | Self::AcquireReviewedMissing | Self::RegisterReviewedSources => {
                 crate::service_protocol::Action::PrepareTools
             }
             _ => crate::service_protocol::Action::ObserveProject,
         }
     }
     pub(crate) fn saved(self) -> bool {
-        matches!(self, Self::InspectRequirements | Self::InspectSavedRequirements | Self::AcquireMissing)
+        matches!(self, Self::InspectRequirements | Self::InspectSavedRequirements | Self::AcquireMissing | Self::AcquireReviewedMissing)
     }
     pub(crate) fn sources(self) -> bool {
         matches!(
@@ -82,14 +84,22 @@ pub(crate) struct Review {
     pub(crate) prepared: Option<Prepared>,
     #[serde(deserialize_with = "present")]
     pub(crate) sources: Option<Sources>,
+    // Omitted on every old kind; explicit null is not an acquisition selection.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "some_acquisition")]
+    pub(crate) acquisition: Option<Acquisition>,
 }
 impl Review {
     pub(crate) fn valid(&self) -> bool {
         self.draft_revision < u32::MAX
             && self.baseline_generation < u32::MAX
             && (self.kind == Kind::Doctor || self.platform == Platform::Android)
+            && match (&self.acquisition, self.kind) {
+                (Some(a), Kind::AcquireReviewedMissing) => a.valid(),
+                (None, Kind::AcquireReviewedMissing) | (Some(_), _) => false,
+                (None, _) => true,
+            }
             && match (self.kind, &self.prepared, &self.sources) {
-                (Kind::Doctor | Kind::InspectSavedRequirements, None, None) => true,
+                (Kind::Doctor | Kind::InspectSavedRequirements | Kind::AcquireReviewedMissing, None, None) => true,
                 (Kind::InspectRequirements | Kind::AcquireMissing, Some(p), None) => {
                     (1..u32::MAX).contains(&p.status_revision)
                 }
@@ -202,6 +212,63 @@ pub(crate) enum Component {
     AndroidPlatform,
     AndroidBuildTools,
 }
+// Closed comparison DATA only. The native original Inspection remains authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Acquisition {
+    pub(crate) operation_id: Id,
+    pub(crate) owner_generation: Id,
+    pub(crate) requirements_sha256: String,
+    #[serde(deserialize_with = "acquisition_components")]
+    pub(crate) missing: Vec<Component>,
+    #[serde(deserialize_with = "acquisition_components")]
+    pub(crate) compatible: Vec<Component>,
+}
+pub(crate) const ACQUISITION_HEAP_BYTES: usize = 128 + 8 * std::mem::size_of::<Component>();
+fn acquisition_components<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Component>, D::Error> {
+    struct Four;
+    impl<'de> serde::de::Visitor<'de> for Four {
+        type Value = Vec<Component>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most four tool components")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            // Streaming JSON has no exact size hint. Do not let the first
+            // push grow this tiny enum's Vec beyond the admitted four slots.
+            let mut values = Vec::with_capacity(4);
+            while let Some(value) = seq.next_element::<Component>()? {
+                if values.len() == 4 {
+                    return Err(serde::de::Error::custom("too many tool components"));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    d.deserialize_seq(Four)
+}
+fn some_acquisition<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Acquisition>, D::Error> {
+    Acquisition::deserialize(d).map(Some)
+}
+impl Acquisition {
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        self.operation_id.retained_bytes().checked_add(self.owner_generation.retained_bytes())?
+            .checked_add(self.requirements_sha256.capacity())?
+            .checked_add(self.missing.capacity().checked_mul(std::mem::size_of::<Component>())?)?
+            .checked_add(self.compatible.capacity().checked_mul(std::mem::size_of::<Component>())?)
+    }
+    pub(crate) fn valid(&self) -> bool {
+        const ALL: [Component; 4] = [Component::Jdk, Component::AndroidPlatform, Component::AndroidBuildTools, Component::Gradle];
+        self.requirements_sha256.len() == 64
+            && self.requirements_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.missing.capacity() <= 4 && self.compatible.capacity() <= 4
+            && self.retained_bytes().is_some_and(|n| n <= ACQUISITION_HEAP_BYTES)
+            && !self.missing.is_empty() && self.missing.len() + self.compatible.len() == 4
+            && self.missing.iter().copied().eq(ALL.into_iter().filter(|v| self.missing.contains(v)))
+            && self.compatible.iter().copied().eq(ALL.into_iter().filter(|v| self.compatible.contains(v)))
+            && ALL.into_iter().all(|v| self.missing.contains(&v) != self.compatible.contains(&v))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CopyState {
@@ -243,6 +310,9 @@ pub(crate) enum Report {
     AcquireMissing {
         staged: Vec<Component>,
     },
+    AcquireReviewedMissing {
+        staged: Vec<Component>,
+    },
     InspectPickedSources {
         sources: Vec<Source>,
     },
@@ -282,6 +352,9 @@ impl Report {
                 (Kind::AcquireMissing, Self::AcquireMissing { staged }) => {
                     !staged.is_empty() && unique(staged, 4)
                 }
+                (Kind::AcquireReviewedMissing, Self::AcquireReviewedMissing { staged }) => {
+                    r.acquisition.as_ref().is_some_and(|a| staged == &a.missing)
+                }
                 (Kind::InspectPickedSources, Self::InspectPickedSources { sources: s }) => {
                     s.len() == 3 && sources(s)
                 }
@@ -316,6 +389,8 @@ impl Operation {
         } else {
             self.owner_generation.is_some()
                 && self.registration_generation.is_none()
+                && r.acquisition.as_ref().is_none_or(|a| self.operation_id != a.operation_id
+                    && self.owner_generation.as_ref() != Some(&a.owner_generation))
                 && r.prepared.as_ref().is_none_or(|p| {
                     p.operation_id == self.operation_id
                         && Some(&p.owner_generation) == self.owner_generation.as_ref()

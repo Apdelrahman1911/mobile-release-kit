@@ -13,7 +13,7 @@ export function sameAgentIOSArchiveOrigin(a: AgentIOSArchiveOrigin | undefined, 
 }
 export function canObserveAgentIOSArchive(previous: IOSArchiveStatus | null, next: IOSArchiveStatus, guiPending: boolean): boolean {
   const a = previous?.operation, b = next.operation;
-  return !guiPending && !!b && (b.context.operation === 'ios-unsigned-archive' || b.context.operation === 'ios-signed-export' || b.context.operation === 'ios-local-recovery') &&
+  return !guiPending && !!b && (b.context.operation === 'ios-unsigned-archive' || b.context.operation === 'ios-signed-export' || b.context.operation === 'ios-candidate-inputs' || b.context.operation === 'ios-local-recovery') &&
     !!b.agentIosArchive && validAgentIOSArchiveOrigin(b.agentIosArchive) && (!previous || next.statusRevision > previous.statusRevision) &&
     (!a || a.phase === 'terminal') && (!a || a.operationId !== b.operationId || a.ownerGeneration !== b.ownerGeneration);
 }

@@ -989,3 +989,6 @@ mod local_release_history_cleanup_tests {
         assert!(helper_cleanup_projection(now,hard,hard+Duration::from_nanos(1),false).is_err());
     }
 }
+
+#[path = "local_release_history_agent_candidate.rs"]
+mod agent_candidate;

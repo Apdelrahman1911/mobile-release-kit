@@ -41,6 +41,7 @@ pub(crate) enum Mode {
     ProfileReconcile,
     KeyReview,
     KeyPrepare,
+    KeyRecover,
     CertificateReview,
     CertificateCreate,
     CertificateReconcile,
@@ -60,6 +61,7 @@ impl Mode {
             Self::ProfileReconcile => "agent-apple-profile-reconcile-once-v1",
             Self::KeyReview => "agent-apple-key-review-once-v1",
             Self::KeyPrepare => "agent-apple-key-prepare-once-v1",
+            Self::KeyRecover => "agent-apple-key-recover-once-v1",
             Self::CertificateReview => "agent-apple-certificate-review-once-v1",
             Self::CertificateCreate => "agent-apple-certificate-create-once-v1",
             Self::CertificateReconcile => "agent-apple-certificate-reconcile-once-v1",
@@ -306,6 +308,7 @@ impl Report {
                     | "blocked"
             ),
             Mode::KeyPrepare => matches!(self.decision.as_str(), "produced" | "blocked"),
+            Mode::KeyRecover => self.decision == "compared",
             Mode::CertificateReview => matches!(
                 self.decision.as_str(),
                 "reuse" | "request-review" | "blocked"

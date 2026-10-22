@@ -25,6 +25,8 @@ fn three_tools_cli_verbs_admit_only_reviewed_ids() {
         vec![COMMANDS[1], &a, &b, "/tmp/source"],
         vec!["tool-setup-prepare", &a, &b, &c],
         vec![COMMANDS[2], &a, &b, &c, "--url", "https://example.invalid"],
+        vec![COMMANDS[0], &a, &b, &c, &d, "--reviewed", "acquire-reviewed-missing"],
+        vec![COMMANDS[0], &a, &b, &c, &d, "--reviewed", "--source", "/tmp/unpicked"],
     ] {
         assert!(parse(&args(&v)).is_err());
     }

@@ -283,6 +283,7 @@ fn ios_historical_report_has_real_counts_and_rejects_paths_synthetic_digests_or_
         entries: 10,
         bytes: 100,
         export: None,
+        candidate: None,
     };
     assert!(r.valid());
     let value = serde_json::to_value(&r).unwrap();
@@ -348,6 +349,7 @@ fn terminal(link: &NativeLink) -> Operation {
                 summary: android::Summary { total: 128, shown: 128, omitted: 0, counts },
                 artifact: android::Artifact { size: 1024, sha256: "f".repeat(64) },
                 signing: None,
+                candidate: None,
             });
         }
         Operation::Ios(o) => {
@@ -365,7 +367,7 @@ fn terminal(link: &NativeLink) -> Operation {
                 scope: ios::Scope::LocalUnsignedIosArchiveObservation,
                 used_config: link.entry().scope().review.ios().unwrap().saved_config.clone(),
                 used_version: link.entry().scope().review.ios().unwrap().saved_version.clone(),
-                entries: 100_000, bytes: 8 * 1024u64.pow(3), export: None,
+                entries: 100_000, bytes: 8 * 1024u64.pow(3), export: None, candidate: None,
             });
         }
         Operation::IosRecovery(_) => panic!("saved-build fixture only"),
@@ -559,3 +561,6 @@ mod original_returns;
 
 #[path = "agent_ios_recovery_requests_tests.rs"]
 mod ios_recovery;
+
+#[path = "agent_candidate_build_requests_tests.rs"]
+mod candidate_build;

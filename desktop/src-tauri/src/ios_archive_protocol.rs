@@ -941,7 +941,7 @@ struct RecoveryProjectionWire {
 }
 impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
     fn try_from(value: ProjectionWire) -> Result<Self, Self::Error> { match value {
-        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || matches!(v.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport)) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
+        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || matches!(v.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSCandidateInputs)) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
             activity: v.activity, disposition: v.disposition, result: v.result, report: None }),
         ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { agent_ios_archive:v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
@@ -952,7 +952,7 @@ impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
 }
 impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::Error;
-    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSLocalRecovery) {return Err(S::Error::custom("wrong agent archive mode"));}
+    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSCandidateInputs|Operation::IOSLocalRecovery) {return Err(S::Error::custom("wrong agent archive mode"));}
     if self.context.recovery() {
         if self.disposition.is_some() || self.result.is_some() { return Err(S::Error::custom("wrong recovery status fields")); }
         RecoveryProjectionWire { agent_ios_archive:self.agent_ios_archive.clone(), operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
@@ -966,7 +966,7 @@ impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serial
     }
 } }
 impl Projection { fn valid(&self) -> bool {
-    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSLocalRecovery) {return false;}
+    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport|Operation::IOSCandidateInputs|Operation::IOSLocalRecovery) {return false;}
     if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
         ||self.context.candidate()&&!crate::android_build_protocol::candidate_id(&self.operation_id)
         || self.stage.is_some_and(|stage| !stage.valid(&self.context))
@@ -1159,8 +1159,8 @@ pub(crate) mod tests {
         value
     }
     pub(crate) fn candidate_context()->Context{let mut value=json!(signed_context());value["operation"]=json!("ios-candidate-inputs");value["action"]=json!("create");Context::deserialize(value).unwrap()}
-    const CANDIDATE_ID:&str="12345678123442349234123456789abc";
-    fn candidate_complete()->Value{
+    pub(crate) const CANDIDATE_ID:&str="12345678123442349234123456789abc";
+    pub(crate) fn candidate_complete()->Value{
         let mut value=signed_complete();value["context"]=json!(candidate_context());
         let base=format!(".mobile-release/desktop-ios-archive/{CANDIDATE_ID}");
         value["disposition"]["relativeDirectory"]=json!(base);
@@ -1527,3 +1527,6 @@ pub(crate) mod tests {
         assert!(wrong.push(&frame(1,"progress",json!({"schemaVersion":1,"stage":"archiving"}))).is_err());
     }
 }
+
+#[path = "ios_archive_agent_candidate_projection.rs"]
+mod agent_candidate;

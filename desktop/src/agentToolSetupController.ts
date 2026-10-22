@@ -38,7 +38,7 @@ export class AgentToolSetupController {
   }
   private read():AgentToolSetupContext{try{
     const c=this.source.current(this.state.selected);if(!c||typeof c.epoch!=='object'||!c.epoch||typeof c.preview!=='boolean'||
-      c.nativeSession!==null&&(!c.nativeSession||typeof c.nativeSession!=='object')||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>6)return absent();
+      c.nativeSession!==null&&(!c.nativeSession||typeof c.nativeSession!=='object')||c.blockedReason!==null&&typeof c.blockedReason!=='string'||!Array.isArray(c.reviews)||c.reviews.length>7)return absent();
     const reviews=c.reviews.map(parseToolSetupReview);if(reviews.some(r=>r===null)||new Set(reviews.map(r=>r!.kind)).size!==reviews.length)return absent();
     const port=c.port&&['access','allow','revoke','requestStatus'].every(k=>typeof c.port![k as keyof AgentToolSetupPort]==='function')?c.port:null;
     return {...c,port,reviews:reviews as ToolSetupReview[],projectId:typeof c.projectId==='string'&&/^[A-Za-z0-9_-]{1,64}$/.test(c.projectId)?c.projectId:null};

@@ -545,6 +545,7 @@ impl SavedCommandOwner {
         &self,
         operation: &str,
         generation: &str,
+        entry: Option<&Arc<crate::service_tool_setup_requests::Entry>>,
     ) -> Result<Arc<crate::asset_session::ToolAcquisitionDocumentInput>, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
         let r = self.inner.lock();
@@ -556,6 +557,10 @@ impl SavedCommandOwner {
                     && p.projection.owner_generation == generation
             })
             .ok_or_else(wire::invalid)?;
+        // The first Doc cut calls this before gates/census/Edit can retire
+        // Prepared. A GUI or foreign service caller must not stop its owner.
+        // The common Start repeats the same exact-origin check before take.
+        if !agent::start_matches(prepared, entry) { return Err(wire::invalid()); }
         let intent = prepared.tools.as_ref().ok_or_else(wire::invalid)?;
         let Context::ToolAcquisition(context) = &prepared.projection.context else {
             return Err(wire::invalid());

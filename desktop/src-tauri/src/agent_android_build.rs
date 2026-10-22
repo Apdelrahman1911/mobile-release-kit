@@ -63,6 +63,7 @@ impl Tools {
 pub enum Mode {
     SavedAndroidBuildStructureAndVersion,
     SavedAndroidLocalUploadKeySign,
+    SavedAndroidCandidateInputs,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -81,7 +82,7 @@ impl Review {
         self.saved_config.valid() && self.saved_version.valid() && self.tools.valid()
             && match self.mode {
                 Mode::SavedAndroidBuildStructureAndVersion => self.signing.is_none() && self.upload_certificate_sha256.is_none(),
-                Mode::SavedAndroidLocalUploadKeySign => self.signing.as_ref().is_some_and(signed::Selection::valid)
+                Mode::SavedAndroidLocalUploadKeySign | Mode::SavedAndroidCandidateInputs => self.signing.as_ref().is_some_and(signed::Selection::valid)
                     && self.upload_certificate_sha256.as_ref().is_some_and(|v| hash(v)),
             }
     }
@@ -132,6 +133,9 @@ pub enum Reason {
     SigningValidationFailed,
     SigningCommandFailed,
     BuildInputsUnrestored,
+    JournalUnavailable,
+    RecoveryRequired,
+    CandidateInputsUnavailable,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -198,6 +202,7 @@ pub struct Artifact {
 #[serde(rename_all = "kebab-case")]
 pub enum Scope {
     LocalPostBuildArtifactObservation,
+    LocalAndroidCandidateInputs,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -210,6 +215,8 @@ pub struct Report {
     pub artifact: Artifact,
     #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
     pub signing: Option<signed::Report>,
+    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<crate::agent_candidate_build::Candidate>,
 }
 impl Report {
     pub fn valid(&self) -> bool {
@@ -217,6 +224,12 @@ impl Report {
             && self.used_version.valid()
             && (1..=1024 * 1024 * 1024).contains(&self.artifact.size)
             && hash(&self.artifact.sha256)
+            && match self.scope {
+                Scope::LocalPostBuildArtifactObservation => self.candidate.is_none(),
+                Scope::LocalAndroidCandidateInputs => self.signing.is_some() && self.candidate.as_ref().is_some_and(|c|
+                    c.valid(crate::agent_candidate_build::ANDROID_PRIMARY_BYTES)
+                        && c.primary_bytes == self.artifact.size && c.primary_sha256 == self.artifact.sha256),
+            }
             && self.signing.as_ref().is_none_or(signed::Report::valid)
             && (self.signing.is_none() || self.findings.iter().filter(|r| r.check == Check::Signature && r.status == FindingStatus::Pass).count() == 1
                 && self.findings.iter().filter(|r| r.check == Check::Signer && r.status == FindingStatus::Pass).count() == 1)
@@ -348,14 +361,18 @@ impl Operation {
 }
 impl Operation {
     pub(crate) fn valid_for(&self, review: &Review) -> bool {
-        let signed = review.mode == Mode::SavedAndroidLocalUploadKeySign;
+        let candidate = review.mode == Mode::SavedAndroidCandidateInputs;
+        let signed = matches!(review.mode, Mode::SavedAndroidLocalUploadKeySign | Mode::SavedAndroidCandidateInputs);
         self.valid() && review.valid()
+            && (candidate || !matches!(self.reason, Reason::JournalUnavailable | Reason::RecoveryRequired | Reason::CandidateInputsUnavailable))
             && (signed || !matches!(self.reason, Reason::SigningInputMissing | Reason::SigningInputInvalid
                 | Reason::SigningValidationFailed | Reason::SigningCommandFailed | Reason::BuildInputsUnrestored))
             && (signed || !matches!(self.stage, Some(Stage::ValidatingSigning | Stage::Signing | Stage::RestoringInputs)))
             && self.result.as_ref().is_none_or(|r| {
                 r.used_config == review.saved_config && r.used_version == review.saved_version
                     && r.signing.is_some() == signed
+                    && r.candidate.is_some() == candidate
+                    && r.candidate.as_ref().is_none_or(|c| c.matches_operation(self.operation_id.as_str()))
                     && r.signing.as_ref().is_none_or(|s| Some(&s.upload_certificate_sha256) == review.upload_certificate_sha256.as_ref())
             })
     }

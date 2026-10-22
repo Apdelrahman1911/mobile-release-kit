@@ -21,14 +21,15 @@ fn review() -> p::Review {
         baseline_generation: 2,
         prepared: None,
         sources: None,
+        acquisition: None,
     }
 }
-fn scope(doc: &Arc<()>, now: Instant) -> Arc<req::NativeScope> {
+fn scope(doc: &Arc<()>, now: Instant, selected: p::Review) -> Arc<req::NativeScope> {
     Arc::new(req::NativeScope {
         project_id: id('1'),
         runtime_id: "p1".into(),
         review_id: id('4'),
-        review: review(),
+        review: selected,
         root: "/inert-never-opened-tool-inspect".into(),
         device: 1,
         inode: 2,
@@ -113,7 +114,8 @@ fn saved_inspect_wire_keeps_required_nulls_and_cannot_request_acquisition() {
 fn later_preparation_cannot_renew_original_allow_read_or_first_failure() {
     let now = Instant::now();
     let doc = Arc::new(());
-    let original = scope(&doc, now);
+    for selected in [review(), acquire_review()] {
+    let original = scope(&doc, now, selected);
     let later = now + Duration::from_secs(300);
     assert_eq!(
         clipped_end(later, later, &original, now).unwrap(),
@@ -136,14 +138,19 @@ fn later_preparation_cannot_renew_original_allow_read_or_first_failure() {
         original.control.first().unwrap(),
         Some((p::Reason::PermissionRevoked, now))
     );
+    }
 }
 
 #[test]
 fn prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history() {
+    for selected in [review(), acquire_review()] {
     for caller_first in [false, true] {
         let now = Instant::now();
         let doc = Arc::new(());
-        let s = scope(&doc, now);
+        let s = scope(&doc, now, selected.clone());
+        let mut context = context();
+        if let Some(a) = &selected.acquisition { context.action = wire::Action::Acquire; context.review = Some(wire::Review {
+            operation_id:a.operation_id.as_str().into(),owner_generation:a.owner_generation.as_str().into(),requirements_sha256:a.requirements_sha256.clone() }); }
         let inbox = req::Inbox::new(id('2'));
         inbox.allow(s.clone(), id('3')).unwrap();
         inbox
@@ -168,7 +175,7 @@ fn prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history(
             approval: Arc::new(super::super::Approval {
                 owner: Weak::new(),
                 intent: Weak::new(),
-                context: context(),
+                context: context.clone(),
                 registration: 1,
                 root: RegisteredRoot {
                     path: s.root.clone(),
@@ -177,7 +184,7 @@ fn prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history(
                     ),
                 },
                 expires: s.read.end(),
-                review: review(),
+                review: selected.clone(),
             }),
             link: link.clone(),
         };
@@ -186,7 +193,7 @@ fn prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history(
             agent_local_check: None,
             operation_id: id('a').as_str().into(),
             owner_generation: id('b').as_str().into(),
-            context: Context::ToolAcquisition(context()),
+            context: Context::ToolAcquisition(context),
             phase: Phase::AwaitingConsent,
             intent_usable: true,
             outcome: None,
@@ -220,5 +227,83 @@ fn prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history(
         assert!(final_status.result.is_none() && !entry.pending());
         assert!(!link.has_entered() && link.caller_returned());
         assert!(inbox.claim().unwrap().is_none());
+    }
+    }
+}
+
+fn acquire_review() -> p::Review {
+    serde_json::from_value(serde_json::json!({"kind":"acquire-reviewed-missing","platform":"android","draftRevision":1,"baselineGeneration":2,
+        "prepared":null,"sources":null,"acquisition":{"operationId":id('c'),"ownerGeneration":id('d'),"requirementsSha256":"b".repeat(64),
+            "missing":["android-build-tools"],"compatible":["jdk","android-platform","gradle"]}})).unwrap()
+}
+
+#[test]
+fn first_start_source_cut_refuses_foreign_entry_without_retiring_prepared_or_borrowing_sources() {
+    for selected in [review(), acquire_review()] {
+        let now = Instant::now();
+        let doc = Arc::new(());
+        let scope = scope(&doc, now, selected.clone());
+        let submit = p::Submit {
+            origin: p::Query { project_id: id('1'), service_instance: id('2'), request_id: id('5') },
+            grant_id: id('3'), review_id: id('4'),
+        };
+        let inbox = req::Inbox::new(id('2'));
+        inbox.allow(scope.clone(), id('3')).unwrap();
+        inbox.submit(submit.clone(), now).unwrap();
+        let entry = inbox.entries().unwrap()[0].clone();
+        let link = req::NativeLink::new(scope.clone());
+        link.attach(&entry).unwrap();
+        let other = req::Inbox::new(id('2'));
+        other.allow(scope.clone(), id('3')).unwrap();
+        other.submit(submit, now).unwrap();
+        let foreign = other.entries().unwrap()[0].clone();
+        assert_eq!(entry.status().unwrap(), foreign.status().unwrap());
+        assert!(!Arc::ptr_eq(&entry, &foreign));
+        // SAME comparator used by both early source lookup and final Start.
+        // Matching this reference is not consume(), entered or a native join.
+        assert!(super::super::start_origin_matches(None, None));
+        assert!(!super::super::start_origin_matches(None, Some(&entry)));
+        assert!(!super::super::start_origin_matches(Some(&link), None));
+        assert!(super::super::start_origin_matches(Some(&link), Some(&entry)));
+        assert!(!super::super::start_origin_matches(Some(&link), Some(&foreign)));
+
+        let owner = SavedCommandOwner::tool_acquisition(RuntimeConfig::packaged("/never-opened-first-tool-start".into()));
+        let mut context = context();
+        if let Some(a) = &selected.acquisition {
+            context.action = wire::Action::Acquire;
+            context.review = Some(wire::Review { operation_id: a.operation_id.as_str().into(),
+                owner_generation: a.owner_generation.as_str().into(), requirements_sha256: a.requirements_sha256.clone() });
+        }
+        let expires = now + INTENT;
+        owner.inner.lock().prepared = Some(Prepared {
+            agent_history: None, agent_store_preparation: None, agent_store: None, store_witness: None,
+            agent_build: None, agent_local_check: None, upload_key_preparation: None, upload_key: None,
+            apple: None, tools: None, local_history: None,
+            projection: RunProjection { agent_build: None, agent_local_check: None,
+                operation_id: id('a').as_str().into(), owner_generation: id('b').as_str().into(),
+                context: Context::ToolAcquisition(context.clone()), phase: Phase::AwaitingConsent,
+                intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None },
+            expires, registration: 1,
+            project: RegisteredRoot { path: scope.root.clone(), identity: crate::asset_source::ProjectIdentity::Posix(
+                crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+            recovery_stamp: None, material: None, recovery: None, android_selection: None,
+            artifact_selection: None, artifact_tools: None,
+        });
+        // A real current Prepared slot, deliberately with no Tool Intent or
+        // CatalogLoan. Do not fabricate positive source authority to test a
+        // losing caller. The opposite linked-GUI case is covered above.
+        for candidate in [Some(&entry), Some(&foreign), None] {
+            assert!(owner.prepared_tool_acquisition_document(id('a').as_str(), id('b').as_str(), candidate).is_err());
+            let registry = owner.inner.lock();
+            let prepared = registry.prepared.as_ref().unwrap();
+            assert_eq!(registry.revision, 0);
+            assert!(registry.active.is_none() && registry.last.is_none());
+            assert_eq!(prepared.projection.context, Context::ToolAcquisition(context.clone()));
+            assert!(prepared.projection.intent_usable && prepared.tools.is_none());
+            assert_eq!(prepared.expires, expires);
+            assert_eq!(super::super::start_matches(prepared, candidate), candidate.is_none());
+        }
+        assert!(!link.has_entered());
+        assert!(scope.control.first().unwrap().is_none());
     }
 }

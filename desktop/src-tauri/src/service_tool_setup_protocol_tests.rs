@@ -20,6 +20,7 @@ fn review(kind: Kind) -> Review {
             source_generation: 6,
             review_id: (kind == Kind::RegisterReviewedSources).then(|| id('c')),
         }),
+        acquisition: None,
     }
 }
 #[test]
@@ -160,4 +161,98 @@ fn exact_struct_report_and_global_frame_bounds() {
     let mut a = Access::empty();
     a.enabled = true;
     assert!(a.validate().is_err());
+}
+
+fn reviewed_acquisition() -> Review {
+    serde_json::from_value(json!({"kind":"acquire-reviewed-missing","platform":"android","draftRevision":1,"baselineGeneration":2,
+        "prepared":null,"sources":null,"acquisition":{"operationId":id('a'),"ownerGeneration":id('b'),"requirementsSha256":"c".repeat(64),
+        "missing":["android-build-tools"],"compatible":["jdk","android-platform","gradle"]}})).unwrap()
+}
+#[test]
+fn reviewed_acquire_is_omitted_for_old_six_and_requires_exact_non_null_partition() {
+    let r = reviewed_acquisition();
+    assert!(r.valid());
+    assert_eq!(r.kind.action(), crate::service_protocol::Action::PrepareTools);
+    let data = serde_json::to_value(&r).unwrap();
+    for kind in [Kind::Doctor,Kind::InspectRequirements,Kind::AcquireMissing,Kind::InspectPickedSources,Kind::RegisterReviewedSources,Kind::InspectSavedRequirements] {
+        let mut old = review(kind);
+        if kind == Kind::InspectSavedRequirements { old.prepared = None; }
+        assert!(old.valid());
+        let encoded = serde_json::to_value(&old).unwrap();
+        assert_eq!(encoded.as_object().unwrap().len(), 6);
+        assert!(encoded.get("acquisition").is_none());
+        assert_eq!(serde_json::to_vec(&serde_json::from_value::<Review>(encoded.clone()).unwrap()).unwrap(), serde_json::to_vec(&old).unwrap());
+        let mut null = encoded.clone(); null["acquisition"] = Value::Null;
+        assert!(serde_json::from_value::<Review>(null).is_err());
+        let mut cross = encoded; cross["acquisition"] = data["acquisition"].clone();
+        assert!(!serde_json::from_value::<Review>(cross).unwrap().valid());
+        assert_ne!(kind.consent(),r.kind.consent());
+    }
+    for field in ["prepared","sources","acquisition"] {
+        let mut missing = data.clone(); missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<Review>(missing).map_or(true, |r| !r.valid()));
+    }
+    for (field,value) in [("missing",json!([])),("compatible",json!(["jdk","gradle","android-platform"])),
+        ("missing",json!(["sdk-build-tools"])),("missing",json!(["jdk"])),("requirementsSha256",json!("c".repeat(64)+"\n"))] {
+        let mut bad = data.clone(); bad["acquisition"][field] = value;
+        assert!(serde_json::from_value::<Review>(bad).map_or(true, |r| !r.valid()));
+    }
+    let mut extra = data; extra["acquisition"]["path"] = json!("/not-a-source");
+    assert!(serde_json::from_value::<Review>(extra).is_err());
+}
+#[test]
+fn reviewed_acquisition_status_has_a_new_identity_and_exact_staged_partition_with_bounded_heap() {
+    let r = reviewed_acquisition();
+    // Use the actual outer streaming decoder, not from_value's exact-length
+    // array hint. Every supported native partition must fit after the wire.
+    let all = [Component::Jdk, Component::AndroidPlatform, Component::AndroidBuildTools, Component::Gradle];
+    for mask in 1u8..16 {
+        let mut current = r.clone();
+        let acquisition = current.acquisition.as_mut().unwrap();
+        acquisition.missing = Vec::with_capacity(4);
+        acquisition.compatible = Vec::with_capacity(4);
+        for (index, component) in all.into_iter().enumerate() {
+            if mask & (1 << index) != 0 { acquisition.missing.push(component); }
+            else { acquisition.compatible.push(component); }
+        }
+        let staged = acquisition.missing.clone();
+        let response = crate::service_protocol::Response {
+            version: crate::service_protocol::VERSION, request_id: id('8'), service_instance: id('2'),
+            client_id: id('9'), session_id: id('f'),
+            response: crate::service_protocol::ResponseBody::ToolSetupRequest(Status {
+                origin: Query { project_id: id('1'), service_instance: id('2'), request_id: id('3') },
+                grant_id: id('4'), review_id: id('5'), revision: 1, review: current,
+                state: State::Complete, settlement: Settlement::Settled, reason: Reason::None,
+                operation: Some(Operation { operation_id: id('d'), owner_generation: Some(id('e')), registration_generation: None }),
+                outcome: Some(Outcome::Complete), result: Some(Report::AcquireReviewedMissing { staged }),
+            }),
+        };
+        let bytes = crate::service_protocol::encode_response(&response).unwrap();
+        let decoded = crate::service_protocol::decode_response(&bytes, &id('8'), &id('2')).unwrap();
+        assert_eq!(decoded, response);
+        let crate::service_protocol::ResponseBody::ToolSetupRequest(row) = decoded.response else { panic!("wrong response kind") };
+        let acquisition = row.review.acquisition.as_ref().unwrap();
+        assert!(acquisition.missing.capacity() <= 4 && acquisition.compatible.capacity() <= 4);
+        assert!(acquisition.retained_bytes().unwrap() <= ACQUISITION_HEAP_BYTES);
+        for field in ["missing", "compatible"] {
+            let mut extra: Value = serde_json::from_slice(&bytes).unwrap();
+            extra["response"]["value"]["review"]["acquisition"][field] = json!(["jdk", "android-platform", "android-build-tools", "gradle", "jdk"]);
+            assert!(crate::service_protocol::decode_response(&serde_json::to_vec(&extra).unwrap(), &id('8'), &id('2')).is_err());
+        }
+    }
+    let mut op = Operation { operation_id:id('d'),owner_generation:Some(id('e')),registration_generation:None };
+    assert!(op.valid_for(&r));
+    op.operation_id = id('a'); assert!(!op.valid_for(&r));
+    op.operation_id = id('d'); op.owner_generation = Some(id('b')); assert!(!op.valid_for(&r));
+    assert!(Report::AcquireReviewedMissing { staged:vec![Component::AndroidBuildTools] }.valid_for(&r));
+    for report in [Report::AcquireMissing { staged:vec![Component::AndroidBuildTools] },
+        Report::AcquireReviewedMissing { staged:vec![Component::Jdk] },
+        Report::InspectSavedRequirements { missing:vec![Component::AndroidBuildTools] }] { assert!(!report.valid_for(&r)); }
+    let a = r.acquisition.as_ref().unwrap();
+    assert!(a.retained_bytes().unwrap() <= ACQUISITION_HEAP_BYTES);
+    let mut expanded = r.clone(); expanded.acquisition.as_mut().unwrap().missing.reserve_exact(8);
+    assert!(!expanded.valid());
+    let mut expanded = r; expanded.acquisition.as_mut().unwrap().requirements_sha256.reserve_exact(256);
+    assert!(!expanded.valid()); // Capacity, not only serialized length, is charged.
+    assert_eq!((REQUEST_LIMIT,RAW_LIMIT,STATUS_LIMIT,REPORT_LIMIT),(32,1024,8192,4096));
 }

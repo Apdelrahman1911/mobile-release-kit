@@ -54,7 +54,6 @@ pub(super) fn approval_backing(input: &ios_wire::Prepare, review: &agent::Review
 
 pub(super) fn mode(c: &ios_wire::Context) -> Option<agent::Mode> {
     if c.recovery.is_some()
-        || c.action.is_some()
         || c.draft_revision.is_none()
         || c.baseline_generation.is_none()
         || c.saved_config.is_none()
@@ -62,11 +61,12 @@ pub(super) fn mode(c: &ios_wire::Context) -> Option<agent::Mode> {
     {
         return None;
     }
-    match (c.operation, c.signing.is_some()) {
-        (ios_wire::Operation::IOSUnsignedArchive, false) => {
+    match (c.operation, c.action, c.signing.is_some()) {
+        (ios_wire::Operation::IOSUnsignedArchive, None, false) => {
             Some(agent::Mode::SavedIosUnsignedArchive)
         }
-        (ios_wire::Operation::IOSSignedExport, true) => Some(agent::Mode::SavedIosSignedExport),
+        (ios_wire::Operation::IOSSignedExport, None, true) => Some(agent::Mode::SavedIosSignedExport),
+        (ios_wire::Operation::IOSCandidateInputs, Some(ios_wire::CreateAction::Create), true) => Some(agent::Mode::SavedIosCandidateInputs),
         _ => None,
     }
 }
@@ -127,6 +127,7 @@ pub(super) fn report(
     let result = agent::Report {
         scope,
         export,
+        candidate: None,
         used_config: agent::Config {
             bytes: v.used_config.bytes,
             sha256: v.used_config.sha256.as_str().to_owned(),

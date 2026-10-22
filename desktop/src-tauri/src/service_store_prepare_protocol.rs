@@ -8,7 +8,7 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub(crate) const RAW_LIMIT: usize = 8192;
-// All eleven closed Prepare shapes fit below this existing strict-reader limit.
+// All thirteen closed Prepare shapes fit below this existing strict-reader limit.
 pub(crate) const RAW_NODES: usize = 128;
 pub(crate) const RAW_DEPTH: usize = 8;
 pub(crate) const STATUS_LIMIT: usize = store::STATUS_LIMIT;
@@ -18,8 +18,8 @@ pub(crate) type Query = store::Query;
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
 }
-// Absence is the original seven-kind spelling. An explicitly present field
-// must contain the complete later-stage tuple, never null or a partial tuple.
+// Absence preserves the original encodings. An explicitly present optional
+// extension must contain its complete closed tuple, never null or a partial tuple.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
 }
@@ -38,6 +38,8 @@ pub(crate) enum Kind {
     IosExternalTesting,
     AndroidProductionSubmit,
     IosProductionSubmit,
+    AndroidCandidateUpload,
+    IosCandidateUpload,
 }
 impl Kind {
     pub fn inventory(self) -> bool {
@@ -62,6 +64,22 @@ impl Kind {
     pub fn prepares_intent(self) -> bool {
         self.candidate() || self.stage().is_some()
     }
+    pub fn candidate_upload(self) -> Option<store::Platform> {
+        match self {
+            Self::AndroidCandidateUpload => Some(store::Platform::Android),
+            Self::IosCandidateUpload => Some(store::Platform::Ios),
+            _ => None,
+        }
+    }
+    pub fn native_kind(self) -> store::Kind {
+        if self.candidate_upload().is_some() {
+            store::Kind::Execute
+        } else if self.prepares_intent() {
+            store::Kind::CandidatePrepare
+        } else {
+            store::Kind::AccessCheck
+        }
+    }
     pub fn consent(self) -> &'static str {
         match self {
             Self::AndroidAccess => "agent-android-store-access-once-v1",
@@ -75,10 +93,12 @@ impl Kind {
             Self::IosExternalTesting => "agent-ios-external-testing-prepare-once-v1",
             Self::AndroidProductionSubmit => "agent-android-production-submit-prepare-once-v1",
             Self::IosProductionSubmit => "agent-ios-production-submit-prepare-once-v1",
+            Self::AndroidCandidateUpload => "agent-android-store-execute-candidate-upload-once-v1",
+            Self::IosCandidateUpload => "agent-ios-store-execute-candidate-upload-once-v1",
         }
     }
     pub fn action(self) -> crate::service_protocol::Action {
-        if self.prepares_intent() {
+        if self.prepares_intent() || self.candidate_upload().is_some() {
             crate::service_protocol::Action::Release
         } else {
             crate::service_protocol::Action::ObserveProject
@@ -126,6 +146,11 @@ impl StageSelection {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExecuteSelection {
+    pub intent_sha256: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Selection {
     pub kind: Kind,
     pub saved_config: store::Content,
@@ -134,20 +159,31 @@ pub(crate) struct Selection {
     pub candidate: Option<store::Candidate>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub later: Option<StageSelection>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub execute: Option<ExecuteSelection>,
 }
 impl Selection {
     pub fn valid(&self) -> bool {
         self.saved_config.valid()
             && self.saved_version.valid()
-            && match (&self.candidate, &self.later, self.kind.stage()) {
-                (Some(c), None, None) => {
-                    self.kind.candidate() && store::uuid(&c.operation_id) && store::sha(&c.sha256)
-                }
-                (None, None, None) => !self.kind.prepares_intent(),
-                (Some(c), Some(later), Some((_, stage))) => {
-                    later.stage == stage && store::sha(&c.sha256) && later.valid_for(&c.operation_id)
-                }
-                _ => false,
+            && if self.kind.candidate_upload().is_some() {
+                self.later.is_none()
+                    && self.execute.as_ref().is_some_and(|e| store::sha(&e.intent_sha256))
+                    && self.candidate.as_ref().is_some_and(|c| {
+                        store::uuid(&c.operation_id) && store::sha(&c.sha256)
+                    })
+            } else {
+                self.execute.is_none()
+                    && match (&self.candidate, &self.later, self.kind.stage()) {
+                        (Some(c), None, None) => {
+                            self.kind.candidate() && store::uuid(&c.operation_id) && store::sha(&c.sha256)
+                        }
+                        (None, None, None) => !self.kind.prepares_intent(),
+                        (Some(c), Some(later), Some((_, stage))) => {
+                            later.stage == stage && store::sha(&c.sha256) && later.valid_for(&c.operation_id)
+                        }
+                        _ => false,
+                    }
             }
     }
     pub(crate) fn bounded_capacity(&self) -> bool {
@@ -160,6 +196,7 @@ impl Selection {
                 .as_ref()
                 .is_none_or(|c| c.operation_id.capacity() <= 36 && c.sha256.capacity() <= 64)
             && self.later.as_ref().is_none_or(StageSelection::bounded_capacity)
+            && self.execute.as_ref().is_none_or(|e| e.intent_sha256.capacity() <= 64)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,7 +331,17 @@ impl Report {
                         && store_precondition_sha256.capacity() <= 64
                         && limitations.capacity() <= 8
                 }
-                _ => false, // Execute/Reconcile still use only their original facade.
+                store::Report::Execute { release } => {
+                    release.mode == store::release::Mode::CandidateUpload
+                        && release.basis.is_none()
+                        && release.operation_id.capacity() <= 36
+                        && release.candidate_operation_id.capacity() <= 36
+                        && release.candidate_sha256.capacity() <= 64
+                        && release.intent_sha256.capacity() <= 64
+                        && release.receipt_sha256.capacity() <= 64
+                        && release.limitations.capacity() <= 8
+                }
+                _ => false, // Reconcile still uses only its original facade.
             },
         }
     }
@@ -317,11 +364,16 @@ impl Report {
     }
 }
 pub(crate) fn ordinary_review(s: &Selection, r: &Review) -> Option<store::Review> {
+    if !s.valid() {
+        return None;
+    }
     let (kind, platform) = match s.kind {
         Kind::AndroidAccess => (store::Kind::AccessCheck, store::Platform::Android),
         Kind::IosAccess => (store::Kind::AccessCheck, store::Platform::Ios),
         Kind::AndroidCandidate => (store::Kind::CandidatePrepare, store::Platform::Android),
         Kind::IosCandidate => (store::Kind::CandidatePrepare, store::Platform::Ios),
+        Kind::AndroidCandidateUpload => (store::Kind::Execute, store::Platform::Android),
+        Kind::IosCandidateUpload => (store::Kind::Execute, store::Platform::Ios),
         _ => return None,
     };
     Some(store::Review {
@@ -333,7 +385,12 @@ pub(crate) fn ordinary_review(s: &Selection, r: &Review) -> Option<store::Review
         saved_config: s.saved_config.clone(),
         saved_version: s.saved_version.clone(),
         candidate: s.candidate.clone(),
-        release: None,
+        release: s.execute.as_ref().map(|e| store::release::Review {
+            mode: store::release::Mode::CandidateUpload,
+            intent_sha256: e.intent_sha256.clone(),
+            stage_operation_id: None,
+            basis: None,
+        }),
     })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

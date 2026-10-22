@@ -11,6 +11,7 @@ export function AgentApplePreparationAccess({controller}:{controller:AgentAppleP
     <label>Selected step <select value={state.mode} disabled={!!controller.ownerReason()} onChange={e=>controller.setMode(e.target.value as ApplePreparationMode)}>
       {appleCliModes.map(mode=><option key={mode} value={mode}>{mode}</option>)}
     </select></label>
+    {state.mode==='key-recover'&&<p>Use only the original durably saved key selected in this app. Start will verify it against the original setup record and may record a local verification association. Missing keys, backup-restored new references and uncertain saves cannot be recovered here; no replacement key is generated.</p>}
     <label><input type="checkbox" checked={state.acknowledged} disabled={!state.selection||!!controller.ownerReason()||!state.listening}
       onChange={e=>controller.acknowledge(e.target.checked)}/> Allow one CLI Prepare of this exact selected step. I will review and approve Start separately.</label>
     <div className="actions">
@@ -24,6 +25,6 @@ export function AgentApplePreparationAccess({controller}:{controller:AgentAppleP
     {state.stale&&<p>These controls address the retained original selection, not the currently selected project.</p>}
     {applePreparationCommands(state.access).map(command=><pre key={command}><code>{command}</code></pre>)}
     {state.status&&<p>Original preparation: {state.status.phase} · {state.status.settlement}. {state.status.usable?'Review the new intent above, then use its normal Start or the separate Start delegation.':''}</p>}
-    <p>Keep this Desktop session open. No credential paths, passwords, keys or provider options belong in these commands. Lost replies are checked using the original request ID, never by repeating Prepare. Key recovery, account setup, assignment and backup remain explicit Desktop actions.</p>
+    <p>Keep this Desktop session open. No credential paths, passwords, keys or provider options belong in these commands. Lost replies are checked using the original request ID, never by repeating Prepare. Account setup, assignment and backup remain explicit Desktop actions; key recovery supports only the original durably saved key.</p>
   </details>;
 }

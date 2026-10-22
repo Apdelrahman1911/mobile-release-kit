@@ -56,6 +56,8 @@ impl Pins {
                 Some(later) if later.supplemental_assignments.is_some() => return Err(public(Error::Conflict)),
                 _ => [None, None, None],
             },
+            Input::Execute(c) if c.later.is_none() && c.stage_operation_id.is_none() => [None, None, None],
+            Input::Execute(_) => return Err(public(Error::Conflict)),
         };
         let (c, p) = m.census_parts();
         let mut rest = m.supplemental_census();
@@ -111,25 +113,14 @@ impl Grant {
 }
 impl DocumentBinding {
     fn preparation_owner(&self, kind: flow::Kind) -> &SavedCommandOwner {
-        self.store_delegate_owner(if kind.prepares_intent() {
-            p::Kind::CandidatePrepare
-        } else {
-            p::Kind::AccessCheck
-        })
+        self.store_delegate_owner(kind.native_kind())
     }
     fn preparation_gate(
         &self,
         s: &DocumentState,
         kind: flow::Kind,
     ) -> crate::local_store_preflight_protocol::Availability {
-        self.store_delegate_gate(
-            s,
-            if kind.prepares_intent() {
-                p::Kind::CandidatePrepare
-            } else {
-                p::Kind::AccessCheck
-            },
-        )
+        self.store_delegate_gate(s, kind.native_kind())
     }
     fn preparation_material(
         &self,
@@ -141,6 +132,7 @@ impl DocumentBinding {
         match input {
             Input::Access(c) => self.review_store_preflight_material(s, c, registration, root),
             Input::Candidate(c) => self.review_store_prepare_material(s, c, registration, root),
+            Input::Execute(c) => self.review_store_execute_material(s, c, registration, root),
         }
     }
     fn preparation_budget(
@@ -152,6 +144,7 @@ impl DocumentBinding {
         match input {
             Input::Access(_) => self.store_preflight_budget(s, m),
             Input::Candidate(_) => self.store_prepare_budget(s, m),
+            Input::Execute(_) => self.store_execute_budget(s, m).map(|_| ()),
         }
     }
     fn preparation_current(
@@ -421,6 +414,7 @@ impl DocumentBinding {
         match &g.input {
             Input::Access(_) => self.recheck_store_preflight_material(s, m, registration, root),
             Input::Candidate(_) => self.recheck_store_prepare_material(s, m, registration, root),
+            Input::Execute(_) => self.recheck_store_execute_material(s, m, registration, root),
         }
     }
     fn admit_store_preparation(
@@ -491,19 +485,32 @@ impl DocumentBinding {
                 .store_preparation_current(entry, &entry.installed_review().map_err(public)?)?,
         };
         self.recheck_preparation(&s, &g, &m, registration, &root)?;
-        self.preparation_budget(&s, &g.input, &m)?;
         match claim.call {
-            queue::Call::Prepare => owner.prepare_agent_store_original(
-                &g.input,
-                entry.clone(),
-                registration,
-                root,
-                gate,
-                m,
-            ),
+            queue::Call::Prepare => {
+                self.preparation_budget(&s, &g.input, &m)?;
+                owner.prepare_agent_store_original(
+                    &g.input,
+                    entry.clone(),
+                    registration,
+                    root,
+                    gate,
+                    m,
+                )
+            }
             queue::Call::Start => {
-                let admitted =
-                    owner.start_agent_store_original(entry, Some((registration, root)), gate, m)?;
+                // Borrow the SAME locked Document/material census through the
+                // original Execute native-book pre-GO check. Never persist a
+                // budget boolean in the metadata row or release GO under Doc.
+                let budget = if matches!(&g.input, Input::Execute(_)) {
+                    Some(self.store_execute_budget(&s, &m)?)
+                } else {
+                    self.preparation_budget(&s, &g.input, &m)?;
+                    None
+                };
+                let admitted = owner.start_agent_store_original(
+                    entry, Some((registration, root)), gate, m.clone(), budget.as_ref(),
+                )?;
+                drop(budget);
                 drop(edit);
                 drop(s);
                 admitted.release();
@@ -654,8 +661,12 @@ pub(in crate::asset_session) mod tests {
             IosExternalTesting,
             AndroidProductionSubmit,
             IosProductionSubmit,
+            AndroidCandidateUpload,
+            IosCandidateUpload,
         ] {
-            let mut prepare = if let Some((platform, stage)) = kind.stage() {
+            let mut prepare = if kind.candidate_upload().is_some() {
+                crate::local_store_execute_protocol::tests::input()
+            } else if let Some((platform, stage)) = kind.stage() {
                 crate::local_store_prepare_protocol::tests::stage_input(
                     platform == p::Platform::Ios, stage == flow::Stage::ProductionSubmit)
             } else if kind.candidate() {
@@ -668,15 +679,16 @@ pub(in crate::asset_session) mod tests {
             // Original ordinary Android request omits platform; its returned
             // Context includes it. Do not widen the original request grammar.
             match kind {
-                AndroidAccess | AndroidCandidate => {
+                AndroidAccess | AndroidCandidate | AndroidCandidateUpload => {
                     prepare.as_object_mut().unwrap().remove("platform");
                 }
                 IosAccess => {
                     prepare["platform"] = "ios".into();
                 }
-                IosCandidate => {
+                IosCandidate | IosCandidateUpload => {
                     prepare["platform"] = "ios".into();
                     prepare["confirmation"] = "candidate:ios:1.2.3:42".into();
+                    prepare.as_object_mut().unwrap().remove("toolchainSelection");
                 }
                 AndroidVersions => {
                     prepare["query"] = "android-current-versions".into();
@@ -714,6 +726,26 @@ pub(in crate::asset_session) mod tests {
                     let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove(field);
                     assert!(Input::parse(kind, &missing).is_err(), "{field}");
                 }
+            }
+            if kind.candidate_upload().is_some() {
+                for other in [AndroidCandidate, IosCandidate, AndroidAccess, IosAccess, PairedVersions,
+                    AndroidExternalTesting, IosExternalTesting, AndroidProductionSubmit, IosProductionSubmit] {
+                    assert!(Input::parse(other, &input.prepare).is_err());
+                }
+                for field in ["intentSha256", "confirmation", "candidateOperationId", "recordId", "recordRevision", "credentialContextRevision"] {
+                    let mut missing = input.prepare.clone(); missing.as_object_mut().unwrap().remove(field);
+                    assert!(Input::parse(kind, &missing).is_err(), "{kind:?}/{field}");
+                }
+                let mut wrong = input.prepare.clone(); wrong["confirmation"] = "production:android:1.2.3:42".into();
+                assert!(Input::parse(kind, &wrong).is_err());
+                let mut tools = input.prepare.clone();
+                if kind == AndroidCandidateUpload { tools.as_object_mut().unwrap().remove("toolchainSelection"); }
+                else { tools["toolchainSelection"] = serde_json::Value::Null; }
+                assert!(Input::parse(kind, &tools).is_err());
+                let later = crate::local_store_execute_protocol::tests::stage_input(kind == IosCandidateUpload, false);
+                assert!(Input::parse(kind, &later).is_err());
+                let mut reconcile = input.prepare.clone(); reconcile["action"] = "current-internal".into();
+                assert!(Input::parse(kind, &reconcile).is_err());
             }
         }
         // Rejected before Document/native selection. No hidden full Value

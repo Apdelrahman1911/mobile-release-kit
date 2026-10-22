@@ -6,6 +6,8 @@ use crate::{
 };
 #[path = "saved_command_agent_tool_inspect.rs"]
 pub(crate) mod inspect;
+#[path = "saved_command_agent_tool_acquire.rs"]
+mod acquire;
 fn refused() -> BridgeError {
     wire::invalid()
 }
@@ -36,6 +38,7 @@ impl Approval {
             .checked_add(6 * std::mem::size_of::<usize>())?
             .checked_add(self.root.path.capacity())?
             .checked_add(self.context.project_id.capacity())?
+            .checked_add(self.review.acquisition.as_ref().map_or(Some(0), p::Acquisition::retained_bytes)?)?
             .checked_add(self.context.saved_config.sha256.capacity())?
             .checked_add(self.context.review.as_ref().map_or(0, |r| {
                 r.operation_id.capacity()
@@ -77,20 +80,21 @@ fn prepared_binding(p: &Prepared) -> Option<&Arc<Binding>> {
 fn session_binding(p: &Session) -> Option<&Arc<Binding>> {
     p.tools.intent.as_ref()?.agent.get()
 }
+fn start_origin_matches(link: Option<&Arc<req::NativeLink>>, entry: Option<&Arc<req::Entry>>) -> bool {
+    match (link, entry) {
+        (None, None) => true,
+        (Some(link), Some(entry)) => link.matches(entry),
+        _ => false,
+    }
+}
 pub(in crate::saved_command_owner) fn start_matches(
     p: &Prepared,
     e: Option<&Arc<req::Entry>>,
 ) -> bool {
-    match (prepared_binding(p), e) {
-        (None, None) => true,
-        (Some(b), Some(e)) => {
-            b.link.matches(e)
-                && p.tools
-                    .as_ref()
-                    .is_some_and(|i| b.approval.intent.as_ptr() == Arc::as_ptr(i))
-        }
-        _ => false,
-    }
+    let binding = prepared_binding(p);
+    start_origin_matches(binding.map(|b| &b.link), e)
+        && binding.is_none_or(|b| p.tools.as_ref()
+            .is_some_and(|i| b.approval.intent.as_ptr() == Arc::as_ptr(i)))
 }
 pub(in crate::saved_command_owner) fn consume(
     p: &Prepared,
@@ -225,7 +229,7 @@ fn retired_projection(b: &Binding, p: &RunProjection) {
             b.link.unknown();
             return;
         };
-        let partition = if b.approval.review.kind == p::Kind::AcquireMissing {
+        let partition = if matches!(b.approval.review.kind, p::Kind::AcquireMissing | p::Kind::AcquireReviewedMissing) {
             // Acquire's terminal intentionally has no observer projection.
             // Borrow the SAME private original Inspection retained by Intent.
             b.approval
@@ -254,6 +258,9 @@ fn retired_projection(b: &Binding, p: &RunProjection) {
             p::Kind::AcquireMissing => p::Report::AcquireMissing {
                 staged: components(partition),
             },
+            p::Kind::AcquireReviewedMissing => p::Report::AcquireReviewedMissing {
+                staged: components(partition),
+            },
             _ => {
                 b.link.unknown();
                 return;
@@ -263,7 +270,7 @@ fn retired_projection(b: &Binding, p: &RunProjection) {
         None
     };
     b.link.publish(
-        if b.link.has_entered() || b.approval.review.kind == p::Kind::InspectSavedRequirements {
+        if b.link.has_entered() || matches!(b.approval.review.kind, p::Kind::InspectSavedRequirements | p::Kind::AcquireReviewedMissing) {
             // The original Prepared retirement may precede Session/entered.
             // Its identity is comparison DATA, not a Start receipt.
             operation(p)
@@ -353,6 +360,7 @@ impl SavedCommandOwner {
                 baseline_generation: c.baseline_generation,
                 prepared: Some(ids.clone()),
                 sources: None,
+                acquisition: None,
             },
         }))
     }

@@ -1,4 +1,4 @@
-//! One saved Inspect preparation inside the existing Tool Intent/registry.
+//! Saved Inspect or exactly reviewed Acquire inside the existing Tool Intent/registry.
 //! No source, worker, grant or clock is constructed from a service Status.
 use super::*;
 use std::sync::atomic::AtomicU8;
@@ -23,13 +23,41 @@ fn clipped_end(
     }
     Ok(end)
 }
+enum OriginalInput {
+    SavedInspect,
+    ReviewedAcquire(super::acquire::Original),
+}
 pub(crate) struct Approval {
+    original: OriginalInput,
     owner: Weak<Inner>,
     source: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
     expires: Instant,
     review: p::Review,
 }
 impl Approval {
+    pub(super) fn reviewed(owner: &Arc<Inner>, source: Arc<crate::asset_session::ToolAcquisitionDocumentInput>,
+        expires: Instant, review: p::Review, original: super::acquire::Original) -> Arc<Self> {
+        Arc::new(Self { owner: Arc::downgrade(owner), source, expires, review,
+            original: OriginalInput::ReviewedAcquire(original) })
+    }
+    fn current_registry(&self, r: &super::super::super::Registry) -> bool {
+        self.source.current() && match &self.original {
+            OriginalInput::SavedInspect => self.review.kind == p::Kind::InspectSavedRequirements
+                && self.review.acquisition.is_none() && self.source.context().action == wire::Action::Inspect
+                && self.source.context().review.is_none(),
+            OriginalInput::ReviewedAcquire(original) => self.review.kind == p::Kind::AcquireReviewedMissing
+                && self.review.acquisition.as_ref().is_some_and(|selected| original.matches_registry(r, &self.source, selected)),
+        }
+    }
+    fn matches_intent(&self, intent: &Intent) -> bool {
+        match &self.original {
+            OriginalInput::SavedInspect => intent.inspection.is_none()
+                && intent.document.context().action == wire::Action::Inspect
+                && intent.document.context().review.is_none(),
+            OriginalInput::ReviewedAcquire(original) => self.review.acquisition.as_ref()
+                .is_some_and(|selected| original.matches_intent(intent, selected)),
+        }
+    }
     pub(crate) fn review(&self) -> &p::Review {
         &self.review
     }
@@ -42,7 +70,8 @@ impl Approval {
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(4 * std::mem::size_of::<usize>())?
-            .checked_add(self.source.retained_bytes()?)
+            .checked_add(self.source.retained_bytes()?)?
+            .checked_add(self.review.acquisition.as_ref().map_or(Some(0), p::Acquisition::retained_bytes)?)
     }
 }
 struct Created {
@@ -127,9 +156,7 @@ impl Preparation {
             || binding.created.get().is_some()
             || !Arc::ptr_eq(&intent.document, binding.source())
             || !intent.current()
-            || intent.inspection.is_some()
-            || intent.document.context().action != wire::Action::Inspect
-            || intent.document.context().review.is_some()
+            || !binding.approval.matches_intent(&intent)
         {
             return Err(refused());
         }
@@ -149,6 +176,7 @@ impl Preparation {
     pub(in crate::saved_command_owner) fn link(
         self,
         owner: &Arc<Inner>,
+        registry: &super::super::super::Registry,
         context: &Context,
         registration: u32,
         root: &RegisteredRoot,
@@ -160,6 +188,8 @@ impl Preparation {
             return Err(refused());
         };
         if self.binding.approval.owner.as_ptr() != Arc::as_ptr(owner)
+            || !self.binding.approval.current_registry(registry)
+            || !self.binding.approval.matches_intent(&self.intent)
             || !self.intent.document.matches(c, registration, root)
             || self.clip_expiry(expires)? != expires
             || self.binding.created.get().is_some()
@@ -233,8 +263,10 @@ impl SavedCommandOwner {
             baseline_generation: c.baseline_generation,
             prepared: None,
             sources: None,
+            acquisition: None,
         };
         Ok(Arc::new(Approval {
+            original: OriginalInput::SavedInspect,
             owner: Arc::downgrade(&self.inner),
             source,
             expires: now + INTENT,
@@ -249,7 +281,7 @@ impl SavedCommandOwner {
         let mut r = self.inner.lock();
         self.inner.expire_prepared(&mut r, Instant::now());
         if approval.owner.as_ptr() != Arc::as_ptr(&self.inner)
-            || !approval.source.current()
+            || !approval.current_registry(&r)
             || self.inner.availability(&r, Availability::Available) != Availability::Available
             || link.scope().review != approval.review
             || link.scope().expires > approval.expires

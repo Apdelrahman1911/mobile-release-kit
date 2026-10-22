@@ -757,6 +757,11 @@ mod tests {
                 scope,
             }
         }
+        fn for_mode(mode: p::Mode) -> Self {
+            let mut fixture = Self::new();
+            Arc::get_mut(&mut fixture.scope).unwrap().mode = mode;
+            fixture
+        }
         fn scope(doc: &Arc<()>, witness: &Arc<()>, scope_id: Id) -> Arc<Scope> {
             let now = Instant::now();
             Scope::new(
@@ -796,11 +801,13 @@ mod tests {
             self.inbox.preparation(&self.input().origin).unwrap()
         }
         fn start_scope(&self) -> Arc<NativeScope> {
+            let mut selected = review();
+            selected.mode = self.scope.mode;
             Arc::new(NativeScope {
                 project_id: id(1),
                 runtime_id: "p1".into(),
                 review_id: id(10),
-                review: review(),
+                review: selected,
                 root: point().root,
                 device: 1,
                 inode: 2,
@@ -823,7 +830,9 @@ mod tests {
     fn constructed(entry: &Arc<Entry>) -> Call {
         let call = entry.begin().unwrap();
         entry.host_entered().unwrap();
-        entry.constructed(review()).unwrap();
+        let mut selected = review();
+        selected.mode = entry.scope.mode;
+        entry.constructed(selected).unwrap();
         call
     }
     fn finish(entry: &Arc<Entry>, call: Call) {
@@ -858,8 +867,12 @@ mod tests {
     }
     #[test]
     fn prepare_lost_original_or_history_is_unknown_and_never_replayable() {
+        prepare_lost_original_or_history_is_unknown_and_never_replayable_for_mode(p::Mode::Review);
+        prepare_lost_original_or_history_is_unknown_and_never_replayable_for_mode(p::Mode::KeyRecover);
+    }
+    fn prepare_lost_original_or_history_is_unknown_and_never_replayable_for_mode(mode: p::Mode) {
         for original in [true, false] {
-            let f = Fixture::new();
+            let f = Fixture::for_mode(mode);
             let e = f.submit();
             let call = constructed(&e);
             if original {
@@ -905,8 +918,12 @@ mod tests {
     }
     #[test]
     fn prepare_exact_gui_or_separate_start_handoff_rejects_late_old_cancel() {
+        prepare_exact_gui_or_separate_start_handoff_rejects_late_old_cancel_for_mode(p::Mode::Review);
+        prepare_exact_gui_or_separate_start_handoff_rejects_late_old_cancel_for_mode(p::Mode::KeyRecover);
+    }
+    fn prepare_exact_gui_or_separate_start_handoff_rejects_late_old_cancel_for_mode(mode: p::Mode) {
         for gui in [true, false] {
-            let f = Fixture::new();
+            let f = Fixture::for_mode(mode);
             let e = f.submit();
             finish(&e, constructed(&e));
             assert!(f.inbox.can_allow().is_err());
@@ -966,7 +983,11 @@ mod tests {
     }
     #[test]
     fn prepare_original_receipt_read_and_scope_expiries_are_not_renewed() {
-        let f = Fixture::new();
+        prepare_original_receipt_read_and_scope_expiries_are_not_renewed_for_mode(p::Mode::Review);
+        prepare_original_receipt_read_and_scope_expiries_are_not_renewed_for_mode(p::Mode::KeyRecover);
+    }
+    fn prepare_original_receipt_read_and_scope_expiries_are_not_renewed_for_mode(mode: p::Mode) {
+        let f = Fixture::for_mode(mode);
         f.inbox.allow_preparation(f.scope.clone(), id(3)).unwrap();
         assert!(f
             .inbox

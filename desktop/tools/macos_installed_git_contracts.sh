@@ -38,6 +38,10 @@ selected_tests=(
   agent_build_requests::permission::tests::returned_revision_cannot_survive_pre_first_cut_revoke_or_another_allow
   agent_build_requests::permission::tests::revisions_are_canonical_full_u64_not_javascript_numbers
   agent_build_requests::tests::all32_mixed_rows_retain_acknowledged_reports_and_one_absorbing_failed_claim
+  agent_build_requests::tests::candidate_build::candidate_and_ordinary_requests_share_all32_retained_rows_and_cross_family_refuses
+  agent_build_requests::tests::candidate_build::candidate_original_read_and_lost_caller_remain_absorbing_after_start
+  agent_build_requests::tests::candidate_build::candidate_prepare_and_terminal_require_original_callers_and_history_without_new_start_permission
+  agent_build_requests::tests::candidate_build::candidate_public_report_correlations_and_capacity_use_the_existing_typed_quote
   agent_build_requests::tests::earlier_failed_progress_is_preserved_beside_one_full_immutable_terminal
   agent_build_requests::tests::ios_historical_report_has_real_counts_and_rejects_paths_synthetic_digests_or_signing
   agent_build_requests::tests::ios_recovery::recovery_and_saved_rows_share_original32_and_bounded_full_reports
@@ -55,6 +59,8 @@ selected_tests=(
   agent_build_requests::tests::private_scope_and_incoming_report_capacity_refuse_without_rebinding_either_family
   agent_build_requests::tests::same_ios_start_link_is_one_use_and_foreign_family_never_consumes_it
   agent_build_requests::tests::typed_row_public_and_ancillary_bounds_keep_all32_and_four_nonipc_reports
+  agent_candidate_build::tests::exact_candidate_summary_is_bounded_and_correlates_the_native_operation
+  agent_candidate_build::tests::malformed_candidate_fields_and_platform_overflow_never_validate
   agent_ios_archive::recovery::tests::recovery_report_retains_pending_manual_and_conflict_without_fabricating_artifacts
   agent_ios_archive::recovery::tests::recovery_review_is_configless_and_preserves_displayed_inspection_identity
   agent_ios_archive::recovery::tests::recovery_selection_has_no_session_input_or_implicit_restore_confirmation
@@ -70,6 +76,8 @@ selected_tests=(
   agent_local_checks::tests::native_unknown_absorbs_later_terminal_and_history_never_changes_it
   agent_local_checks::tests::older_failed_progress_claim_and_terminal_are_retained_without_two_full_reports
   agent_local_checks::tests::oversized_native_scope_or_projection_capacity_cannot_replace_original_storage
+  android_build_protocol::agent_candidate::tests::native_status_and_serializer_accept_only_the_three_exact_agent_modes
+  android_build_protocol::agent_candidate::tests::original_candidate_decoder_not_signed_output_supplies_the_compact_report
   android_build_protocol::agent_signed::tests::failed_signature_or_missing_original_close_never_becomes_a_signed_report
   android_build_protocol::agent_signed::tests::returned_signed_result_is_projected_without_paths_and_preserves_raw_policy_match
   apple_provisioning_journal::data::key_recovery::tests::armed_written_unknown_and_foreign_scope_do_not_gain_an_association
@@ -161,6 +169,7 @@ selected_tests=(
   asset_session::agent_store::permission::tests::store_permission_revoke_before_first_cut_and_between_cuts_refuses_old_user_revision
   asset_session::agent_store::preparation::tests::store_preparation_native_grant_and_input_fit_existing_fixed_backing
   asset_session::agent_store::preparation::tests::store_preparation_raw_uses_original_closed_input_and_bounded_nodes
+  asset_session::agent_tool_setup::acquire::tests::acquisition_allow_requires_exact_inspection_context_and_old_consents_cannot_gain_it
   asset_session::agent_tool_setup::inspect::tests::current_service_saved_config_must_equal_the_original_allow_context
   asset_session::agent_tool_setup::tests::actual_default_document_and_near_limit_copied_doctor_input_fit
   asset_session::agent_tool_setup::tests::document_limit_is_checked_not_inferred_from_a_successful_census
@@ -189,6 +198,8 @@ selected_tests=(
   asset_session::shared_memory_tests::actual_mac_native_quotes_fit_current_document_before_any_runtime_is_opened
   asset_session::store_material::apple_prepare::tests::preparation_comparison_never_keeps_retired_private_material_alive
   asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment
+  asset_session::tool_acquisition::tests::changed_selected_root_or_complete_roster_cannot_reuse_prepare
+  asset_session::tool_acquisition::tests::equal_saved_bytes_in_a_replacement_lane_are_not_the_original
   asset_session::vault::backup_delegation::tests::authenticated_kind_policy_has_no_wrong_link_fallback_before_new
   asset_session::vault::backup_delegation::tests::original_picker_import_is_android_only_without_narrowing_the_backend
   asset_session::vault::backup_desktop::tests::android_upload_key_scope_does_not_qualify_other_desktop_contexts
@@ -258,6 +269,7 @@ selected_tests=(
   installed_cli::local_history::tests::local_history_cli_status_never_accepts_foreign_family_origin_or_scope
   installed_cli::metadata_images::tests::image_cli_actual_collector_and_capabilities_admit_only_scalar_prepared_import
   installed_cli::metadata_images::tests::image_cli_same_response_binding_and_lost_ack_never_claim_upload_or_replay
+  installed_cli::store::tests::preparation_tests::store_prepare_cli_candidate_upload_keeps_candidate_receipt_and_separate_start_ids
   installed_cli::store::tests::preparation_tests::store_prepare_cli_has_two_fixed_separately_reviewed_id_only_commands
   installed_cli::store::tests::preparation_tests::store_prepare_cli_later_stage_results_keep_fixed_calls_and_nonpublishing_limits
   installed_cli::store::tests::preparation_tests::store_prepare_cli_original_response_and_start_grants_cannot_cross_use
@@ -277,12 +289,15 @@ selected_tests=(
   installed_cli::version_reserve::tests::lost_ack_keeps_exact_public_request_and_catalogue_stays_bounded_without_readiness
   installed_cli_ipc::tests::metadata_exchange_admission_is_fixed_fail_fast_and_reuses_only_its_original_lease
   installed_cli_ipc::tests::metadata_stalled_large_frame_keeps_lease_until_original_stop_close_and_return
+  ios_archive_protocol::agent_candidate::tests::native_ios_candidate_origin_roundtrips_without_weakening_other_mode_guards
+  ios_archive_protocol::agent_candidate::tests::original_ios_candidate_decoder_preserves_operation_and_primary_without_ordinary_conversion
   ios_archive_protocol::tests::recovery_frames_keep_the_five_frame_domain_and_refuse_archive_work
   ios_archive_protocol::tests::recovery_prepare_is_closed_without_saved_inputs_and_confirmation_is_action_bound
   ios_archive_protocol::tests::recovery_reports_are_exact_session_data_and_never_provisional_artifacts
   release_version_edit_protocol::tests::agent_prepare_frame_bound_precedes_same_closed_version_decoder
   saved_command_owner::agent_android_build::signed::tests::native_signed_input_requires_exact_closed_assignment_and_separate_scope
   saved_command_owner::agent_android_build::tests::actual_common_start_checks_same_agent_and_context_before_original_take
+  saved_command_owner::agent_android_build::tests::candidate_terminal_projection_still_requires_original_retirement
   saved_command_owner::agent_android_build::tests::named_scope_cannot_borrow_signing_candidate_or_signature_inspection
   saved_command_owner::agent_android_build::tests::original_validated_result_projection_drops_labels_paths_and_preserves_failed_checks
   saved_command_owner::agent_history::tests::local_history_actual_original_result_projects_only_public_current_history
@@ -291,6 +306,7 @@ selected_tests=(
   saved_command_owner::agent_ios_archive::signed_export::tests::actual_signed_terminal_decoder_precedes_sanitized_report_and_original_retirement
   saved_command_owner::agent_ios_archive::signed_export::tests::only_exact_export_mode_uses_signed_consent_summary_not_candidate_check_or_recovery
   saved_command_owner::agent_ios_archive::tests::actual_common_start_checks_same_agent_and_context_before_original_take
+  saved_command_owner::agent_ios_archive::tests::candidate_terminal_projection_still_requires_original_retirement
   saved_command_owner::agent_ios_archive::tests::fixed_archive_and_export_cannot_borrow_candidate_recovery_or_partial_inputs
   saved_command_owner::agent_ios_archive::tests::native_projection_keeps_closed_family_and_unsigned_mode
   saved_command_owner::agent_ios_archive::tests::same_original_unsigned_result_projects_only_real_counts_without_digest_or_paths
@@ -298,6 +314,8 @@ selected_tests=(
   saved_command_owner::agent_ios_recovery::tests::recovery_approval_keeps_exact_displayed_weak_observation_and_original_join_predicate
   saved_command_owner::agent_ios_recovery::tests::recovery_approval_refuses_lost_custody_and_no_source_grants_no_restore
   saved_command_owner::agent_ios_recovery::tests::recovery_common_start_requires_same_link_and_read_before_consuming_configless_intent
+  saved_command_owner::agent_store::preparation::tests::store_candidate_upload_link_rejects_losing_gui_start_without_retiring_prepared
+  saved_command_owner::agent_store::preparation::tests::store_candidate_upload_prepare_uses_original_execute_decoder_and_distinct_candidate_identity
   saved_command_owner::agent_store::preparation::tests::store_preparation_actual_core_decoder_projects_required_inconclusive_inventory
   saved_command_owner::agent_store::preparation::tests::store_preparation_losing_gui_start_checks_link_before_any_retirement_or_take
   saved_command_owner::agent_store::preparation::tests::store_preparation_read_end_and_delayed_earlier_revoke_keep_original_clock
@@ -315,13 +333,16 @@ selected_tests=(
   saved_command_owner::apple_provisioning::preparation::tests::delegated_common_commit_foreign_intent_or_lost_history_cannot_enable_start
   saved_command_owner::apple_provisioning::preparation::tests::delegated_common_prepared_commit_never_publishes_before_real_caller_and_history
   saved_command_owner::apple_provisioning::preparation::tests::delegated_gui_start_uses_actual_before_take_handoff_but_inert_material_still_refuses
-  saved_command_owner::apple_provisioning::preparation::tests::delegated_prepare_rejects_desktop_only_key_recover_without_changing_context
+  saved_command_owner::apple_provisioning::preparation::tests::delegated_prepare_key_recover_keeps_selected_key_and_null_reference_without_authority
   saved_command_owner::apple_provisioning::tests::apple_original_clock_and_finite_representation_quote_are_not_renewed
   saved_command_owner::apple_provisioning::tests::apple_original_store_closure_keeps_mode_and_owner_gates
   saved_command_owner::apple_provisioning::tests::apple_start_parent_dispatch_matches_actual_initialized_modes
   saved_command_owner::tests::recovery_observation_needs_original_final_join_binding_not_just_a_success_report
   saved_command_owner::tests::recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_context_before_effects
   saved_command_owner::tests::signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work_or_material
+  saved_command_owner::tool_acquisition::agent::acquire::tests::equal_inspection_data_in_a_replaced_slot_cannot_satisfy_the_original_weak_identity
+  saved_command_owner::tool_acquisition::agent::acquire::tests::sixteen_original_partitions_project_only_missing_components_without_granting_a_join
+  saved_command_owner::tool_acquisition::agent::inspect::tests::first_start_source_cut_refuses_foreign_entry_without_retiring_prepared_or_borrowing_sources
   saved_command_owner::tool_acquisition::agent::inspect::tests::later_preparation_cannot_renew_original_allow_read_or_first_failure
   saved_command_owner::tool_acquisition::agent::inspect::tests::prepared_retirement_keeps_identity_before_start_and_waits_caller_and_history
   saved_command_owner::tool_acquisition::agent::inspect::tests::saved_inspect_wire_keeps_required_nulls_and_cannot_request_acquisition
@@ -337,8 +358,13 @@ selected_tests=(
   service_apple_provisioning_requests::preparation::tests::prepare_original_construction_caller_and_history_are_three_distinct_cuts
   service_apple_provisioning_requests::preparation::tests::prepare_original_receipt_read_and_scope_expiries_are_not_renewed
   service_apple_provisioning_requests::preparation::tests::prepare_scope_rejects_foreign_or_unbounded_metadata_before_retention
+  service_apple_provisioning_requests::tests::apple_cli_cancel_is_not_retirement_and_preserves_earliest_stop
+  service_apple_provisioning_requests::tests::apple_cli_dropped_call_or_history_is_absorbing_unknown
   service_apple_provisioning_requests::tests::apple_cli_exact_modes_and_status_payloads_remain_small_and_closed
   service_apple_provisioning_requests::tests::apple_cli_finite_roster_never_reclaims_terminal_or_unknown_rows
+  service_apple_provisioning_requests::tests::apple_cli_key_recover_report_is_compared_only_and_never_a_new_credential
+  service_apple_provisioning_requests::tests::apple_cli_read_revoke_and_wrong_doc_never_admit
+  service_apple_provisioning_requests::tests::apple_cli_triple_cut_in_both_native_caller_orders
   service_configuration_requests::images::tests::exact_old_image_origin_survives_next_grant_and_cross_family_collision_refuses
   service_configuration_requests::images::tests::image_nonce_tombstones_and_config_rows_share_original32_without_fake_origins
   service_configuration_requests::tests::duplicate_read_is_same_data_and_other_request_cannot_replace_live_or_unknown_original
@@ -394,6 +420,9 @@ selected_tests=(
   service_store_requests::tests::local_history_tests::local_history_same_request_reconnect_is_not_replay_and_exact_query_is_retained
   service_store_requests::tests::local_history_tests::local_history_shared32_and_discovery_use_one_namespace_without_reading_or_expiring_rows
   service_store_requests::tests::local_history_tests::local_history_triple_returns_and_progress_ack_never_settle_early
+  service_store_requests::tests::preparation_tests::candidate_upload_prepare_lost_return_failed_history_and_capacity_remain_absorbing
+  service_store_requests::tests::preparation_tests::candidate_upload_prepare_preserves_eleven_bytes_and_separates_present_execute_selection
+  service_store_requests::tests::preparation_tests::candidate_upload_prepare_requires_both_original_callers_native_and_history_before_result
   service_store_requests::tests::preparation_tests::later_prepare_excess_capacity_and_wrong_terminal_tuple_never_gain_success
   service_store_requests::tests::preparation_tests::later_prepare_preserves_seven_wire_shapes_and_requires_exact_kind_and_present_tuple
   service_store_requests::tests::preparation_tests::later_prepare_report_stays_owned_and_waits_for_original_start_and_history
@@ -410,12 +439,15 @@ selected_tests=(
   service_store_requests::tests::store_triple_cut_in_both_native_caller_orders
   service_tool_setup_protocol::tests::exact_struct_report_and_global_frame_bounds
   service_tool_setup_protocol::tests::five_closed_reviews_require_exact_pairs_and_no_extra_fields
+  service_tool_setup_protocol::tests::reviewed_acquire_is_omitted_for_old_six_and_requires_exact_non_null_partition
+  service_tool_setup_protocol::tests::reviewed_acquisition_status_has_a_new_identity_and_exact_staged_partition_with_bounded_heap
   service_tool_setup_protocol::tests::summaries_do_not_upgrade_completion_or_foreign_original
   service_tool_setup_requests::tests::bounded_consent_exhaustion_and_document_loss_do_not_reset
   service_tool_setup_requests::tests::cancelled_unentered_still_needs_actual_caller_and_history
   service_tool_setup_requests::tests::exact_duplicate_nonce_and_foreign_cancel_do_not_replay_or_stop
   service_tool_setup_requests::tests::lost_caller_history_and_contradictory_callback_stay_unknown
   service_tool_setup_requests::tests::quiet_read_facet_preserves_earliest_failure_and_absolute_permission
+  service_tool_setup_requests::tests::reviewed_acquisition_and_old_actions_share_original_32_rows_and_all_return_cuts
   service_tool_setup_requests::tests::three_real_return_slots_required_in_both_callback_orders
   service_upload_key_protocol::preparation::tests::prepared_comparison_is_bounded_and_never_a_grant_for_other_actions
   service_upload_key_requests::tests::attempted_preparation_without_install_and_lost_original_return_are_absorbing_unknown
@@ -469,7 +501,7 @@ selected_tests=(
   vault_store::macos::bound_read_tests::stored_record_read_checks_original_witness_and_allowance_before_body
   vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation
 )
-[[ "${#selected_tests[@]}" == 440 ]] || exit 1
+[[ "${#selected_tests[@]}" == 472 ]] || exit 1
 list_log="$MRK_MACOS_WORK/git-selected-contracts-list.log"
 run_log="$MRK_MACOS_WORK/git-selected-contracts.log"
 [[ ! -e "$list_log" && ! -L "$list_log" && ! -e "$run_log" && ! -L "$run_log" ]] || exit 1
@@ -479,12 +511,12 @@ cargo=("$rust_bin/cargo" test --locked --offline --jobs 1 --no-default-features
 # Ordinary Cargo list+run reuse the same one test binary. Exact count
 # and each-once checks prevent absent/renamed cfg tests passing as zero.
 "${cargo[@]}" "${selected_tests[@]}" --exact --list --color=never | /usr/bin/tee "$list_log"
-/usr/bin/grep -Fx '440 tests, 0 benchmarks' "$list_log"
+/usr/bin/grep -Fx '472 tests, 0 benchmarks' "$list_log"
 for test_name in "${selected_tests[@]}"; do
   [[ "$(/usr/bin/grep -Fxc "$test_name: test" "$list_log")" == 1 ]]
 done
 "${cargo[@]}" "${selected_tests[@]}" --exact --test-threads=1 --color=never --format=pretty | /usr/bin/tee "$run_log"
-/usr/bin/grep -Eq '^test result: ok\. 440 passed; 0 failed; 0 ignored;' "$run_log"
+/usr/bin/grep -Eq '^test result: ok\. 472 passed; 0 failed; 0 ignored;' "$run_log"
 
 # Real synthetic-record APFS backup, separate from the selected DATA checks.
 # Same compiled libtest/cache; no picker, Keychain or Desktop qualification.

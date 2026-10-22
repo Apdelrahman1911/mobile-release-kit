@@ -201,7 +201,15 @@ struct Linked {
     _doc: Arc<()>,
 }
 fn linked() -> Linked {
-    let (owner, mut p, old, old_inbox, doc) = super::super::tests::binding();
+    linked_input(None)
+}
+fn linked_input(input: Option<Input>) -> Linked {
+    let (mut owner, mut p, old, old_inbox, doc) = super::super::tests::binding();
+    if let Some(input) = input {
+        let context = input.context();
+        owner = SavedCommandOwner::new(RuntimeConfig::packaged("/unopened-store-runtime".into()), context.domain());
+        p.projection.context = context;
+    }
     let source = old.scope();
     let scope = queue::Scope::new(
         source.project_id.clone(),
@@ -469,5 +477,132 @@ fn store_stage_public_uuid_relation_matches_original_native_uuid4_mapper() {
             assert_eq!(native.is_some(), version == b'4' && matches!(variant, b'8' | b'9' | b'a' | b'b'));
             assert!(!flow::stage_operation_matches("12345678-1234-4234-8234-123456789abc", &id));
         }
+    }
+}
+
+fn upload_input(ios: bool) -> Input {
+    let mut raw = execute_wire::tests::input();
+    if ios {
+        raw["platform"] = "ios".into();
+        raw["confirmation"] = "candidate:ios:1.2.3:42".into();
+        raw.as_object_mut().unwrap().remove("toolchainSelection");
+    }
+    Input::parse(if ios { flow::Kind::IosCandidateUpload } else { flow::Kind::AndroidCandidateUpload }, &raw).unwrap()
+}
+const UPLOAD_AUTH: &str = "23456789-1234-4234-8234-123456789abc";
+fn upload_terminal_value(c: &execute_wire::Context) -> serde_json::Value {
+    let ios = c.platform == execute_wire::Platform::Ios;
+    let mut receipt = serde_json::json!({
+        "operationId":c.candidate_operation_id,"candidateSha256":c.candidate_sha256,"intentSha256":c.intent_sha256,
+        "receiptSha256":"f".repeat(64),"authorizationId":UPLOAD_AUTH,"sourceCommit":"a".repeat(40),"sourceTree":"b".repeat(40),
+        "version":{"name":c.saved_version.name,"build":c.saved_version.build},"observedAt":"2026-10-17T00:00:00Z",
+        "result":"accepted","limitations":execute_wire::LIMITATIONS,
+    });
+    if ios {
+        receipt["bundleId"] = "dev.example.app".into(); receipt["appStoreAppId"] = "0012345".into();
+        receipt["destination"] = serde_json::json!({"channel":"testflight-internal"});
+    } else {
+        receipt["applicationId"] = "dev.example.app".into();
+        receipt["destination"] = serde_json::json!({"channel":"internal","releaseStatus":"completed"});
+    }
+    serde_json::json!({"schemaVersion":1,"context":c,"outcome":"complete","reason":"none",
+        "result":{"schemaVersion":1,"scope":if ios {"local-ios-store-execute"}else{"local-android-store-execute"},"headSequence":7,"executionReceipt":receipt},
+        "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":if ios {16}else{14},
+            "profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}})
+}
+// Original six-frame Execute decoder, not a synthetic native completion. The
+// separately generated authorization remains distinct from Prepared/candidate.
+fn upload_terminal(c: &execute_wire::Context, value: serde_json::Value) -> Result<execute_wire::Terminal, BridgeError> {
+    let rows = [
+        ("accepted", serde_json::json!({"schemaVersion":1,"context":c})),
+        ("lease-ready", serde_json::json!({})),
+        ("history-head", serde_json::json!({"sequence":5,"sha256":"a".repeat(64)})),
+        ("execute-pending", serde_json::json!({"sequence":6,"sha256":"b".repeat(64)})),
+        ("execute-settled", serde_json::json!({"head":{"sequence":7,"sha256":"c".repeat(64)},"phase":"settled-success"})),
+        ("terminal", value),
+    ];
+    let mut decoder = execute_wire::Decoder::new(UPLOAD_AUTH)?;
+    let mut terminal = None;
+    for (sequence, (kind, payload)) in rows.into_iter().enumerate() {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "protocol":execute_wire::PROTOCOL,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
+            "nonce":"c".repeat(32),"requestSha256":"d".repeat(64),"sequence":sequence,"kind":kind,"payload":payload,
+        })).unwrap(); bytes.push(b'\n');
+        match decoder.decode(&bytes, &"a".repeat(32), &"b".repeat(32), c, &"c".repeat(32), &"d".repeat(64))? {
+            execute_wire::Frame::Accepted => assert_eq!(sequence, 0),
+            execute_wire::Frame::Event(_) => assert!((1..=4).contains(&sequence)),
+            execute_wire::Frame::Terminal(t) => { assert_eq!(sequence, 5); terminal = Some(t); }
+        }
+    }
+    assert!(decoder.finish());
+    Ok(terminal.unwrap())
+}
+#[test]
+fn store_candidate_upload_prepare_uses_original_execute_decoder_and_distinct_candidate_identity() {
+    for ios in [false, true] {
+        let input = upload_input(ios); let context = input.context();
+        assert_eq!(context.domain(), SavedCommandDomain::LocalStoreExecute);
+        let selected = input.selection().unwrap();
+        let Context::LocalStoreExecute(c) = &context else { unreachable!() };
+        assert_eq!(c.toolchain_selection.is_some(), !ios);
+        assert!(c.later.is_none() && c.stage_operation_id.is_none());
+        let review = flow::Review { review_id: id('a'), operation: p::Operation {
+            operation_id: id('a'), owner_generation: id('b'), status_revision: 3,
+        }};
+        let start = |consent: &str| execute_wire::start(&serde_json::json!({
+            "operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent,
+        }));
+        assert!(start(c.consent()).unwrap().matches_context(c));
+        for other in [prepare_wire::CONSENT, store_wire::CONSENT, selected.kind.consent()] {
+            assert!(start(other).is_err()); // service consent cannot replace the original native consent.
+        }
+        let value = upload_terminal_value(c);
+        let terminal = Terminal::LocalStoreExecute(upload_terminal(c, value.clone()).unwrap());
+        let report = project_report(&terminal, &context, &selected, &review).unwrap();
+        assert!(report.valid_for(&selected, &review) && report.bounded_capacity());
+        let out = serde_json::to_value(&report).unwrap();
+        assert_eq!(out["report"]["kind"], "execute");
+        assert_eq!(out["report"]["release"]["operationId"], c.candidate_operation_id);
+        assert_ne!(c.candidate_operation_id.replace('-', ""), review.operation.operation_id.as_str());
+        assert_eq!(out["report"]["release"]["target"], if ios { "testflight-internal" } else { "play-internal" });
+        for private in ["authorizationId", "sourceCommit", "context", "lifetime", "recordId", "toolchainSelection"] {
+            assert!(!out.to_string().contains(private));
+        }
+        let mut wrong = selected.clone(); wrong.execute.as_mut().unwrap().intent_sha256 = "0".repeat(64);
+        assert!(project_report(&terminal, &context, &wrong, &review).is_err());
+        for cut in 0..7 {
+            let mut bad = value.clone();
+            match cut {
+                0 => bad["result"]["executionReceipt"]["authorizationId"] = c.candidate_operation_id.clone().into(),
+                1 => bad["result"]["executionReceipt"]["operationId"] = UPLOAD_AUTH.into(),
+                2 => bad["result"]["executionReceipt"]["intentSha256"] = "0".repeat(64).into(),
+                3 => bad["lifetime"]["commands"] = serde_json::json!(if ios { 15 } else { 13 }),
+                4 => bad["lifetime"]["commandDispatched"] = false.into(),
+                5 => bad["result"]["headSequence"] = 6.into(),
+                _ => bad["lifetime"]["inputClosed"] = false.into(),
+            }
+            assert!(upload_terminal(c, bad).is_err(), "{ios}/{cut}");
+        }
+    }
+}
+#[test]
+fn store_candidate_upload_link_rejects_losing_gui_start_without_retiring_prepared() {
+    for ios in [false, true] {
+        let mut f = linked_input(Some(upload_input(ios)));
+        let p = f.prepared.take().unwrap(); let expires = p.expires;
+        assert_eq!(p.projection.context.domain(), f.owner.inner.domain);
+        f.owner.inner.lock().prepared = Some(p);
+        assert!(f.owner.ordinary_store_start_allowed(id('a').as_str(), id('b').as_str()).is_err());
+        let r = f.owner.inner.lock(); let original = r.prepared.as_ref().unwrap();
+        assert_eq!(original.expires, expires);
+        assert!(Arc::ptr_eq(original.agent_store_preparation.as_ref().unwrap(), &f.link));
+        assert!(!f.link.consumed.load(Ordering::Acquire));
+        assert!(!start_matches(original, None));
+        assert!(!f.link.matches(&f.owner.inner, original)); // no material/Start is fabricated.
+        drop(r);
+        f.caller.take().unwrap().returned(false); // post-install lost/error reply stays Unknown.
+        assert_eq!(f.link.entry.status().unwrap().phase, flow::Phase::Unknown);
+        assert!(f.link.entry.pending());
+        assert!(f.link.entry.allow_start(&f.link.review, id('6')).is_err());
     }
 }

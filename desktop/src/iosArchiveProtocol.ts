@@ -434,7 +434,7 @@ function operation(value: unknown): value is IOSArchiveOperation {
   if (value.context.operation === 'ios-local-recovery') return recoveryOperation(value, value.context);
   if (value.context.operation === 'ios-signing-inputs-check') return signingCheckOperation(value, value.context);
   if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', ...(Object.hasOwn(value,'agentIosArchive') ? ['agentIosArchive'] : [])]) ||
-      Object.hasOwn(value,'agentIosArchive') && (!['ios-unsigned-archive', 'ios-signed-export'].includes(value.context.operation) || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
+      Object.hasOwn(value,'agentIosArchive') && (!['ios-unsigned-archive', 'ios-signed-export', 'ios-candidate-inputs'].includes(value.context.operation) || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
       !(value.activity === null || activity(value.activity, value.context)) ||
       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
       !(value.result === null || (value.context.operation === 'ios-candidate-inputs' ? candidateResult(value.result, value.context, value.operationId) : result(value.result, value.context, value.operationId)))) return false;

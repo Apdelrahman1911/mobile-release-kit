@@ -20,6 +20,7 @@ fn quiet_read_revocation_interrupts_original_registration_wait_without_relay() {
                 source_generation: 0,
                 review_id: None,
             }),
+            acquisition: None,
         },
         root: "/not-opened".into(),
         device: 1,

@@ -2,6 +2,7 @@ import { parseToolSetupReview, sameToolSetupReview } from './agentToolSetup.ts';
 import type { ToolSetupReview, ToolSetupDelegation } from './agentToolSetup.ts';
 // App-held UI coordination, not a native owner. Only the original native
 // status after its own joins can report completion. A Promise/event cannot.
+import { reviewedAcquisitionReview } from './toolSetupAcquisition.ts';
 import { savedRequirementsReview } from './toolSetupSavedRequirements.ts';
 import type { SavedRequirementsOrigin } from './toolSetupSavedRequirements.ts';
 import { isDirty } from './drafts.ts';
@@ -461,19 +462,39 @@ export class ToolAcquisitionController {
   savedRequirementsReview(): ToolSetupReview | null {
     const a=this.attempt;
     if(a?.savedDelegation&&!a.terminalRead&&!a.notAdmitted)
-      return !a.retired&&this.current(a)&&!this.issue?a.savedDelegation.review:null;
+      return a.savedDelegation.review.kind==='inspect-saved-requirements'&&!a.retired&&this.current(a)&&!this.issue?a.savedDelegation.review:null;
     if(this.newWorkReason(false,false)||this.ownerReason()||this.currentPrerequisite())return null;
     return savedRequirementsReview(this.capture()?.context);
+  }
+  reviewedAcquisitionReview(): ToolSetupReview | null {
+    const a=this.attempt;
+    if(a?.savedDelegation&&!a.terminalRead&&!a.notAdmitted)
+      return a.savedDelegation.review.kind==='acquire-reviewed-missing'&&!a.retired&&this.current(a)&&!this.issue?a.savedDelegation.review:null;
+    if(this.reviewReason()||!this.inspection||!this.current(this.inspection))return null;
+    const i=this.inspection;
+    return reviewedAcquisitionReview(i.witness.context,i.identity,i.result.requirements.sourcesSha256,i.result.components);
+  }
+  delegateReviewedAcquisition(review:ToolSetupReview):ToolSetupDelegation|null {
+    if(this.attempt?.savedDelegation&&!this.attempt.terminalRead&&!this.attempt.notAdmitted)return null;
+    if(review.kind!=='acquire-reviewed-missing'||!sameToolSetupReview(this.reviewedAcquisitionReview(),review))return null;
+    const witness=this.capture(),i=this.inspection,a=review.acquisition;
+    if(!witness||!i||!a||!this.current(i))return null;
+    const context=parseToolAcquisitionContext({...witness.context,action:'acquire',review:{operationId:a.operationId,ownerGeneration:a.ownerGeneration,requirementsSha256:a.requirementsSha256}});
+    return context?this.delegateSavedPreparation(review,witness,context,i.result):null;
   }
   delegateSavedRequirements(review:ToolSetupReview):ToolSetupDelegation|null {
     if(this.attempt?.savedDelegation&&!this.attempt.terminalRead&&!this.attempt.notAdmitted)return null;
     if(!sameToolSetupReview(this.savedRequirementsReview(),review)||review.kind!=='inspect-saved-requirements')return null;
-    const witness=this.capture(),api=this.api,before=this.status;
-    if(!witness||!api||!before)return null;
-    const a:Attempt={witness,epoch:this.epoch,context:freeze({...witness.context}),after:before.statusRevision,previous:before.operation&&identity(before.operation),
+    const witness=this.capture();
+    return witness?this.delegateSavedPreparation(review,witness,witness.context,null):null;
+  }
+  private delegateSavedPreparation(review:ToolSetupReview,witness:Witness,context:ToolAcquisitionContext,requirements:ToolRequirementsObservation|null):ToolSetupDelegation|null {
+    const api=this.api,before=this.status;
+    if(!api||!before)return null;
+    const a:Attempt={witness,epoch:this.epoch,context:freeze({...context}),after:before.statusRevision,previous:before.operation&&identity(before.operation),
       beforeStatus:before,refusedBeforeAdmission:null,notAdmitted:false,identity:null,prepareSent:false,prepareJoined:false,prepareAccepted:false,
       startClaimed:true,startSent:false,startJoined:false,delegated:true,delegatedReturned:false,retired:false,unconfirmed:false,terminalRead:false,cancelRequested:false,cancelSent:false,
-      requirements:null,savedDelegation:{review,allowJoined:false,allowConfirmed:false,candidate:null,service:null}};
+      requirements,savedDelegation:{review,allowJoined:false,allowConfirmed:false,candidate:null,service:null}};
     // Install this closed service-origin attempt before notifying any listener.
     // It is NOT an invoked or joined GUI Prepare/Start.
     this.sourceFolders.retire();this.inspection=null;this.attempt=a;this.cancelIdentity=null;this.consentOpen=false;this.acknowledged=false;this.mutation++;this.publish();

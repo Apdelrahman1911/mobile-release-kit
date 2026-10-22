@@ -12,7 +12,7 @@ fn selected(kind: flow::Kind) -> flow::Selection {
         kind,
         saved_config: r.saved_config,
         saved_version: r.saved_version,
-        candidate: kind.prepares_intent().then(|| p::Candidate {
+        candidate: (kind.prepares_intent() || kind.candidate_upload().is_some()).then(|| p::Candidate {
             operation_id: "12345678-1234-4234-8234-123456789abc".into(),
             sha256: "e".repeat(64),
         }),
@@ -25,6 +25,7 @@ fn selected(kind: flow::Kind) -> flow::Selection {
             }.into(),
             predecessor_receipt_sha256: "f".repeat(64),
         }),
+        execute: kind.candidate_upload().map(|_| flow::ExecuteSelection { intent_sha256: "d".repeat(64) }),
     }
 }
 fn scope(f: &Fixture, kind: flow::Kind) -> Arc<queue::Scope> {
@@ -315,10 +316,10 @@ fn prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history() {
                 .returned(Ok(()))
                 .unwrap();
         } else {
-            let kind = if (n / 2) % 5 == 0 {
-                flow::Kind::PairedVersions
-            } else {
-                STAGE_KINDS[(n / 2) % 5 - 1]
+            let kind = match (n / 2) % 7 {
+                0 => flow::Kind::PairedVersions,
+                i @ 1..=4 => STAGE_KINDS[i - 1],
+                i => UPLOAD_KINDS[i - 5],
             };
             f.inbox
                 .allow_preparation(scope(&f, kind), id('3'))
@@ -345,7 +346,9 @@ fn prepare_and_original_rows_share_all_32_slots_and_keep_last_failed_history() {
             c.returned(true);
             let mut ndata = finished(&f);
             ndata.operation.operation_id = review.operation.operation_id;
-            ndata.result = Some(if kind.stage().is_some() { stage_report(&e.scope.selection) } else { flow::Report::CurrentVersions {
+            ndata.result = Some(if kind.stage().is_some() { stage_report(&e.scope.selection) } else if kind.candidate_upload().is_some() {
+                upload_report(&e.scope.selection)
+            } else { flow::Report::CurrentVersions {
                 inventory: inventory::Inventory::Both {
                     android: android(),
                     ios: ios(),
@@ -470,7 +473,7 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     // 32-byte DATA. Entry includes its inline row and both Native enum cells.
     let scope_cells =
         size_of::<queue::PrepareEntry>() + size_of::<queue::Scope>() + size_of::<Control>();
-    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + 36 + 64 + 32 * 24 + 512; // includes the new bounded predecessor tuple, never a second row.
+    let scope_heap = 4096 + 64 + 3 * 64 + 36 + 64 + 36 + 64 + 64 + 32 * 24 + 512; // retains old predecessor and new intent capacity; never another row.
     assert!(
         scope_cells + scope_heap <= 8192,
         "{scope_cells}+{scope_heap}"
@@ -483,7 +486,8 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
     // Three UUIDs, four hashes and the largest actual UTF-8 destination.
     // Six limitations are inline fixed DATA, no Vec capacity to discard.
     let stage_report_heap = 3 * 36 + 4 * 64 + 400 + 9;
-    let report_heap = original_report_heap.max(stage_report_heap);
+    let upload_report_heap = 2 * 36 + 3 * 64 + 8 * size_of::<p::release::Limitation>();
+    let report_heap = original_report_heap.max(stage_report_heap).max(upload_report_heap);
     assert!(size_of::<queue::Native>() + report_heap <= 8192);
     assert!(
         size_of::<flow::Status>() + size_of::<flow::Access>() + scope_heap + report_heap
@@ -508,6 +512,10 @@ fn prepare_complete_2mib_quote_includes_mixed_rows_native_history_and_all_copies
         .checked_add(gui_decode)
         .unwrap();
     assert!(complete <= p::DOCUMENT_BACKING);
+    // Preserve the existing History sibling's full potential term too. No
+    // credit for mutually exclusive kinds, empty slots or a failed claim.
+    assert!(complete.checked_add(512 * 1024).unwrap() <= p::DOCUMENT_BACKING);
+    assert_eq!(crate::service_store_requests::history::retained_document_backing(), Some(p::DOCUMENT_BACKING));
     assert_eq!(p::DOCUMENT_BACKING, 2 * 1024 * 1024);
     assert!(usize::MAX.checked_add(complete).is_none());
     let original_limit = crate::service_request_catalogue::ADDITIONAL_LIMIT;
@@ -653,4 +661,132 @@ fn later_prepare_excess_capacity_and_wrong_terminal_tuple_never_gain_success() {
     let mut over = scope(&f, flow::Kind::IosProductionSubmit);
     Arc::get_mut(&mut over).unwrap().selection.later.as_mut().unwrap().predecessor_operation_id.reserve(8192);
     assert!(f.inbox.allow_preparation(over, id('3')).is_err());
+}
+
+const UPLOAD_KINDS: [flow::Kind; 2] = [flow::Kind::AndroidCandidateUpload, flow::Kind::IosCandidateUpload];
+fn upload_report(s: &flow::Selection) -> flow::Report {
+    let platform = s.kind.candidate_upload().unwrap();
+    let candidate = s.candidate.as_ref().unwrap();
+    flow::Report::Ordinary { report: p::Report::Execute { release: p::release::Receipt {
+        mode: p::release::Mode::CandidateUpload,
+        head_sequence: 7,
+        operation_id: candidate.operation_id.clone(),
+        candidate_operation_id: candidate.operation_id.clone(),
+        candidate_sha256: candidate.sha256.clone(),
+        intent_sha256: s.execute.as_ref().unwrap().intent_sha256.clone(),
+        receipt_sha256: "e".repeat(64), basis: None,
+        target: p::release::Mode::CandidateUpload.target(platform),
+        result: p::release::ResultKind::Accepted, state: None,
+        limitations: p::release::Mode::CandidateUpload.limitations(),
+    }}}
+}
+#[test]
+fn candidate_upload_prepare_preserves_eleven_bytes_and_separates_present_execute_selection() {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OriginalSelection<'a> {
+        kind: flow::Kind, saved_config: &'a p::Content, saved_version: &'a p::Version,
+        candidate: &'a Option<p::Candidate>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        later: &'a Option<flow::StageSelection>,
+    }
+    let old = [flow::Kind::AndroidAccess, flow::Kind::IosAccess, flow::Kind::AndroidCandidate,
+        flow::Kind::IosCandidate, flow::Kind::AndroidVersions, flow::Kind::IosVersions, flow::Kind::PairedVersions,
+        STAGE_KINDS[0], STAGE_KINDS[1], STAGE_KINDS[2], STAGE_KINDS[3]];
+    for kind in old {
+        let s = selected(kind);
+        assert_eq!(serde_json::to_vec(&s).unwrap(), serde_json::to_vec(&OriginalSelection {
+            kind, saved_config: &s.saved_config, saved_version: &s.saved_version, candidate: &s.candidate, later: &s.later,
+        }).unwrap());
+        let mut explicit_null = serde_json::to_value(&s).unwrap();
+        explicit_null["execute"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<flow::Selection>(explicit_null).is_err());
+        let mut hybrid = s;
+        hybrid.execute = selected(UPLOAD_KINDS[0]).execute;
+        assert!(!hybrid.valid());
+    }
+    for kind in UPLOAD_KINDS {
+        let s = selected(kind);
+        assert!(s.valid() && s.bounded_capacity());
+        assert_eq!(kind.native_kind(), p::Kind::Execute);
+        assert!(!kind.prepares_intent() && !kind.inventory());
+        let review = flow::ordinary_review(&s, &r()).unwrap();
+        assert_eq!(review.kind, p::Kind::Execute);
+        assert_eq!(review.consent(), Some(kind.consent()));
+        assert!(old.iter().all(|old| old.consent() != kind.consent()));
+        assert_eq!(review.release.as_ref().unwrap().mode, p::release::Mode::CandidateUpload);
+        let mut missing = serde_json::to_value(&s).unwrap();
+        missing.as_object_mut().unwrap().remove("execute");
+        assert!(!serde_json::from_value::<flow::Selection>(missing).unwrap().valid());
+        let mut null = serde_json::to_value(&s).unwrap(); null["execute"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<flow::Selection>(null).is_err());
+        let mut mixed = s.clone(); mixed.later = selected(STAGE_KINDS[0]).later;
+        assert!(!mixed.valid());
+        for old in old {
+            let mut other = s.clone(); other.kind = old;
+            assert!(!other.valid());
+        }
+    }
+}
+#[test]
+fn candidate_upload_prepare_requires_both_original_callers_native_and_history_before_result() {
+    for kind in UPLOAD_KINDS {
+        for native_first in [false, true] {
+            let f = Fixture::new(); let (e, prepare) = enter(&f, kind);
+            prepared(&e);
+            assert!(e.allow_start(&r(), id('6')).is_err());
+            prepare.returned(true);
+            let start = start(&f, &e);
+            let report = upload_report(&e.scope.selection);
+            assert!(report.valid_for(&e.scope.selection, &r()) && report.bounded_capacity());
+            let mut native = finished(&f); native.result = Some(report.clone());
+            if native_first { e.native(native.clone()); assert!(e.claim_history().unwrap().is_none()); }
+            start.returned(true);
+            if !native_first { assert!(e.pending()); e.native(native); }
+            let history = e.claim_history().unwrap().unwrap();
+            assert!(e.pending() && e.status().unwrap().result.is_none());
+            history.returned(Ok(())).unwrap();
+            let original = e.status().unwrap(); original.validate().unwrap();
+            assert_eq!(original.result, Some(report)); assert!(!e.pending());
+            let bytes = serde_json::to_vec(&original).unwrap(); assert!(bytes.len() <= flow::STATUS_LIMIT);
+            let mut public = original.clone();
+            let Some(flow::Report::Ordinary { report: p::Report::Execute { release } }) = &mut public.result else { unreachable!() };
+            // Historical candidate UUID is not the new native Prepared ID.
+            assert_ne!(release.operation_id.replace('-', ""), r().operation.operation_id.as_str());
+            release.operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+            assert!(public.validate().is_err()); assert_eq!(e.status().unwrap(), original);
+        }
+    }
+}
+#[test]
+fn candidate_upload_prepare_lost_return_failed_history_and_capacity_remain_absorbing() {
+    for kind in UPLOAD_KINDS {
+        for cut in 0..4 {
+            let f = Fixture::new(); let (e, prepare) = enter(&f, kind);
+            prepared(&e);
+            if cut == 0 { prepare.returned(false); }
+            else {
+                prepare.returned(true);
+                let start = start(&f, &e);
+                if cut == 1 { drop(start); } else { start.returned(true); }
+                let mut report = upload_report(&e.scope.selection);
+                if cut == 3 {
+                    let flow::Report::Ordinary { report: p::Report::Execute { release } } = &mut report else { unreachable!() };
+                    release.intent_sha256.reserve(8192);
+                    assert!(report.valid_for(&e.scope.selection, &r()) && !report.bounded_capacity());
+                }
+                let mut native = finished(&f); native.result = Some(report); e.native(native);
+                if cut == 2 { assert!(e.claim_history().unwrap().unwrap().returned(Err(Error::Unavailable)).is_err()); }
+            }
+            let mut later = finished(&f); later.result = Some(upload_report(&e.scope.selection)); e.native(later);
+            assert_eq!(e.status().unwrap().phase, flow::Phase::Unknown);
+            assert!(e.pending() && e.status().unwrap().result.is_none());
+            assert!(e.allow_start(&r(), id('7')).is_err());
+            assert!(e.claim_history().unwrap().is_none());
+            assert!(f.inbox.claim_preparation().unwrap().is_none());
+        }
+        let f = Fixture::new(); let mut over = scope(&f, kind);
+        Arc::get_mut(&mut over).unwrap().selection.execute.as_mut().unwrap().intent_sha256.reserve(8192);
+        assert!(f.inbox.allow_preparation(over, id('3')).is_err());
+    }
 }

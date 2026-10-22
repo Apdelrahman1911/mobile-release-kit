@@ -4,12 +4,15 @@ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
 import { startEnvironmentDiagnosticsFits } from './environmentDiagnosticsProtocol.ts';
 import { copyAndroidBuildRequest } from './androidBuildProtocol.ts';
 import { TOOL_ACQUISITION_CONSENT } from './toolAcquisitionProtocol.ts';
+import { parseToolSetupAcquisition, reviewedAcquisitionContext } from './toolSetupAcquisition.ts';
+import type { ToolSetupAcquisition } from './toolSetupAcquisition.ts';
 import { savedRequirementsContext } from './toolSetupSavedRequirements.ts';
 import { ANDROID_TOOL_REGISTRATION_CONSENT } from './androidToolRegistration.ts';
 import type { JsonObject } from './types.ts';
-export const TOOL_SETUP_KINDS = ['doctor','inspect-requirements','acquire-missing','inspect-picked-sources','register-reviewed-sources','inspect-saved-requirements'] as const;
+export const TOOL_SETUP_KINDS = ['doctor','inspect-requirements','acquire-missing','inspect-picked-sources','register-reviewed-sources','inspect-saved-requirements','acquire-reviewed-missing'] as const;
 export type ToolSetupKind = typeof TOOL_SETUP_KINDS[number];
 export interface ToolSetupReview {
+  readonly acquisition?: ToolSetupAcquisition;
   readonly kind: ToolSetupKind; readonly platform: 'android'|'ios'; readonly draftRevision: number; readonly baselineGeneration: number;
   readonly prepared: { readonly operationId: string; readonly ownerGeneration: string; readonly statusRevision: number } | null;
   readonly sources: { readonly registrationGeneration: number; readonly sourceGeneration: number; readonly reviewId: string|null } | null;
@@ -53,8 +56,9 @@ const keys=(v:unknown,n:readonly string[]):v is Record<string,unknown>=>record(v
 const one=(v:unknown,a:readonly string[])=>typeof v==='string'&&a.includes(v);
 export function freezeToolSetup<T>(v:T):T{if(v&&typeof v==='object'&&!Object.isFrozen(v)){Object.values(v).forEach(freezeToolSetup);Object.freeze(v);}return v;}
 function review(v:unknown):v is ToolSetupReview {
-  if(!keys(v,['kind','platform','draftRevision','baselineGeneration','prepared','sources'])||!one(v.kind,TOOL_SETUP_KINDS)||!one(v.platform,['android','ios'])||
+  if(!record(v)||!keys(v,v.kind==='acquire-reviewed-missing'?['kind','platform','draftRevision','baselineGeneration','prepared','sources','acquisition']:['kind','platform','draftRevision','baselineGeneration','prepared','sources'])||!one(v.kind,TOOL_SETUP_KINDS)||!one(v.platform,['android','ios'])||
       !uint(v.draftRevision)||!uint(v.baselineGeneration)||v.kind!=='doctor'&&v.platform!=='android')return false;
+  if(v.kind==='acquire-reviewed-missing')return v.prepared===null&&v.sources===null&&parseToolSetupAcquisition(v.acquisition)!==null;
   if(v.kind==='doctor'||v.kind==='inspect-saved-requirements')return v.prepared===null&&v.sources===null;
   if(v.kind==='inspect-requirements'||v.kind==='acquire-missing')return v.sources===null&&keys(v.prepared,['operationId','ownerGeneration','statusRevision'])&&
     toolSetupId(v.prepared.operationId)&&toolSetupId(v.prepared.ownerGeneration)&&uint(v.prepared.statusRevision,1);
@@ -64,7 +68,7 @@ function review(v:unknown):v is ToolSetupReview {
 export function parseToolSetupReview(raw:unknown):ToolSetupReview|null{try{const v=copyBoundedComparisonData(raw,1024,48);return review(v)?freezeToolSetup(v):null;}catch{return null;}}
 export const sameToolSetupReview=(a:ToolSetupReview|null,b:ToolSetupReview|null):boolean=>a===null||b===null?a===b:JSON.stringify(a)===JSON.stringify(b);
 export const toolSetupConsent=(kind:ToolSetupKind):string=>({doctor:'agent-tool-doctor-once-v1','inspect-requirements':'agent-tool-requirements-once-v1',
-  'inspect-saved-requirements':'agent-tool-inspect-saved-once-v1','acquire-missing':'agent-tool-acquire-missing-once-v1','inspect-picked-sources':'agent-tool-inspect-picked-once-v1','register-reviewed-sources':'agent-tool-register-reviewed-once-v1'})[kind];
+  'inspect-saved-requirements':'agent-tool-inspect-saved-once-v1','acquire-missing':'agent-tool-acquire-missing-once-v1','acquire-reviewed-missing':'agent-tool-acquire-reviewed-missing-once-v1','inspect-picked-sources':'agent-tool-inspect-picked-once-v1','register-reviewed-sources':'agent-tool-register-reviewed-once-v1'})[kind];
 const query=(v:unknown):v is ToolSetupQuery=>keys(v,['projectId','serviceInstance','requestId'])&&Object.values(v).every(toolSetupId);
 const components=['jdk','gradle','android-platform','android-build-tools'];
 const unique=(v:unknown,max:number,values:readonly string[])=>Array.isArray(v)&&v.length<=max&&v.every(x=>one(x,values))&&new Set(v).size===v.length;
@@ -78,6 +82,7 @@ function report(v:unknown,r:ToolSetupReview):boolean {
       one(c.check,['developer-selection','git','java','javac','xcode'])&&one(c.status,['ok','failed','unavailable','skipped']))&&new Set(v.checks.map(c=>c.check)).size===v.checks.length;
     case 'inspect-saved-requirements':
     case 'inspect-requirements':return keys(v,['kind','missing'])&&unique(v.missing,4,components);
+    case 'acquire-reviewed-missing':return keys(v,['kind','staged'])&&Array.isArray(v.staged)&&JSON.stringify(v.staged)===JSON.stringify(r.acquisition?.missing);
     case 'acquire-missing':return keys(v,['kind','staged'])&&unique(v.staged,4,components)&&(v.staged as unknown[]).length>0;
     case 'inspect-picked-sources':return keys(v,['kind','sources'])&&sources(v.sources)&&v.sources.length===3;
     case 'register-reviewed-sources':return keys(v,['kind','copy','sources'])&&one(v.copy,['not-created','published','retained-partial'])&&sources(v.sources);
@@ -89,7 +94,8 @@ function status(v:unknown):v is ToolSetupStatus {
       !uint(v.revision,1)||!review(v.review)||!one(v.reason,reasons)||v.result!==null&&!report(v.result,v.review))return false;
   if(v.operation!==null){const o=v.operation,r=v.review;if(!keys(o,['operationId','ownerGeneration','registrationGeneration'])||!toolSetupId(o.operationId))return false;
     if(r.sources){if(o.ownerGeneration!==null||!uint(o.registrationGeneration)||o.registrationGeneration!==r.sources.registrationGeneration+1)return false;}
-    else if(!toolSetupId(o.ownerGeneration)||o.registrationGeneration!==null||r.prepared&&(o.operationId!==r.prepared.operationId||o.ownerGeneration!==r.prepared.ownerGeneration))return false;
+    else if(!toolSetupId(o.ownerGeneration)||o.registrationGeneration!==null||r.prepared&&(o.operationId!==r.prepared.operationId||o.ownerGeneration!==r.prepared.ownerGeneration)||
+      r.acquisition&&(o.operationId===r.acquisition.operationId||o.ownerGeneration===r.acquisition.ownerGeneration))return false;
   }
   if(v.state==='unknown')return v.settlement==='unknown'&&v.outcome==='unknown'&&v.result===null&&one(v.reason,['cleanup-unknown','history-unavailable']);
   if(one(v.state,['complete','failed','refused','cancelled','expired'])){
@@ -125,6 +131,11 @@ export function copyToolSetupInput(raw:unknown):ToolSetupInput|null{try{
     return freezeToolSetup({projectId:raw.projectId,review:r,doctorDraft:structuredClone(raw.doctorDraft) as JsonObject,sourceContext:null,nativeConsent:null,licenseAcknowledged:false});
   }
   if(raw.doctorDraft!==null)return null;
+  if(r.kind==='acquire-reviewed-missing'){
+    const context=reviewedAcquisitionContext(raw.sourceContext,r,raw.projectId);
+    if(!context||raw.nativeConsent!==TOOL_ACQUISITION_CONSENT||raw.licenseAcknowledged!==false)return null;
+    return freezeToolSetup({projectId:raw.projectId,review:r,doctorDraft:null,sourceContext:context as unknown as Record<string,unknown>,nativeConsent:TOOL_ACQUISITION_CONSENT,licenseAcknowledged:false});
+  }
   if(r.kind==='inspect-saved-requirements'){
     const context=savedRequirementsContext(raw.sourceContext,r,raw.projectId);
     if(!context||raw.nativeConsent!==TOOL_ACQUISITION_CONSENT||raw.licenseAcknowledged!==false)return null;
@@ -145,10 +156,11 @@ export function createAgentToolSetupPort(invoke:(name:string,raw:Uint8Array)=>Pr
 }
 export function toolSetupCommands(raw:AgentToolSetupAccess|null):readonly string[]{const a=parseAgentToolSetupAccess(raw);if(!a?.grantId)return [];const ids=`${a.projectId} ${a.serviceInstance}`;
   return a.requestId?[`mrk tool-setup-status ${ids} ${a.requestId}`,`mrk tool-setup-cancel ${ids} ${a.requestId}`]:a.enabled?[`mrk tool-setup-submit ${ids} ${a.grantId} ${a.reviewId} --reviewed`]:[];}
-export const toolSetupLabel:Readonly<Record<ToolSetupKind,string>>=Object.freeze({'inspect-saved-requirements':'Prepare and inspect current saved requirements',doctor:'Check tools for the approved draft','inspect-requirements':'Inspect saved project requirements','acquire-missing':'Download only the reviewed missing tools','inspect-picked-sources':'Inspect the three chosen tool folders','register-reviewed-sources':'Make the reviewed protected tool copy'});
+export const toolSetupLabel:Readonly<Record<ToolSetupKind,string>>=Object.freeze({'acquire-reviewed-missing':'Prepare and download the inspected missing tools','inspect-saved-requirements':'Prepare and inspect current saved requirements',doctor:'Check tools for the approved draft','inspect-requirements':'Inspect saved project requirements','acquire-missing':'Download only the reviewed missing tools','inspect-picked-sources':'Inspect the three chosen tool folders','register-reviewed-sources':'Make the reviewed protected tool copy'});
 export const toolSetupEffect:Readonly<Record<ToolSetupKind,string>>=Object.freeze({doctor:'Runs the existing fixed tool probes against an immutable copy of the draft approved below. Later edits do not change that copy. It is not a saved-file or build-readiness check.',
   'inspect-saved-requirements':'Prepares and inspects only these currently saved project requirements. It does not download, select or register tools. Saved input and catalogue checks remain required.',
   'inspect-requirements':'Starts only the original prepared requirements inspection. It does not download, select or register tools.',
+  'acquire-reviewed-missing':'Prepares and stages only the missing components from this exact completed inspection. Checked cached archives are reused; compatible chosen tools are kept. A partial Android SDK copies only its checked compatible sibling. Source pickers, inspection and protected-copy approval remain separate.',
   'acquire-missing':'Uses the original missing-component review and pinned public downloads. Existing compatible tools are not replaced. Staged folders still require the ordinary picker and inspection.',
   'inspect-picked-sources':'Checks the three folders already chosen in Desktop, with the original saved project inputs. It does not make a protected copy.',
   'register-reviewed-sources':'Consumes the current native inspection review and vendor-license approval to make the protected copy. Catalogue recovery/selection and build checks remain separate.'});

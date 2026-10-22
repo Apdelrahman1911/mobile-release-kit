@@ -46,7 +46,8 @@ fn actual_review_document_source_future_and_retained_payload_obey_original_cap()
             credential_format::FileKind::GoogleServiceAccount,
         ),
     ] {
-        let observation = credential_format::inspect(file_kind, &[], &mut || false).unwrap();
+        let observation = credential_format::inspect(file_kind, &[], &mut || false)
+            .unwrap_or_else(|_| panic!("inert credential observation interrupted"));
         state.records.push(Record {
             key: RecordKey {
                 id: Token(id.into()),
@@ -88,7 +89,8 @@ fn actual_review_document_source_future_and_retained_payload_obey_original_cap()
     assert!(crate::macos_history_inventory::admission_bytes(debit, future).is_some());
     assert!(version_allocation::source_quote(usize::MAX).is_none());
     let observation =
-        credential_format::inspect(credential_format::FileKind::AscP8, &[], &mut || false).unwrap();
+        credential_format::inspect(credential_format::FileKind::AscP8, &[], &mut || false)
+            .unwrap_or_else(|_| panic!("inert credential observation interrupted"));
     state.records.push(Record {
         key: RecordKey {
             id: Token("overbound-review".into()),

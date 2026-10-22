@@ -91,6 +91,7 @@ mod service_version_reserve_requests;
 #[path = "../src/service_repository_summary.rs"] mod service_repository_summary;
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
 #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
+#[path = "../src/agent_candidate_build.rs"] mod agent_candidate_build;
 #[path = "../src/agent_android_build.rs"] mod agent_android_build;
 #[path = "../src/agent_build_requests.rs"] mod agent_build_requests;
 #[path = "../src/agent_ios_archive.rs"] mod agent_ios_archive;

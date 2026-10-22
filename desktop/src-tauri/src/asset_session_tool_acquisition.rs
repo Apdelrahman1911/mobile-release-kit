@@ -327,6 +327,15 @@ impl DocumentBinding {
     pub(super) fn tool_inspect_input(&self, state: &DocumentState, input: &wire::Context,
         edit: &crate::edit_owner::SavedEditGuard<'_>) -> Result<Arc<ToolAcquisitionDocumentInput>, BridgeError> {
         if !input.valid() || input.action != wire::Action::Inspect || input.review.is_some() { return Err(wire::invalid()); }
+        self.tool_saved_preparation_input(state, input, edit)
+    }
+    pub(super) fn tool_reviewed_acquire_input(&self, state: &DocumentState, input: &wire::Context,
+        edit: &crate::edit_owner::SavedEditGuard<'_>) -> Result<Arc<ToolAcquisitionDocumentInput>, BridgeError> {
+        if !input.valid() || input.action != wire::Action::Acquire || input.review.is_none() { return Err(wire::invalid()); }
+        self.tool_saved_preparation_input(state, input, edit)
+    }
+    fn tool_saved_preparation_input(&self, state: &DocumentState, input: &wire::Context,
+        edit: &crate::edit_owner::SavedEditGuard<'_>) -> Result<Arc<ToolAcquisitionDocumentInput>, BridgeError> {
         let (registration, root) = self.inner.bridge.native_project(&input.project_id).map_err(|_| wire::invalid())?;
         let roster = self.inner.bridge.native_roster().map_err(|_| wire::invalid())?;
         if roster.generation != registration || roster.roots.len() > 64 || !roster.roots.contains(&root)
@@ -438,7 +447,7 @@ impl DocumentBinding {
         let mut state = self.lock();
         let owner = &self.inner.bridge.tool_acquisition;
         let original = owner
-            .prepared_tool_acquisition_document(&input.operation_id, &input.owner_generation)?;
+            .prepared_tool_acquisition_document(&input.operation_id, &input.owner_generation, entry)?;
         let gate = self.tool_acquisition_gate(&state);
         if gate != wire::Availability::Available {
             owner.context_changed();

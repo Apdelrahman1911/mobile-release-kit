@@ -1,5 +1,5 @@
-import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, signedAndroidAgentInput } from './agentAndroidSigned.ts';
-export { AGENT_ANDROID_BUILD_SIGNED_CONSENT } from './agentAndroidSigned.ts';
+import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, AGENT_ANDROID_CANDIDATE_CONSENT, signedAndroidAgentInput, candidateAndroidAgentInput } from './agentAndroidSigned.ts';
+export { AGENT_ANDROID_BUILD_SIGNED_CONSENT, AGENT_ANDROID_CANDIDATE_CONSENT } from './agentAndroidSigned.ts';
 import { BuildPermission } from './agentBuildPermission.ts';
 // A single exact-input START permission, separate from reading and local checks.
 // The existing Android controller owns display/STOP; this creates no executor.
@@ -27,8 +27,8 @@ export function copyAndroidBuildApproval(value: unknown): AndroidBuildApproval |
     if (!keys(v, ['input', 'toolchainSelection'])) return null;
     const input = copyAndroidBuildRequest('prepare_android_build', v.input) as PrepareAndroidBuild | null;
     const selected = parseAndroidMacToolchainSelection(v.toolchainSelection);
-    if (!input || input.operation !== undefined || input.action !== undefined || !selected) return null;
-    if (input.signing !== undefined ? !signedAndroidAgentInput(input) :
+    if (!input || !selected || (input.operation !== undefined || input.action !== undefined) && !candidateAndroidAgentInput(input)) return null;
+    if (input.signing !== undefined ? !(signedAndroidAgentInput(input) || candidateAndroidAgentInput(input)) :
         input.artifactValidation.mode !== 'structure-and-version' || input.artifactValidation.uploadCertificateSha256 !== null) return null;
     if (input.signing) { for (const row of input.signing.assignments) Object.freeze(row); Object.freeze(input.signing.assignments); Object.freeze(input.signing); }
     Object.freeze(input.savedConfig); Object.freeze(input.savedVersion); Object.freeze(input.artifactValidation);
@@ -39,7 +39,7 @@ export function encodeAndroidBuildAccessRequest(command: Command, value: unknown
   try {
     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
     if (command === 'allow_agent_android_build') {
-      if (!keys(v, ['input', 'toolchainSelection', 'consentVersion', 'expectedPermissionRevision']) || v.consentVersion !== ((v.input as PrepareAndroidBuild)?.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT) || !buildPermissionRevision(v.expectedPermissionRevision) ||
+      if (!keys(v, ['input', 'toolchainSelection', 'consentVersion', 'expectedPermissionRevision']) || v.consentVersion !== ((v.input as PrepareAndroidBuild)?.operation === 'android-candidate-inputs' ? AGENT_ANDROID_CANDIDATE_CONSENT : (v.input as PrepareAndroidBuild)?.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT) || !buildPermissionRevision(v.expectedPermissionRevision) ||
           !copyAndroidBuildApproval({ input: v.input, toolchainSelection: v.toolchainSelection })) return null;
     } else if ((command !== 'agent_android_build_access' && command !== 'revoke_agent_android_build') || !keys(v, [])) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= REQUEST_LIMIT ? bytes : null;
@@ -54,7 +54,7 @@ export function createAgentAndroidBuildApi(mode: string, invoke: Invoke): AgentA
     catch { return Promise.reject(refusal()); }
   };
   return Object.freeze({ status: () => call('agent_android_build_access', {}),
-    allow: (input: AndroidBuildApproval, expectedPermissionRevision: string) => { const safe = copyAndroidBuildApproval(input); return safe ? call('allow_agent_android_build', { ...safe, consentVersion: safe.input.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT, expectedPermissionRevision }) : Promise.reject(refusal()); },
+    allow: (input: AndroidBuildApproval, expectedPermissionRevision: string) => { const safe = copyAndroidBuildApproval(input); return safe ? call('allow_agent_android_build', { ...safe, consentVersion: safe.input.operation === 'android-candidate-inputs' ? AGENT_ANDROID_CANDIDATE_CONSENT : safe.input.signing ? AGENT_ANDROID_BUILD_SIGNED_CONSENT : AGENT_ANDROID_BUILD_CONSENT, expectedPermissionRevision }) : Promise.reject(refusal()); },
     revoke: () => call('revoke_agent_android_build', {}) });
 }
 export type PermissionContext = import('./agentBuildPermission.ts').PermissionContext<AndroidBuildApproval>;
@@ -62,4 +62,5 @@ export type { PermissionState } from './agentBuildPermission.ts';
 export class AgentAndroidBuildPermission extends BuildPermission<AndroidBuildApproval> {
   constructor(current?:()=>PermissionContext){super(copyAndroidBuildApproval,current);}
   signingSelected(): boolean { return this.comparison()?.input.signing !== undefined; }
+  candidateSelected(): boolean { return this.comparison()?.input.operation === 'android-candidate-inputs'; }
 }

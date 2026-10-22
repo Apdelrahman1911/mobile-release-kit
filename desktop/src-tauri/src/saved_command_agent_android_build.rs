@@ -64,7 +64,7 @@ fn same_context(
     };
     let s = entry.scope();
     let Some(review) = s.review.android() else { return false };
-    (if review.mode == agent::Mode::SavedAndroidLocalUploadKeySign { signed::same(c, review) }
+    (if matches!(review.mode, agent::Mode::SavedAndroidLocalUploadKeySign | agent::Mode::SavedAndroidCandidateInputs) { signed::same(c, review) }
         else { c.operation == android_wire::Operation::AndroidBuildInspect && c.signing.is_none() && c.action.is_none()
             && c.artifact_validation.mode == android_wire::ValidationMode::StructureAndVersion
             && c.artifact_validation.upload_certificate_sha256.is_none() })
@@ -169,9 +169,7 @@ fn projection(
     let Context::AndroidBuild(c) = &p.context else {
         return Err(failure());
     };
-    if !matches!(c.operation, android_wire::Operation::AndroidBuildInspect | android_wire::Operation::AndroidBuildSign)
-        || c.action.is_some()
-        || (!c.signed() && c.artifact_validation.mode != android_wire::ValidationMode::StructureAndVersion)
+    if !c.agent_context()
     {
         return Err(failure());
     }
@@ -202,7 +200,8 @@ fn projection(
                 Some(copy(&t.disposition)?),
                 if outcome == agent::Outcome::Complete {
                     let native = t.result.as_ref().ok_or_else(failure)?;
-                    Some(if c.signed() { native.agent_signed_report(c)? } else { report(native)? })
+                    Some(if c.candidate() { native.agent_candidate_report(c, &p.operation_id)? }
+                        else if c.signed() { native.agent_signed_report(c)? } else { report(native)? })
                 } else {
                     None
                 },
@@ -327,7 +326,8 @@ impl SavedCommandOwner {
             .filter(|s| s.data() == selected && s.matches_owner(&self.inner))
             .ok_or_else(failure)?;
         let review = agent::Review {
-            mode: if input.signing.is_some() { agent::Mode::SavedAndroidLocalUploadKeySign } else { agent::Mode::SavedAndroidBuildStructureAndVersion },
+            mode: if input.context().candidate() { agent::Mode::SavedAndroidCandidateInputs }
+                else if input.signing.is_some() { agent::Mode::SavedAndroidLocalUploadKeySign } else { agent::Mode::SavedAndroidBuildStructureAndVersion },
             signing: input.signing.as_ref().map(signed::selection).transpose()?,
             upload_certificate_sha256: input.artifact_validation.upload_certificate_sha256.as_deref().and_then(agent::signed::fingerprint),
             saved_config: agent::Config {
@@ -382,7 +382,7 @@ impl SavedCommandOwner {
         let p = r.prepared.as_ref().filter(|p| start_matches(p, Some(entry))).ok_or_else(failure)?;
         match (&p.projection.context, &p.material) {
             (Context::AndroidBuild(c), Some(PrivateSigningMaterial::Android(m)))
-                if c.operation == android_wire::Operation::AndroidBuildSign => Ok(Some(m.clone())),
+                if c.agent_context() && c.signed() => Ok(Some(m.clone())),
             (Context::AndroidBuild(c), None) if c.operation == android_wire::Operation::AndroidBuildInspect => Ok(None),
             _ => Err(failure()),
         }
@@ -728,4 +728,17 @@ mod tests {
             assert!(!encoded.contains(text));
         }
     }
+    #[test]
+    fn candidate_terminal_projection_still_requires_original_retirement() {
+        let context=android_wire::tests::candidate_context();let raw=android_wire::tests::candidate_complete();
+        let terminal=android_wire::terminal(&raw, &context).unwrap();
+        let mut p=RunProjection {agent_local_check:None,agent_build:None,operation_id:android_wire::tests::CANDIDATE_ID.into(),owner_generation:"b".repeat(32),
+            context:Context::AndroidBuild(context),phase:Phase::Stopping,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,
+            result:Some(Terminal::AndroidBuild(terminal)),stage:Some(Stage::AndroidBuild(android_wire::Stage::DisposingWork))};
+        let pending=projection(&p,1,false).unwrap();assert!(pending.result.is_none());assert_eq!(pending.settlement,service::Settlement::Pending);
+        assert!(projection(&p,1,true).is_err());p.phase=Phase::Terminal;assert!(projection(&p,2,false).is_err());
+        let known=projection(&p,2,true).unwrap();assert!(known.result.as_ref().unwrap().candidate.is_some());assert_eq!(known.settlement,service::Settlement::Settled);
+        p.phase=Phase::Unknown;p.reason=Reason::CleanupUnknown;let unknown=projection(&p,3,false).unwrap();assert!(unknown.result.is_none());assert_eq!(unknown.settlement,service::Settlement::Unknown);
+    }
+
 }

@@ -317,6 +317,7 @@ fn local_history_and_existing_store_preparation_exclude_only_live_originals() {
         saved_version: review().saved_version,
         candidate: None,
         later: None,
+        execute: None,
     };
     let ps = crate::service_store_requests::preparation::Scope::new(
         id('1'),

@@ -138,6 +138,7 @@ impl EnvironmentDiagnosticsOwner {
             baseline_generation: context.baseline_generation,
             prepared: None,
             sources: None,
+            acquisition: None,
         };
         if !review.valid() || !root.is_absolute() {
             return Err(invalid());

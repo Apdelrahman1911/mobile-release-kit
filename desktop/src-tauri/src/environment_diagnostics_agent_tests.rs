@@ -13,6 +13,7 @@ fn link(doc: &Arc<()>, end: Instant) -> Arc<req::NativeLink> {
             baseline_generation: 1,
             prepared: None,
             sources: None,
+            acquisition: None,
         },
         root: "/not-opened".into(),
         device: 1,

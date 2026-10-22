@@ -64,6 +64,11 @@ impl Fixture {
             scope,
         }
     }
+    fn for_mode(mode: p::Mode) -> Self {
+        let mut fixture = Self::new();
+        Arc::get_mut(&mut fixture.scope).unwrap().review.mode = mode;
+        fixture
+    }
     fn allow(&self) {
         self.inbox.allow(self.scope.clone(), id('3')).unwrap();
     }
@@ -93,7 +98,11 @@ impl Fixture {
             reason: p::Reason::None,
             outcome: Some(p::Outcome::Complete),
             result: Some(p::Report {
-                decision: "review-required".into(),
+                decision: if self.scope.review.mode == p::Mode::KeyRecover {
+                    "compared"
+                } else {
+                    "review-required"
+                }.into(),
                 comparison: None,
                 attempt: None,
                 certificate_id: None,
@@ -108,8 +117,12 @@ impl Fixture {
 }
 #[test]
 fn apple_cli_triple_cut_in_both_native_caller_orders() {
+    apple_cli_triple_cut_in_both_native_caller_orders_for_mode(p::Mode::Review);
+    apple_cli_triple_cut_in_both_native_caller_orders_for_mode(p::Mode::KeyRecover);
+}
+fn apple_cli_triple_cut_in_both_native_caller_orders_for_mode(mode: p::Mode) {
     for native_first in [false, true] {
-        let f = Fixture::new();
+        let f = Fixture::for_mode(mode);
         f.allow();
         let e = f.submit();
         let claim = f.inbox.claim().unwrap().unwrap();
@@ -164,8 +177,12 @@ fn apple_cli_history_progress_ack_cannot_settle_later_native_terminal() {
 }
 #[test]
 fn apple_cli_dropped_call_or_history_is_absorbing_unknown() {
+    apple_cli_dropped_call_or_history_is_absorbing_unknown_for_mode(p::Mode::Review);
+    apple_cli_dropped_call_or_history_is_absorbing_unknown_for_mode(p::Mode::KeyRecover);
+}
+fn apple_cli_dropped_call_or_history_is_absorbing_unknown_for_mode(mode: p::Mode) {
     for caller in [true, false] {
-        let f = Fixture::new();
+        let f = Fixture::for_mode(mode);
         f.allow();
         let e = f.submit();
         let c = f.inbox.claim().unwrap().unwrap();
@@ -229,7 +246,11 @@ fn apple_cli_same_request_reconnect_does_not_reexecute_and_grant_consumes_once()
 }
 #[test]
 fn apple_cli_cancel_is_not_retirement_and_preserves_earliest_stop() {
-    let f = Fixture::new();
+    apple_cli_cancel_is_not_retirement_and_preserves_earliest_stop_for_mode(p::Mode::Review);
+    apple_cli_cancel_is_not_retirement_and_preserves_earliest_stop_for_mode(p::Mode::KeyRecover);
+}
+fn apple_cli_cancel_is_not_retirement_and_preserves_earliest_stop_for_mode(mode: p::Mode) {
+    let f = Fixture::for_mode(mode);
     f.allow();
     let e = f.submit();
     let at = e.submitted_at();
@@ -255,8 +276,12 @@ fn apple_cli_unknown_does_not_renew_original_cutoff() {
 }
 #[test]
 fn apple_cli_read_revoke_and_wrong_doc_never_admit() {
+    apple_cli_read_revoke_and_wrong_doc_never_admit_for_mode(p::Mode::Review);
+    apple_cli_read_revoke_and_wrong_doc_never_admit_for_mode(p::Mode::KeyRecover);
+}
+fn apple_cli_read_revoke_and_wrong_doc_never_admit_for_mode(mode: p::Mode) {
     for revoke in [true, false] {
-        let mut f = Fixture::new();
+        let mut f = Fixture::for_mode(mode);
         f.allow();
         if revoke {
             f.scope.read.revoke(Instant::now());
@@ -382,9 +407,23 @@ fn apple_cli_exact_modes_and_status_payloads_remain_small_and_closed() {
     f.allow();
     let e = f.submit();
     let status = e.status().unwrap();
-    let mut value = serde_json::to_value(&status).unwrap();
-    value["review"]["mode"] = "key-recover".into();
-    assert!(serde_json::from_value::<p::Status>(value).is_err());
+    for name in [
+        "review", "register", "reconcile", "profile-review", "profile-reuse",
+        "profile-create", "profile-reconcile", "key-review", "key-prepare", "key-recover",
+        "certificate-review", "certificate-create", "certificate-reconcile", "p12-review",
+        "p12-reuse", "p12-save",
+    ] {
+        let mut value = serde_json::to_value(&status).unwrap();
+        value["review"]["mode"] = name.into();
+        let decoded: p::Status = serde_json::from_value(value).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.review.mode.consent(), format!("agent-apple-{name}-once-v1"));
+    }
+    for name in ["p12-reconcile", "key-restore", "key-recover-force", "unknown"] {
+        let mut value = serde_json::to_value(&status).unwrap();
+        value["review"]["mode"] = name.into();
+        assert!(serde_json::from_value::<p::Status>(value).is_err());
+    }
     for private in ["csr", "password", "p12", "certificateDer", "sourceKey"] {
         let mut v = serde_json::to_value(&status).unwrap();
         v[private] = "forbidden".into();
@@ -418,6 +457,51 @@ fn apple_cli_exact_modes_and_status_payloads_remain_small_and_closed() {
     assert_eq!(p::DOCUMENT_BACKING, 32 * p::ROW_BACKING + 128 * 1024);
     assert_eq!(p::IPC_WORKER_BACKING, 3 * p::STATUS_LIMIT + p::RAW_LIMIT);
     assert_eq!(crate::installed_cli_ipc::CLIENTS, 8);
+}
+#[test]
+fn apple_cli_key_recover_report_is_compared_only_and_never_a_new_credential() {
+    let f = Fixture::for_mode(p::Mode::KeyRecover);
+    let review = &f.scope.review;
+    let normal = f.finished();
+    assert!(normal.valid(review));
+    assert_eq!(review.mode.action(), crate::service_protocol::Action::ObserveProject);
+    assert!(review.mode.record_kind().is_none() && !review.mode.reconciles());
+    let mut wrong_record = normal.clone();
+    wrong_record.record_at_completion = Some(p::RecordAtCompletion {
+        kind: p::RecordKind::AppleDistributionKey,
+        reference: crate::service_protocol::CredentialReference {
+            vault_id: id('1'), generation_id: id('2'), record_id: id('3'),
+            revision_id: id('4'), revision_counter: 1,
+        },
+    });
+    assert!(!wrong_record.valid(review));
+    for decision in ["produced", "blocked", "comparison-only", "reused", "assembled"] {
+        let mut bad = normal.clone();
+        bad.result.as_mut().unwrap().decision = decision.into();
+        assert!(!bad.valid(review));
+    }
+    for field in ["comparison", "attempt", "certificateId", "certificateSha256"] {
+        let mut report = serde_json::to_value(normal.result.as_ref().unwrap()).unwrap();
+        report[field] = match field {
+            "comparison" => serde_json::json!("same-response"),
+            "attempt" => serde_json::json!({"operationId":review.operation_id,"status":"succeeded","cancellationRequested":false}),
+            "certificateId" => serde_json::json!("existing-certificate"),
+            _ => serde_json::json!("a".repeat(64)),
+        };
+        let decoded: p::Report = serde_json::from_value(report).unwrap();
+        assert!(!decoded.valid_for(review), "{field}");
+    }
+    for (field, value) in [("doNotReplay", false), ("credentialReady", true)] {
+        let mut report = serde_json::to_value(normal.result.as_ref().unwrap()).unwrap();
+        report[field] = value.into();
+        assert!(!serde_json::from_value::<p::Report>(report).unwrap().valid_for(review));
+    }
+    let mut other = review.clone();
+    other.mode = p::Mode::KeyPrepare;
+    assert!(!normal.valid(&other));
+    let mut report = serde_json::to_value(normal.result.as_ref().unwrap()).unwrap();
+    report["recoverySha256"] = "b".repeat(64).into();
+    assert!(serde_json::from_value::<p::Report>(report).is_err());
 }
 #[test]
 fn apple_cli_record_requires_exact_mode_and_all_three_return_cuts() {

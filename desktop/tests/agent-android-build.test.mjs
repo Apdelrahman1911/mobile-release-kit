@@ -5,7 +5,7 @@ import test from 'node:test';
 import { AGENT_ANDROID_BUILD_CONSENT, AgentAndroidBuildPermission, copyAndroidBuildApproval,
   createAgentAndroidBuildApi, encodeAndroidBuildAccessRequest, parseAndroidBuildAccess } from '../src/agentAndroidBuild.ts';
 import { buildPermissionRevision } from '../src/agentBuildPermissionProtocol.ts';
-import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, canonicalAndroidUploadFingerprint } from '../src/agentAndroidSigned.ts';
+import { AGENT_ANDROID_BUILD_SIGNED_CONSENT, AGENT_ANDROID_CANDIDATE_CONSENT, canonicalAndroidUploadFingerprint } from '../src/agentAndroidSigned.ts';
 import { canObserveAgentAndroidBuild } from '../src/agentAndroidBuildOrigin.ts';
 import { AndroidBuildController } from '../src/androidBuild.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
@@ -290,7 +290,8 @@ test('signed scope keeps raw policy, exact assigned existing key and a separate 
   for (const raw of ['af'.repeat(32) + '\n', ' ' + 'af'.repeat(32), 'af:'.repeat(32), 'af'.repeat(31) + 'ag']) {
     const v=signedApproval();v.input.artifactValidation.uploadCertificateSha256=raw; assert.equal(copyAndroidBuildApproval(v),null);
   }
-  const v=signedApproval();v.input.operation='android-candidate-inputs';v.input.action='create';assert.equal(copyAndroidBuildApproval(v),null);
+  const v=signedApproval();v.input.operation='android-candidate-inputs';v.input.action='create';assert.ok(copyAndroidBuildApproval(v));
+  assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build',{...v,consentVersion:AGENT_ANDROID_BUILD_SIGNED_CONSENT,expectedPermissionRevision:'0'}),null);
 });
 test('Build MAIN revision is exact full-u64 DATA and old five-field/other API access cannot authorize Allow', async () => {
   for (const value of ['0','1','9007199254740993','18446744073709551615']) assert.ok(buildPermissionRevision(value));
@@ -363,4 +364,29 @@ test('a returned Refresh revision consumes old acknowledgement including acknowl
     assert.equal(controller.getState().uncertain, false);
     assert.equal(controller.getState().access.permissionRevision, '2');
   }
+});
+
+const candidateApproval = () => { const a=signedApproval();a.input.operation='android-candidate-inputs';a.input.action='create';return a; };
+test('candidate Android uses exact Create consent and retains original pending Allow through revoke', async () => {
+  const calls=[],api=createAgentAndroidBuildApi('native',async(command,raw)=>{calls.push({command,value:JSON.parse(new TextDecoder().decode(raw))});return enabled('1');});
+  const a=candidateApproval();await api.allow(a,'0');assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].value,{...a,consentVersion:AGENT_ANDROID_CANDIDATE_CONSENT,expectedPermissionRevision:'0'});
+  for(const consent of [AGENT_ANDROID_BUILD_CONSENT,AGENT_ANDROID_BUILD_SIGNED_CONSENT,'local-android-candidate-inputs-v1'])
+    assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build',{...a,consentVersion:consent,expectedPermissionRevision:'0'}),null);
+  for(const ordinary of [approval(),signedApproval()])assert.equal(encodeAndroidBuildAccessRequest('allow_agent_android_build',{...ordinary,consentVersion:AGENT_ANDROID_CANDIDATE_CONSENT,expectedPermissionRevision:'0'}),null);
+  for(const change of [v=>{delete v.input.action;},v=>{v.input.action='check-signing';},v=>{delete v.input.signing;},v=>{v.input.operation='android-build-sign';}]){const v=candidateApproval();change(v);assert.equal(copyAndroidBuildApproval(v),null);}
+  const p=port(),c=new AgentAndroidBuildPermission();c.bind(p.api,candidateApproval());await refresh(c,p);
+  assert.equal(c.candidateSelected(),true);c.acknowledge(true);const allowing=c.allow();assert.equal(p.calls[0].kind,'allow');
+  const stopping=c.revoke();p.calls[1].resolve(disabled('1'));await stopping;assert.equal(c.getState().pending,'allow');
+  c.acknowledge(true);assert.equal(c.canAllow(),false);p.calls[0].resolve(enabled('1'));await allowing;
+  assert.equal(c.getState().access.enabled,false);assert.equal(p.calls.filter(x=>x.kind==='allow').length,1);
+});
+test('actual Android candidate original may be observed and stopped but never starts from status', async t=>{
+  const op=operation({operationId:'33333333333343338333333333333333'},candidateApproval().input);op.context.operation='android-candidate-inputs';
+  const incoming=status(3,op);assert.ok(parseAndroidBuildStatus(incoming));
+  const prior=status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')})));
+  assert.equal(canObserveAgentAndroidBuild(prior,incoming,true),false);
+  const h=await nativeView(t,prior);h.emit(incoming);assert.equal(h.controller.getSnapshot().integrityFailed,false);
+  assert.equal(h.controller.getSnapshot().consent,null);await h.controller.start(op.operationId,op.ownerGeneration);assert.equal(h.calls.length,0);
+  assert.equal(h.controller.cancel(),true);await flush();assert.deepEqual(h.calls,[{kind:'cancel',operationId:op.operationId,ownerGeneration:op.ownerGeneration}]);
 });
