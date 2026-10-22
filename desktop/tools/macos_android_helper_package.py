@@ -2306,6 +2306,15 @@ def compiler_diagnostic(stdout, stderr, checkout, *, package_version=None):
     classes, lines_seen = set(), 0
     for body in (stdout, stderr):
         offset, package = 0, None
+        # Cargo's json-render-diagnostics keeps artifacts on stdout but emits
+        # ordinary Rust diagnostics on stderr. Keep only a header/code until
+        # its primary arrow; messages/snippets never enter public diagnostics.
+        rendered = None
+        def finish_rendered():
+            nonlocal rendered
+            if rendered is not None and rendered[0] is not None:
+                add("rust", rendered[0], None, None, None, None)
+            rendered = None
         while offset < len(body):
             if lines_seen == 65536:
                 result["scanComplete"] = False
@@ -2316,19 +2325,23 @@ def compiler_diagnostic(stdout, stderr, checkout, *, package_version=None):
             start, offset = offset, end + 1
             if end - start > 256 * 1024:
                 result["scanComplete"] = False
+                finish_rendered()
                 continue
             raw = body[start:end]
             # Text searches have a smaller bound than Cargo JSON. The left
             # path boundary below also prevents retries at each path character.
             if not raw.startswith(b"{") and len(raw) > 8192:
                 result["scanComplete"] = False
+                finish_rendered()
                 continue
             try:
                 text = raw.decode("utf-8", "strict").rstrip("\r")
             except UnicodeError:
                 result["scanComplete"] = False
+                finish_rendered()
                 continue
             if text.startswith("{"):
+                finish_rendered()
                 if '"compiler-message"' not in text:
                     continue
                 try:
@@ -2366,6 +2379,25 @@ def compiler_diagnostic(stdout, stderr, checkout, *, package_version=None):
                 if not primary:
                     add("rust", code, None, None, None, context)
                 continue  # Never mine rendered/message JSON text as stderr.
+            header = re.match(r"^error(?:\[(E[0-9]{4})\])?:", text)
+            if header:
+                finish_rendered()
+                rendered = (header[1],)
+                if header[1] is not None:
+                    result["rustMessages"] += 1
+            elif not text.strip() or text.startswith(("error", "warning", "note:", "help:")):
+                finish_rendered()
+            elif rendered is not None:
+                arrow = re.fullmatch(r"[ \t]*-->[ \t]+([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6}):([1-9][0-9]{0,4})[ \t]*", text)
+                if arrow:
+                    if rendered[0] is None:
+                        result["rustMessages"] += 1
+                    # Never inherit the preceding build-script's crate. An
+                    # ambiguous relative Rust path is intentionally unknown.
+                    add("rust", rendered[0], arrow[1], int(arrow[2]), int(arrow[3]), None)
+                    rendered = None
+                elif text.lstrip().startswith("-->"):
+                    finish_rendered()
             lower = text.lower()
             if "lock file" in lower and "--locked" in lower and ("update" in lower or "updated" in lower): classes.add("locked-update")
             if "no matching package named" in lower or "no matching version" in lower: classes.add("missing-package")
@@ -2396,6 +2428,7 @@ def compiler_diagnostic(stdout, stderr, checkout, *, package_version=None):
             if panic:
                 result["buildScriptPanics"] += 1
                 add("build-script-panic", None, panic[1], int(panic[2]), int(panic[3]), line_package)
+        finish_rendered()
     result["classifications"] = [value for value in _COMPILER_CLASSES if value in classes] or ["unclassified"]
     return result
 

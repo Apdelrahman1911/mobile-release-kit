@@ -2915,6 +2915,58 @@ def packaging_fixture(target="aarch64-apple-darwin", *, package=b"synthetic comp
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
+    def test_rendered_resident_compiler_diagnostics_are_bounded_and_private(self):
+        module = ANDROID_HELPER
+        source = "/private/compiler-checkout"
+        path = "desktop/src-tauri/src/service_github_operation_native.rs"
+        secret = "PRIVATE_SENTINEL_TOKEN_DO_NOT_EXPORT"
+        def parse(stdout=b"", stderr=b""):
+            value = module.compiler_diagnostic(stdout, stderr, source)
+            self.assertEqual(module.compiler_diagnostic_data(value), value)
+            self.assertNotIn(secret, json.dumps(value))
+            return value
+        def rendered(code="[E0433]", location=None, line=21):
+            location = source + "/" + path if location is None else location
+            return (f"error{code}: {secret}\n  --> {location}:{line}:7\n"
+                    f"   | private source snippet {secret}\n\n").encode()
+        row = {"kind": "rust", "code": "E0433", "source": path, "line": 21, "column": 7}
+        actual = parse(stderr=rendered())
+        self.assertEqual(actual["rows"], [row])
+        self.assertEqual(actual["rustMessages"], 1)
+        for location, expected in (("../../src-tauri/src/service_github_operation_native.rs", path),
+                                   ("src/lib.rs", None), ("/private/foreign.rs", None)):
+            self.assertEqual(parse(stderr=rendered(location=location))["rows"], [dict(row, source=expected)])
+        uncoded = parse(stderr=rendered(code=""))
+        self.assertEqual(uncoded["rows"], [dict(row, code=None)])
+        self.assertEqual(uncoded["rustMessages"], 1)
+        # No Cargo message, source snippet or fake header becomes a Rust span.
+        for raw in (rendered(code="[E12345]"), b"prefix " + rendered(),
+                    rendered()[rendered().index(b"  -->"):],
+                    b"error: failed to download PRIVATE_SENTINEL_TOKEN_DO_NOT_EXPORT\n"):
+            self.assertFalse(parse(stderr=raw)["rows"])
+        arrow = f"  --> {source}/{path}:21:7\n".encode()
+        no_location = dict(row, source=None, line=None, column=None)
+        header = f"error[E0433]: {secret}\n".encode()
+        for boundary in (b"\n", b"warning: private\n", b"error[E12345]: private\n",
+                         b"{\"reason\":\"build-finished\"}\n", b"\xff\n", b"x" * 8193 + b"\n",
+                         b"  --> invalid path:1:2\n"):
+            self.assertEqual(parse(stderr=header + boundary + arrow)["rows"], [no_location])
+        self.assertEqual(parse(stdout=header, stderr=arrow)["rows"], [no_location])
+        self.assertEqual(parse(stderr=header)["rows"], [no_location])
+        many = parse(stderr=b"".join(rendered(line=line) for line in range(1, 10)))
+        self.assertEqual((len(many["rows"]), many["rustMessages"], many["rowsOmitted"]), (8, 9, True))
+        # JSON mode and generic Cargo failure classifications retain their
+        # existing behavior; neither borrows a preceding rendered header.
+        message = {"reason": "compiler-message", "manifest_path": source + "/desktop/src-tauri/Cargo.toml",
+            "message": {"level": "error", "message": secret, "code": {"code": "E0433"},
+                "spans": [{"file_name": source + "/" + path, "line_start": 21,
+                           "column_start": 7, "is_primary": True}]}}
+        self.assertEqual(parse(stdout=json.dumps(message).encode() + b"\n")["rows"], [row])
+        cargo = parse(stderr=b"error: failed to download private; could not resolve host\n")
+        self.assertFalse(cargo["rows"])
+        self.assertEqual(cargo["classifications"], ["download-failed", "network-failed"])
+        self.assertFalse(parse(stderr=b"x" * (4 * 1024 * 1024 + 1))["scanComplete"])
+
     def test_removal_target_routes_keep_preparation_scripts_and_observers_bound(self):
         module = ANDROID_HELPER
         for target in TOOL.MAC_TARGETS:
