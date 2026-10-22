@@ -622,7 +622,7 @@ selected_tests=(
   project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents
   project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded
   project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply
-  edit_owner::tests::initialization_intent_original_slot_and_recovery_finality_are_closed
+  edit_owner::workflow_domain_tests::initialization_intent_original_slot_and_recovery_finality_are_closed
   service_request_catalogue::tests::additional_ids_have_strict_schema_presence_privacy_and_original_commands
   # Public acquisition observer contracts and empty distinct Git nomination slots.
   shell::installed_observation::tool_setup::acquire::tests::public_cases_keep_old_three_and_require_complete_cold_warm_partitions
