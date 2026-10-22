@@ -543,7 +543,7 @@ def inspect(root, fd, original, context):
     mount = root / "mount"
     need(not os.path.lexists(mount), "inspection-destination-occupied")
     mounted, device, mount_id, device_id, error = None, None, None, None, None
-    returned, originals = None, {}
+    returned, originals, image_post = None, {}, None
     try:
         code, out, err = native(root, fd, original, calls, "attach", ["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse",
             "-noautoopen", "-owners", "on", "-mountpoint", str(mount), "-plist", str(root / "MobileReleaseKit.dmg")], work_end, 60)
@@ -580,6 +580,7 @@ def inspect(root, fd, original, context):
             _, after = read_at(mounted, name, before["bytes"], work_end, body=False, mounted=True)
             need(after == before, "mounted-post-changed")
         _, after = read_at(fd, "MobileReleaseKit.dmg", IMAGE_BYTES, work_end, body=False)
+        image_post = after
         need(after == acquired["image"], "image-post-changed"); same_mount()
         bodies["install-inventory.json"] = inventory
         returned = {"bodies": bodies, "release": release, "signingPolicy": policy, "inventoryFiles": count,
@@ -610,7 +611,15 @@ def inspect(root, fd, original, context):
         # Only after the original cleanup attempt; this DATA never grants a
         # detach/return/completion or replaces the retained first failure.
         try:
-            print("MRK_PREDECESSOR_INSPECTION_FAILURE=" + encoded(inspection_failure_data(error, stager)).decode("ascii").rstrip("\n"),
+            failure = inspection_failure_data(error, stager)
+            if image_post is not None and image_post != acquired["image"]:
+                before = acquired["image"]
+                fields = ("dev", "ino", "mode", "uid", "gid", "nlink", "size", "mtimeNs", "ctimeNs")
+                failure["imagePost"] = {"bytesEqual": image_post["bytes"] == before["bytes"],
+                    "sha256Equal": image_post["sha256"] == before["sha256"],
+                    "identityChanged": [name for index, name in enumerate(fields)
+                                        if image_post["identity"][index] != before["identity"][index]]}
+            print("MRK_PREDECESSOR_INSPECTION_FAILURE=" + encoded(failure).decode("ascii").rstrip("\n"),
                   file=sys.stderr, flush=True)
         except BaseException: pass
         raise error
