@@ -581,7 +581,12 @@ def inspect(root, fd, original, context):
             need(after == before, "mounted-post-changed")
         _, after = read_at(fd, "MobileReleaseKit.dmg", IMAGE_BYTES, work_end, body=False)
         image_post = after
-        need(after == acquired["image"], "image-post-changed"); same_mount()
+        # Only this cross-readonly-mount DATA comparison permits ctime drift.
+        # Each complete read still requires all nine identity fields unchanged.
+        need(after["bytes"] == acquired["image"]["bytes"] == IMAGE_BYTES
+             and after["sha256"] == acquired["image"]["sha256"] == IMAGE_SHA
+             and after["identity"][:8] == acquired["image"]["identity"][:8], "image-post-changed")
+        same_mount()
         bodies["install-inventory.json"] = inventory
         returned = {"bodies": bodies, "release": release, "signingPolicy": policy, "inventoryFiles": count,
                     "inventoryPayloadBytes": size, "inventory": {k: inventory_info[k] for k in ("bytes", "sha256")}}
