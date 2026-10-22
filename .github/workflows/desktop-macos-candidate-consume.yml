@@ -28,7 +28,9 @@ jobs:
   inspect-predecessor:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'inspect-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-inspection'
     name: Read-only delivered ARM predecessor controls
-    runs-on: macos-26
+    # Only this one-shot inspection needs a larger ARM host: the standard
+    # runner fell below the unchanged 3-GiB available-memory admission floor.
+    runs-on: macos-26-xlarge
     timeout-minutes: 20
     steps:
       - name: Require the isolated dispatch, never the Restore push route
