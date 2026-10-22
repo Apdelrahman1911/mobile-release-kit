@@ -374,6 +374,34 @@ class ProjectIdentityTests(unittest.TestCase):
                          sources["iosApp/Shared/Identity.xcconfig"].replace(OLD.encode(), NEW.encode()))
         self.assertEqual(len(prepared.view["changes"]), 2)
 
+    def test_xcconfig_line_continuation_cannot_hide_inherited_bundle_id_control(self):
+        path = "iosApp/Identity.xcconfig"
+        refs = f'{IDS["config"]} = {{ isa = PBXFileReference; path = Identity.xcconfig; sourceTree = SOURCE_ROOT; }};'
+        for newline in ("\n", "\r\n"):
+            for ending in ("\\", "\\ \t; \t"):
+                with self.subTest(newline=newline, ending=ending):
+                    sources = ios(app_settings="", base=IDS["config"], refs=refs,
+                                  project_settings=f"PRODUCT_BUNDLE_IDENTIFIER = {OLD};")
+                    sources[path] = newline.join(("// keep context", "IGNORED_NOTE = keep " + ending,
+                                                  f"PRODUCT_BUNDLE_IDENTIFIER = {OLD}", "")).encode()
+                    diagnostic = self.refused(sources, "unsupported-syntax", IOS)
+                    self.assertEqual((diagnostic.path, diagnostic.line, diagnostic.column), (path, 2, 21))
+
+    def test_xcconfig_comment_and_closed_string_backslashes_keep_literal_identity_supported(self):
+        path = "iosApp/Identity.xcconfig"
+        refs = f'{IDS["config"]} = {{ isa = PBXFileReference; path = Identity.xcconfig; sourceTree = SOURCE_ROOT; }};'
+        for newline in ("\n", "\r\n"):
+            for quote in ("", '"'):
+                with self.subTest(newline=newline, quote=quote):
+                    sources = ios(app_settings="", base=IDS["config"], refs=refs)
+                    raw = newline.join((r"// kept \ comment text", r"/* kept \ block comment */",
+                                        r'OTHER = "closed \\ string"',
+                                        f"PRODUCT_BUNDLE_IDENTIFIER = {quote}{OLD}{quote}", "")).encode()
+                    sources[path] = raw
+                    prepared = self.prepared(sources, IOS)
+                    self.assertEqual(set(dict(prepared._payloads)), {identity.CONFIG_PATH, path})
+                    self.assertEqual(dict(prepared._payloads)[path], raw.replace(OLD.encode(), NEW.encode()))
+
     def test_shared_scheme_binds_selected_application_and_remains_read_only(self):
         sources = ios()
         prepared = self.prepared(sources, IOS)

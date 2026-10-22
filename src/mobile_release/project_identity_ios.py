@@ -195,6 +195,10 @@ class _Settings:
             if not stripped:
                 offset += len(raw_line)
                 continue
+            # Even an ignored setting can continue over an apparent identity
+            # declaration. Xcode strips one trailing semicolon before joining.
+            if stripped.removesuffix(";").rstrip().endswith("\\"):
+                refuse("unsupported-syntax", path, text, offset + line.rfind("\\"))
             if stripped.startswith("#"):
                 match = re.fullmatch(r'[ \t]*#include[ \t]+"([^"\\]+)"[ \t]*', line)
                 need(match is not None, "conditional-config", path, text, offset)
