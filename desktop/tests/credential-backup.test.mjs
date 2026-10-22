@@ -214,6 +214,51 @@ test('the existing cross-feature busy owner still vetoes backup and restore', as
   assert.equal(h.calls.length, 1);
 });
 
+test('reentrant context, status, peer or disposal before backup dispatch cannot start either picker', async (t) => {
+  for (const action of ['export', 'import']) for (const retire of ['unchanged', 'project', 'scope-aba', 'status', 'peer', 'dispose']) {
+    let peer = null;
+    const h = harness(t, () => peer); await ready(h);
+    let fired = false;
+    const unsubscribe = h.controller.subscribe(() => {
+      if (fired || h.controller.getSnapshot().busy !== (action === 'export' ? 'prepare-backup-export' : 'import-backup')) return;
+      fired = true; // Retire only once, BEFORE any reentrant publication.
+      if (retire === 'project') h.changeProject(); // No sync hook to rescue this handoff.
+      else if (retire === 'scope-aba') {
+        h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'signing' });
+        h.controller.setScope({ platform: 'android', stage: 'candidate', purpose: 'signing' });
+      } else if (retire === 'status') h.emit(status(2, { records: [record({ revision: 2 })] }));
+      else if (retire === 'peer') peer = 'Another original now owns this project.';
+      else if (retire === 'dispose') h.controller.dispose();
+    });
+    try {
+      const view = h.controller.getSnapshot();
+      assert.equal(action === 'export' ? h.controller.exportBackup(ref(), view) : h.controller.importBackup(view), true);
+      unsubscribe(); await settle();
+      assert.equal(fired, true, `${action}/${retire}`);
+      assert.equal(h.calls.filter((call) => ['export', 'import'].includes(call.command)).length, retire === 'unchanged' ? 1 : 0, `${action}/${retire}`);
+      noPrivateMutation(h);
+      assert.equal(h.calls.some((call) => call.command === 'discard'), false);
+      if (retire === 'unchanged') {
+        assert.deepEqual(h.last(action).args, action === 'export' ? { contextRevision: 1, record: ref() } : { contextRevision: 1 });
+        h.reply(action, status(2, { operation: operation({ operation: action === 'export' ? 'prepare-backup-export' : 'import-backup' }) }));
+        await settle();
+        assert.equal(h.controller.getSnapshot().originPending, false);
+        assert.equal(h.controller.getSnapshot().observationFailed, false);
+      } else if (retire !== 'dispose') {
+        assert.equal(h.controller.getSnapshot().originPending, true);
+        assert.equal(h.controller.getSnapshot().observationFailed, true);
+        assert.equal(h.controller.backupExportCompleted(h.controller.getSnapshot()), false);
+      }
+    } finally {
+      unsubscribe(); h.controller.dispose();
+      // Resolve original inert calls even on the old-controller failure. The
+      // ABA's queued context is not a backup call, cancellation or fake join.
+      for (const call of h.calls) call.resolve(status(9));
+      await settle();
+    }
+  }
+});
+
 test('an overtaking delivered event cannot supply a missing original command acknowledgement', async (t) => {
   const h = harness(t); await ready(h);
   assert.equal(h.controller.exportBackup(ref(), h.controller.getSnapshot()), true);

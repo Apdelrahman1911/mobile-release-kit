@@ -646,16 +646,39 @@ export class AssetSessionController {
     // syncProject too: that call can retire the context without another render.
     if (expected !== this.state || !this.contextReady() || expected !== this.state) return false;
     const request = credentialBackupExportRequest(this.state, record);
-    if (!request) return false;
-    return this.run(BACKUP_EXPORT_OPERATION, () => this.api!.exportCredentialBackup(request),
-      this.phase({ type: 'backup', change: 'export', record: request.record }, BACKUP_EXPORT_OPERATION, null));
+    const api = this.api;
+    if (!request || !api) return false;
+    const localRevision = this.localRevision, failureRevision = this.failureRevision;
+    const project = this.selectedProject(), status = this.state.status;
+    const phase = this.phase({ type: 'backup', change: 'export', record: request.record }, BACKUP_EXPORT_OPERATION, null);
+    return this.run(BACKUP_EXPORT_OPERATION, async () => {
+      // The busy publication can synchronously retire this original request.
+      const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
+      if (peer || !current || this.disposed || this.api !== api || selected !== project ||
+          this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
+          this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
+          this.state.blocked || this.state.observationFailed || this.state.busy !== BACKUP_EXPORT_OPERATION ||
+          this.intentPhase !== phase || phase.uncertain) throw { code: 'assessment_context_stale' };
+      return api.exportCredentialBackup(request);
+    }, phase);
   }
   importBackup(expected: AssetDisplayState): boolean {
     if (expected !== this.state || !this.contextReady() || expected !== this.state) return false;
     const request = credentialBackupImportRequest(this.state);
-    if (!request) return false;
-    return this.run(BACKUP_IMPORT_OPERATION, () => this.api!.importCredentialBackup(request),
-      this.phase({ type: 'backup', change: 'import', record: null }, BACKUP_IMPORT_OPERATION, null));
+    const api = this.api;
+    if (!request || !api) return false;
+    const localRevision = this.localRevision, failureRevision = this.failureRevision;
+    const project = this.selectedProject(), status = this.state.status;
+    const phase = this.phase({ type: 'backup', change: 'import', record: null }, BACKUP_IMPORT_OPERATION, null);
+    return this.run(BACKUP_IMPORT_OPERATION, async () => {
+      const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
+      if (peer || !current || this.disposed || this.api !== api || selected !== project ||
+          this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
+          this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
+          this.state.blocked || this.state.observationFailed || this.state.busy !== BACKUP_IMPORT_OPERATION ||
+          this.intentPhase !== phase || phase.uncertain) throw { code: 'assessment_context_stale' };
+      return api.importCredentialBackup(request);
+    }, phase);
   }
   backupExportCompleted(expected: AssetDisplayState): boolean {
     const phase = this.intentPhase, operation = this.state.status?.operation;
