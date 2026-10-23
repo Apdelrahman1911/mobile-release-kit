@@ -1327,6 +1327,8 @@ class PredecessorInstallTests(unittest.TestCase):
                 owner = retained_instance(selection)
                 image, preview = dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE], None
                 originals, selected, stage = mounted_fixture(owner.target)
+                stage.xar_members = mock.Mock(return_value={'PackageInfo': b'info', 'Scripts': b'cpio'})
+                stage.install_product_members.side_effect = AssertionError('flat observer must use the component parser')
                 owner.selection = stage.source_build_selection(owner.target)
                 stage.PRODUCER_DESCRIPTOR_BYTES, stage.PRODUCER_SIGNATURE_BYTES = 16384, 512
                 stage.maintenance_producer_data.return_value['signingPolicies'][0]['policy']['leafCertificateSha1'] = 'e'*40
@@ -1512,6 +1514,8 @@ class PredecessorInstallTests(unittest.TestCase):
                         self.assertEqual(value['release']['sourceCommit'],owner.nomination['source'])
                         self.assertFalse(value['productReady'] or value['p0Qualified'] or value['uiQualified'])
                         self.assertNotIn('consumerReturnedZero',value)  # A record cannot prove its caller's future return.
+                        owner.stager.xar_members.assert_called_once_with(b'package', allocation_budget=owner.allocation_budget)
+                        owner.stager.install_product_members.assert_not_called()
                         receipt.assert_called_once_with()
                         self.assertEqual(owner.quota.finish.call_count,2)
                     else:

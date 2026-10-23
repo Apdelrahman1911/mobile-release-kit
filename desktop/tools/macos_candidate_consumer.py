@@ -735,7 +735,7 @@ class CandidateResume(resume.Resume):
         options = ({'capture_scripts': self.__capture_restore_scripts} if self.purpose == 'acquire-restore' else
                    {'capture_scripts': self.__capture_removal_program} if self.purpose == 'acquire-removal' else {})
         result, inventory = resume.mounted_data(originals, row, self.target, self.stager,
-                                               allocation_budget=self.allocation_budget, candidate=True, **options)
+                                               allocation_budget=self.allocation_budget, candidate=True, retained_observer=self.__retained_observer, **options)
         self.point()
         self.__binding = resume.canonical(row)
         self.__binding_image_bytes = len(image)
