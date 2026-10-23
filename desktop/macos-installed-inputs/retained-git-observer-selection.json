@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "retained-observer-source-selection-v1",
+  "packageRole": "installed-shell-observation",
+  "nativeScope": "git-native",
+  "origin": {
+    "source": "216a2d3a559dd562164e852ea78b7235916e7c3a",
+    "tree": "648da9db10800c44c67fa10a481526e704e72a49",
+    "target": "aarch64-apple-darwin",
+    "runId": "39998949850",
+    "runAttempt": "1",
+    "jobId": "120569711652",
+    "artifactId": "12525594440",
+    "artifactBytes": 294019154,
+    "artifactSha256": "de587416e6092082346500caae3e82cac6e9c4a0bc334e892da4e262129488e6"
+  },
+  "members": [
+    {"name": "distribution/MobileReleaseKit-Observation.dmg", "bytes": 147009401},
+    {"name": "distribution/MobileReleaseKit.dmg", "bytes": 147009391}
+  ]
+}

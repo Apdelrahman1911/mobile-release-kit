@@ -8,7 +8,7 @@ import re
 import zipfile
 
 from desktop.tools.macos_fixed_carrier_resume import (
-    CANDIDATE_MEMBERS, RETAINED_OBSERVER_MEMBERS, LIMIT, REPOSITORY, WORKFLOW, WORKFLOW_ID,
+    CANDIDATE_MEMBERS, RETAINED_OBSERVER_MEMBERS, RETAINED_GIT_MEMBERS, LIMIT, REPOSITORY, WORKFLOW, WORKFLOW_ID,
     canonical, decode, need, sha, zip_data, zip_directory_data,
 )
 
@@ -145,6 +145,9 @@ def candidate_members(body, nomination, clock, *, before_image=None):
 # A separate, explicitly nonshipping input. None of the ordinary candidate's
 # PREVIEW/final-image/installation gates above is relaxed for these bytes.
 RETAINED_OBSERVER_IMAGE = 'distribution/MobileReleaseKit.dmg'
+RETAINED_OBSERVER_OPERATIONS = ('install-retained-observer', 'install-retained-git-observer')
+RETAINED_GIT_SELECTION_PATH = 'desktop/macos-installed-inputs/retained-git-observer-selection.json'
+RETAINED_GIT_TUPLE = ('216a2d3a559dd562164e852ea78b7235916e7c3a', '39998949850', '1')
 RETAINED_OBSERVER_STEPS = (
     'Build the current nonshipping observer',
     'Record the effective pinned compiler and preflight configured observer DATA',
@@ -158,19 +161,39 @@ RETAINED_OBSERVER_STEPS = (
 )
 
 
+def retained_git_context(environment):
+    """Only the explicit original Git27 continuation; all old routes stay26."""
+    git = environment.get('MRK_CANDIDATE_MODE') == RETAINED_OBSERVER_OPERATIONS[1]
+    if git:
+        expected = {'MRK_CANDIDATE_SOURCE': RETAINED_GIT_TUPLE[0],
+            'MRK_MACOS_INSTALL_SOURCE_COMMIT': RETAINED_GIT_TUPLE[0],
+            'MRK_MACOS_TARGET': 'aarch64-apple-darwin', 'MRK_MACOS_RUNNER': 'xcode-27',
+            'MRK_MACOS_MACHINE': 'arm64', 'MRK_MACOS_HOSTED_JOB': 'github-hosted-xcode27-arm64',
+            'MRK_MACOS_NATIVE_SCOPE': 'git-native', 'MRK_MACOS_PACKAGE_ROLE': 'installed-shell-observation',
+            'MRK_MACOS_STORE_RUNTIME': 'signed-component',
+            'DEVELOPER_DIR': '/Library/Developer/CommandLineTools'}
+        need(all(environment.get(key) == value for key, value in expected.items())
+             and environment.get('MRK_EXPECTED_SHA') == environment.get('GITHUB_SHA'), 'retained-git-context')
+    return git
+
+
 def retained_observer_selection_data(value):
     """Trusted helper SOURCE selects one artifact; the artifact never selects it."""
     need(type(value) is dict and set(value) == {'schemaVersion', 'kind', 'packageRole', 'nativeScope', 'origin', 'members'}
          and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
          and value['kind'] == 'retained-observer-source-selection-v1'
-         and value['packageRole'] == 'installed-shell-observation' and value['nativeScope'] == 'tool-setup',
+         and value['packageRole'] == 'installed-shell-observation' and value['nativeScope'] in ('tool-setup', 'git-native'),
          'retained-observer-selection')
     origin = candidate_selection_data(value['origin'])
     need(origin['target'] == 'aarch64-apple-darwin', 'retained-observer-target')
+    git = value['nativeScope'] == 'git-native'
+    need(not git or tuple(origin[key] for key in ('source', 'runId', 'runAttempt')) == RETAINED_GIT_TUPLE,
+         'retained-git-original-tuple')
+    limits = RETAINED_GIT_MEMBERS if git else RETAINED_OBSERVER_MEMBERS
     members = value['members']
-    need(type(members) is list and len(members) == 5, 'retained-observer-members')
-    for item, name in zip(members, sorted(RETAINED_OBSERVER_MEMBERS)):
-        cap = RETAINED_OBSERVER_MEMBERS[name]
+    need(type(members) is list and len(members) == len(limits), 'retained-observer-members')
+    for item, name in zip(members, sorted(limits)):
+        cap = limits[name]
         need(type(item) is dict and set(item) == {'name', 'bytes'} and item['name'] == name
              and type(item['bytes']) is int and (0 if cap == 0 else 1) <= item['bytes'] <= cap,
              'retained-observer-member')
@@ -181,6 +204,8 @@ def retained_observer_selection_data(value):
 def retained_observer_metadata_data(run, job, artifact, selection):
     selected = retained_observer_selection_data(selection)
     row = selected['origin']
+    git = selected['nativeScope'] == 'git-native'
+    suffix = '-git-native' if git else ''
     need(type(run) is dict and type(job) is dict and type(artifact) is dict, 'retained-observer-metadata')
     need(all(type(run.get(k)) is int and run[k] == int(row[v]) for k, v in
              (('id', 'runId'), ('run_attempt', 'runAttempt')))
@@ -192,8 +217,8 @@ def retained_observer_metadata_data(run, job, artifact, selection):
     steps = job.get('steps')
     need(all(type(job.get(k)) is int and job[k] == int(row[v]) for k, v in
              (('id', 'jobId'), ('run_id', 'runId'), ('run_attempt', 'runAttempt')))
-         and job.get('head_sha') == row['source'] and job.get('name') == 'normal-installed-' + row['target']
-         and job.get('status') == 'completed' and job.get('labels') == ['macos-26']
+         and job.get('head_sha') == row['source'] and job.get('name') == 'normal-installed-' + row['target'] + suffix
+         and job.get('status') == 'completed' and job.get('labels') == ['xcode-27' if git else 'macos-26']
          and type(steps) is list and len(RETAINED_OBSERVER_STEPS) <= len(steps) <= 256
          and all(type(s) is dict and type(s.get('number')) is int and 0 < s['number'] <= 256 for s in steps)
          and len({s['number'] for s in steps}) == len(steps), 'retained-observer-producer-job')
@@ -209,7 +234,7 @@ def retained_observer_metadata_data(run, job, artifact, selection):
     # preceding completed signing stages and this exact upload admit raw bytes.
     origin = artifact.get('workflow_run')
     need(type(artifact.get('id')) is int and artifact['id'] == int(row['artifactId'])
-         and artifact.get('name') == 'candidate-detach-nonshipping-unqualified-diagnostics-' + row['target']
+         and artifact.get('name') == 'candidate-detach-nonshipping-unqualified-diagnostics-' + row['target'] + suffix
              + '-' + row['source'] + '-' + row['runId'] + '-' + row['runAttempt']
          and artifact.get('expired') is False and type(artifact.get('size_in_bytes')) is int
          and artifact['size_in_bytes'] == row['artifactBytes']
@@ -221,18 +246,18 @@ def retained_observer_metadata_data(run, job, artifact, selection):
 
 
 def retained_observer_members(body, selection, clock, *, before_image=None):
-    """Validate/hash all five originals, retaining only the image to install."""
+    """Validate/hash the exact Tool5 or Git2 originals; keep only the main image."""
     selected = retained_observer_selection_data(selection)
     origin = selected['origin']
     need(type(body) is bytes and len(body) == origin['artifactBytes'] and sha(body) == origin['artifactSha256'],
          'retained-observer-zip-pin')
-    zip_directory_data(body, 5)
+    zip_directory_data(body, len(selected['members']))
     if before_image is not None:
         clock.check()
         # Fund the sole output before BytesIO or its growable buffer is created.
         before_image(next(item['bytes'] for item in selected['members'] if item['name'] == RETAINED_OBSERVER_IMAGE))
         clock.check()
-    return zip_data(body, {'kind': 'retained-observer', 'bytes': origin['artifactBytes'],
+    return zip_data(body, {'kind': 'retained-git-observer' if selected['nativeScope'] == 'git-native' else 'retained-observer', 'bytes': origin['artifactBytes'],
         'sha256': origin['artifactSha256'], 'members': selected['members']}, clock)
 
 
@@ -331,7 +356,7 @@ def retained_observer_install_receipt_data(value, selection, helper_source, help
          and all(type(value[k]) is type(v) and value[k] == v for k, v in expected.items()),
          'retained-observer-install-handoff')
     members = value['members']
-    need(type(members) is list and len(members) == 5, 'retained-observer-handoff-members')
+    need(type(members) is list and len(members) == len(selected['members']), 'retained-observer-handoff-members')
     for row, wanted in zip(members, selected['members']):
         need(type(row) is dict and set(row) == {'name', 'bytes', 'sha256'}
              and row['name'] == wanted['name'] and type(row['bytes']) is int and row['bytes'] == wanted['bytes']

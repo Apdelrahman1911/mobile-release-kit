@@ -63,6 +63,14 @@ def retained_environment():
         "MRK_CANDIDATE_SOURCE": BINDING.source}
 
 
+def retained_git_environment():
+    env = retained_environment()
+    return {**env, "MRK_CANDIDATE_MODE": "install-retained-git-observer",
+        "MRK_CANDIDATE_SOURCE": M.RETAINED_GIT_TUPLE[0], "MRK_MACOS_INSTALL_SOURCE_COMMIT": M.RETAINED_GIT_TUPLE[0],
+        "MRK_EXPECTED_SHA": env["GITHUB_SHA"], "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
+        "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+
+
 class InertOnly(unittest.TestCase):
     def setUp(self):
         no_process = patch("subprocess.Popen", side_effect=AssertionError("native/process execution forbidden"))
@@ -71,7 +79,22 @@ class InertOnly(unittest.TestCase):
 
 
 class CurrentRouteTests(InertOnly):
-    def test_retained_modifier_is_explicit_and_never_admits_git_intel_or_mac27(self):
+    def test_retained_selection_reads_only_corresponding_trusted_helper_source_once(self):
+        import desktop.tools as package
+        for env, path, scope in ((retained_environment(), M.RETAINED_SELECTION, M.TOOLS_SCOPE),
+                                (retained_git_environment(), M.RETAINED_GIT_SELECTION, M.GIT_SCOPE)):
+            with self.subTest(scope=scope), patch.dict(sys.modules), \
+                 patch.object(package, 'macos_candidate_carrier', getattr(package, 'macos_candidate_carrier', None), create=True), \
+                 patch.object(M, 'HELPER_ROOT', ROOT):
+                sys.modules.pop('desktop.tools.macos_candidate_carrier', None)
+                parser, body, selection = M._retained_selection(env)
+                self.assertEqual(body, (ROOT / path).read_bytes())
+                self.assertEqual(selection['nativeScope'], scope)
+                self.assertEqual(selection, parser.retained_observer_selection_data(parser.decode(body)))
+                with self.assertRaisesRegex(M.Refused, 'retained-observer-parser-imported'):
+                    M._retained_selection(env)
+
+    def test_retained_modifier_is_explicit_and_tool_mode_never_admits_git_intel_or_mac27(self):
         env = retained_environment()
         self.assertEqual(M.retained_context(env, M.TARGET),
             ("b" * 40, "900", "2", Path(env["MRK_MACOS_WORK"])))
@@ -83,8 +106,7 @@ class CurrentRouteTests(InertOnly):
                 args = ["--target", M.TARGET, "--scope", M.TOOLS_SCOPE, "--tool-cases", "public-acquisition"]
             self.assertEqual(M.entry_arguments(["--retained-observer", *args]), (scope, True))
             self.assertEqual(M.entry_arguments(args), (scope, False))
-        for args in (["--target", M.TARGET, "--scope", M.FETCH_SCOPE],
-                     ["--target", M.TARGET, "--scope", M.GIT_CLI_SCOPES[0]], ["--target", A.INTEL_TARGET],
+        for args in (["--target", M.TARGET, "--scope", M.GIT_SCOPE], ["--target", A.INTEL_TARGET],
                      ["--target", M.TARGET, "--retained-observer"]):
             with self.subTest(args=args), self.assertRaises(M.Refused):
                 M.entry_arguments(["--retained-observer", *args])
@@ -94,6 +116,41 @@ class CurrentRouteTests(InertOnly):
                            ("MRK_MACOS_RUNNER", "xcode-27"), ("MRK_CANDIDATE_MODE", "install")):
             with self.subTest(key=key), self.assertRaises(M.Refused):
                 M.retained_context({**env, key: value}, M.TARGET)
+
+    def test_retained_git_six_invocations_bind_original216a_without_relabelling_current_helper_context(self):
+        env = retained_git_environment()
+        selection = json.loads((ROOT / M.RETAINED_GIT_SELECTION).read_bytes())
+        selected = (None, b"INERT nomination seam", selection)
+        binding = A.Binding(*M.RETAINED_GIT_TUPLE)
+        self.assertEqual(M.retained_context(env, M.TARGET),
+            (env["GITHUB_SHA"], "900", "2", Path(env["MRK_MACOS_WORK"])))
+        self.assertEqual([len(A.selected_cases(scope)) for scope in M.RETAINED_GIT_SCOPES], [1, 1, 4, 3, 5, 1])
+        for scope in M.RETAINED_GIT_SCOPES:
+            with self.subTest(scope=scope):
+                result, observed, owner, run, error = self.main_with_host_data(env, "27.0.1", scope, retained=selected)
+                self.assertEqual((result, error), (0, ""))
+                observed.assert_called_once_with(); owner.assert_called_once_with(retained=True)
+                self.assertEqual(run.call_args.args[1], binding)
+                self.assertEqual(run.call_args.args[6], env)
+                self.assertEqual(run.call_args.kwargs["host"], ("xcode-27", "27.0.1"))
+                self.assertEqual(run.call_args.kwargs["scope"], scope)
+                for wrong in (retained_environment(), {**env, "MRK_CANDIDATE_MODE": "install-retained-observer"}):
+                    result, _, owner, run, _ = self.main_with_host_data(wrong, "27.0.1", scope, retained=selected)
+                    self.assertEqual(result, 1); owner.assert_not_called(); run.assert_not_called()
+        for key, value in (("GITHUB_REF", M.REF), ("GITHUB_EVENT_NAME", "push"),
+                ("MRK_CANDIDATE_SOURCE", BINDING.source), ("MRK_MACOS_INSTALL_SOURCE_COMMIT", BINDING.source),
+                ("MRK_EXPECTED_SHA", M.RETAINED_GIT_TUPLE[0]), ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image"),
+                ("MRK_MACOS_STORE_RUNTIME", "historical"), ("MRK_MACOS_NATIVE_SCOPE", M.FETCH_SCOPE),
+                ("MRK_MACOS_RUNNER", "macos-26"), ("MRK_MACOS_HOSTED_JOB", "github-hosted-macos26-arm64")):
+            with self.subTest(key=key), self.assertRaises(M.Refused):
+                M.retained_context({**env, key: value}, M.TARGET)
+        for version in ("26.0.1", "28.0.1"):
+            result, _, owner, run, _ = self.main_with_host_data(env, version, M.FETCH_SCOPE, retained=selected)
+            self.assertEqual(result, 1); owner.assert_not_called(); run.assert_not_called()
+        for scope in set(M.RETAINED_SCOPES) - set(M.RETAINED_GIT_SCOPES):
+            with self.subTest(scope=scope), self.assertRaises(M.Refused): M.observation_scope(env, scope)
+        with self.assertRaisesRegex(M.Refused, "retained-observer-tool-fixture"):
+            M.retained_fixture_context(env, M.TARGET, 501, 20)
 
     def test_retained_main_binds_original_tuple_but_preserves_actual_current_helper_environment(self):
         # Tuple comparison DATA only: installed admission/run are not executed.
@@ -464,6 +521,7 @@ class RetainedBindingFilesTests(InertOnly):
             path.mkdir(mode=0o700)
             if os.getuid() == 0: os.chown(path, self.uid, self.gid)
         self.env = retained_environment()
+        self.binding, self.scope = BINDING, M.SCOPE
         self.put(self.checkout / ".git/HEAD", (BINDING.source + "\n").encode())
         self.put(self.helper / ".git/HEAD", (self.env["GITHUB_SHA"] + "\n").encode())
         for name in M.RETAINED_HELPER_FILES:
@@ -529,7 +587,7 @@ class RetainedBindingFilesTests(InertOnly):
 
     def new_book(self):
         if hasattr(self, "fixtures"): self.fixtures.close()
-        fixtures = self.fixtures = A.Fixtures(BINDING, self.uid, self.gid, M.SCOPE)
+        fixtures = self.fixtures = A.Fixtures(self.binding, self.uid, self.gid, self.scope)
         self.addCleanup(fixtures.close)
         self.admissions = []
         def admit(*args, **kwargs):
@@ -542,6 +600,38 @@ class RetainedBindingFilesTests(InertOnly):
         for name in ("manifest.json", STAGE.INSTALLATION_INVENTORY_NAME, STAGE.INSTALLATION_RECORD_NAME, "python3"):
             fd = fixtures._open(name, parent)
             fixtures.recovery_runtime_originals.append((parent, name, fd, A.signature(os.fstat(fd))))
+        if self.scope in M.RETAINED_GIT_SCOPES:
+            read = fixtures._recovery_read
+            def inert_root_owner(parent, name, uid, limit, mode, **options):
+                # Unit seam substitutes only the unavailable installed root
+                # ownership, retaining the actual reader, FD, hash and POST.
+                self.assertEqual((uid, limit, mode, options), (0, 64 * 1024, 0o444, {'retain': True}))
+                return read(parent, name, self.uid, limit, mode, **options)
+            fixtures._recovery_read = inert_root_owner
+
+    def configure_git(self):
+        self.binding, self.scope = A.Binding(*M.RETAINED_GIT_TUPLE), M.FETCH_SCOPE
+        self.env = retained_git_environment()
+        self.put(self.checkout / ".git/HEAD", (self.binding.source + "\n").encode())
+        for name in M.RETAINED_GIT_HELPER_FILES:
+            self.put(self.helper / "desktop/tools" / name, b"# INERT held Git helper SOURCE\n")
+        self.selection['nativeScope'] = M.GIT_SCOPE
+        self.selection['origin'].update(zip(('source', 'runId', 'runAttempt'), M.RETAINED_GIT_TUPLE))
+        self.selection['members'] = self.selection['members'][-2:]
+        self.selection_body = STAGE.canonical(self.selection)
+        self.put(self.helper / M.RETAINED_GIT_SELECTION, self.selection_body)
+        manifest = json.loads((self.installed / 'manifest.json').read_bytes())
+        for name in sorted(STAGE.GIT_OBSERVATION_BOOTSTRAPS):
+            manifest['files'].append(dict(path=name, size=1, sha256=A.digest(b'x')))
+            self.put(self.installed / name, b'x'); (self.installed / name).chmod(0o444)
+        manifest['files'].sort(key=lambda row: row['path'])
+        manifest['inventorySha256'] = A.digest(STAGE.canonical(manifest['files']))
+        manifest = STAGE.canonical(manifest)
+        self.put(self.installed / 'manifest.json', manifest)
+        self.receipt.update(nativeScope=M.GIT_SCOPE, nomination=self.selection['origin'], members=self.receipt['members'][-2:])
+        self.receipt['release'].update(sourceCommit=self.binding.source, runtimeManifestSha256=A.digest(manifest))
+        self.put(self.work / 'retained-observer-install.json', STAGE.canonical(self.receipt))
+        self.new_book()
 
     def gate(self, *, fixture_context=False):
         retained = (self.parser, self.selection_body, self.selection)
@@ -558,7 +648,61 @@ class RetainedBindingFilesTests(InertOnly):
                 for name, value in (("getuid", self.uid), ("geteuid", self.uid), ("getgid", self.gid), ("getegid", self.gid)):
                     stack.enter_context(patch.object(os, name, return_value=value))
                 return M.retained_fixture_context(self.env, M.TARGET, self.uid, self.gid)
-            return M._admit_retained_runtime(A, self.fixtures, BINDING, self.work, self.env, retained)
+            return M._admit_retained_runtime(A, self.fixtures, self.binding, self.work, self.env, retained)
+
+    def test_retained_git_requires_and_holds_all_four_signed_bootstraps_and_its_own_helper_roster(self):
+        self.configure_git()
+        public = self.gate()
+        self.assertEqual(tuple(public['origin'][key] for key in ('source', 'runId', 'runAttempt')), M.RETAINED_GIT_TUPLE)
+        self.assertEqual((public['helperSource'], public['consumerRunId']), ('b'*40, '900'))
+        held = {row['name']: row for row in self.fixtures.gate_files}
+        for name in STAGE.GIT_OBSERVATION_BOOTSTRAPS:
+            self.assertEqual(held[name]['sha256'], A.digest(b'x'))
+            self.assertIn(held[name]['fd'], self.fixtures.fds)
+        for name in M.RETAINED_GIT_HELPER_FILES:
+            self.assertIn(name, held)
+        self.assertNotIn('macos_tool_setup_observation.py', held)
+        self.assertEqual(self.admissions, [((self.checkout, self.work), {'application_source': self.binding.source})])
+        self.assertFalse((self.work / 'runtime-binding.json').exists())
+        M._current(A, self.fixtures)
+
+    def test_retained_git_refuses_tool_manifest_receipt_selection_or_wrong_original_tuple(self):
+        self.configure_git()
+        for key, value in (('nativeScope', M.TOOLS_SCOPE), ('originalMountDetached', False),
+                            ('originalInstallerReturnedZero', False), ('sameRequestReadback', False)):
+            self.put(self.work / 'retained-observer-install.json', STAGE.canonical(dict(self.receipt, **{key: value})))
+            self.new_book()
+            with self.subTest(key=key), self.assertRaises(ValueError): self.gate()
+            self.assertEqual(self.admissions, [])
+        self.put(self.work / 'retained-observer-install.json', STAGE.canonical(self.receipt))
+        old = self.selection['nativeScope']; self.selection['nativeScope'] = M.TOOLS_SCOPE
+        self.new_book()
+        with self.assertRaisesRegex(A.Refused, 'retained-observer-original-tuple'): self.gate()
+        self.assertEqual(self.admissions, []); self.selection['nativeScope'] = old
+        self.binding = BINDING; self.new_book()
+        with self.assertRaisesRegex(A.Refused, 'retained-observer-original-tuple'): self.gate()
+        self.assertEqual(self.admissions, []); self.binding = A.Binding(*M.RETAINED_GIT_TUPLE)
+        manifest = json.loads((self.installed / 'manifest.json').read_bytes())
+        manifest['files'] = [row for row in manifest['files'] if row['path'] not in STAGE.GIT_OBSERVATION_BOOTSTRAPS]
+        manifest['inventorySha256'] = A.digest(STAGE.canonical(manifest['files']))
+        manifest = STAGE.canonical(manifest)
+        self.put(self.installed / 'manifest.json', manifest)
+        self.receipt['release']['runtimeManifestSha256'] = A.digest(manifest)
+        self.put(self.work / 'retained-observer-install.json', STAGE.canonical(self.receipt))
+        self.new_book()
+        with self.assertRaisesRegex(A.Refused, 'retained-git-observation-roster'): self.gate()
+
+    def test_retained_git_unused_peer_and_helper_replacements_refuse_original_post_without_repair(self):
+        self.configure_git()
+        for path in (self.helper / M.RETAINED_GIT_SELECTION,
+                     self.helper / 'desktop/tools/macos_git_cli_observation.py',
+                     self.installed / sorted(STAGE.GIT_OBSERVATION_BOOTSTRAPS)[-1]):
+            self.new_book(); self.gate()
+            body, mode = path.read_bytes(), path.stat().st_mode & 0o777
+            replacement = path.with_name(path.name + '.inert-replacement')
+            self.put(replacement, body); replacement.chmod(mode); replacement.replace(path)
+            with self.subTest(path=path.name), self.assertRaises(A.Refused): M._current(A, self.fixtures)
+            self.assertEqual(path.read_bytes(), body)
 
     def test_same_installed_fds_join_new_receipt_without_any_old_work_binding(self):
         with patch.object(STAGE, "composed_runtime_binding_data", side_effect=AssertionError("no old composition")), \

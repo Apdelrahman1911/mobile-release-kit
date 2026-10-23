@@ -31,13 +31,28 @@ def instance(target='aarch64-apple-darwin'):
                                  nomination=nomination(target))
 
 
-def retained_instance(selection):
+def retained_instance(selection, *, environment=None):
     with mock.patch.object(R.Resume, '__init__', return_value=None):
         owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
                                   retained_observer=True)
     owner.source = mock.Mock(return_value=R.canonical(selection))
-    owner.load_nomination('aarch64-apple-darwin')
+    with mock.patch.dict(C.os.environ, environment or {}, clear=True):
+        owner.load_nomination('aarch64-apple-darwin')
     return owner
+
+
+def retained_git_environment():
+    env = PredecessorInstallTests().environment()
+    env.update(MRK_CANDIDATE_MODE='install-retained-git-observer',
+        GITHUB_REF='refs/heads/'+C.RETAINED_OBSERVER_BRANCH,
+        GITHUB_WORKFLOW_REF=R.REPOSITORY+'/'+C.WORKFLOW+'@refs/heads/'+C.RETAINED_OBSERVER_BRANCH,
+        MRK_CANDIDATE_SOURCE=C.candidate.RETAINED_GIT_TUPLE[0],
+        MRK_MACOS_INSTALL_SOURCE_COMMIT=C.candidate.RETAINED_GIT_TUPLE[0],
+        MRK_MACOS_RUNNER='xcode-27', MRK_MACOS_MACHINE='arm64',
+        MRK_MACOS_HOSTED_JOB='github-hosted-xcode27-arm64', MRK_MACOS_NATIVE_SCOPE='git-native',
+        MRK_MACOS_PACKAGE_ROLE='installed-shell-observation', MRK_MACOS_STORE_RUNTIME='signed-component',
+        MRK_EXPECTED_SHA=env['GITHUB_SHA'], DEVELOPER_DIR='/Library/Developer/CommandLineTools')
+    return env
 
 
 def mounted_fixture(target):
@@ -73,6 +88,55 @@ def mounted_fixture(target):
 
 
 class CandidateConsumerTests(unittest.TestCase):
+    def test_git_retained_context_selection_and_actual_host_caller_are_closed_and_defaults_stay26(self):
+        import ctypes
+        from desktop.tools import macos_xcode_host_preparation as H
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        selected = retained_fixture(git=True)[0]
+        env = retained_git_environment()
+        self.assertEqual(C.context_data(env, C.HELPER_ROOT, 'arm64')['helperSource'], env['GITHUB_SHA'])
+        git = retained_instance(selected, environment=env)
+        git.source.assert_called_once_with(C.candidate.RETAINED_GIT_SELECTION_PATH, 8192)
+        self.assertEqual(git.nomination, selected['origin'])
+        tool = retained_instance(retained_fixture()[0])
+        for key, value in (('GITHUB_EVENT_NAME', 'push'), ('MRK_CANDIDATE_MODE', 'install-retained-other'),
+                ('GITHUB_REF', 'refs/heads/'+C.BRANCH), ('GITHUB_WORKFLOW_SHA', selected['origin']['source']),
+                ('MRK_CANDIDATE_SOURCE', 'a'*40), ('MRK_MACOS_INSTALL_SOURCE_COMMIT', 'b'*40),
+                ('MRK_MACOS_NATIVE_SCOPE', 'tool-setup'), ('MRK_MACOS_RUNNER', 'macos-26'),
+                ('MRK_MACOS_HOSTED_JOB', 'github-hosted-macos26-arm64'), ('MRK_MACOS_MACHINE', 'x86_64'),
+                ('MRK_MACOS_TARGET', 'x86_64-apple-darwin'), ('MRK_MACOS_PACKAGE_ROLE', 'ordinary-image'),
+                ('MRK_MACOS_STORE_RUNTIME', 'historical'), ('MRK_EXPECTED_SHA', 'f'*40),
+                ('DEVELOPER_DIR', '/Applications/Xcode.app/Contents/Developer')):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                C.context_data(dict(env, **{key: value}), C.HELPER_ROOT, 'arm64')
+        with self.assertRaises(ValueError): retained_instance(retained_fixture()[0], environment=env)
+        with self.assertRaises(ValueError): retained_instance(selected)
+        # Actual new Apple constructor and consumer caller; only CDLL/signal
+        # observations are inert. No dylib, syscall, process or install occurs.
+        for owner, version, expected in ((git, b'27.0.1', True), (git, b'26.0', False),
+                (tool, b'26.0', True), (tool, b'27.0.1', False),
+                (instance(), b'26.0', True), (instance('x86_64-apple-darwin'), b'27.0.1', False)):
+            owner.clock = SimpleNamespace(check=lambda: None)
+            native = mock.Mock()
+            native.issetugid.return_value = native.sigaction.return_value = 0
+            def sysctl(name, buffer, length, *_args):
+                self.assertEqual(name, b'kern.osproductversion')
+                buffer.value = version
+                ctypes.cast(length, ctypes.POINTER(ctypes.c_size_t)).contents.value = len(version) + 1
+                return 0
+            native.sysctlbyname.side_effect = sysctl
+            with mock.patch.object(H.ctypes, 'CDLL', return_value=native), \
+                 mock.patch.object(H.signal, 'SIGCHLD', H.DARWIN_SIGCHLD), \
+                 mock.patch.object(H.signal, 'getsignal', return_value=H.signal.SIG_DFL):
+                if expected:
+                    owner.initialize_host(H)
+                    self.assertEqual(owner.host.version, version.decode())
+                    self.assertEqual(native.sigaction.call_count, 1)
+                else:
+                    with self.assertRaises(H.Refused): owner.initialize_host(H)
+                    self.assertEqual(native.sigaction.call_count, 0)
+            native.sysctlbyname.assert_called_once()
+
     def test_retained_observer_is_explicit_arm_install_and_held_helper_selection_only(self):
         from tests.desktop.test_macos_candidate_carrier import retained_fixture
         selection, *_ = retained_fixture()
@@ -1067,7 +1131,8 @@ class CandidateConsumerTests(unittest.TestCase):
                 self.entries.append(value)
                 return value, b'inert'
         for selection, archive in ((C.SELECTION_PATH,'arm64-candidate.zip'),
-                                   (C.RETAINED_OBSERVER_SELECTION_PATH,'arm64-retained-observer.zip')):
+                                   (C.RETAINED_OBSERVER_SELECTION_PATH,'arm64-retained-observer.zip'),
+                                   (C.candidate.RETAINED_GIT_SELECTION_PATH,'arm64-retained-observer.zip')):
             with self.subTest(selection=selection):
                 quota = R.OriginalQuota(); quota.reserve(2)  # mkdir + consumed bootstrap
                 outer = quota.book(Book)
@@ -1332,7 +1397,7 @@ class PredecessorInstallTests(unittest.TestCase):
         """Actual install/command/signature methods; inert native and FS ports."""
         import subprocess
         C._PREDECESSOR_DETACH = None
-        retained = mode == 'retained-observer'
+        retained = mode in ('retained-observer', 'retained-git-observer')
         events, native_calls, now = [], [], [1]
         original_error = RuntimeError('inert original unknown')
         image = b'inert-image'
@@ -1346,10 +1411,12 @@ class PredecessorInstallTests(unittest.TestCase):
                 owner._CandidateResume__nomination = nomination()
             elif retained:
                 from tests.desktop.test_macos_candidate_carrier import retained_fixture
-                selection, entries, _, *_ = retained_fixture()
-                owner = retained_instance(selection)
+                git = mode == 'retained-git-observer'
+                selection, entries, _, *_ = retained_fixture(git=git)
+                owner = retained_instance(selection, environment=retained_git_environment() if git else None)
                 image, preview = dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE], None
                 originals, selected, stage = mounted_fixture(owner.target)
+                stage.maintenance_producer_data.return_value['releaseSet']['current']['sourceCommit'] = owner.nomination['source']
                 stage.xar_members = mock.Mock(return_value={'PackageInfo': b'info', 'Scripts': b'cpio'})
                 stage.install_product_members.side_effect = AssertionError('flat observer must use the component parser')
                 owner.selection = stage.source_build_selection(owner.target)
@@ -1491,12 +1558,18 @@ class PredecessorInstallTests(unittest.TestCase):
             yield owner, image, preview, events, native_calls, original_error
 
     def test_retained_actual_install_consume_and_receipt_require_original_finality(self):
+        self.retained_install_finality()
+
+    def test_git_retained_install_consume_and_receipt_require_the_same_original_finality(self):
+        self.retained_install_finality(git=True)
+
+    def retained_install_finality(self, *, git=False):
         faults = (None, 'pre-source', 'post-source', 'producer-key', 'producer-signature',
             'producer-signature-stdout', 'producer-signature-stderr', 'request-before', 'request-after',
             'installer', 'readback', 'not-fresh', 'entry-signature', 'payload-signature', 'mounted-close',
             'detach16', 'detach-unknown', 'detach-post', 'call-capture', 'retire', 'close', 'final-close')
         for fault in faults:
-            with self.subTest(fault=fault), self.scheduled_install('retained-observer', fault) as (owner,image,preview,events,calls,original):
+            with self.subTest(fault=fault), self.scheduled_install('retained-git-observer' if git else 'retained-observer', fault) as (owner,image,preview,events,calls,original):
                 self.assertIsNone(preview)
                 owner.helper_source, owner.helper_tree = 'd'*40, 'e'*40
                 owner.quota.reserved = 76
@@ -1528,7 +1601,8 @@ class PredecessorInstallTests(unittest.TestCase):
                         value = owner.consume(0,0)
                         self.assertEqual(value['scope'],'retained-observer-fresh-install')
                         self.assertEqual(value['nomination'],owner.nomination)
-                        self.assertEqual(value['nomination']['runId'],'42')
+                        self.assertEqual(value['nomination']['runId'], C.candidate.RETAINED_GIT_TUPLE[1] if git else '42')
+                        self.assertEqual(value['nativeScope'], 'git-native' if git else 'tool-setup')
                         self.assertEqual((value['consumerRunId'],value['consumerRunAttempt']),('51','2'))
                         self.assertEqual(value['consumerWorkDirectory'],[1,2,501])
                         self.assertEqual(value['freshInstall'],dict(requestId='f'*32,invocation='7'*32,instance='8'*32,

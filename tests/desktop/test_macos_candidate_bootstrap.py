@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -27,6 +28,51 @@ from test_macos_candidate_carrier import fixture, archive
 
 
 class CandidateBootstrapTests(unittest.TestCase):
+    def test_retained_workflow_adds_only_closed_git_operation_and_preserves_original_handoff_and_clocks(self):
+        workflow = (ROOT / C.WORKFLOW).read_text()
+        self.assertIn('install-retained-observer, install-retained-git-observer]', workflow)
+        self.assertNotIn('\n  install-retained-git-observer:', workflow)
+        job = workflow.split('\n  install-retained-observer:\n', 1)[1].split('\n  install-predecessor:\n', 1)[0]
+        self.assertIn("inputs.operation == 'install-retained-observer' || inputs.operation == 'install-retained-git-observer'", job)
+        self.assertIn("inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'", job)
+        self.assertIn('timeout-minutes: 260\n', job)
+        self.assertIn('MRK_CANDIDATE_MODE: ${{ inputs.operation }}', job)
+        expression = "${{ inputs.operation == 'install-retained-git-observer' && '%s' || '%s' }}"
+        for key, git, tool in (('runs-on', 'xcode-27', 'macos-26'), ('MRK_MACOS_RUNNER', 'xcode-27', 'macos-26'),
+                ('MRK_MACOS_HOSTED_JOB', 'github-hosted-xcode27-arm64', 'github-hosted-macos26-arm64'),
+                ('MRK_MACOS_NATIVE_SCOPE', 'git-native', 'tool-setup'),
+                ('DEVELOPER_DIR', '/Library/Developer/CommandLineTools', '/Applications/Xcode.app/Contents/Developer')):
+            self.assertIn(key + ': ' + expression % (git, tool), job)
+        for key in ('MRK_CANDIDATE_SOURCE', 'MRK_MACOS_INSTALL_SOURCE_COMMIT'):
+            self.assertIn(key + ': ' + expression % (C.candidate.RETAINED_GIT_TUPLE[0], 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'), job)
+        sections = re.split(r'^      - name: ', job, flags=re.M)[1:]
+        steps = {section.splitlines()[0]: section for section in sections}
+        tool_names = ('Verify four supported project identity edits', 'Start the fixed native service and verify readiness',
+            'Verify the installed CLI with the native service', 'Prepare only the required isolated Android tool inputs',
+            'Verify tool acquisition, cancellation and missing-only reuse',
+            'Verify signing-key reuse, cancellation, restart and encrypted backup')
+        for name, clock in zip(tool_names, (15, 13, 3, 22, 122, 60)):
+            self.assertIn("if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'", steps[name])
+            self.assertIn('timeout-minutes: ' + str(clock) + '\n', steps[name])
+        install = steps['Reuse the retained signed image for a fresh install and file verification']
+        for required in ('timeout-minutes: 12\n', 'phase_status=$?', 'saved_status=$?',
+                'retained-observer-install.json', 'retained-observer-install.status', 'unset GITHUB_TOKEN',
+                'if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi', '[[ "$saved_status" == 0 ]] || exit "$saved_status"'):
+            self.assertIn(required, install)
+        git = steps['Verify fifteen existing Git cases on the freshly installed signed Git observer']
+        self.assertIn("if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer'", git)
+        self.assertIn('timeout-minutes: 25\n', git)
+        self.assertIn('set -euo pipefail', git)
+        calls = re.findall(r'^          (exec )?"\$MRK_PYTHON" -I -S -B "\$driver" --retained-observer --target "\$MRK_MACOS_TARGET" --scope ([a-z-]+)$', git, re.M)
+        self.assertEqual(calls, [('', 'git-index-cli-native'), ('', 'git-branch-cli-native'),
+            ('', 'git-fetch-native'), ('', 'git-push-native'), ('', 'git-push-create-native'), ('exec ', 'git-upstream-native')])
+        self.assertNotIn('GITHUB_TOKEN', git)
+        self.assertNotIn('continue-on-error', job)
+        self.assertNotIn('secrets.', job)
+        self.assertEqual(R.MAX_ORIGINALS, 96)
+        for path, cap in ((C.CONSUMER_PATH, 96 << 10), (C.LEGACY_PATH, R.SOURCE_LIMIT), (C.PARSER_PATH, C.PARSER_SOURCE_LIMIT)):
+            self.assertLessEqual((ROOT / path).stat().st_size, cap)
+
     def exercise(self, target, fault=None, purpose="install", transport=None):
         work = Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH/resume-carrier')
         host = work.parent / 'host-python'

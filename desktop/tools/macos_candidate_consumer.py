@@ -203,7 +203,7 @@ def context_data(environment, root, machine):
     source = environment.get('GITHUB_SHA', '')
     removal = environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery'
     predecessor = environment.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
-    retained = environment.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
+    retained = candidate.retained_git_context(environment) or environment.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
     branch = RETAINED_OBSERVER_BRANCH if retained else PREDECESSOR_BRANCH if predecessor else REMOVAL_BRANCH if removal else BRANCH
     resume.need(root == HELPER_ROOT and environment.get('GITHUB_WORKSPACE') == str(CANDIDATE_ROOT)
                 and environment.get('RUNNER_TEMP') == '/Users/runner/work/_temp'
@@ -230,11 +230,7 @@ def context_data(environment, root, machine):
 
 
 def source_rows_data(body, expected):
-    """Same tracked Git blob correspondence used by the existing normal UI.
-
-    No index/status/filter/diff execution, no manual implementation hash pins.
-    Only the exact held SOURCE files of the two selected commits are compared.
-    """
+    """Join held SOURCE to tracked blobs; no filters, status or manual hash pins."""
     import hashlib
     resume.need(type(body) is bytes and 0 < len(body) <= 8192 and body.endswith(b'\0'), 'candidate-source-roster')
     seen = set()
@@ -265,11 +261,7 @@ def candidate_transport_path(run, attempt, nomination):
 
 
 def predecessor_detach_data(stdout, stderr):
-    """Same bounded lexical policy as the production detach DATA helpers.
-
-    Kept local to avoid a 97th lifetime SOURCE original just for diagnostics.
-    Literal text hints are not cause, stage, PID or service-finality evidence.
-    """
+    """Lexical hints, not finality/cause; local to avoid a 97th SOURCE original."""
     label = 'unclassified'
     if type(stderr) is bytes and len(stderr) <= 65536:
         known = {b'Resource busy': 'resource-busy', b'Permission denied': 'permission-denied',
@@ -481,7 +473,10 @@ class CandidateResume(resume.Resume):
         resume.need(not self.__predecessor_install or target == 'aarch64-apple-darwin', 'candidate-predecessor-target')
         if self.__retained_observer:
             resume.need(target == 'aarch64-apple-darwin', 'retained-observer-target')
-            selected = candidate.retained_observer_selection_data(resume.decode(self.source(RETAINED_OBSERVER_SELECTION_PATH, 8192)))
+            git = candidate.retained_git_context(os.environ)
+            path = candidate.RETAINED_GIT_SELECTION_PATH if git else RETAINED_OBSERVER_SELECTION_PATH
+            selected = candidate.retained_observer_selection_data(resume.decode(self.source(path, 8192)))
+            resume.need(selected['nativeScope'] == ('git-native' if git else 'tool-setup'), 'retained-observer-source-scope')
             self.__retained_selection = resume.canonical(selected)
             self.__nomination = MappingProxyType(selected['origin'])
             return
@@ -495,7 +490,7 @@ class CandidateResume(resume.Resume):
         return candidate.retained_observer_selection_data(resume.decode(self.__retained_selection))
 
     def verify_sources(self):
-        """Original owned Git queries; source bytes stay held across every call."""
+        """Owned Git queries with held SOURCE originals."""
         env = dict(self.environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
                    GIT_NO_REPLACE_OBJECTS='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
         for role, root, selected in (('helper-source', self.root, self.helper_source),
@@ -536,8 +531,7 @@ class CandidateResume(resume.Resume):
         for relative, cap in ((STAGER_PATH, resume.SOURCE_MODULE_LIMIT), *CANDIDATE_SOURCE_INPUTS):
             entry, body = self.quota.call(self.outer, 'file', self.candidate_root / relative, cap, uid=os.getuid())
             self.sources.append((entry, body)); bodies[relative] = body
-        # The candidate's code is not executed until its real Git tree and every
-        # source byte here match the exact service-nominated checkout.
+        # No candidate code executes before its actual Git tree/blob join.
         self.verify_sources()
         if fixture_body is not None:
             self.fixture_api = resume.load_module("_mrk_candidate_fixture", self.root / FIXTURE_PATH, fixture_body)
@@ -546,8 +540,7 @@ class CandidateResume(resume.Resume):
         self.stager = resume.load_module('_mrk_candidate_stager', self.candidate_root / STAGER_PATH, bodies[STAGER_PATH])
         resume.need(self.stager.DESKTOP == self.candidate_root / 'desktop', 'candidate-stager-source-root')
         self.selection = self.stager.source_build_selection(self.target)
-        # Producer/source policy is subordinate to the independently pinned G2
-        # certificate retained by the helper, never PREVIEW's claimed identity.
+        # Independent helper certificate, never PREVIEW identity, binds policy.
         relative, size, digest = resume.SIGNING_CERTIFICATE
         leaf = self.source(relative, size, digest)
         import hashlib
@@ -563,10 +556,10 @@ class CandidateResume(resume.Resume):
         self.__source_loaded = True
 
     def initialize_host(self, host_module):
-        # The caller must load this module from its original held helper source,
-        # just as Resume.main does. Never default the Intel owner to ARM ABI.
+        # Held helper source;27 only after explicit Git context/selection admission.
         self.host_module = host_module
-        self.host = host_module.DarwinAPI(self.clock, target=self.target)
+        self.host = host_module.DarwinAPI(self.clock, target=self.target, **({'expected_major': 27}
+            if self.__retained_observer and self.retained_selection()['nativeScope'] == 'git-native' else {}))
         self.host.waitable_sigchld()
 
     def admit_resources(self, retained, host_bytes, *, image_bytes=None, acquiring=False, package_bytes=None, reading=False):
@@ -1023,15 +1016,14 @@ class CandidateResume(resume.Resume):
                 BaseException.add_note(primary, 'candidate-original-final-closes')
 
     def retained_observer_receipt(self):
-        # Only consume's successful actual finality reaches this projection.
-        # The shell must still write a separate status after THIS caller exits.
+        # Actual consume finality only; the shell must still save THIS return.
         resume.need(self.__retained_observer and self.__observer_product is not None,
                     'retained-observer-signed-product-missing')
         observed = self.installation
         q = self.outer.directories[self.work.parent]['identity']
         work_identity = (q[0], q[1], q[3])
         value = {'schemaVersion': 1, 'scope': 'retained-observer-fresh-install',
-            'packageRole': 'installed-shell-observation', 'nativeScope': 'tool-setup', 'target': self.target,
+            'packageRole': 'installed-shell-observation', 'nativeScope': self.retained_selection()['nativeScope'], 'target': self.target,
             'nomination': self.nomination, 'members': resume.decode(self.__members_document),
             'image': resume.decode(self.__image_document), **resume.decode(self.__observer_product),
             'helperSource': self.helper_source, 'helperTree': self.helper_tree,
@@ -1275,14 +1267,14 @@ def _admit_system_tool(session, role, tool):
 
 
 def main(purpose="install"):
-    """Hosted fixed acquisition/install and explicit reuse only."""
+    """Hosted fixed acquisition/install and explicit reuse."""
     global _SYSTEM_TOOL_FAILURE, _PREDECESSOR_DETACH, _RETAINED_DETACH
     _SYSTEM_TOOL_FAILURE = None
     _PREDECESSOR_DETACH = None
     _RETAINED_DETACH = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
     predecessor = os.environ.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
-    retained = os.environ.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
+    retained = os.environ.get('MRK_CANDIDATE_MODE') in candidate.RETAINED_OBSERVER_OPERATIONS
     resume.need(not predecessor or purpose == 'install', 'candidate-predecessor-install-purpose')
     resume.need(not retained or purpose == 'install', 'retained-observer-install-purpose')
     resume.need((purpose == 'acquire-removal' or predecessor or retained) == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
@@ -1318,7 +1310,8 @@ def main(purpose="install"):
         session.python = os.path.realpath(sys.executable)
         session.environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC',
                                'HOME': '/Users/runner', 'TMPDIR': str(session.work) + '/',
-                               'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer'}
+                               'DEVELOPER_DIR': '/Library/Developer/CommandLineTools' if candidate.retained_git_context(os.environ)
+                                   else '/Applications/Xcode.app/Contents/Developer'}
         host_root = session.work.parent / 'host-python'
         host_entry, host_body = quota.call(session.outer, 'file', host_root / 'host-binding.json', 32768, modes=(0o600,))
         host_binding = resume.decode(host_body)

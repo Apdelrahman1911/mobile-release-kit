@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Closed identity/tool/upload-key observations on one current installed observer.
+"""Closed identity/tool/upload-key/Git observations on one installed observer.
 
 Import is DATA-only. The explicit main entry uses the existing Fixtures and
 run_cases/owned_process owners; it never prepares, signs or installs a runtime.
@@ -38,10 +38,13 @@ HELPER_ROOT = CHECKOUT / ".candidate-consumer-helper"
 RETAINED_REF = "refs/heads/verify/desktop-macos-observer-reuse"
 RETAINED_WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-candidate-consume.yml@" + RETAINED_REF
 RETAINED_SELECTION = "desktop/macos-installed-inputs/retained-observer-selection.json"
+RETAINED_GIT_SELECTION = "desktop/macos-installed-inputs/retained-git-observer-selection.json"
+RETAINED_GIT_TUPLE = ("216a2d3a559dd562164e852ea78b7235916e7c3a", "39998949850", "1")
+RETAINED_GIT_SCOPES = (*GIT_CLI_SCOPES, FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE, UPSTREAM_SCOPE)
 RETAINED_SCOPES = (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, PUBLIC_TOOLS_SCOPE, CLI_SCOPE,
-                   *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE, BACKUP_CLI_SCOPE)
+                   *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE, BACKUP_CLI_SCOPE, *RETAINED_GIT_SCOPES)
 # Fixed current helper SOURCE, not a second content-hash or supplier authority.
-# The retained mode uses only these existing tool/identity/upload observers.
+# Tool and Git retain their corresponding existing helper originals separately.
 RETAINED_HELPER_FILES = (
     "macos_identity_current_runtime.py", "macos_aqua_qualification.py",
     "macos_candidate_carrier.py", "macos_fixed_carrier_resume.py",
@@ -49,6 +52,11 @@ RETAINED_HELPER_FILES = (
     "macos_tool_acquisition_observation.py", "macos_cli_local_check_observation.py",
     "macos_upload_key_observation.py", "macos_upload_key_restart_observation.py",
     "macos_upload_key_backup_observation.py", "macos_upload_key_cli_observation.py",
+)
+RETAINED_GIT_HELPER_FILES = (*RETAINED_HELPER_FILES[:4],
+    "macos_git_fetch_qualification.py", "macos_git_push_qualification.py",
+    "macos_git_push_create_qualification.py", "macos_git_upstream_qualification.py",
+    "macos_cli_local_check_observation.py", "macos_git_cli_observation.py",
 )
 # A source-selected observer host is not a product minimum-OS or Git build
 # nomination. Keep the exact old host; only combined Git admits the preview.
@@ -138,17 +146,23 @@ def retained_context(environment, target):
     source = environment.get("GITHUB_SHA", "")
     need(target == TARGET and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
          and source != "0" * 40, "retained-observer-helper-source")
+    git = environment.get("MRK_CANDIDATE_MODE") == "install-retained-git-observer"
     required = {
         "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
         "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": RETAINED_REF,
         "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_REF": RETAINED_WORKFLOW,
         "GITHUB_WORKFLOW_SHA": source, "MRK_MACOS_TARGET": TARGET,
-        "MRK_CANDIDATE_MODE": "install-retained-observer", "MRK_MACOS_NATIVE_SCOPE": TOOLS_SCOPE,
+        "MRK_CANDIDATE_MODE": "install-retained-git-observer" if git else "install-retained-observer",
+        "MRK_MACOS_NATIVE_SCOPE": GIT_SCOPE if git else TOOLS_SCOPE,
         "MRK_MACOS_PACKAGE_ROLE": ROLE,
     }
+    if git:
+        required.update(MRK_CANDIDATE_SOURCE=RETAINED_GIT_TUPLE[0],
+            MRK_MACOS_INSTALL_SOURCE_COMMIT=RETAINED_GIT_TUPLE[0], MRK_EXPECTED_SHA=source,
+            MRK_MACOS_STORE_RUNTIME="signed-component", DEVELOPER_DIR="/Library/Developer/CommandLineTools")
     need(all(environment.get(key) == value for key, value in required.items()), "retained-observer-current-route")
-    need(_host_profile(environment)[0] == "macos-26", "retained-observer-host")
+    need(_host_profile(environment)[0] == ("xcode-27" if git else "macos-26"), "retained-observer-host")
     for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         need(type(environment.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", environment[key]),
              "retained-observer-current-run")
@@ -236,7 +250,7 @@ def _load_observer(*, retained=False):
     return module
 
 
-def _retained_selection():
+def _retained_selection(environment):
     # Trusted current SOURCE only. This bounded first read proposes a fixture
     # tuple; admission retains/rechecks the original before any process owner.
     import importlib
@@ -248,10 +262,14 @@ def _retained_selection():
         sys.path.pop(0)
     need(Path(parser.__file__).absolute() == HELPER_ROOT / "desktop/tools/macos_candidate_carrier.py",
          "retained-observer-parser-source")
-    with (HELPER_ROOT / RETAINED_SELECTION).open("rb") as original:
+    git = parser.retained_git_context(environment)
+    path = RETAINED_GIT_SELECTION if git else RETAINED_SELECTION
+    with (HELPER_ROOT / path).open("rb") as original:
         body = original.read(8193)
     need(0 < len(body) <= 8192, "retained-observer-selection-bound")
-    return parser, body, parser.retained_observer_selection_data(parser.decode(body))
+    selected = parser.retained_observer_selection_data(parser.decode(body))
+    need(selected["nativeScope"] == environment.get("MRK_MACOS_NATIVE_SCOPE"), "retained-observer-source-scope")
+    return parser, body, selected
 
 
 def _admit_runtime(aqua, fixtures, binding, work, environment):
@@ -337,7 +355,10 @@ def _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained
     helper_source, run, attempt, actual_work = retained_context(environment, binding.target)
     parser, proposed_body, selected = retained
     origin = selected["origin"]
-    aqua.need(work == actual_work and environment.get("MRK_CANDIDATE_SOURCE") == binding.source
+    git_scope = environment.get("MRK_MACOS_NATIVE_SCOPE") == GIT_SCOPE
+    aqua.need(selected["nativeScope"] == environment.get("MRK_MACOS_NATIVE_SCOPE")
+              and (not git_scope or (binding.source, binding.run, binding.attempt) == RETAINED_GIT_TUPLE)
+              and work == actual_work and environment.get("MRK_CANDIDATE_SOURCE") == binding.source
               and (binding.source, binding.run, binding.attempt, binding.target) ==
               tuple(origin[key] for key in ("source", "runId", "runAttempt", "target")),
               "retained-observer-original-tuple")
@@ -351,11 +372,12 @@ def _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained
     aqua.need(head == (helper_source + "\n").encode("ascii"), "retained-observer-helper-head")
     helper_desktop = aqua._gate_directory(fixtures, "desktop", helper)
     helper_inputs = aqua._gate_directory(fixtures, "macos-installed-inputs", helper_desktop)
-    body, _ = aqua._gate_file(fixtures, Path(RETAINED_SELECTION).name, helper_inputs, 8192)
+    selection_path = RETAINED_GIT_SELECTION if git_scope else RETAINED_SELECTION
+    body, _ = aqua._gate_file(fixtures, Path(selection_path).name, helper_inputs, 8192)
     aqua.need(body == proposed_body and parser.retained_observer_selection_data(parser.decode(body)) == selected,
               "retained-observer-selection-changed")
     helper_tools = aqua._gate_directory(fixtures, "tools", helper_desktop)
-    for name in RETAINED_HELPER_FILES:
+    for name in RETAINED_GIT_HELPER_FILES if git_scope else RETAINED_HELPER_FILES:
         aqua._gate_file(fixtures, name, helper_tools, 1024 * 1024, capture=False)
     helper_src = aqua._gate_directory(fixtures, "src", helper)
     helper_core = aqua._gate_directory(fixtures, "mobile_release", helper_src)
@@ -399,7 +421,21 @@ def _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained
               "retained-observer-product-release")
     manifest, _ = _retained_installed_original(aqua, fixtures, "manifest.json", stage.MANIFEST_BYTES,
         expected=signed["runtimeManifestSha256"], capture=True)
-    stage.manifest_files(manifest, signed["runtimeManifestSha256"], current=True, target=binding.target)
+    _, rows = stage.manifest_files(manifest, signed["runtimeManifestSha256"], current=True, target=binding.target)
+    if git_scope:
+        aqua.need(set(rows) & stage.GIT_OBSERVATION_BOOTSTRAPS == stage.GIT_OBSERVATION_BOOTSTRAPS,
+                  "retained-git-observation-roster")
+        parent = next(item[0] for item in fixtures.recovery_runtime_originals if item[1] == "manifest.json")
+        # Same four root-owned originals as current Git, including unused peers;
+        # never borrow Tool's manifest or treat matching names as signed bytes.
+        for entry in sorted(stage.GIT_OBSERVATION_BOOTSTRAPS):
+            original, hashed, _ = fixtures._recovery_read(parent, entry, 0, 64 * 1024, 0o444, retain=True)
+            entry_parent, entry_name, entry_fd, entry_before = fixtures.recovery_runtime_originals[-1]
+            fixtures.normal_runtime_policy[entry_fd] = original[2]
+            fixtures.gate_files.append({"parent": entry_parent, "name": entry_name, "fd": entry_fd,
+                "full9": entry_before, "sha256": rows[entry]["sha256"]})
+            aqua.need(original[6] == rows[entry]["size"] and hashed == rows[entry]["sha256"],
+                      "retained-git-entry-correspondence")
     _, size = _retained_installed_original(aqua, fixtures, stage.INSTALLATION_INVENTORY_NAME, stage.INVENTORY_BYTES,
         expected=signed["inventorySha256"])
     aqua.need(size == receipt["inventory"]["bytes"], "retained-observer-installed-inventory-size")
@@ -428,10 +464,11 @@ def retained_fixture_context(environment, target, uid, gid):
     Every eventual runtime invocation independently retains its own originals.
     """
     _, _, _, work = retained_context(environment, target)
+    need(environment.get("MRK_MACOS_NATIVE_SCOPE") == TOOLS_SCOPE, "retained-observer-tool-fixture")
     need(type(uid) is int and type(gid) is int and uid > 0 and gid >= 0
          and uid == os.getuid() == os.geteuid() and gid == os.getgid() == os.getegid(),
          "retained-observer-fixture-user")
-    retained = _retained_selection()
+    retained = _retained_selection(environment)
     origin = retained[2]["origin"]
     aqua = _load_observer(retained=True)
     binding = aqua.Binding(origin["source"], origin["runId"], origin["runAttempt"], target).checked()
@@ -548,7 +585,7 @@ def main():
         observation_scope(environment, scope)
         source, run, attempt, work = (retained_context if retained_mode else current_context)(environment, TARGET)
         uid, gid, username, host = _native_user(environment, retained=True) if retained_mode else _native_user(environment)
-        retained = _retained_selection() if retained_mode else None
+        retained = _retained_selection(environment) if retained_mode else None
         aqua = _load_observer(retained=True) if retained_mode else _load_observer()
         if retained is not None:
             origin = retained[2]["origin"]

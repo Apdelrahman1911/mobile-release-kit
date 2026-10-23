@@ -207,22 +207,31 @@ class CandidateCarrierData(unittest.TestCase):
         parser.assert_not_called()
 
 
-def retained_fixture():
+def retained_fixture(*, git=False):
     row, _, run, job, artifact = fixture()
     entries = [('android-helper-distribution-detach.status', b'16\n'),
                ('android-helper-distribution-detach.stderr', b'Resource busy\n'),
                ('android-helper-distribution-detach.stdout', b''),
                ('distribution/MobileReleaseKit-Observation.dmg', b'old-request-image'),
                ('distribution/MobileReleaseKit.dmg', b'plain-package-image')]
+    if git:
+        entries = entries[3:]
+        row.update(zip(('source', 'runId', 'runAttempt'), M.RETAINED_GIT_TUPLE))
+        run.update(id=int(row['runId']), run_attempt=int(row['runAttempt']), head_sha=row['source'])
+        job.update(run_id=run['id'], run_attempt=run['run_attempt'], head_sha=row['source'])
+        artifact['workflow_run'].update(id=run['id'], head_sha=row['source'])
     body, row = archive(row, entries)
     selection = dict(schemaVersion=1, kind='retained-observer-source-selection-v1',
-        packageRole='installed-shell-observation', nativeScope='tool-setup', origin=row,
+        packageRole='installed-shell-observation', nativeScope='git-native' if git else 'tool-setup', origin=row,
         members=[dict(name=name, bytes=len(content)) for name, content in entries])
-    job.update(labels=['macos-26'], steps=[dict(number=i + 10, name=name, status='completed',
+    suffix = '-git-native' if git else ''
+    job.update(name='normal-installed-' + row['target'] + suffix,
+        labels=['xcode-27' if git else 'macos-26'], steps=[dict(number=i + 10, name=name, status='completed',
         conclusion='failure' if name == M.RETAINED_OBSERVER_STEPS[-2] else 'success')
         for i, name in enumerate(M.RETAINED_OBSERVER_STEPS)])
     artifact.update(size_in_bytes=len(body), digest='sha256:' + M.sha(body),
-        name='candidate-detach-nonshipping-unqualified-diagnostics-' + row['target'] + '-' + row['source'] + '-42-2')
+        name='candidate-detach-nonshipping-unqualified-diagnostics-' + row['target'] + suffix
+             + '-' + row['source'] + '-' + row['runId'] + '-' + row['runAttempt'])
     return selection, entries, body, run, job, artifact
 
 
@@ -237,7 +246,7 @@ def retained_receipt_fixture(selection, entries):
         packageSha256=controls['package']['sha256'], inventorySha256=controls['inventory']['sha256'])
     members = [dict(name=name, bytes=len(body), sha256=M.sha(body)) for name, body in entries]
     return dict(schemaVersion=1, scope='retained-observer-fresh-install', packageRole='installed-shell-observation',
-        nativeScope='tool-setup', target=selection['origin']['target'], nomination=selection['origin'],
+        nativeScope=selection['nativeScope'], target=selection['origin']['target'], nomination=selection['origin'],
         members=members, image=members[-1], **controls, release=release,
         helperSource='a'*40, helperTree='b'*40, consumerRunId='51', consumerRunAttempt='1', consumerWorkDirectory=[2,3,501],
         freshInstall=dict(requestId='1'*32, invocation='2'*32, instance='3'*32, stateSha256='7'*64, resultSha256='8'*64),
@@ -248,6 +257,98 @@ def retained_receipt_fixture(selection, entries):
 
 
 class RetainedObserverCarrierData(unittest.TestCase):
+    def test_git_selection_is_original_tuple_and_closed_two_member_roster_not_optional_tool_files(self):
+        selected, _, _, *_ = retained_fixture(git=True)
+        tool, *_ = retained_fixture()
+        self.assertEqual(M.retained_observer_selection_data(selected), selected)
+        self.assertEqual(len(selected['members']), 2)
+        changes = (dict(selected, members=tool['members']), dict(tool, members=selected['members']),
+            dict(selected, nativeScope='tool-setup'), dict(selected, nativeScope='git-fetch-native'),
+            dict(selected, members=selected['members'][1:]))
+        changes += tuple(dict(selected, origin=dict(selected['origin'], **{key: value}))
+            for key, value in (('source', tool['origin']['source']), ('runId', '42'), ('runAttempt', '2'),
+                               ('target', 'x86_64-apple-darwin')))
+        for changed in changes:
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                M.retained_observer_selection_data(changed)
+
+    def test_git_metadata_requires_original_combined_build_git_job_runner_artifact_and_closed_notary_stages(self):
+        selected, _, _, run, job, artifact = retained_fixture(git=True)
+        self.assertEqual(M.retained_observer_metadata_data(run, job, artifact, selected), selected)
+        mutations = ((0, 'id', 42), (0, 'run_attempt', 2), (0, 'head_sha', 'f'*40),
+            (1, 'id', 44), (1, 'name', 'normal-installed-aarch64-apple-darwin'),
+            (1, 'labels', ['macos-26']), (1, 'labels', ['xcode-27', 'macos-26']),
+            (2, 'id', 45), (2, 'expired', True), (2, 'digest', 'sha256:'+'f'*64),
+            (2, 'name', artifact['name'].replace('-git-native-', '-')))
+        for index, key, value in mutations:
+            rows = copy.deepcopy([run, job, artifact]); rows[index][key] = value
+            with self.subTest(index=index, key=key), self.assertRaises(ValueError):
+                M.retained_observer_metadata_data(*rows, selected)
+        for index in range(len(M.RETAINED_OBSERVER_STEPS)):
+            for fault in ('missing', 'skipped', 'reordered', 'duplicate'):
+                changed = copy.deepcopy(job)
+                if fault == 'missing': del changed['steps'][index]
+                elif fault == 'duplicate': changed['steps'].append(dict(changed['steps'][index], number=50))
+                elif fault == 'reordered': changed['steps'][index]['number'] = 60 if index < 8 else 1
+                else: changed['steps'][index]['conclusion'] = 'skipped'
+                with self.subTest(index=index, fault=fault), self.assertRaises(ValueError):
+                    M.retained_observer_metadata_data(run, changed, artifact, selected)
+        changed = copy.deepcopy(job)
+        changed['steps'][0]['name'] = 'Build only the current nonshipping observer'
+        with self.assertRaises(ValueError): M.retained_observer_metadata_data(run, changed, artifact, selected)
+
+    def test_git_two_member_codec_keeps_same_chunk_crc_eof_roster_and_main_only_memory_rules(self):
+        selection, entries, *_ = retained_fixture(git=True)
+        entries = [(name, data * 10000) for name, data in entries]
+        selection['members'] = [dict(name=name, bytes=len(data)) for name, data in entries]
+        expected = {'image': entries[-1][1], 'members': [dict(name=name, bytes=len(data), sha256=M.sha(data))
+                                                       for name, data in entries]}
+        complete = R.member_stream_complete
+        for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            for streaming in (False, True):
+                # Main first: discarded peer must still be checked after it.
+                body, origin = archive(selection['origin'], list(reversed(entries)), compression, streaming=streaming)
+                selected, events = dict(selection, origin=origin), []
+                def bounded(stream, info, *args, **kwargs):
+                    sink = kwargs['on_chunk']
+                    def receive(chunk):
+                        self.assertLessEqual(len(chunk), 65536)
+                        sink(chunk)
+                    events.append(info.filename)
+                    return complete(stream, info, *args, **dict(kwargs, on_chunk=receive))
+                with mock.patch.object(R, 'member_stream_complete', side_effect=bounded), \
+                     mock.patch.object(zipfile.ZipFile, 'open', side_effect=AssertionError('no second decode')):
+                    self.assertEqual(M.retained_observer_members(body, selected, CLOCK,
+                        before_image=lambda size: events.append(size)), expected)
+                self.assertEqual(events, [len(entries[-1][1]), entries[-1][0], entries[0][0]])
+                with zipfile.ZipFile(io.BytesIO(body)) as archive_data:
+                    ignored = archive_data.getinfo(entries[0][0])
+                local = struct.unpack('<4s5H3L2H', body[ignored.header_offset:ignored.header_offset + 30])
+                start = ignored.header_offset + 30 + local[9] + local[10]
+                changed = bytearray(body); changed[start] ^= 1; changed = bytes(changed)
+                invalid = dict(selection, origin=dict(origin, artifactSha256=M.sha(changed)))
+                with self.assertRaises((ValueError, zlib.error)):
+                    M.retained_observer_members(changed, invalid, CLOCK)
+        tool, *_ = retained_fixture()
+        body, origin = archive(selection['origin'], entries + [('android-helper-distribution-detach.stdout', b'')])
+        with self.assertRaises(ValueError): M.retained_observer_members(body, dict(selection, origin=origin), CLOCK)
+        self.assertEqual(M.retained_observer_memory_requirement(selection, 17),
+            3 * selection['origin']['artifactBytes'] + (16 << 20) + 17 + (512 << 20) + (1 << 30))
+        with self.assertRaises(ValueError):
+            M.retained_observer_memory_requirement(selection, 17, image_bytes=1)
+        self.assertEqual(len(tool['members']), 5)
+
+    def test_git_fresh_receipt_is_scoped_and_cannot_certify_a_tool_install_or_original_future_return(self):
+        selected, entries, *_ = retained_fixture(git=True)
+        receipt = retained_receipt_fixture(selected, entries)
+        args = (selected, 'a'*40, 'b'*40, '51', '1', [2, 3, 501])
+        self.assertEqual(M.retained_observer_install_receipt_data(receipt, *args), receipt)
+        for key, value in (('nativeScope', 'tool-setup'), ('consumerRunId', selected['origin']['runId']),
+                ('originalMountDetached', False), ('sameRequestReadback', False), ('originalInstallerReturnedZero', False),
+                ('members', retained_receipt_fixture(*retained_fixture()[:2])['members'])):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                M.retained_observer_install_receipt_data(dict(receipt, **{key: value}), *args)
+
     def test_exact_nonshipping_selection_and_no_ordinary_substitution(self):
         selected, _, _, *_ = retained_fixture()
         self.assertEqual(M.retained_observer_selection_data(selected), selected)

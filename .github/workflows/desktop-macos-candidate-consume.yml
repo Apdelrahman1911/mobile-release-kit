@@ -8,7 +8,7 @@ on:
       operation:
         description: Reuse a fixed signed app for recovery or remaining functional checks; no app rebuild
         type: choice
-        options: [remove-delivery, inspect-predecessor, install-predecessor, install-retained-observer]
+        options: [remove-delivery, inspect-predecessor, install-predecessor, install-retained-observer, install-retained-git-observer]
         default: remove-delivery
       architecture:
         description: Package only the selected architecture
@@ -26,23 +26,23 @@ concurrency:
 
 jobs:
   install-retained-observer:
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'install-retained-observer' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'install-retained-observer' || inputs.operation == 'install-retained-git-observer') && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'
     name: Reuse signed Mac build and complete core functional checks
-    runs-on: macos-26
+    runs-on: ${{ inputs.operation == 'install-retained-git-observer' && 'xcode-27' || 'macos-26' }}
     timeout-minutes: 260
     env:
-      MRK_CANDIDATE_MODE: install-retained-observer
-      MRK_CANDIDATE_SOURCE: 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'
+      MRK_CANDIDATE_MODE: ${{ inputs.operation }}
+      MRK_CANDIDATE_SOURCE: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f' }}
       MRK_MACOS_TARGET: aarch64-apple-darwin
-      MRK_MACOS_RUNNER: macos-26
+      MRK_MACOS_RUNNER: ${{ inputs.operation == 'install-retained-git-observer' && 'xcode-27' || 'macos-26' }}
       MRK_MACOS_MACHINE: arm64
-      MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
-      MRK_MACOS_NATIVE_SCOPE: tool-setup
+      MRK_MACOS_HOSTED_JOB: ${{ inputs.operation == 'install-retained-git-observer' && 'github-hosted-xcode27-arm64' || 'github-hosted-macos26-arm64' }}
+      MRK_MACOS_NATIVE_SCOPE: ${{ inputs.operation == 'install-retained-git-observer' && 'git-native' || 'tool-setup' }}
       MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       MRK_MACOS_STORE_RUNTIME: signed-component
       MRK_EXPECTED_SHA: ${{ github.sha }}
-      MRK_MACOS_INSTALL_SOURCE_COMMIT: 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f' }}
+      DEVELOPER_DIR: ${{ inputs.operation == 'install-retained-git-observer' && '/Library/Developer/CommandLineTools' || '/Applications/Xcode.app/Contents/Developer' }}
     steps:
       - name: Require the isolated disposable ARM host
         shell: bash
@@ -124,6 +124,7 @@ jobs:
           # Only a real return0, fresh Installer/readback and unforced detach0
           # allow later cases. The JSON cannot certify its own future exit.
       - name: Verify four supported project identity edits
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 15
         shell: bash
         env:
@@ -135,6 +136,7 @@ jobs:
           exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
             --retained-observer --target "$MRK_MACOS_TARGET"
       - name: Start the fixed native service and verify readiness
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 13
         shell: bash
         env:
@@ -146,6 +148,7 @@ jobs:
           exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
             --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
       - name: Verify the installed CLI with the native service
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 3
         shell: bash
         env:
@@ -157,6 +160,7 @@ jobs:
           exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
             --retained-observer --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
       - name: Prepare only the required isolated Android tool inputs
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 22
         shell: bash
         env:
@@ -168,6 +172,7 @@ jobs:
           export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
           exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_android_dependency_preparation.py" prepare-tool-setup-inputs
       - name: Verify tool acquisition, cancellation and missing-only reuse
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 122
         shell: bash
         env:
@@ -181,6 +186,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
           exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-setup
       - name: Verify signing-key reuse, cancellation, restart and encrypted backup
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 60
         shell: bash
         env:
@@ -196,6 +202,29 @@ jobs:
           "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-cold-restart
           "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
           exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
+
+      - name: Verify fifteen existing Git cases on the freshly installed signed Git observer
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          driver="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py"
+          # Original Index1 -> Branch1 -> Fetch4 -> Push3 -> create-only Push5 -> Upstream1.
+          # Same signed216a Git image, fresh Installer/readback/unforced detach first.
+          # Existing600s suite/120s case,135s app and45/55s Git clocks unchanged;
+          # the unchanged25min outer cap does not promise worst-case completion.
+          # First nonzero/unknown/78 stops; no retry, live remote write or nomination.
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-index-cli-native
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-branch-cli-native
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-fetch-native
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-push-native
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-push-create-native
+          exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope git-upstream-native
 
   install-predecessor:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'install-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-install'

@@ -46,6 +46,10 @@ RETAINED_OBSERVER_MEMBERS = {
     'distribution/MobileReleaseKit-Observation.dmg': LIMIT,
     'distribution/MobileReleaseKit.dmg': LIMIT,
 }
+# The original Git job failed before attach: its actual archive has only these
+# two images. This is a separate closed roster, not optional Tool diagnostics.
+RETAINED_GIT_MEMBERS = {name: RETAINED_OBSERVER_MEMBERS[name] for name in (
+    'distribution/MobileReleaseKit-Observation.dmg', 'distribution/MobileReleaseKit.dmg')}
 
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
          'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None, 'installerObservation': None}
@@ -450,7 +454,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS, empty=False, on_chunk=None):
     """Same original span, real codec EOF and CRC; never ZipExtFile private state."""
-    need(on_chunk is None or limits is RETAINED_OBSERVER_MEMBERS and callable(on_chunk),
+    need(on_chunk is None or (limits is RETAINED_OBSERVER_MEMBERS or limits is RETAINED_GIT_MEMBERS) and callable(on_chunk),
          'collector-public-chunk-profile')
     need(type(empty) is bool and (not empty or limits is RETAINED_OBSERVER_MEMBERS
          and info.filename == 'android-helper-distribution-detach.stdout' and info.file_size == 0),
@@ -531,9 +535,10 @@ def zip_data(body, selected, clock):
          and sha(body) == selected['sha256'], 'p0-zip-original')
     wanted = selected['members']; names = {v['name'] for v in wanted}
     candidate = selected['kind'] == 'candidate'
-    retained = selected['kind'] == 'retained-observer'
-    limits = RETAINED_OBSERVER_MEMBERS if retained else CANDIDATE_MEMBERS if candidate else MEMBERS
-    need((len(wanted) == 5 and names == set(RETAINED_OBSERVER_MEMBERS) if retained else
+    git = selected['kind'] == 'retained-git-observer'
+    retained = git or selected['kind'] == 'retained-observer'
+    limits = RETAINED_GIT_MEMBERS if git else RETAINED_OBSERVER_MEMBERS if retained else CANDIDATE_MEMBERS if candidate else MEMBERS
+    need((len(wanted) == len(limits) and names == set(limits) if retained else
           len(wanted) == 3 and names == set(CANDIDATE_MEMBERS) if candidate else
           len(names) == len(wanted) in (1, 2) and names <= set(MEMBERS))
          and all(type(v['bytes']) is int and (0 if retained and limits[v['name']] == 0 else 1)
