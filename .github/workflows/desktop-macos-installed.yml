@@ -2141,8 +2141,10 @@ jobs:
       # contain only the audited package and public producer descriptor/signature.
       # No workdir, credentials or signing/notary/lsof captures. Partial/missing
       # files prove no native completion, cleanup, Installer or product success.
+      # Retain after install success or failure, before later native checks.
+      # Upload failure is not ignored; success/ignore-missing is not byte proof.
       - name: Retain only nonshipping candidate detach diagnostics and images
-        if: failure() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.work.outcome == 'success' && steps.package_install.outcome == 'failure'
+        if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.work.outcome == 'success' && (steps.package_install.outcome == 'success' || steps.package_install.outcome == 'failure') }}
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
