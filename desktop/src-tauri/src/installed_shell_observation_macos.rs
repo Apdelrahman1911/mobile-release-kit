@@ -276,7 +276,25 @@ const CONFIG: &[u8] = br#"{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case), ToolSetup(tool_setup::Case), GitFetch(git_fetch::Case), GitPush(git_push::Case), GitUpstream, GitCli(git_cli::Case), Cli }
+const FUNCTIONAL_SCOPE: &str = "original Document/core operations and genuine native selectors; UI navigation not tested; no Store, release, distribution or physical-device evidence";
 impl Case {
+    // Only these existing leaves are functional rather than renderer journeys.
+    // Installation has its own no-project owner; UI cases keep their old route.
+    fn functional_entry(self) -> Option<Step> {
+        Some(match self {
+            Self::Identity(_) => Step::Identity(identity::Step::Open),
+            Self::GitCli(_) => Step::GitCli(git_cli::Step::Read),
+            Self::GitUpstream => Step::GitUpstream(git_upstream::Step::Read),
+            Self::GitPush(_) => Step::GitPush(git_push::Step::Connect),
+            Self::GitFetch(_) => Step::GitFetch(git_fetch::Step::Connect),
+            Self::Cli => Step::Cli(cli::Step::Allow),
+            Self::ToolSetup(_) => Step::ToolSetup(tool_setup::Step::Context),
+            Self::Vault(vault::Case::UploadKey(vault::upload_key::Case::ColdReopen)) =>
+                Step::UploadKey(vault::upload_key::Step::Cold(vault::upload_key::restart::Step::Open)),
+            Self::Vault(_) => Step::Vault(vault::Step::Open),
+            _ => return None,
+        })
+    }
     fn name(self) -> &'static str { match self {
         Self::GitUpstream => git_upstream::NAME,
         Self::GitCli(case) => case.name(),
@@ -1082,6 +1100,7 @@ struct Record {
     identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
+    functional_project_id: Option<u32>, // Actual Document::choose_project return, never an invented ID.
     project_selection: Option<ProjectSelectionSample>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
     cancel_settled: bool, project_settled: bool, panel_attached: [bool; 4],
@@ -1445,6 +1464,7 @@ impl Observation {
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
+                functional_project_id: None,
                 project_selection: None,
                 project_witness: None, picker_witness: None,
                 cancel_settled: false, project_settled: false, panel_attached: [false; 4],
@@ -2043,6 +2063,94 @@ impl Observation {
         }
         r.status_revision = Some(status.status_revision);
     }
+    // The SAME retained async relay calls this narrow prelude. Starting the
+    // ordinary selector must return to its existing native/AX ticks; awaiting
+    // the result while that picker still needs relay input would deadlock it.
+    pub(super) async fn functional_project_tick(self: &Arc<Self>, app: &tauri::AppHandle) -> bool {
+        if self.case.functional_entry().is_none() || !self.timely() { return false; }
+        let step = {
+            let Some(r) = self.record() else { return true; };
+            if r.pending.is_some() || !matches!(r.step, Step::ChooseProject | Step::ProjectSettled | Step::Snapshot)
+                || r.step == Step::ProjectSettled && r.project_returned
+                || r.step == Step::Snapshot && r.snapshot_requests == 1 && !r.snapshot_pending && r.snapshots == 1 { return false; }
+            r.step
+        };
+        if std::thread::current().id() == self.main { self.fail_with("bootstrap-tick-main-thread"); return true; }
+        let Some(state) = app.try_state::<super::ShellState>() else { self.fail(); return true; };
+        if state.observation.as_ref().is_none_or(|q| !Arc::ptr_eq(self, q)) { self.fail(); return true; }
+        match step {
+            Step::ChooseProject => {
+                let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.fail(); return true; };
+                if let Err(error) = super::asset_window(window.as_ref()).and_then(|()| crate::asset_commands::status(&json!({}))) {
+                    self.project_result(&Err(error), None); return true;
+                }
+                {
+                    let Some(mut r) = self.record() else { return true; };
+                    if r.step != step || r.pending.is_some() || r.project_calls != 0 || r.functional_project_id.is_some()
+                        || r.project_returned || r.project.is_some() || r.snapshot_requests != 0 { self.fail_with("project-result-order"); return true; }
+                    if !self.timely() { return true; }
+                    r.step = Step::OpenProject;
+                }
+                if !self.timely() { return true; }
+                let result = state.document.choose_project(app.clone());
+                {
+                    let Some(mut r) = self.record() else { return true; };
+                    // The actual synchronous admission returned. Its original
+                    // worker remains retained by Document, including on failure.
+                    r.project_calls += 1;
+                    r.functional_project_id = result.as_ref().ok().copied();
+                }
+                match result {
+                    Ok(id) if id == self.case.selected_id() => {},
+                    Ok(_) => self.fail_with("native-original-id"),
+                    Err(error) => self.project_result(&Err(error), None),
+                }
+            },
+            Step::ProjectSettled => {
+                let id = {
+                    let Some(r) = self.record() else { return true; };
+                    let Some(id) = r.functional_project_id else { self.fail_with("native-original-id"); return true; };
+                    if id != self.case.selected_id() || r.project_calls != 1 || r.project_returned || r.project.is_some()
+                        || !r.native_actions_returned[1] || r.prepared_open.is_some()
+                        || !r.accessibility.is_some_and(|s| s.id == id && s.succeeded())
+                        || !r.identity_binding.is_some_and(|s| s.input_bound(id)) { self.fail_with("project-result-order"); return true; }
+                    // Input-worker retirement is not native callback completion.
+                    // Wait on the existing ticks for that SAME returned sample.
+                    let Some(completion) = r.completion_selection else { return true; };
+                    if completion.case != self.case || completion.id != id || !completion.timely
+                        || completion.returned.poll_result != "responded"
+                        || !completion.returned.facts.is_some_and(|f| f.callback_returned && !f.duplicate && !f.native_unknown) {
+                        self.fail_with("native-completion-data"); return true;
+                    }
+                    id
+                };
+                if !self.timely() { return true; }
+                let mut selection = None;
+                let result = state.document.installed_macos_project_result(id, &mut selection).await;
+                // Preserve the ordinary result/path diagnostics before the
+                // unchanged ProjectSettled witness checks. No guard spans await.
+                self.project_result(&result, selection.as_ref());
+            },
+            Step::Snapshot => {
+                let project_id = {
+                    let Some(r) = self.record() else { return true; };
+                    if r.functional_project_id != Some(self.case.selected_id()) || r.project_calls != 1
+                        || !r.project_returned || !r.project_settled || r.snapshot_requests != 0
+                        || r.snapshot_pending || r.snapshots != 0 { self.fail_with("snapshot-request-order"); return true; }
+                    let Some(project) = &r.project else { self.fail_with("snapshot-request-project"); return true; };
+                    project.id.clone()
+                };
+                if !self.timely() { return true; }
+                // Reuse the actual command: original request/return callbacks,
+                // registered-root core query and saved shared-state publication.
+                let _ = super::project_snapshot(project_id, state).await;
+            },
+            _ => { self.fail(); },
+        }
+        // Actual returned DATA is not permission for a late/error continuation.
+        self.timely();
+        true
+    }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if std::thread::current().id() == self.main { self.fail_with("bootstrap-tick-main-thread"); return; }
         // Drain the one prepared original even after failure/deadline: known
@@ -2086,6 +2194,7 @@ impl Observation {
                 // is not proof of permanent inactivity; the same endpoint wins.
                 if !r.original_window.is_some_and(|s| s.admitted) || !r.info || !r.catalog || !r.capability
                     || !state.document.installed_macos_live() { return; }
+                if self.case.functional_entry().is_some() { r.step = Step::ChooseProject; return; }
                 r.step = Step::Environment;
             }
             match r.step {
@@ -2124,35 +2233,11 @@ impl Observation {
                     }
                     r.cancel_settled = true; r.step = Step::ReadCancelled; return;
                 },
-                Step::Snapshot if matches!(self.case,Case::GitCli(_)) => {
-                    if r.snapshot_pending||r.snapshots!=1{return;}
-                    r.step=Step::GitCli(git_cli::Step::Read);return;
-                },
-                Step::Snapshot if self.case==Case::GitUpstream => {
-                    if r.snapshot_pending||r.snapshots!=1{return;}
-                    r.step=Step::GitUpstream(git_upstream::Step::Read);return;
-                },
-                Step::Snapshot if matches!(self.case,Case::GitPush(_)) => {
-                    if r.snapshot_pending||r.snapshots!=1{return;}
-                    r.step=Step::GitPush(git_push::Step::Connect);return;
-                },
-                Step::Snapshot if self.case==Case::Cli => {
-                    if r.snapshot_pending||r.snapshots!=1{return;}
-                    r.step=Step::Cli(cli::Step::Allow);return;
-                },
-                Step::Snapshot if matches!(self.case,Case::GitFetch(_)) => {
-                    if r.snapshot_pending||r.snapshots!=1{return;}
-                    r.step=Step::GitFetch(git_fetch::Step::Connect);return;
-                },
-                Step::Snapshot if matches!(self.case,Case::ToolSetup(_)) => {
-                    if r.snapshot_pending || r.snapshots!=1{return;}
-                    r.step=Step::ToolSetup(tool_setup::Step::Context);return;
-                },
-                Step::Snapshot if matches!(self.case,Case::Identity(_)) => {
-                    // Retain the unchanged picker-triggered original snapshot,
-                    // then drive the normal identity APIs directly, no new DOM.
-                    if r.snapshot_pending || r.snapshots!=1{return;}
-                    r.step=Step::Identity(identity::Step::Open);return;
+                Step::Snapshot if self.case.functional_entry().is_some() => {
+                    if r.snapshot_pending || r.snapshots != 1 { return; }
+                    // This is the real registered snapshot, not a rendered-card
+                    // acknowledgement. Existing functional leaves stay unchanged.
+                    r.step = self.case.functional_entry().expect("closed functional case"); return;
                 },
                 Step::ProjectSettled => {
                     let Some(returned) = &r.project else { return; };
@@ -2381,6 +2466,8 @@ impl Observation {
                 r.reload_returned = true; r.step = Step::Lost;
             }).is_err() { self.fail(); } return;
         }
+        // A functional case must never fall back to decorative DOM navigation.
+        if self.case.functional_entry().is_some() { self.fail(); return; }
         let original = {
             let Some(mut r) = self.record() else { return; };
             if r.evaluations >= 160 { self.fail_with("dom-evaluation-budget"); return; }
@@ -3386,6 +3473,8 @@ impl Observation {
         let identity_binding = project_open.map(|p| p.1);
         let completion_selection = project_open.map(|p| p.2);
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
+            && (self.case.functional_entry().is_none() || r.functional_project_id == Some(self.case.selected_id())
+                && r.evaluations == 0 && r.last_project_chooser.is_none())
             && r.original_window.is_some_and(|s| s.admitted && s.positive())
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
             && r.ax_trusted && r.prepared_open.is_none()
@@ -3509,7 +3598,8 @@ impl Observation {
             "reload":{"requested":r.reload_requested,"dispatchReturned":r.reload_returned,"navigationDenied":r.reload_navigation,
                 "secondStarted":r.loss_seen,"originalLossSettled":r.loss_settled,"webProcessCrashTested":false},
             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
-            "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
+            "scope":if self.case.functional_entry().is_some() { FUNCTIONAL_SCOPE }
+                else { "programmatic genuine controls; no Store, release, distribution or physical-device evidence" }});
         if let Some(c)=&self.git_push {report["gitPush"]=r.git_push.as_ref()?.report(c)?;}
         if let Some(c)=&self.git_upstream {report["gitUpstream"]=r.git_upstream.as_ref()?.report(c)?;}
         if let Some(c)=&self.git_cli {report["gitCli"]=r.git_cli.as_ref()?.report(c)?;}

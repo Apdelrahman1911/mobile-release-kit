@@ -1143,6 +1143,9 @@ PROJECT_FIELD_CHOICES = (
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
 ALL_CASES = (*GIT_CLI.CASES, *PUBLIC_TOOLS.CASES, *CLI.CASES, *CLI.BACKUP.CASES, *UPSTREAM.CASES, *PUSH.ALL_CASES, *FETCH.CASES, *TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + BACKUP.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES)
+FUNCTIONAL_CASES = frozenset((*identity_qualification.CASES, *GIT_CLI.CASES, *UPSTREAM.CASES, *PUSH.ALL_CASES,
+    *FETCH.CASES, *CLI.CASES, *TOOLS.CASES, *TOOLS.SERVICE_CASES, *PUBLIC_TOOLS.CASES,
+    *VAULT_HELPER_CASES, *UPLOAD.CASES, *COLD.CASES, *BACKUP.CASES, *CLI.BACKUP.CASES))
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -1154,6 +1157,7 @@ PROJECT_FIELDS_JSON_LIMIT = 32767  # Four bounded original selection histories; 
 FAILURE_CONTEXT_LIMIT = 8192
 TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
+FUNCTIONAL_SCOPE = "original Document/core operations and genuine native selectors; UI navigation not tested; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
     "Bootstrap Environment ReadEnvironment Dashboard ChooseCancel CancelProject CancelSettled ReadCancelled "
     "ChooseProject OpenProject ProjectSettled Snapshot Settings Suggest Suggestion Adopt Draft "
@@ -2654,6 +2658,8 @@ def expected_result(binding, case):
     if case in GIT_CLI.CASES or case in CLI.CASES or case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case in (BACKUP.SCOPE, CLI.BACKUP.SCOPE) or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in (*TOOLS.CASES, *PUBLIC_TOOLS.CASES) or case == TOOLS.SERVICE_CASE or case in FETCH.CASES or case in PUSH.ALL_CASES or case == UPSTREAM.CASE:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+        if case in FUNCTIONAL_CASES:
+            value["scope"] = FUNCTIONAL_SCOPE
         if case in GIT_CLI.CASES:
             value["gitCli"] = None  # Actual native+caller+history/Host result only.
         if case == UPSTREAM.CASE:

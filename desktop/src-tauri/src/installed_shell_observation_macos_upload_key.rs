@@ -352,6 +352,7 @@ impl Observation {
     /// Called by the SAME existing Relay task. An async native startup/saved
     /// observation is awaited by that original; there is no new unjoined task.
     pub(crate) async fn tick_original(self: &Arc<Self>, app: &tauri::AppHandle) {
+        if self.functional_project_tick(app).await { return; }
         let cli=self.record().and_then(|r|match r.step{super::super::Step::Cli(step)=>Some(step),_=>None});
         if let Some(step)=cli{
             if !self.timely(){self.tick(app);return;}

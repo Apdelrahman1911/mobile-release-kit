@@ -657,6 +657,51 @@ class AquaDataTests(unittest.TestCase):
             with self.subTest(index=index), self.assertRaises(M.Refused):
                 M.parse_result(captured(item), b"", BINDING, "first-save")
 
+    def test_functional_scope_is_closed_and_does_not_claim_ui_navigation(self):
+        functional = {
+            "identity-android-apply", "identity-ios-apply", "identity-rollback-recovery", "identity-committed-cleanup",
+            "git-fetch-pack", "git-fetch-corrupt", "git-fetch-limit", "git-fetch-held-helper",
+            "git-push-pack", "git-push-stale", "git-push-held-refusal", "git-push-create-empty", "git-push-create-equal",
+            "git-push-create-stale", "git-push-create-race", "git-push-create-held", "git-upstream-local",
+            "git-index-cli", "git-branch-cli", "installed-cli-local-check", "tool-service-prerequisite",
+            "tool-setup-missing-sdk", "tool-setup-cancel-transfer", "tool-setup-source-drift",
+            "tool-acquisition-cancel-in-transfer", "tool-acquisition-cold-warm",
+            "vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add",
+            "upload-key-roundtrip", "upload-key-stop-before-go", "upload-key-stop-after-new",
+            "upload-key-cold-produce", "upload-key-cold-reopen", "upload-key-backup-roundtrip", "upload-key-backup-cli",
+        }
+        self.assertEqual(M.FUNCTIONAL_CASES, functional)
+        self.assertIn("UI navigation not tested", M.FUNCTIONAL_SCOPE)
+        self.assertIn("original Document/core operations", M.FUNCTIONAL_SCOPE)
+        self.assertIn("genuine native selectors", M.FUNCTIONAL_SCOPE)
+        for case in M.ALL_CASES:
+            with self.subTest(case=case):
+                expected = M.expected_result(BINDING, case)
+                self.assertEqual(expected["scope"], M.FUNCTIONAL_SCOPE if case in functional else M.SCOPE)
+                self.assertIs(expected["shippingBinaryQualified"], False)
+                self.assertIs(expected["distributionQualified"], False)
+
+    def test_functional_scope_preserves_strict_native_finality_validation(self):
+        # Complete comparison DATA, never a claim that a native case ran here.
+        for case in M.VAULT_HELPER_CASES:
+            good = M.expected_result(BINDING, case)
+            self.assertEqual(good["scope"], M.FUNCTIONAL_SCOPE)
+            self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+            variants = []
+            for field, value in (("scope", M.SCOPE), ("scope", M.FUNCTIONAL_SCOPE + "; UI tested"),
+                                 ("actualExit", False), ("originalRelayJoined", False), ("syntheticFileReadback", False)):
+                changed = deepcopy(good); changed[field] = value; variants.append(changed)
+            for field in ("projectOpenInput", "projectCompletionSelection", "originalDocumentAndQuitSettled"):
+                changed = deepcopy(good); del changed["native"][field]; variants.append(changed)
+            for changed in variants:
+                with self.subTest(case=case, changed=changed), self.assertRaises(M.Refused):
+                    M.parse_result(captured(changed), b"", BINDING, case)
+        original = M.expected_result(BINDING, "first-save")
+        self.assertEqual(M.parse_result(captured(original), b"", BINDING, "first-save"), original)
+        original["scope"] = M.FUNCTIONAL_SCOPE
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(original), b"", BINDING, "first-save")
+
     def test_marker_duplicates_failure_json_and_byte_limits(self):
         good = captured(M.expected_result(BINDING, "first-save"))
         duplicate = good.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1', 1)
