@@ -221,6 +221,7 @@ def retained_observer_metadata_data(run, job, artifact, selection):
 
 
 def retained_observer_members(body, selection, clock, *, before_image=None):
+    """Validate/hash all five originals, retaining only the image to install."""
     selected = retained_observer_selection_data(selection)
     origin = selected['origin']
     need(type(body) is bytes and len(body) == origin['artifactBytes'] and sha(body) == origin['artifactSha256'],
@@ -228,12 +229,26 @@ def retained_observer_members(body, selection, clock, *, before_image=None):
     zip_directory_data(body, 5)
     if before_image is not None:
         clock.check()
-        # Fund BOTH retained images before decoding; only the plain user image
-        # will be installed. No mounted request from the observation image is used.
-        before_image(sum(item['bytes'] for item in selected['members']))
+        # Fund the sole output before BytesIO or its growable buffer is created.
+        before_image(next(item['bytes'] for item in selected['members'] if item['name'] == RETAINED_OBSERVER_IMAGE))
         clock.check()
     return zip_data(body, {'kind': 'retained-observer', 'bytes': origin['artifactBytes'],
         'sha256': origin['artifactSha256'], 'members': selected['members']}, clock)
+
+
+def retained_observer_memory_requirement(selection, retained, *, image_bytes=None):
+    """Source-bounded allocation phases; no OS reservation or measured RSS claim."""
+    selected = retained_observer_selection_data(selection)
+    image = next(item['bytes'] for item in selected['members'] if item['name'] == RETAINED_OBSERVER_IMAGE)
+    need(type(retained) is int and 0 <= retained <= 1 << 30
+         and (image_bytes is None or type(image_bytes) is int and image_bytes == image),
+         'retained-observer-memory-bound')
+    archive = selected['origin']['artifactBytes']
+    # Original.read: growable ZIP plus final bytes (or a resize), with no image.
+    # Decode: immutable ZIP + at most one BytesIO copy; only the main image's
+    # growable/final copies overlap. Codec/metadata chunks fit the same 16MiB.
+    copies = 3 * archive if image_bytes is None else 2 * archive + 3 * image
+    return copies + (16 << 20) + retained + (512 << 20) + (1 << 30)
 
 
 def retained_observer_install_receipt_data(value, selection, helper_source, helper_tree, run, attempt, work_identity):
@@ -300,4 +315,3 @@ def retained_observer_install_receipt_data(value, selection, helper_source, help
          'retained-observer-handoff-fresh-install')
     need(len(canonical(value)) <= 16384, 'retained-observer-handoff-bound')
     return value
-

@@ -448,8 +448,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS, empty=False):
+def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS, empty=False, on_chunk=None):
     """Same original span, real codec EOF and CRC; never ZipExtFile private state."""
+    need(on_chunk is None or limits is RETAINED_OBSERVER_MEMBERS and callable(on_chunk),
+         'collector-public-chunk-profile')
     need(type(empty) is bool and (not empty or limits is RETAINED_OBSERVER_MEMBERS
          and info.filename == 'android-helper-distribution-detach.stdout' and info.file_size == 0),
          'collector-public-empty-profile')
@@ -473,6 +475,7 @@ def member_stream_complete(stream, info, data_start, central_start, deadline=Non
         if stored:
             emitted += len(data)
             crc = zlib.crc32(data, crc)
+            if on_chunk is not None: on_chunk(data)
             continue
         while True:
             if deadline is not None:
@@ -481,6 +484,10 @@ def member_stream_complete(stream, info, data_start, central_start, deadline=Non
             produced = len(output)
             emitted += produced
             crc = zlib.crc32(output, crc)
+            if on_chunk is not None:
+                need(emitted <= info.file_size and not inflater.unused_data,
+                     'collector-public-compressed-tail')
+                on_chunk(output)
             del output  # No prior output chunk survives the next allocation.
             need(emitted <= info.file_size and not inflater.unused_data,
                  'collector-public-compressed-tail')
@@ -536,6 +543,7 @@ def zip_data(body, selected, clock):
     stream = io.BytesIO(body)
     end = zip_directory_data(body, len(wanted))
     result, span = {}, 0
+    observed = []
     with zipfile.ZipFile(stream) as archive:
         infos = sorted(archive.infolist(), key=lambda v: v.header_offset)
         need(len(infos) == len(names) and {v.filename for v in infos} == names, 'p0-zip-roster')
@@ -560,8 +568,16 @@ def zip_data(body, selected, clock):
                 need(local[6] in (0, info.CRC) and local[7] in (0, info.compress_size)
                      and local[8] in (0, info.file_size), 'p0-zip-local-size')
             data_start = stream.tell()
+            options = {}
+            if retained:
+                digest = hashlib.sha256()
+                image = bytearray() if info.filename == 'distribution/MobileReleaseKit.dmg' else None
+                def observe(chunk):
+                    digest.update(chunk)
+                    if image is not None: image.extend(chunk)
+                options['on_chunk'] = observe
             member_stream_complete(stream, info, data_start, end[6], clock, limits=limits,
-                                   empty=retained and limits[info.filename] == 0)
+                                   empty=retained and limits[info.filename] == 0, **options)
             span = data_start + info.compress_size
             if info.flag_bits & 8:
                 stream.seek(span); prefix = stream.read(4)
@@ -569,15 +585,24 @@ def zip_data(body, selected, clock):
                 values = struct.unpack('<3L', descriptor[4:] if prefix == b'PK\x07\x08' else descriptor)
                 need(values == (info.CRC, info.compress_size, info.file_size), 'p0-zip-descriptor')
                 span += len(descriptor)
-            with archive.open(info) as member:
-                value = member.read(nominated['bytes'] + 1)
-                need(type(value) is bytes and len(value) == nominated['bytes'] and member.read(1) == b''
-                     and (retained or sha(value) == nominated['sha256']), 'p0-zip-member-original')
-                # Retained observer members are authenticated by the exact outer
-                # ZIP pin, not a nonexistent PREVIEW or invented inner hashes.
-            result[info.filename] = value
+            if retained:
+                # Hash every fully checked original, but retain only the image
+                # this consumer installs. Never decode discarded members twice.
+                # The outer ZIP pin authenticates these observed hashes; no
+                # nonexistent PREVIEW or invented inner pins are substituted.
+                observed.append({'name': info.filename, 'bytes': info.file_size, 'sha256': digest.hexdigest()})
+                if image is not None:
+                    result['image'] = bytes(image)
+                    image = None  # Retire the growable copy before the next member.
+            else:
+                with archive.open(info) as member:
+                    value = member.read(nominated['bytes'] + 1)
+                    need(type(value) is bytes and len(value) == nominated['bytes'] and member.read(1) == b''
+                         and sha(value) == nominated['sha256'], 'p0-zip-member-original')
+                result[info.filename] = value
         need(span == end[6], 'p0-zip-unaccounted-bytes')
     clock.check()
+    if retained: result['members'] = sorted(observed, key=lambda row: row['name'])
     return result
 
 

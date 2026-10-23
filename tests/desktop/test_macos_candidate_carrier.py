@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import stat
 import struct
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +20,7 @@ SPEC = importlib.util.spec_from_file_location('candidate_carrier_data',
     ROOT / 'desktop/tools/macos_candidate_carrier.py')
 M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
+R = sys.modules['desktop.tools.macos_fixed_carrier_resume']
 CLOCK = SimpleNamespace(check=lambda: None)
 
 
@@ -57,8 +60,11 @@ def fixture(target='aarch64-apple-darwin'):
     return row, preview, run, job, artifact
 
 
-def archive(row, entries, compression=zipfile.ZIP_DEFLATED):
-    stream = io.BytesIO()
+def archive(row, entries, compression=zipfile.ZIP_DEFLATED, *, streaming=False):
+    class Unseekable(io.BytesIO):
+        def seekable(self): return False
+        def seek(self, *args): raise io.UnsupportedOperation('inert descriptor fixture')
+    stream = Unseekable() if streaming else io.BytesIO()
     with zipfile.ZipFile(stream, 'w', compression=compression) as output:
         for name, body in entries:
             output.writestr(name, body)
@@ -282,11 +288,13 @@ class RetainedObserverCarrierData(unittest.TestCase):
 
     def test_five_original_members_empty_stdout_and_no_preview(self):
         selection, entries, _, *_ = retained_fixture()
+        expected = {'image': entries[-1][1], 'members': [dict(name=name, bytes=len(body), sha256=M.sha(body))
+                                                       for name, body in entries]}
         for compression in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):
             body,origin=archive(selection['origin'],entries,compression)
             selected=dict(selection,origin=origin); admitted=[]
-            self.assertEqual(M.retained_observer_members(body,selected,CLOCK,before_image=admitted.append),dict(entries))
-            self.assertEqual(admitted,[sum(len(v) for _,v in entries)])
+            self.assertEqual(M.retained_observer_members(body,selected,CLOCK,before_image=admitted.append),expected)
+            self.assertEqual(admitted,[len(entries[-1][1])])
             with self.assertRaises(ValueError): M.candidate_members(body,origin,CLOCK)
             with self.assertRaises(ValueError): M.retained_observer_members(body+b'x',selected,CLOCK)
         for entries2 in (entries[:-1],entries+[('PREVIEW.json',b'{}')],entries[:2]+[(entries[2][0],b'x')]+entries[3:],
@@ -297,6 +305,149 @@ class RetainedObserverCarrierData(unittest.TestCase):
         with mock.patch.object(M,'zip_data') as decoder, self.assertRaisesRegex(ValueError,'capacity'):
             M.retained_observer_members(body,dict(selection,origin=origin),CLOCK,
                 before_image=lambda size:(_ for _ in ()).throw(ValueError('capacity')))
+        decoder.assert_not_called()
+
+    def test_main_only_collection_hashes_all_members_once_in_bounded_chunks(self):
+        selection, entries, *_ = retained_fixture()
+        entries[-2] = (entries[-2][0], b'OBSOLETE' * 40000)
+        entries[-1] = (entries[-1][0], b'MAIN' * 40000)
+        selection['members'] = [dict(name=name, bytes=len(body)) for name, body in entries]
+        expected = {'image': entries[-1][1], 'members': [dict(name=name, bytes=len(body), sha256=M.sha(body))
+                                                       for name, body in entries]}
+        actual = R.member_stream_complete
+        for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            for streaming in (False, True):
+                for order in (entries, [entries[-1], *entries[:-1]]):
+                    with self.subTest(compression=compression, streaming=streaming, main_first=order is not entries):
+                        body, origin = archive(selection['origin'], order, compression, streaming=streaming)
+                        counts = dict(created=0, appended=0, largest=0, live=0)
+                        emitted, events = {}, []
+                        class MainBuffer(bytearray):
+                            def __init__(self):
+                                super().__init__()
+                                counts['created'] += 1; counts['live'] += 1
+                                events.append('main-buffer')
+                            def extend(self, chunk):
+                                counts['appended'] += len(chunk)
+                                counts['largest'] = max(counts['largest'], len(chunk))
+                                super().extend(chunk)
+                            def __del__(self): counts['live'] -= 1
+                        def bounded(stream, info, *args, **kwargs):
+                            self.assertNotIn(info.filename, emitted)
+                            emitted[info.filename] = 0
+                            sink = kwargs['on_chunk']
+                            def receive(chunk):
+                                self.assertIs(type(chunk), bytes)
+                                self.assertLessEqual(len(chunk), 65536)
+                                emitted[info.filename] += len(chunk)
+                                sink(chunk)
+                            return actual(stream, info, *args, **dict(kwargs, on_chunk=receive))
+                        def admit(size):
+                            self.assertEqual(size, len(expected['image']))
+                            events.append('admit')
+                        with mock.patch.object(R, 'bytearray', MainBuffer, create=True), \
+                             mock.patch.object(R, 'member_stream_complete', side_effect=bounded), \
+                             mock.patch.object(zipfile.ZipFile, 'open', side_effect=AssertionError('second decode forbidden')):
+                            result = M.retained_observer_members(body, dict(selection, origin=origin), CLOCK, before_image=admit)
+                        self.assertEqual(result, expected)
+                        self.assertEqual(emitted, {name: len(value) for name, value in entries})
+                        self.assertEqual(counts['created'], 1)
+                        self.assertEqual(counts['appended'], len(expected['image']))
+                        self.assertLessEqual(counts['largest'], 65536)
+                        self.assertEqual(counts['live'], 0)
+                        self.assertEqual(events, ['admit', 'main-buffer'])
+
+    def test_discarded_member_still_requires_every_original_zip_check(self):
+        selection, entries, *_ = retained_fixture()
+        # Main first proves a completed image never authorizes skipping a later
+        # discarded member's corruption. Outer digest is deliberately repinned.
+        body, origin = archive(selection['origin'], [entries[-1], *entries[:-1]],
+                               zipfile.ZIP_STORED, streaming=True)
+        ignored = entries[-2][0]
+        with zipfile.ZipFile(io.BytesIO(body)) as parsed:
+            info = parsed.getinfo(ignored)
+        central = struct.unpack('<4s4H2LH', body[-22:])[6]
+        while True:
+            row = struct.unpack('<4s6H3L5H2L', body[central:central + 46])
+            self.assertEqual(row[0], b'PK\x01\x02')
+            name = body[central + 46:central + 46 + row[10]].decode()
+            if name == ignored: break
+            central += 46 + row[10] + row[11] + row[12]
+        local = info.header_offset
+        fields = struct.unpack('<4s5H3L2H', body[local:local + 30])
+        start = local + 30 + fields[9] + fields[10]
+        descriptor = start + info.compress_size
+        self.assertEqual(body[descriptor:descriptor + 4], b'PK\x07\x08')
+        for fault in ('crc', 'local-size', 'local-name', 'local-flags', 'encryption',
+                      'compression', 'external-type', 'central-size', 'span', 'descriptor'):
+            changed = bytearray(body)
+            if fault == 'crc': changed[start] ^= 1
+            elif fault == 'local-size': struct.pack_into('<L', changed, local + 22, info.file_size + 1)
+            elif fault == 'local-name': changed[local + 30] ^= 1
+            elif fault == 'local-flags': struct.pack_into('<H', changed, local + 6, 0)
+            elif fault == 'encryption':
+                struct.pack_into('<H', changed, local + 6, info.flag_bits | 1)
+                struct.pack_into('<H', changed, central + 8, info.flag_bits | 1)
+            elif fault == 'compression':
+                struct.pack_into('<H', changed, local + 8, 99)
+                struct.pack_into('<H', changed, central + 10, 99)
+            elif fault == 'external-type': struct.pack_into('<L', changed, central + 38, stat.S_IFLNK << 16)
+            elif fault == 'central-size': struct.pack_into('<L', changed, central + 24, info.file_size + 1)
+            elif fault == 'span': struct.pack_into('<L', changed, central + 42, info.header_offset + 1)
+            else: changed[descriptor + 4] ^= 1
+            changed = bytes(changed)
+            selected = dict(selection, origin=dict(origin, artifactBytes=len(changed), artifactSha256=M.sha(changed)))
+            with self.subTest(fault=fault), self.assertRaises((ValueError, zipfile.BadZipFile, struct.error)):
+                M.retained_observer_members(changed, selected, CLOCK)
+
+    def test_discarded_deflate_codec_eof_crc_bound_and_deadline_remain_authoritative(self):
+        data = b'IGNORED' * 40000
+        compressor = zlib.compressobj(wbits=-15)
+        packed = compressor.compress(data) + compressor.flush()
+        name = 'distribution/MobileReleaseKit-Observation.dmg'
+        for fault in ('none', 'tail', 'unfinished', 'crc', 'size', 'deadline'):
+            raw = packed + b'X' if fault == 'tail' else packed[:-1] if fault == 'unfinished' else packed
+            info = SimpleNamespace(filename=name, compress_size=len(raw), file_size=len(data) - (fault == 'size'),
+                compress_type=zipfile.ZIP_DEFLATED, CRC=zlib.crc32(data) ^ (fault == 'crc'))
+            emitted, calls = [], [0]
+            def point():
+                calls[0] += 1
+                if fault == 'deadline' and calls[0] == 3: raise ValueError('deadline')
+            with self.subTest(fault=fault):
+                args = (io.BytesIO(raw), info, 0, len(raw), SimpleNamespace(check=point))
+                options = dict(limits=R.RETAINED_OBSERVER_MEMBERS, on_chunk=lambda chunk: emitted.append(len(chunk)))
+                if fault == 'none':
+                    R.member_stream_complete(*args, **options)
+                    self.assertEqual(sum(emitted), len(data))
+                else:
+                    with self.assertRaises(ValueError): R.member_stream_complete(*args, **options)
+                self.assertTrue(all(size <= 65536 for size in emitted))
+        # Chunk sinks do not change any ordinary carrier/P0 API or profile.
+        with self.assertRaisesRegex(ValueError, 'collector-public-chunk-profile'):
+            R.member_stream_complete(io.BytesIO(packed), info, 0, len(packed), CLOCK, on_chunk=lambda chunk: None)
+
+    def test_retained_memory_quotes_bind_exact_phase_and_main_size(self):
+        selection, entries, body, *_ = retained_fixture()
+        image = len(entries[-1][1])
+        for retained in (0, 12345, 1 << 30):
+            reserve = (16 << 20) + retained + (512 << 20) + (1 << 30)
+            self.assertEqual(M.retained_observer_memory_requirement(selection, retained), 3 * len(body) + reserve)
+            self.assertEqual(M.retained_observer_memory_requirement(selection, retained, image_bytes=image),
+                             2 * len(body) + 3 * image + reserve)
+        for invalid in (True, -1, (1 << 30) + 1, 1.0):
+            with self.assertRaisesRegex(ValueError, 'retained-observer-memory-bound'):
+                M.retained_observer_memory_requirement(selection, invalid)
+        for invalid in (True, 0, image - 1, image + 1, sum(len(value) for _, value in entries), 1.0):
+            with self.assertRaisesRegex(ValueError, 'retained-observer-memory-bound'):
+                M.retained_observer_memory_requirement(selection, 0, image_bytes=invalid)
+        late = [False]
+        def point():
+            if late[0]: raise ValueError('deadline')
+        def admit(size):
+            self.assertEqual(size, image)
+            late[0] = True
+        with mock.patch.object(M, 'zip_data') as decoder, self.assertRaisesRegex(ValueError, 'deadline'):
+            M.retained_observer_members(body, selection, SimpleNamespace(check=point), before_image=admit)
         decoder.assert_not_called()
 
     def test_receipt_separates_original_product_fresh_instance_and_current_consumer(self):
