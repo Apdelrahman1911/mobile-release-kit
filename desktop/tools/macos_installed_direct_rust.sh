@@ -6,10 +6,27 @@ case "$MRK_MACOS_TARGET:$RUSTUP_TOOLCHAIN" in
   aarch64-apple-darwin:1.98.1|x86_64-apple-darwin:1.98.0) ;;
   *) echo 'Unsupported pinned Mac compiler selection' >&2; exit 1 ;;
 esac
+# New hosted images keep rustup in its Homebrew keg, not ~/.cargo/bin.
+# Select once before entry; an unusable legacy launcher is not a fallback.
+rustup_directory=/Users/runner/.cargo/bin
+if [[ ! -e "$rustup_directory/rustup" && ! -L "$rustup_directory/rustup" ]]; then
+  case "$MRK_MACOS_TARGET" in
+    aarch64-apple-darwin) rustup_directory=/opt/homebrew/opt/rustup/bin ;;
+    x86_64-apple-darwin) rustup_directory=/usr/local/opt/rustup/bin ;;
+  esac
+fi
+if [[ ! -f "$rustup_directory/rustup" || ! -x "$rustup_directory/rustup" ]]; then
+  echo 'Pinned Mac Rust bootstrap unavailable' >&2; exit 1
+fi
 /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
   CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
-  /Users/runner/.cargo/bin/rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+  "$rustup_directory"/rustup toolchain install "$RUSTUP_TOOLCHAIN" \
   --profile minimal --no-self-update
+# Packaged rustup installs toolchains but need not create Cargo's home.
+# Never repair an existing entry; the unchanged no-follow admission follows.
+if [[ ! -e /Users/runner/.cargo && ! -L /Users/runner/.cargo ]]; then
+  /bin/mkdir -m 700 /Users/runner/.cargo
+fi
 "$MRK_PYTHON" -I -S -B - <<'PY_DIRECT_RUST'
 import importlib.util, os, re, stat, subprocess, sys, tomllib
 from pathlib import Path
