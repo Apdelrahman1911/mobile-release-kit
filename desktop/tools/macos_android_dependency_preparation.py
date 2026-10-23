@@ -2594,6 +2594,10 @@ if __name__ == '__main__':
     # still admits the exact source, host, current run and original work first.
     if len(sys.argv) == 2 and sys.argv[1] in TOOL_COMMANDS:
         RUN_SCOPE = TOOL_SCOPE
+        if os.environ.get('MRK_CANDIDATE_MODE') == 'install-retained-observer':
+            # Fixed current helper checkout; the tool fixture independently
+            # admits the retained install and original product namespace.
+            SOURCE = UI_CONSUMER_SOURCE
     elif len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
         RUN_SCOPE = UI_SCOPE
     elif len(sys.argv) == 2 and sys.argv[1] in UI_CONSUMER_COMMANDS:

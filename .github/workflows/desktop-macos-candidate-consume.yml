@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Reuse the fixed delivered app for removal packaging, read-only inspection or a fresh install check; no app rebuild
+        description: Reuse a fixed signed app for recovery or remaining functional checks; no app rebuild
         type: choice
-        options: [remove-delivery, inspect-predecessor, install-predecessor]
+        options: [remove-delivery, inspect-predecessor, install-predecessor, install-retained-observer]
         default: remove-delivery
       architecture:
         description: Package only the selected architecture
@@ -25,6 +25,178 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  install-retained-observer:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'install-retained-observer' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'
+    name: Reuse signed Mac build and complete core functional checks
+    runs-on: macos-26
+    timeout-minutes: 260
+    env:
+      MRK_CANDIDATE_MODE: install-retained-observer
+      MRK_CANDIDATE_SOURCE: 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_RUNNER: macos-26
+      MRK_MACOS_MACHINE: arm64
+      MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
+      MRK_MACOS_NATIVE_SCOPE: tool-setup
+      MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Require the isolated disposable ARM host
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-observer-reuse ]]
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
+      - name: Check out the unchanged signed application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MRK_CANDIDATE_SOURCE }}
+          persist-credentials: false
+      - name: Keep current helpers separate from the original application
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          test ! -L "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate-consumer-helper
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: arm64
+      - name: Prepare the existing private host interpreter
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          export MRK_MACOS_WORK="$work"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s/host-python/bin/python3\n' "$work" "$work" >> "$GITHUB_ENV"
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py"
+          export MRK_HOST_BASE_CONTEXT
+          MRK_HOST_BASE_CONTEXT=$(python3 -I -S -B "$helper" host-base)
+          python3 -I -S -B -m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"
+          "$work/host-python/bin/python3" -I -S -B "$helper" bind-host
+          unset MRK_HOST_BASE_CONTEXT
+      - name: Reuse the retained signed image for a fresh install and file verification
+        id: retained_install
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          # Same signed package; no build, signing credentials or notarization.
+          # The consumer removes its acquisition token before native install.
+          set +e
+          "$MRK_PYTHON" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" \
+            > "$MRK_MACOS_WORK/retained-observer-install.json"
+          phase_status=$?
+          printf '%s\n' "$phase_status" > "$MRK_MACOS_WORK/retained-observer-install.status"
+          saved_status=$?
+          unset GITHUB_TOKEN
+          set -e
+          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi
+          [[ "$saved_status" == 0 ]] || exit "$saved_status"
+          # Only a real return0, fresh Installer/readback and unforced detach0
+          # allow later cases. The JSON cannot certify its own future exit.
+      - name: Verify four supported project identity edits
+        timeout-minutes: 15
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
+            --retained-observer --target "$MRK_MACOS_TARGET"
+      - name: Start the fixed native service and verify readiness
+        timeout-minutes: 13
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
+            --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+      - name: Verify the installed CLI with the native service
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py" \
+            --retained-observer --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
+      - name: Prepare only the required isolated Android tool inputs
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
+          exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_android_dependency_preparation.py" prepare-tool-setup-inputs
+      - name: Verify tool acquisition, cancellation and missing-only reuse
+        timeout-minutes: 122
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          driver="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py"
+          # Preserve existing case order and clocks; no retry or ignored78.
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
+          exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope tool-setup
+      - name: Verify signing-key reuse, cancellation, restart and encrypted backup
+        timeout-minutes: 60
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          driver="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py"
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-roundtrip
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-stop-before-go
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-stop-after-new
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-cold-restart
+          "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
+          exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
+
   install-predecessor:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'install-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-install'
     name: Install the existing signed ARM app and observe its first detach

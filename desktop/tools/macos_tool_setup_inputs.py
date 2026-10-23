@@ -44,11 +44,19 @@ def context(a):
     a.need(_CONTEXT is None and a.RUN_SCOPE == a.TOOL_SCOPE
            and os.environ.get("MRK_MACOS_NATIVE_SCOPE") == SCOPE
            and os.environ.get("MRK_MACOS_TARGET") == TARGET
+           and Path(a.__file__).absolute() == a.SOURCE / "desktop/tools/macos_android_dependency_preparation.py"
            and Path(__file__).absolute() == a.SOURCE / "desktop/tools/macos_tool_setup_inputs.py"
            and sys.version_info[:3] == (3, 14, 7), "tool-input-fixed-entry")
     driver = a.load("_mrk_tool_input_current_driver", "desktop/tools/macos_identity_current_runtime.py")
-    source, run, attempt, work = driver.current_context(os.environ, TARGET)
-    uid, gid, username = driver._native_user()
+    if os.environ.get("MRK_CANDIDATE_MODE") == "install-retained-observer":
+        a.need(a.SOURCE == a.UI_CONSUMER_SOURCE, "tool-input-retained-helper")
+        uid, gid, username, _host = driver._native_user(os.environ, retained=True)
+        # Current helper/run authority stays current; only the validated
+        # original product tuple selects the compiled observer's fixture path.
+        source, run, attempt, work = driver.retained_fixture_context(os.environ, TARGET, uid, gid)
+    else:
+        source, run, attempt, work = driver.current_context(os.environ, TARGET)
+        uid, gid, username, _host = driver._native_user(os.environ)
     account = pwd.getpwuid(uid)
     a.need(account.pw_uid == uid and account.pw_gid == gid and username == account.pw_name
            and os.environ.get("MRK_ANDROID_PREPARATION_WORK") == str(work), "tool-input-native-account")
@@ -297,10 +305,16 @@ def _parent(a, work, private, clock):
     for key in ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW_SHA",
                 "GITHUB_WORKFLOW_REF", "GITHUB_WORKSPACE", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_ENVIRONMENT",
                 "RUNNER_OS", "RUNNER_ARCH", "MRK_EXPECTED_SHA", "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_MACOS_STORE_RUNTIME",
-                "MRK_MACOS_NATIVE_SCOPE", "MRK_MACOS_PACKAGE_ROLE", "MRK_MACOS_WORK", "MRK_MACOS_TARGET", "MRK_ANDROID_PREPARATION_WORK"):
+                "MRK_MACOS_NATIVE_SCOPE", "MRK_MACOS_PACKAGE_ROLE", "MRK_MACOS_WORK", "MRK_MACOS_TARGET", "MRK_ANDROID_PREPARATION_WORK",
+                "MRK_MACOS_RUNNER", "MRK_MACOS_MACHINE", "MRK_MACOS_HOSTED_JOB"):
         environment[key] = os.environ[key]
+    retained = os.environ.get("MRK_CANDIDATE_MODE") == "install-retained-observer"
+    if retained:
+        for key in ("MRK_CANDIDATE_MODE", "MRK_CANDIDATE_SOURCE"):
+            environment[key] = os.environ[key]
     environment["MRK_ANDROID_ACQUISITION_CHILD"] = "1"
-    phase = a.N.NormalPhase(a.N.load_normal_owner(a.SOURCE), environment, a.SOURCE, clock)
+    cwd = a.UI_CONSUMER_SOURCE.parent if retained else a.SOURCE
+    phase = a.N.NormalPhase(a.N.load_normal_owner(a.SOURCE), environment, cwd, clock)
     _ATTEMPT["phase"] = phase
     # Reuse the existing original caller and fixed source PRE/POST commands.
     _ATTEMPT["inflight"] = True

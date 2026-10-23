@@ -10,7 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -181,6 +181,126 @@ class ServiceReports(PassiveOnly):
                         owner.close()
                         self.assertFalse(owner.fds)
                         self.assertEqual(owner.close_errors, 0)
+
+
+class FixtureContext(PassiveOnly):
+    def test_current_context_passes_environment_and_accepts_four_native_values(self):
+        self.check_context(retained=False)
+
+    def test_retained_context_uses_original_product_namespace_not_current_helper_run(self):
+        self.check_context(retained=True)
+
+    def check_context(self, *, retained):
+        source = A.UI_CONSUMER_SOURCE if retained else A.SOURCE
+        work = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12")
+        product = ("b" * 40, "23", "2", work)
+        environment = {"MRK_MACOS_NATIVE_SCOPE": INPUTS.SCOPE, "MRK_MACOS_TARGET": INPUTS.TARGET,
+            "MRK_ANDROID_PREPARATION_WORK": str(work), "GITHUB_SHA": "a" * 40,
+            "GITHUB_RUN_ID": "900", "GITHUB_RUN_ATTEMPT": "1"}
+        if retained:
+            environment.update(MRK_CANDIDATE_MODE="install-retained-observer", MRK_CANDIDATE_SOURCE=product[0])
+        account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_name="runner", pw_dir="/Users/runner")
+        native_calls = []
+        def native(env, *, retained=False):
+            native_calls.append((dict(env), retained))
+            return 501, 20, "runner", ("macos-26", "26.6")
+        driver = SimpleNamespace(_native_user=native, current_context=Mock(return_value=product),
+                                 retained_fixture_context=Mock(return_value=product))
+        with patch.object(A, "SOURCE", source), \
+             patch.object(A, "__file__", str(source / "desktop/tools/macos_android_dependency_preparation.py")), \
+             patch.object(A, "RUN_SCOPE", A.TOOL_SCOPE), patch.object(A, "load", return_value=driver), \
+             patch.object(INPUTS, "__file__", str(source / "desktop/tools/macos_tool_setup_inputs.py")), \
+             patch.object(INPUTS, "_CONTEXT", None), patch.object(sys, "version_info", (3, 14, 7)), \
+             patch("pwd.getpwuid", return_value=account), patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(INPUTS.context(A), (work, INPUTS.TARGET))
+            self.assertEqual(INPUTS._CONTEXT[:4], product)
+            self.assertEqual(INPUTS._CONTEXT[4], INPUTS.source_root(*product[:3], account.pw_dir, A.need))
+            self.assertEqual(native_calls, [(environment, retained)])
+            selected = driver.retained_fixture_context if retained else driver.current_context
+            other = driver.current_context if retained else driver.retained_fixture_context
+            selected.assert_called_once_with(os.environ, INPUTS.TARGET, *([501, 20] if retained else []))
+            other.assert_not_called()
+            self.assertEqual(os.environ["GITHUB_SHA"], "a" * 40)
+            self.assertEqual(os.environ["GITHUB_RUN_ID"], "900")
+            with self.assertRaisesRegex(A.Refused, "tool-input-fixed-entry"):
+                INPUTS.context(A)
+
+    def test_retained_context_refuses_wrong_helper_before_native_or_namespace_use(self):
+        driver = SimpleNamespace(_native_user=Mock(), retained_fixture_context=Mock())
+        environment = {"MRK_MACOS_NATIVE_SCOPE": INPUTS.SCOPE, "MRK_MACOS_TARGET": INPUTS.TARGET,
+                       "MRK_CANDIDATE_MODE": "install-retained-observer"}
+        with patch.object(A, "__file__", str(A.SOURCE / "desktop/tools/macos_android_dependency_preparation.py")), \
+             patch.object(A, "RUN_SCOPE", A.TOOL_SCOPE), patch.object(A, "load", return_value=driver), \
+             patch.object(INPUTS, "__file__", str(A.SOURCE / "desktop/tools/macos_tool_setup_inputs.py")), \
+             patch.object(INPUTS, "_CONTEXT", None), patch.object(sys, "version_info", (3, 14, 7)), \
+             patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(A.Refused, "tool-input-retained-helper"):
+                INPUTS.context(A)
+            self.assertIsNone(INPUTS._CONTEXT)
+        driver._native_user.assert_not_called()
+        driver.retained_fixture_context.assert_not_called()
+
+    def test_failed_retained_receipt_never_publishes_a_fixture_context(self):
+        source = A.UI_CONSUMER_SOURCE
+        driver = SimpleNamespace(_native_user=Mock(return_value=(501, 20, "runner", ("macos-26", "26.6"))),
+            retained_fixture_context=Mock(side_effect=ValueError("unverified retained install")))
+        environment = {"MRK_MACOS_NATIVE_SCOPE": INPUTS.SCOPE, "MRK_MACOS_TARGET": INPUTS.TARGET,
+                       "MRK_CANDIDATE_MODE": "install-retained-observer"}
+        with patch.object(A, "SOURCE", source), \
+             patch.object(A, "__file__", str(source / "desktop/tools/macos_android_dependency_preparation.py")), \
+             patch.object(A, "RUN_SCOPE", A.TOOL_SCOPE), patch.object(A, "load", return_value=driver), \
+             patch.object(INPUTS, "__file__", str(source / "desktop/tools/macos_tool_setup_inputs.py")), \
+             patch.object(INPUTS, "_CONTEXT", None), patch.object(sys, "version_info", (3, 14, 7)), \
+             patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "unverified retained install"):
+                INPUTS.context(A)
+            self.assertIsNone(INPUTS._CONTEXT)
+
+    def test_child_receives_actual_host_and_current_helper_identity_without_credentials(self):
+        class StoppedBeforeChild(Exception):
+            pass
+        work = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12")
+        root = Path("/Users/runner/Library/Application Support") / ("mrk-macos-tool-inputs-" + "b" * 40 + "-23-2")
+        environment = {key: "fixture" for key in (
+            "GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW_SHA",
+            "GITHUB_WORKFLOW_REF", "GITHUB_WORKSPACE", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_ENVIRONMENT",
+            "RUNNER_OS", "RUNNER_ARCH", "MRK_EXPECTED_SHA", "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_MACOS_STORE_RUNTIME",
+            "MRK_MACOS_NATIVE_SCOPE", "MRK_MACOS_PACKAGE_ROLE", "MRK_MACOS_WORK", "MRK_MACOS_TARGET", "MRK_ANDROID_PREPARATION_WORK")}
+        environment.update(GITHUB_SHA="a" * 40, GITHUB_RUN_ID="900", GITHUB_TOKEN="inert-test-token",
+            MRK_MACOS_RUNNER="macos-26", MRK_MACOS_MACHINE="arm64", MRK_MACOS_HOSTED_JOB="github-hosted-macos26-arm64")
+        for retained in (False, True):
+            selected_env = dict(environment)
+            source = A.SOURCE
+            if retained:
+                source = A.UI_CONSUMER_SOURCE
+                selected_env.update(MRK_CANDIDATE_MODE="install-retained-observer", MRK_CANDIDATE_SOURCE="b" * 40)
+            native = Mock()
+            native.call.side_effect = StoppedBeforeChild
+            factory = Mock(return_value=native)
+            normal = SimpleNamespace(NormalPhase=factory, load_normal_owner=Mock(return_value="inert-owner"))
+            attempt = {"roots": [], "inflight": False}
+            with self.subTest(retained=retained), patch.object(A, "SOURCE", source), patch.object(A, "N", normal), \
+                 patch.object(A, "chain", return_value=([11], ["inert-parent"])), \
+                 patch.object(A, "publish_preparation"), patch.object(A, "source_original"), \
+                 patch.object(A, "clean_environment", return_value={"PATH": "/usr/bin:/bin"}), \
+                 patch.object(INPUTS, "_new", side_effect=lambda a, p, n, c: {"path": p["path"] / n}), \
+                 patch.object(INPUTS, "_binding", return_value={}), patch.object(INPUTS, "_ATTEMPT", attempt), \
+                 patch.object(INPUTS, "_CONTEXT", ("b" * 40, "23", "2", work, root, 501, 20)), \
+                 patch("os.fstatvfs", return_value=SimpleNamespace(f_bavail=8 << 30, f_frsize=1)), \
+                 patch.dict(os.environ, selected_env, clear=True):
+                with self.assertRaises(StoppedBeforeChild):
+                    INPUTS._parent(A, work, {"path": work, "fds": [12]}, "inert-clock")
+            factory.assert_called_once()
+            _, child, cwd, _ = factory.call_args.args
+            self.assertEqual(cwd, A.UI_CONSUMER_SOURCE.parent if retained else source)
+            self.assertEqual((child["GITHUB_SHA"], child["GITHUB_RUN_ID"]), ("a" * 40, "900"))
+            for key in ("MRK_MACOS_RUNNER", "MRK_MACOS_MACHINE", "MRK_MACOS_HOSTED_JOB"):
+                self.assertEqual(child[key], environment[key])
+            self.assertNotIn("GITHUB_TOKEN", child)
+            self.assertEqual(child.get("MRK_CANDIDATE_SOURCE"), "b" * 40 if retained else None)
+            self.assertEqual(child["MRK_ANDROID_ACQUISITION_CHILD"], "1")
+            self.assertEqual(native.call.call_args.args[1], [sys.executable, "-I", "-S", "-B",
+                str(source / "desktop/tools/macos_android_dependency_preparation.py"), A.TOOL_COMMANDS[1]])
 
 
 class FixturePreparation(PassiveOnly):
