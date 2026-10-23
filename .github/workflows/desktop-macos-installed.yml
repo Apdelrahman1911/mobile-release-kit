@@ -1334,7 +1334,10 @@ jobs:
           fi
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
-        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update'))
+        # Update delivery reuses the separately verified core checks instead of
+        # rebuilding a nonshipping observer. Real signing/Installer/update
+        # checks below remain mandatory; no skipped test is reported as passed.
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'))
         timeout-minutes: 28
         shell: bash
         run: |
