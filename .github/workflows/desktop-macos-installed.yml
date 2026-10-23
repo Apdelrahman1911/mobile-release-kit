@@ -72,8 +72,9 @@ jobs:
     # Explicit current-runtime identity4 alone selects the nonshipping observer.
     # Conservative selected step maxima (minutes), NOT an expected duration:
     # setup13 + compiler/argv9 + signed suppliers/current-runtime39 +
-    # helper/vault/app/assembly102 + REQUIRED notary/package/install98 +
-    # identity4 15 =276; the independent288 cap leaves12 for job overhead.
+    # helper/vault/app/assembly102 + REQUIRED notary/package/install110 +
+    # identity4 15 =288 after ARM Installer20; the unchanged288 job cap also
+    # contains overhead, so these maxima are not a worst-case fit guarantee.
     # No per-case renewal, legacy suite, ordinary prepared export or final image.
     timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 288 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
@@ -1780,7 +1781,9 @@ jobs:
           # concurrent races, OS EIO/power-loss, native close failure or Aqua/Save.
       - name: Compile the fixed ordinary root Installer before credential admission
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
-        timeout-minutes: 8
+        # Configured ARM compilation hit8min; the isolated release/link passes,
+        # but absent package pins do not prove configured timing. Verify it here.
+        timeout-minutes: ${{ matrix.target == 'aarch64-apple-darwin' && 20 || 8 }}
         shell: bash
         run: |
           set -euo pipefail
