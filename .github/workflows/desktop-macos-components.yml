@@ -38,9 +38,9 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
-        description: Architecture for app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
+        description: Architecture for installer-compile/app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -207,16 +207,27 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: ${{ inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-removal-fixtures' && 'Check removal fixture roles' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-removal-fixtures' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
+    name: ${{ inputs.component == 'installer-compile' && 'Compile and link Installer without signing or execution' || inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-removal-fixtures' && 'Check removal fixture roles' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-compile' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-removal-fixtures' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.component == 'installer-compile' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     steps:
+      - name: Require the explicit ARM-only Installer compile selection
+        if: inputs.component == 'installer-compile'
+        shell: bash
+        env:
+          SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
+            printf '%s\n' 'installer-compile requires architecture=arm64; no other architecture was compiled.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -244,6 +255,21 @@ jobs:
           # This is the existing reviewed native clock tuple on both Macs.
           # 1.98.0 is supported only on Intel, not Apple Silicon.
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$INSTALLER_CHECKS" == installer-compile ]]; then
+            [[ "$COMPONENT_EVENT" == workflow_dispatch ]] || exit 1
+            # Reproduce the failed release/codegen/link target, not cargo check.
+            # Match the configured compiler/profile; keep ordinary diagnostics.
+            unset CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
+            export DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0
+            started=$SECONDS
+            rustup run 1.98.1 cargo build --locked --release --no-default-features \
+              --features macos-installed-installer --target aarch64-apple-darwin --bin mrk-macos-install
+            printf 'Installer compile/link completed in %ss; no configured package bindings or native execution.\n' "$((SECONDS - started))"
+            # Missing package/inventory/runtime pins keep this a component-only
+            # build, not a reusable Installer or a configured-build timing proof.
+            # The original Cargo failure exits under set -e before this success.
+            exit 0
+          fi
           if [[ "$INSTALLER_CHECKS" == xcode-setup-files ]]; then
             [[ "$COMPONENT_EVENT" == workflow_dispatch ]] || exit 1
             # Normal runner compiles ONLY the native libtest. No root Cargo,
