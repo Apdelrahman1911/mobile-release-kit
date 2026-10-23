@@ -341,11 +341,11 @@ class CandidateConsumerTests(unittest.TestCase):
 
     def test_package_memory_credit_follows_complete_reads_and_precedes_codecs(self):
         image = b'image'
-        for fault in ('pass', 'read', 'before', 'after'):
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        for retained, fault in ((retained, fault) for retained in (False, True)
+                               for fault in ('pass', 'read', 'before', 'after')):
             originals, row, stage = mounted_fixture('aarch64-apple-darwin')
-            with mock.patch.object(R.Resume, '__init__', return_value=None):
-                owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
-                                         nomination=nomination())
+            owner = retained_instance(retained_fixture()[0]) if retained else instance()
             owner._CandidateResume__artifact_admitted = True
             owner._CandidateResume__members_document = R.canonical(row['members'])
             owner.selection = stage.source_build_selection(owner.target)
@@ -355,10 +355,11 @@ class CandidateConsumerTests(unittest.TestCase):
             owner.clock, owner.host, owner.parent = SimpleNamespace(check=lambda: None), object(), {'fd': 7}
             owner.point = lambda: None
             owner.command = mock.Mock(return_value=SimpleNamespace(stdout=b'', stderr=b'', returncode=0))
-            quote = C.candidate_resource_requirements(nomination(), 0, 0, image_bytes=len(image))
+            quote = C.candidate_resource_requirements(owner.nomination, 0, 0, image_bytes=len(image))
             package = len(originals['Install.pkg'][0])
             fixed = quote['postAcquisitionMemory'] - 5 * len(image) + 2 * 65536
             before, after = fixed + 6 * package, fixed + package
+            codec = after - (len(image) + package if retained else 0)
             owner.memory_base = quote['postAcquisitionMemory']
             calls = []
             def read(book, operation, path, *args, **kwargs):
@@ -370,15 +371,19 @@ class CandidateConsumerTests(unittest.TestCase):
             preview = {key + 'Sha256': row[key]['sha256'] for key in ('package', 'descriptor', 'signature')}
             preview.update(packageSize=package, installerInventorySha256=row['inventorySha256'],
                            runtimeManifestSha256=row['runtimeManifestSha256'])
+            if retained: preview = None
             def parse(*args, **kwargs):
-                self.assertEqual(owner.memory_base, after)
+                self.assertEqual(owner.memory_base, codec)
+                self.assertEqual(R.STATE['resourceAdmission']['requiredMemoryBytes'], after)
+                self.assertIs(kwargs['clock'], owner.clock)
+                self.assertIs(kwargs['retained_observer'], retained)
                 self.assertEqual(calls, list(originals))
                 return {}, b'inventory'
-            with self.subTest(fault=fault), mock.patch.dict(R.STATE), \
+            with self.subTest(retained=retained, fault=fault), mock.patch.dict(R.STATE), \
                     mock.patch.object(R, 'host_memory_data', return_value=(4096, 1 << 40)), \
                     mock.patch.object(R, 'memory_data', side_effect=[
                         {'availableEstimateBytes': 0 if fault == 'before' else 1 << 40},
-                        {'availableEstimateBytes': 0 if fault == 'after' else 1 << 40}]), \
+                        {'availableEstimateBytes': after - 1 if fault == 'after' else after}]), \
                     mock.patch.object(C.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1 << 40, f_frsize=1)), \
                     mock.patch.object(C.os, 'stat', side_effect=lambda name, **kw: SimpleNamespace(
                         st_mode=stat.S_IFREG | 0o444, st_size=len(originals[name][0]),
@@ -387,7 +392,7 @@ class CandidateConsumerTests(unittest.TestCase):
                 if fault == 'pass':
                     owner.read_mounted(object(), {'fd': 8}, Path('/inert'), image, preview)
                     parser.assert_called_once()
-                    self.assertEqual(owner.memory_base, after)
+                    self.assertEqual(owner.memory_base, codec)
                     self.assertEqual(owner.allocation_samples, 0)
                 else:
                     with self.assertRaises((OSError, R.Refused)):
@@ -404,6 +409,24 @@ class CandidateConsumerTests(unittest.TestCase):
             with self.assertRaises(R.Refused):
                 owner.admit_resources(0, 0, image_bytes=1, **options)
             owner.command.assert_not_called()
+
+    def test_retained_codec_credit_never_applies_before_the_package_read(self):
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        selection = retained_fixture()[0]
+        owner = retained_instance(selection)
+        image = next(row['bytes'] for row in selection['members'] if row['name'] == C.candidate.RETAINED_OBSERVER_IMAGE)
+        owner.sources, owner.child_bootstrap = [], ''
+        owner.clock, owner.host, owner.parent = SimpleNamespace(check=lambda: None), object(), {'fd': 7}
+        owner.command = mock.Mock(return_value=SimpleNamespace(stdout=b'', stderr=b'', returncode=0))
+        with mock.patch.dict(R.STATE), \
+                mock.patch.object(R, 'host_memory_data', return_value=(4096, 1 << 40)), \
+                mock.patch.object(R, 'memory_data', return_value={'availableEstimateBytes': 1 << 40}), \
+                mock.patch.object(C.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1 << 40, f_frsize=1)):
+            for options in ({}, {'image_bytes': image}, {'image_bytes': image, 'acquiring': True},
+                            {'image_bytes': image, 'package_bytes': 7, 'reading': True}):
+                with self.subTest(options=options):
+                    owner.admit_resources(0, 0, **options)
+                    self.assertEqual(owner.memory_base, R.STATE['resourceAdmission']['requiredMemoryBytes'])
 
     def test_child_source_limits_precede_construction_and_sources_are_explicit(self):
         bodies = {name: (ROOT / name).read_bytes() for name in (C.LEGACY_PATH, C.PARSER_PATH)}
@@ -1514,7 +1537,13 @@ class PredecessorInstallTests(unittest.TestCase):
                         self.assertEqual(value['release']['sourceCommit'],owner.nomination['source'])
                         self.assertFalse(value['productReady'] or value['p0Qualified'] or value['uiQualified'])
                         self.assertNotIn('consumerReturnedZero',value)  # A record cannot prove its caller's future return.
-                        owner.stager.xar_members.assert_called_once_with(b'package', allocation_budget=owner.allocation_budget)
+                        owner.stager.xar_members.assert_called_once()
+                        parsed = owner.stager.xar_members.call_args
+                        self.assertEqual(parsed.args, (b'package',))
+                        self.assertEqual(set(parsed.kwargs), {'allocation_budget'})
+                        owner.allocation_budget.reset_mock()
+                        parsed.kwargs['allocation_budget']('xar-toc', 7, 2, 3)
+                        owner.allocation_budget.assert_called_once_with('xar-toc', 0, 2, 3)
                         owner.stager.install_product_members.assert_not_called()
                         receipt.assert_called_once_with()
                         self.assertEqual(owner.quota.finish.call_count,2)

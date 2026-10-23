@@ -302,14 +302,13 @@ def candidate_resource_requirements(nomination, retained, host_bytes, *, image_b
 
 
 def acquisition_bootstrap(helper_root, bodies):
-    """Only two held SOURCE bodies, no ambient desktop imports in the child."""
+    """Two held sources; no ambient Desktop imports."""
     resume.need(helper_root == HELPER_ROOT and type(bodies) is dict
                 and set(bodies) == {LEGACY_PATH, PARSER_PATH}, 'candidate-child-sources')
     for name, limit in ((LEGACY_PATH, resume.SOURCE_LIMIT), (PARSER_PATH, PARSER_SOURCE_LIMIT)):
         resume.need(type(bodies[name]) is bytes and 0 < len(bodies[name]) <= limit,
                     'candidate-child-source-bound')
-    # Quote escaping is bounded before building any source literal/copy. Four
-    # bytes funds every escaped input byte; printable unquoted ASCII needs one.
+    # Bound quoting (up to four bytes/input byte) before building child source.
     quoted_bound = sum(2 + sum(1 if 32 <= byte < 127 and byte not in (34, 39, 92) else 4
                                for byte in body) for body in bodies.values())
     resume.need(sum(map(len, bodies.values())) <= CHILD_SOURCE_LIMIT
@@ -581,8 +580,6 @@ class CandidateResume(resume.Resume):
         if package_bytes is not None:
             resume.need(not acquiring and image_bytes is not None and type(package_bytes) is int
                         and 0 < package_bytes <= resume.LIMIT, 'candidate-package-bound')
-            # Initial image copies have returned. Fund the package read peak,
-            # then its retained bytes separately from every codec allocation.
             required += -5 * image_bytes + (6 if reading else 1) * package_bytes + 2 * 65536
         call = self.command('memory', ['/usr/bin/vm_stat'], 10)
         page_size, physical = resume.host_memory_data(self.host, self.clock)
@@ -593,6 +590,9 @@ class CandidateResume(resume.Resume):
         resume.STATE['resourceAdmission'] = facts
         resume.need(facts['memorySufficient'] and facts['diskSufficient'], 'candidate-resource-admission')
         self.memory_base, self.required_disk = required, quote['requiredDisk']
+        # Later samples measure remaining memory; image/package are resident.
+        if self.__retained_observer and package_bytes is not None and not reading:
+            self.memory_base -= image_bytes + package_bytes
         self.allocation_samples, self.cpio_window = 0, None
 
     def acquire_fixed(self):
@@ -735,7 +735,7 @@ class CandidateResume(resume.Resume):
         options = ({'capture_scripts': self.__capture_restore_scripts} if self.purpose == 'acquire-restore' else
                    {'capture_scripts': self.__capture_removal_program} if self.purpose == 'acquire-removal' else {})
         result, inventory = resume.mounted_data(originals, row, self.target, self.stager,
-                                               allocation_budget=self.allocation_budget, candidate=True, retained_observer=self.__retained_observer, **options)
+                                               allocation_budget=self.allocation_budget, candidate=True, retained_observer=self.__retained_observer, clock=self.clock, **options)
         self.point()
         self.__binding = resume.canonical(row)
         self.__binding_image_bytes = len(image)
