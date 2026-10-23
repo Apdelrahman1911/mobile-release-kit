@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, image-detach, image-installer-detach, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, image-detach, image-installer-detach, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-runtime-retain, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
         description: Architecture for installer-compile/image-detach/image-installer-detach/app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
@@ -57,6 +57,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  store-runtime-retain:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-store-retention' && inputs.component == 'store-runtime-retain' && inputs.architecture == 'arm64' && !inputs.apple_key_component
+    name: Retain signed Store runtime (arm64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Copy only the verified original signed ZIP without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_store_component.py retain-selected \
+            "$RUNNER_TEMP/mrk-retained-store" --target aarch64-apple-darwin
+      - name: Retain the same signed bytes in one normal artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: store-signed-retained-aarch64-apple-darwin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-retained-store/store-original.zip
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+
   image-detach:
     if: github.event_name == 'workflow_dispatch' && (inputs.component == 'image-detach' || inputs.component == 'image-installer-detach')
     name: ${{ inputs.component == 'image-installer-detach' && 'Observe disk image detach after a harmless Installer package' || 'Observe a real busy disk image and clean detach without signing' }}

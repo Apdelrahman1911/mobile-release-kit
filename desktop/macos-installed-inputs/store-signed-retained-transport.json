@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "original": {
+        "source": "f05ec74e3d061e5576e5473a62be809932f8372c",
+        "runId": "38924519973",
+        "runAttempt": "1",
+        "artifactId": "12055694185",
+        "digest": "sha256:1a9f2289a26c44b5dad4b0868dee8f7c2b5dde4e9837fd8afc9f152bb8e52f79",
+        "bytes": 34824526
+      },
+      "transport": {
+        "kind": "original"
+      }
+    },
+    "x86_64-apple-darwin": null
+  }
+}
