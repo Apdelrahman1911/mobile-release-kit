@@ -2137,19 +2137,22 @@ jobs:
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
-      # Only the existing credential-free hdiutil detach captures, never lsof,
-      # signing/notary output or the workdir. Partial/missing files are diagnostic
-      # only: no native completion, cleanup, Installer or product-success claim.
-      - name: Retain only candidate distribution-detach diagnostics
+      # NONSHIPPING, unqualified diagnostic inputs only. Fixed image sources
+      # contain only the audited package and public producer descriptor/signature.
+      # No workdir, credentials or signing/notary/lsof captures. Partial/missing
+      # files prove no native completion, cleanup, Installer or product success.
+      - name: Retain only nonshipping candidate detach diagnostics and images
         if: failure() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.work.outcome == 'success' && steps.package_install.outcome == 'failure'
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-distribution-detach-diagnostics-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: candidate-detach-nonshipping-unqualified-diagnostics-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
+            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg
+            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
