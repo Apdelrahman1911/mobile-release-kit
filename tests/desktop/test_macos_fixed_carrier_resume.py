@@ -2024,12 +2024,106 @@ class FixedCarrierResumeData(unittest.TestCase):
                 m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)
             self.assertEqual(tool.source_build_selection(tool.ARM_TARGET), selection)
 
+    def test_retained_gzip_chunks_preserve_exact_bytes_and_bound_codec_workspace(self):
+        m = ADAPTER
+        tool = inert_module('retained_gzip_stager_data', 'desktop/tools/stage_macos_installed.py')
+        clock = SimpleNamespace(check=lambda: None)
+        random_data = b''.join(m.hashlib.sha256(str(n).encode('ascii')).digest() for n in range(7000))
+        for data in (b'', b'A' * (3 * 65536 + 1), random_data):
+            compressor = m.zlib.compressobj(wbits=31)
+            packed = compressor.compress(data) + compressor.flush()
+            expected = tool.inflate(packed, len(data), gzip=True)
+            base, live = 1 << 20, 123
+            required = m.allocation_memory_requirement(base, 0, min(len(packed), 65536), len(data))
+            self.assertEqual(m.allocation_memory_requirement(base, live, len(packed), len(data)) - required,
+                             live + 3 * max(0, len(packed) - 65536))
+            calls = []
+            def admit(phase, retained, compressed, output):
+                calls.append((phase, retained, compressed, output))
+                m.need(m.allocation_memory_requirement(base, retained, compressed, output) <= required,
+                       'inert-current-free-budget')
+            # The real legacy whole-input quote cannot pass the bounded future
+            # allocation envelope. No native memory result is manufactured.
+            with self.assertRaisesRegex(m.Refused, '^inert-current-free-budget$'):
+                m.scripts_archive_data(packed, tool, live, admit)
+            calls.clear()
+            original = m.zlib.decompressobj
+            chunks = []
+            class Observed:
+                def __init__(self, wbits):
+                    self.raw = original(wbits)
+                    self.wbits = wbits
+                def decompress(self, source, limit):
+                    self_outer.assertEqual(self.wbits, 31)
+                    self_outer.assertLessEqual(len(source), 65536)
+                    self_outer.assertLessEqual(limit, 65536)
+                    output = self.raw.decompress(source, limit)
+                    self_outer.assertLessEqual(len(output), 65536)
+                    self_outer.assertLessEqual(len(self.raw.unused_data), 65536)
+                    self_outer.assertLessEqual(len(self.raw.unconsumed_tail), 65536)
+                    chunks.append((len(source), len(output)))
+                    return output
+                def __getattr__(self, name): return getattr(self.raw, name)
+            self_outer = self
+            with mock.patch('subprocess.Popen', side_effect=AssertionError('no process/native execution')), \
+                    mock.patch.object(m.zlib, 'decompressobj', new=Observed):
+                actual = m.retained_scripts_archive_data(packed, clock, admit)
+            self.assertIs(type(actual), bytes)
+            self.assertEqual(actual, expected)
+            self.assertEqual(calls, [('scripts', 0, min(len(packed), 65536), len(data))])
+            self.assertEqual(sum(output for _, output in chunks), len(data))
+            if len(data) > 65536: self.assertGreater(len(chunks), 1)
+            if data is random_data: self.assertGreater(len(packed), 65536)
+        raw = b'070707-INERT-PLAIN-CPIO'
+        with mock.patch.object(tool, 'inflate', side_effect=AssertionError('no stager mutation/fallback')):
+            self.assertIs(m.retained_scripts_archive_data(raw, clock, lambda *args: self.fail('plain decode budget')), raw)
+
+    def test_retained_gzip_rejects_corruption_and_stops_before_unfunded_or_expired_work(self):
+        m = ADAPTER
+        data = b'INERT-GZIP-DATA' * 30000
+        compressor = m.zlib.compressobj(wbits=31)
+        packed = compressor.compress(data) + compressor.flush()
+        crc = bytearray(packed); crc[-8] ^= 1
+        flags = bytearray(packed); flags[3] |= 0xe0
+        malformed = (b'\x1f\x8b' + b'\0' * 15, bytes(crc), bytes(flags), packed[:-1],
+                     packed[:-4] + m.struct.pack('<I', 1), packed[:-4] + m.struct.pack('<I', len(data) + 1),
+                     packed[:-4] + m.struct.pack('<I', m.LIMIT + 1), packed + packed,
+                     packed + b'tail' + m.struct.pack('<I', len(data)))
+        clock = SimpleNamespace(check=lambda: None)
+        for body in malformed:
+            with self.subTest(size=len(body)), self.assertRaises((m.Refused, m.zlib.error)):
+                m.retained_scripts_archive_data(body, clock, lambda *args: None)
+        for body in (None, bytearray(packed), b''):
+            with self.assertRaises(m.Refused): m.retained_scripts_archive_data(body, clock)
+        with self.assertRaises(m.Refused): m.retained_scripts_archive_data(packed, None)
+        first = m.Refused('inert-original-budget-refusal')
+        def refused(*args): raise first
+        with mock.patch.object(m, 'bytearray', wraps=bytearray, create=True) as allocation, \
+                mock.patch.object(m.zlib, 'decompressobj', wraps=m.zlib.decompressobj) as decoder:
+            with self.assertRaises(m.Refused) as caught:
+                m.retained_scripts_archive_data(packed, clock, refused)
+            self.assertIs(caught.exception, first)
+            allocation.assert_not_called(); decoder.assert_not_called()
+        first = m.Refused('inert-original-deadline-refusal')
+        ticks = []
+        def tick():
+            ticks.append(1)
+            if len(ticks) == 5: raise first
+        with mock.patch.object(m, 'bytearray', wraps=bytearray, create=True) as allocation, \
+                mock.patch.object(m.zlib, 'decompressobj', wraps=m.zlib.decompressobj) as decoder:
+            with self.assertRaises(m.Refused) as caught:
+                m.retained_scripts_archive_data(packed, SimpleNamespace(check=tick), lambda *args: None)
+            self.assertIs(caught.exception, first)
+            self.assertEqual(len(ticks), 5)
+            allocation.assert_called_once_with(len(data)); decoder.assert_called_once_with(31)
+
     def test_retained_observer_flat_parser_is_explicit_and_keeps_common_checks_and_budgets(self):
         # Tiny genuine XAR/CPIO DATA, not reconstructed artifact bytes or a
         # native signature/Installer result. Every production parser is real.
         m = ADAPTER
         with mock.patch('subprocess.Popen', side_effect=AssertionError('no process/native execution')):
             tool = inert_module('retained_flat_stager_data', 'desktop/tools/stage_macos_installed.py')
+            clock = SimpleNamespace(check=lambda: None)
             selection = tool.source_build_selection(tool.ARM_TARGET)
             manifest = 'a' * 64
             paths = {'app/' + tool.ENTRY_BINARY, 'app/' + tool.APP_BINARY, 'app/' + tool.VAULT_HELPER,
@@ -2103,21 +2197,24 @@ class FixedCarrierResumeData(unittest.TestCase):
                 for candidate in (True, False):
                     with self.subTest(default_candidate=candidate), self.assertRaisesRegex(tool.Refused, '^install-product-xar-roster$'):
                         m.mounted_data(*originals(flat, legacy=not candidate), tool.ARM_TARGET, tool, candidate=candidate)
-                result, retained = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True)
+                result, retained = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True, clock=clock)
                 phases = []
-                observed = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True,
+                observed = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True, clock=clock,
                     allocation_budget=lambda *v: phases.append(v))
                 self.assertEqual(observed, (result, retained))
                 self.assertEqual(retained, inventory)
                 self.assertEqual(result['inventoryFiles'], len(paths))
                 self.assertEqual(result['inventoryPayloadBytes'], len(paths))
                 self.assertFalse(result['nativeQualificationInferred'] or result['updateActivated'] or result['productReady'])
-                self.assertEqual(phases[:len(flat_phases)], flat_phases)
+                self.assertEqual(phases[:len(flat_phases)], [(phase, 0, packed, output) for phase, _, packed, output in flat_phases])
                 self.assertFalse(any(phase.startswith('install-product-') for phase, *_ in phases))
                 self.assertEqual(sum(phase == 'cpio-window' for phase, *_ in phases), 1)
                 self.assertEqual(sum(phase == 'scripts' for phase, *_ in phases), int(scripts is gzipped))
                 window = next(v for v in phases if v[0] == 'cpio-window')
-                self.assertEqual(window, ('cpio-window', len(info) + len(scripts) + 2 * len(archive), 0, 0))
+                self.assertEqual(window, ('cpio-window', len(archive), 0, 0))
+                for phase, live, packed, output in phases:
+                    if phase == 'cpio-slice':
+                        self.assertLessEqual(live, len(archive)); self.assertEqual((packed, output), (0, 0))
 
             product = xar([('Distribution', b'PUBLIC-XML'), ('Resources', [('InstallerReadMe.html', b'PUBLIC-HTML')]),
                            (tool.INSTALL_COMPONENT, flat)])
@@ -2133,7 +2230,7 @@ class FixedCarrierResumeData(unittest.TestCase):
             )
             for package, error, reason in malformed:
                 with self.subTest(refusal=reason), self.assertRaisesRegex(error, '^' + reason + '$'):
-                    m.mounted_data(*originals(package), tool.ARM_TARGET, tool, candidate=True, retained_observer=True)
+                    m.mounted_data(*originals(package), tool.ARM_TARGET, tool, candidate=True, retained_observer=True, clock=clock)
             for flag, candidate, target in ((1, True, tool.ARM_TARGET), (None, True, tool.ARM_TARGET),
                     (True, False, tool.ARM_TARGET), (True, True, tool.INTEL_TARGET)):
                 with self.subTest(flag=flag, candidate=candidate, target=target), self.assertRaisesRegex(m.Refused, '^resume-mounted-purpose$'):
@@ -2147,11 +2244,11 @@ class FixedCarrierResumeData(unittest.TestCase):
                 with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as codec, \
                         mock.patch.object(tool, 'cpio_members', wraps=tool.cpio_members) as cpio_parser:
                     with self.subTest(allocation=phase), self.assertRaises(m.Refused) as caught:
-                        m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True,
+                        m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True, clock=clock,
                                        allocation_budget=refuse)
                     self.assertIs(caught.exception, first)
                     self.assertEqual(phases[-1], phase)
-                    self.assertEqual(codec.call_count, 0 if phase == 'xar-toc' else 2 if phase == 'cpio-window' else 1)
+                    self.assertEqual(codec.call_count, 0 if phase == 'xar-toc' else 1)
                     self.assertEqual(cpio_parser.call_count, int(phase == 'cpio-window'))
 
     def test_producer_signature_uses_native_domain_and_retained_original_message(self):

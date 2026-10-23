@@ -1047,8 +1047,62 @@ def scripts_archive_data(packed, stager, live, allocation_budget=None):
     return archive
 
 
+def retained_scripts_archive_data(packed, clock, allocation_budget=None):
+    """One gzip member, bounded codec chunks and an exactly sized output buffer."""
+    need(type(packed) is bytes and 0 < len(packed) <= LIMIT and clock is not None,
+         'resume-retained-scripts-bound')
+    clock.check()
+    if packed[:2] != b'\x1f\x8b':
+        return packed
+    need(len(packed) >= 18, 'resume-scripts-gzip-header')
+    expanded = struct.unpack_from('<I', packed, len(packed) - 4)[0]
+    need(expanded <= LIMIT, 'resume-scripts-expanded-bound')
+    # The fresh sample already owns packed. Fund bounded input/tail chunks and
+    # the exact bytearray + immutable result overlap; ISIZE is only a cap here.
+    if allocation_budget is not None:
+        allocation_budget('scripts', 0, min(len(packed), 65536), expanded)
+    clock.check()
+    archive = bytearray(expanded)
+    destination, source = memoryview(archive), memoryview(packed)
+    stream = zlib.decompressobj(31)  # Original gzip header, CRC and ISIZE checks.
+    offset, emitted = 0, 0
+    while offset < len(packed):
+        clock.check()
+        data = source[offset:offset + 65536]
+        offset += len(data)
+        while True:
+            clock.check()
+            output = stream.decompress(data, min(65536, expanded - emitted + 1))
+            produced = len(output)
+            need(emitted + produced <= expanded and not stream.unused_data,
+                 'resume-scripts-compressed-tail')
+            destination[emitted:emitted + produced] = output
+            emitted += produced
+            del output  # No prior output chunk survives the next allocation.
+            tail = stream.unconsumed_tail
+            if stream.eof:
+                need(not tail and offset == len(packed), 'resume-scripts-compressed-tail')
+                break
+            consumed = len(data) - len(tail)
+            if not data and produced == 0:
+                break
+            need(consumed > 0 or produced > 0, 'resume-scripts-compressed-progress')
+            if tail:
+                data = tail
+            elif produced == 65536:
+                data = b''
+            else:
+                break
+    need(stream.eof and not stream.unused_data and not stream.unconsumed_tail
+         and emitted == expanded, 'resume-scripts-expanded-size')
+    clock.check()
+    result = bytes(archive)
+    clock.check()
+    return result
+
+
 def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False,
-                 retained_observer=False, capture_scripts=None):
+                 retained_observer=False, capture_scripts=None, clock=None):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
          and all(type(v) is tuple and len(v) == 2 and type(v[0]) is bytes and type(v[1]) is int for v in originals.values()), 'enrollment-mounted-roster')
@@ -1078,8 +1132,12 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
     # Only the explicitly selected retained observer has a flat scripts package.
     # Ordinary candidates/fixed P0 keep the product parser; never sniff or retry.
     parser = stager.xar_members if retained_observer else stager.install_product_members
+    def retained_xar_budget(phase, live, packed, output):
+        # Each XAR sample already owns its input/TOC/earlier member buffers.
+        allocation_budget(phase, 0, packed, output)
+    parser_budget = retained_xar_budget if retained_observer else allocation_budget
     members = (parser(bodies['Install.pkg']) if allocation_budget is None else
-        parser(bodies['Install.pkg'], allocation_budget=allocation_budget))
+        parser(bodies['Install.pkg'], allocation_budget=parser_budget))
     outer_retained = sum(len(value) for value in members.values())
     def nested_budget(phase, live, packed, output):
         if allocation_budget is not None:
@@ -1097,10 +1155,14 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
     stager.package_info(component['PackageInfo'], selection=selection)
     packed = component['Scripts']
     component_retained = sum(len(value) for value in component.values())
-    archive = scripts_archive_data(packed, stager, outer_retained + component_retained, allocation_budget)
+    archive = (retained_scripts_archive_data(packed, clock, allocation_budget) if retained_observer else
+               scripts_archive_data(packed, stager, outer_retained + component_retained, allocation_budget))
     def cpio_budget(phase, live, packed_bytes, output):
         if allocation_budget is not None:
-            allocation_budget(phase, outer_retained + component_retained + live, packed_bytes, output)
+            # The one retained window already owns archive; future copied
+            # slices (and the disjoint trailer suffix) remain bounded by it.
+            future = live - len(archive) if retained_observer else outer_retained + component_retained + live
+            allocation_budget(phase, future, packed_bytes, output)
     options = {'store_runtime': True} if candidate else {}
     if allocation_budget is not None: options['allocation_budget'] = cpio_budget
     scripts = stager.cpio_members(archive, **options)
