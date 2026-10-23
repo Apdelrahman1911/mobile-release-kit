@@ -136,14 +136,16 @@ class CandidateConsumerTests(unittest.TestCase):
             def admit(*args, **kwargs):
                 events.append('capacity')
                 self.assertEqual(args, (0,0))
-                self.assertEqual(kwargs, {'image_bytes':sum(len(value) for _,value in entries), 'acquiring':True})
+                self.assertEqual(kwargs, {'image_bytes':len(dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE]), 'acquiring':True})
                 if fault == 'capacity': raise R.Refused('inert retained capacity')
             owner.admit_resources = mock.Mock(side_effect=admit)
-            def post(entry):
+            def post(book, entry, content, clock):
                 events.append('post'); self.assertIs(entry, original)
-                return b'changed' if fault == 'post' else body
-            owner.outer = SimpleNamespace(read=post)
-            with self.subTest(fault=fault), mock.patch.object(C.candidate, 'candidate_preview_data') as preview:
+                self.assertIs(book, owner.outer); self.assertIs(content, body); self.assertIs(clock, owner.clock)
+                if fault == 'post': raise R.Refused('inert retained original post')
+            owner.outer = SimpleNamespace(read=mock.Mock())
+            with self.subTest(fault=fault), mock.patch.object(C.candidate, 'candidate_preview_data') as preview, \
+                    mock.patch.object(R, 'retained_image_post', side_effect=post):
                 if fault is None:
                     self.assertEqual(owner.acquire_candidate(), {C.candidate.RETAINED_OBSERVER_IMAGE:dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE]})
                     self.assertEqual(R.decode(owner._CandidateResume__members_document),
@@ -154,6 +156,7 @@ class CandidateConsumerTests(unittest.TestCase):
                     with self.assertRaises(R.Refused): owner.acquire_candidate()
                     self.assertFalse(owner._CandidateResume__artifact_admitted)
                 preview.assert_not_called()
+                owner.outer.read.assert_not_called()
             self.assertEqual(events, ['child'] + ([] if fault == 'child' else ['capacity'])
                              + ([] if fault in ('child','capacity') else ['post']))
             owner.quota.reserve.assert_called_once_with(3)

@@ -295,8 +295,7 @@ def candidate_resource_requirements(nomination, retained, host_bytes, *, image_b
                 'candidate-image-bound')
     image = 0 if image_bytes is None else image_bytes
     memory = 6 * (row['artifactBytes'] + image) + (16 << 20) + retained + (512 << 20) + (1 << 30)
-    # Include both the retained transport and its actual published image. Keep
-    # the original installation/codec/disk reserve without crediting old bytes.
+    # Fund both disk copies and the original installation/codec reserve.
     disk = (3 << 30) + 2 * row['artifactBytes'] + 2 * (resume.LIMIT if image_bytes is None else image) + host_bytes
     return {'acquisitionMemory': memory, 'postAcquisitionMemory': memory - 6 * row['artifactBytes'],
             'requiredDisk': disk}
@@ -576,6 +575,8 @@ class CandidateResume(resume.Resume):
                     + len(self.child_bootstrap.encode('utf-8')), 'candidate-retained-source-budget')
         quote = candidate_resource_requirements(self.nomination, retained, host_bytes, image_bytes=image_bytes)
         required = quote['acquisitionMemory' if image_bytes is None or acquiring else 'postAcquisitionMemory']
+        if self.__retained_observer and (image_bytes is None or acquiring):
+            required = candidate.retained_observer_memory_requirement(self.retained_selection(), retained, image_bytes=image_bytes)
         resume.need(type(reading) is bool and (package_bytes is not None or not reading), 'candidate-package-stage')
         if package_bytes is not None:
             resume.need(not acquiring and image_bytes is not None and type(package_bytes) is int
@@ -624,18 +625,19 @@ class CandidateResume(resume.Resume):
         self.private[name] = entry['identity']
         def before_image(size):
             self.admit_resources(*self._resource_inputs, image_bytes=size, acquiring=True)
-        values = (candidate.retained_observer_members(body, self.retained_selection(), self.clock, before_image=before_image)
-                  if self.__retained_observer else candidate.candidate_members(body, selected, self.clock, before_image=before_image))
+        if self.__retained_observer:
+            values = candidate.retained_observer_members(body, self.retained_selection(), self.clock,
+                before_image=before_image)
+            resume.retained_image_post(self.outer, entry, body, self.clock)
+            self.__members_document = resume.canonical(values['members'])
+            self.__image_document = resume.canonical(next(v for v in values['members']
+                if v['name'] == candidate.RETAINED_OBSERVER_IMAGE))
+            self.__artifact_admitted = True
+            return {candidate.RETAINED_OBSERVER_IMAGE: values['image']}
+        values = candidate.candidate_members(body, selected, self.clock, before_image=before_image)
         resume.need(self.outer.read(entry) == body, 'candidate-acquisition-original-post')
         self.__members_document = resume.canonical([{'name': name, 'bytes': len(body), 'sha256': resume.sha(body)}
                                                    for name, body in sorted(values.items())])
-        if self.__retained_observer:
-            image = values[candidate.RETAINED_OBSERVER_IMAGE]
-            self.__image_document = resume.canonical({'name': candidate.RETAINED_OBSERVER_IMAGE,
-                'bytes': len(image), 'sha256': resume.sha(image)})
-            self.__artifact_admitted = True
-            # No old request-named package or detach transcript is kept for use.
-            return {candidate.RETAINED_OBSERVER_IMAGE: image}
         self.preview_bytes, self.preview_sha = len(values['PREVIEW.json']), resume.sha(values['PREVIEW.json'])
         self.__preview_document = resume.canonical(candidate.candidate_preview_data(values['PREVIEW.json'], selected))
         self.__artifact_admitted = True
