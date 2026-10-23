@@ -63,7 +63,196 @@ def nested_nomination():
     return source
 
 
+def manual_delivery_fixture(target=DATA.TARGETS[0], *, producer=None, observation=None, package_owner=None):
+    """Inert public DATA for the real join/export readers, never native evidence."""
+    document = nomination()
+    selected = document["targets"][target]
+    selected["source"] = selected["release"]["sourceCommit"] = "c" * 40
+    if producer is not None:
+        selected["signingPolicy"] = copy.deepcopy(producer["signingPolicies"][0])
+        selected["release"]["signingPolicySha256"] = selected["signingPolicy"]["sha256"]
+    paths = sorted({"app/" + STAGER.ENTRY_BINARY, "app/" + STAGER.APP_BINARY, "app/" + STAGER.VAULT_HELPER,
+        "app/Contents/Info.plist", "app/" + STAGER.PAYLOAD_INFO, "runtime/python/bin/python3", "runtime/manifest.json"})
+    inventory = STAGER.canonical({"schemaVersion": 1, "release": selected["release"]["release"],
+        "runtimeManifestSha256": selected["release"]["runtimeManifestSha256"], "files": [
+            {"path": path, "size": 4096 if path == "app/" + STAGER.VAULT_HELPER else 1,
+             "sha256": selected["release"]["runtimeManifestSha256"] if path == "runtime/manifest.json" else "5" * 64,
+             "executable": path in {"app/" + STAGER.ENTRY_BINARY, "app/" + STAGER.APP_BINARY,
+                                    "app/" + STAGER.VAULT_HELPER, "runtime/python/bin/python3"}} for path in paths]})
+    selected["inventory"].update(bytes=len(inventory), sha256=DATA.sha(inventory))
+    selected["release"]["inventorySha256"] = DATA.sha(inventory)
+    if producer is None:
+        current = {**selected["release"], "sourceCommit": "b" * 40, "packageVersion": "0.2.0",
+            "release": selected["release"]["release"] + "-next", "packageSha256": "8" * 64}
+        producer = {"schemaVersion": 2, "kind": "mrk-macos-install-producer-v2", "domain": "MobileReleaseKit-package-producer-v2",
+            "target": target, "releaseSet": {"schemaVersion": 2, "current": current, "acceptedPredecessors": []},
+            "signingPolicies": [selected["signingPolicy"]]}
+    producer["releaseSet"]["acceptedPredecessors"] = [selected["release"]]
+    current = producer["releaseSet"]["current"]
+    descriptor = STAGER.canonical(producer) + b"\n"
+    context = dict(source=current["sourceCommit"], workflowSource=current["sourceCommit"], target=target, runId="123", runAttempt="1")
+    owner_fields = {"schemaVersion": 1, **context, "packageRole": "ordinary-image", "workflow":
+        DATA.REPOSITORY + "/.github/workflows/desktop-macos-installed.yml@" + DATA.REF,
+        "passed": True, "targetRetired": True, "originalClosesKnown": True, "outerFinalityRequired": True,
+        "cleanupErrors": [], "directStagerIOPending": None, "productReady": False}
+    calls = lambda roles: [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0} for role in roles]
+    facts = lambda inode, mode, size: [str(x) for x in (1, inode, mode, 501, 20, 1, 0, size, 1, 0, 1, 0)]
+    leaf = lambda inode, size, digest: {"facts": facts(inode, stat.S_IFREG | 0o600, size), "bytes": size, "sha256": digest}
+    state = {"root": facts(1, stat.S_IFDIR | 0o700, 128), "sentinel": leaf(2, len(DATA.SENTINEL), DATA.sha(DATA.SENTINEL)),
+        "vault": {"directory": facts(3, stat.S_IFDIR | 0o700, 128), "files": {
+            "vault-lock": leaf(4, 0, DATA.sha(b"")), "initialization-reservation": leaf(5, 48, "1" * 64),
+            "vault-header": leaf(6, 104, "2" * 64), "record-" + "a" * 32: leaf(7, 248, "3" * 64)}}}
+    identity = lambda inode, mode: dict(device=1, inode=inode, mode=stat.S_IFDIR | mode, uid=0, gid=0, flags=0)
+    old_generation = {"release": selected["release"], "instance": "6" * 32, "releaseDirectory": identity(101, 0o755),
+        "app": {"location": "canonical", "identity": identity(102, 0o555)}}
+    baseline = {"schemaVersion": 1, **context, "predecessorSource": selected["source"],
+        "predecessorPackageSha256": selected["package"]["sha256"], "publicControlsSha256": selected["publicControlsSha256"],
+        "nominationSha256": DATA.sha(STAGER.canonical(selected)), "expectedCurrentDescriptorSha256": DATA.sha(descriptor),
+        "freshCurrentBytesReadback": True, "originalInstallerReturnedZero": True, "originalMountDetached": True, "productReady": False,
+        "readback": {"previous": {"invocation": "6" * 32, "sha256": "6" * 64}, "rootIdentity": identity(100, 0o755),
+                     "generation": old_generation}, "requestId": "7" * 32, "census": {"7" * 32: {"sha256": "7" * 64}},
+        "sentinel": {"identity": [1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(DATA.SENTINEL), 1000000000, 1000000000],
+            "parentIdentity": [1, 1, stat.S_IFDIR | 0o700, 501, 20], "bytes": len(DATA.SENTINEL), "sha256": DATA.sha(DATA.SENTINEL)}}
+    baseline_body = STAGER.canonical({**owner_fields, "phase": DATA.PHASE, "originalCalls": calls(DATA.ROLES), "updateBaseline": baseline}) + b"\n"
+    bootstrap = {"schemaVersion": 1, "scope": DATA.CREDENTIAL_SCOPE, "segment": "p0-bootstrap", "sourceCommit": context["source"],
+        "applicationSourceCommit": selected["source"], "target": target, "runId": "123", "runAttempt": "1",
+        "nominationSha256": baseline["nominationSha256"], "baselineReceiptSha256": DATA.sha(baseline_body), "helperSha256": "5" * 64,
+        "helperBytes": 4096, "state": state, "recordRevision": 1, "testAdmissionSha256": "6" * 64,
+        "summaryAdmissionSha256": "7" * 64, "nativeSummarySha256": "8" * 64, "fixtureOriginalClosesCompleted": True,
+        "normalQuitObserved": True, "gateReleased": True, "originalCommandsSettled": True, "productReady": False}
+    bootstrap_body = STAGER.canonical(bootstrap) + b"\n"
+    if observation is None:
+        request, invocation = "1" * 32, "2" * 32
+        result = {"schemaVersion": 2, "kind": "maintenance-parent-pending-finalization", "invocation": invocation,
+            "requestId": request, "resultName": "MobileReleaseKit-InstallerResult-v2-" + request + ".json",
+            "resultFinality": "pending-own-write-readback-close-and-outer-return", "action": "update",
+            "writerState": "installed", "writerExit": 0, "intentSha256": "3" * 64, "stateSha256": "4" * 64,
+            "capsuleSha256": "5" * 64, "payloadWriteCount": 1, "payloadWriteBytes": 10, "originalWriterJoined": True,
+            "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
+            "historicalOuterExit": "unverified", "registrationReservation": {"schemaVersion": 1, "entered": True,
+                "creation": "existing-not-modified", "fixedBytes": 38, "writtenBytes": 0, "sealed": False,
+                "filePersisted": False, "parentPersisted": False, "writer": "not-attempted", "verified": True,
+                "exclusiveAttempted": True, "exclusiveAcquired": True, "participant": "closed", "closedUnderMaintenance": True,
+                "verifiedAfterGo": False, "cleanup": "original-closes-only-permanent-reservation-retained"}}
+        observation = {"schemaVersion": 2, "sourceCommit": context["source"], "release": current["release"],
+            "runtimeManifestSha256": current["runtimeManifestSha256"], "inventorySha256": current["inventorySha256"],
+            "completedPackageSha256": current["packageSha256"], "requestId": request, "invocation": invocation,
+            "originalInstallerReturnedZero": True, "originalWriterJoined": True, "applicationLaunched": False, "guiSaveQualified": False,
+            "originalInstallerResult": result, "nonrootReadbackFileCount": 7,
+            "installationMetadata": [{"release": current["release"], "instance": invocation, "verifiedCurrentFiles": 7}]}
+    observation["originalInstallerResult"]["action"] = "update"
+    observation["installationMetadata"].append({"release": selected["release"]["release"], "instance": old_generation["instance"],
+        "verifiedCurrentFiles": 0, "historicalOuterExit": "unverified"})
+    package_owner = {} if package_owner is None else package_owner
+    package_owner.update(owner_fields, phase="package-install", originalCalls=calls(STAGER.PACKAGING_CALL_ROLES))
+    distribution = package_owner.setdefault("distribution", {})
+    distribution.update(schemaVersion=1, kind="mrk-ordinary-package-observed-v2", target=target,
+        release=current["release"], packageVersion=current["packageVersion"], requestId=observation["requestId"],
+        packageSha256=current["packageSha256"], descriptorSha256=DATA.sha(descriptor), originalInstallerReturnedZero=True,
+        sameRequestV2Readback=True, originalMountDetached=True, groupEndpointMet=True, originalOuterReturnRequired=True, productReady=False)
+    if "producerSummary" in distribution:
+        distribution["producerSummary"].update(descriptorSha256=DATA.sha(descriptor), descriptorBytes=len(descriptor))
+    # Exercise the existing writer with inert already-observed inputs; this is
+    # not a mocked native pass or new receipt schema supplied to the reader.
+    op = SimpleNamespace(image_source=context["source"], target=target, receipt=package_owner,
+        environment={"GITHUB_SHA": context["source"], "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"},
+        installer_zero=True, installation_readback=True, mount_detached=True, package_settled=lambda: True,
+        update={"baseline": baseline, "credentialBootstrapSha256": DATA.sha(bootstrap_body), "nomination": selected,
+            "facts": {"previous": {"invocation": observation["invocation"]}, "rootIdentity": baseline["readback"]["rootIdentity"],
+                "generation": {"instance": observation["installationMetadata"][0]["instance"]}}})
+    DATA.current_complete(op)
+    return dict(nomination_body=STAGER.canonical(document), baseline_body=baseline_body, bootstrap_body=bootstrap_body,
+        package_body=STAGER.canonical(package_owner) + b"\n", predecessor_inventory=inventory, descriptor=descriptor,
+        observation=observation, statuses={name: b"0\n" for name in DATA.MANUAL_DELIVERY_STATUSES},
+        source=context["source"], target=target, run="123", attempt="1")
+
+
 class UpdateDataTests(unittest.TestCase):
+
+    def test_manual_delivery_join_preserves_p0_finality_without_claiming_p1_access(self):
+        with mock.patch.object(DATA.os, "getuid", return_value=501), mock.patch.object(DATA.os, "getgid", return_value=20):
+            for target in DATA.TARGETS:
+                value = manual_delivery_fixture(target)
+                original = copy.deepcopy(value)
+                result = DATA.manual_delivery_data(STAGER, **value)
+                self.assertEqual(value, original, "the delivery join must not mutate its originals")
+                self.assertEqual(result["deliveryOutcome"], "manual-p1-verification-required")
+                self.assertTrue(result["p0CredentialBootstrapObserved"] and result["ownedAppDataOriginalsPreserved"])
+                self.assertEqual(result["p1UIAndCredentialCompatibility"], "unverified")
+                self.assertFalse(result["allUserDataCompatible"] or result["productReady"] or result["fullUIQualified"])
+                self.assertNotIn("record-", json.dumps(result))
+                self.assertNotIn("state", result)
+                for name in DATA.MANUAL_DELIVERY_STATUSES:
+                    for status in (None, b"1\n", b"0", b"false\n"):
+                        bad = copy.deepcopy(value)
+                        if status is None: del bad["statuses"][name]
+                        else: bad["statuses"][name] = status
+                        with self.subTest(target=target, status=name, value=status), self.assertRaises(ValueError):
+                            DATA.manual_delivery_data(STAGER, **bad)
+            value = manual_delivery_fixture()
+            faults = (("bootstrap_body", ("normalQuitObserved",), False), ("bootstrap_body", ("gateReleased",), False),
+                ("bootstrap_body", ("originalCommandsSettled",), False), ("bootstrap_body", ("applicationSourceCommit",), "d" * 40),
+                ("bootstrap_body", ("helperSha256",), "f" * 64), ("bootstrap_body", ("state", "vault", "files", "vault-header", "sha256"), "f" * 64),
+                ("baseline_body", ("passed",), False), ("baseline_body", ("originalCalls", 1, "returncode"), 1),
+                ("baseline_body", ("updateBaseline", "predecessorSource"), "f" * 40),
+                ("package_body", ("originalCalls", 13, "capturesSettled"), False),
+                ("package_body", ("originalClosesKnown",), False), ("package_body", ("directStagerIOPending",), "update-credential-state-post"),
+                ("package_body", ("workflow",), "foreign-workflow"), ("package_body", ("runAttempt",), "2"),
+                ("package_body", ("positiveUpdate", "credentialBootstrapSha256"), "f" * 64),
+                ("package_body", ("positiveUpdate", "testedAppDataOriginalPreserved"), False),
+                ("package_body", ("positiveUpdate", "rootIdentityPreserved"), 1),
+                ("package_body", ("positiveUpdate", "currentInvocation"), "f" * 32),
+                ("package_body", ("positiveUpdate", "previousExportUnchanged"), False),
+                ("package_body", ("positiveUpdate", "allUserDataCompatible"), True),
+                ("package_body", ("positiveUpdate", "productReady"), True), ("package_body", ("positiveUpdate",), None),
+                ("descriptor", ("releaseSet", "acceptedPredecessors"), []))
+            for key, path, replacement in faults:
+                bad = copy.deepcopy(value); parsed = json.loads(bad[key]); parent = parsed
+                for part in path[:-1]: parent = parent[part]
+                parent[path[-1]] = replacement
+                bad[key] = STAGER.canonical(parsed) + b"\n"
+                with self.subTest(input=key, path=path), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.manual_delivery_data(STAGER, **bad)
+            for path, replacement in ((('originalInstallerResult', 'action'), 'fresh-install'),
+                (('installationMetadata', 0, 'instance'), '6' * 32), (('invocation',), 'f' * 32),
+                (('completedPackageSha256',), 'f' * 64), (('originalInstallerReturnedZero',), False)):
+                bad = copy.deepcopy(value); parent = bad['observation']
+                for part in path[:-1]: parent = parent[part]
+                parent[path[-1]] = replacement
+                with self.subTest(observation=path), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.manual_delivery_data(STAGER, **bad)
+            bad = copy.deepcopy(value); bad['predecessor_inventory'] += b'\n'
+            with self.assertRaises(ValueError): DATA.manual_delivery_data(STAGER, **bad)
+
+    def test_workflow_manual_delivery_keeps_p0_and_installer_gates_without_p1_ui(self):
+        import re
+        workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        self.assertNotIn('id: update_p1_credentials', workflow)
+        self.assertNotIn('run: *mrk_update_credentials', workflow)
+        names = ('Notarize, staple and verify only the final user image',
+            'Prepare the fixed two-file removal package without executing it',
+            'Sign and notarize the completed removal package without executing it',
+            'Emit the genuine removal descriptor and readonly carrier without Installer',
+            'Notarize staple and verify the separate readonly removal carrier',
+            'Stage only the audited normal early-preview deliverables',
+            'Upload only the normal user preview package and guide',
+            "Remove only this completed preview build's disposable compiler outputs")
+        for name in names:
+            step = workflow.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
+            condition = next(line.strip()[4:] for line in step.splitlines() if line.strip().startswith('if: '))
+            self.assertNotIn('update_p1', condition)
+            steps = SimpleNamespace(**{key: SimpleNamespace(outcome='skipped') for key in re.findall(r'steps\.(\w+)\.outcome', condition)})
+            env = SimpleNamespace(**{key: 'disabled' for key in re.findall(r'env\.(\w+)', condition)})
+            for key in ('update_p0_credentials', 'package_install', 'preview', 'preview_upload', 'public_evidence', 'evidence'):
+                setattr(steps, key, SimpleNamespace(outcome='success'))
+            scope = dict(github=SimpleNamespace(ref=DATA.REF), steps=steps, env=env, always=lambda: True)
+            expression = condition.replace('&&', ' and ').replace('||', ' or ')
+            self.assertTrue(eval(expression, {'__builtins__': {}}, scope), name)
+            for required in ('update_p0_credentials', 'package_install'):
+                for outcome in ('failure', 'skipped', 'cancelled'):
+                    getattr(steps, required).outcome = outcome
+                    self.assertFalse(eval(expression, {'__builtins__': {}}, scope), (name, required, outcome))
+                getattr(steps, required).outcome = 'success'
 
     def test_workflow_credential_pairs_preserve_original_status_and_fail_fast(self):
         """Execute the real inline Bash; only its native Python child is inert."""

@@ -246,6 +246,7 @@ CARRIER_REFUSAL_REASONS = frozenset({
     'update-carrier-ci-context',
     'update-carrier-credential-status',
     'update-carrier-installer-action',
+    'update-carrier-preservation-handoff',
     'absolute-path-required',
     'ancestor-changed',
     'ancestor-close-unknown',
@@ -2626,6 +2627,46 @@ _INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/wo
 _CANDIDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-candidate'
 _UPDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-positive-update'
 _UPDATE_DISTRIBUTION_SCOPE = 'positive-macos-update-distribution'
+_UPDATE_GUIDE = b"""# Mobile Release Kit - manual updated-app verification required
+
+This is an unqualified engineering update, NOT a production-ready release.
+PREVIEW.json identifies the signed/notarized image, its build, installation and
+checks of installed files. The reviewed previous app really installed, saved
+one synthetic credential through its ordinary interface and completed normal
+Quit. Installing the updated app preserved the same test sentinel, vault
+directory, three controls and one encrypted record, including file identities
+and bytes. These observations apply only to this disposable test fixture.
+
+The updated app's UI and credential compatibility remain UNVERIFIED. Preserved
+ciphertext does not prove Keychain access, old-record decryption, Bind, Delete,
+or normal Quit in the updated app. No automated result for those checks is
+supplied. Other projects, settings and user data, downloaded Gatekeeper launch,
+and complete update compatibility are not qualified. Product readiness and
+all-user-data compatibility remain false.
+
+Requires macOS 26.0 or newer and the native architecture in PREVIEW.json. Use a
+disposable test Mac and synthetic inputs, never live Store/production credentials.
+For your own continuity test, create a synthetic credential in the reviewed
+previous app normally before installing the updated app. The automated test's
+private vault is not distributed.
+Do not copy or modify vault/key files or protected installation state manually.
+
+Open MobileReleaseKit.dmg in Finder, then Install.pkg inside the read-only image.
+Keep producer.json and producer.sig beside it; do not extract a standalone pkg.
+Installer requires normal administrator approval. Launch the ordinary app at
+/Applications/Mobile Release Kit.app, select your test project and use its normal
+signing/account controls and native pickers. Manually check existing-credential
+access and the operations you need, then use normal Quit. An installed-file hash
+match or visible control alone does not establish any of those observations.
+
+Preserve quarantine, Gatekeeper, Keychain and other macOS security settings.
+A refusal is a failed observation: stop rather than bypassing it. No automatic
+updater or arbitrary predecessor is supported. The separate matching removal
+image has its own REMOVE.md; packaging it does not qualify or execute removal.
+Keep PREVIEW.json and concise redacted observations. Never share credentials,
+private project files, vaults or raw logs. Manual success is not public-release
+approval or proof of complete compatibility.
+"""
 _CANDIDATE_GUIDE = b"""# Mobile Release Kit - unqualified macOS candidate
 
 This temporary engineering candidate is NOT READY for production or public release.
@@ -2783,6 +2824,30 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     return final
 
 
+def update_manual_delivery(args, binding, *, package_body, descriptor, observation):
+    """Fixed original DATA join, not a native/P1 credential execution route."""
+    work = Path(args.work)
+    path = DESKTOP / "tools/macos_update_verification.py"
+    with github_tool_leaf(path, 65536) as body:
+        spec = importlib.util.spec_from_file_location("mrk_update_delivery_data", path)
+        need(spec is not None, "update-carrier-preservation-handoff")
+        module = importlib.util.module_from_spec(spec)
+        # Same bounded current SOURCE adapter as the package owner; only its
+        # DATA definitions run. Never resolve a second pathname for execution.
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        statuses = {name: read(work / name, 4) for name in module.MANUAL_DELIVERY_STATUSES}
+        try:
+            return module.manual_delivery_data(sys.modules[__name__],
+                nomination_body=read(DESKTOP.parent / module.NOMINATION, module.RECORD_LIMIT),
+                baseline_body=read(work / "android-helper-update-baseline.json", module.RECORD_LIMIT),
+                bootstrap_body=read(work / "normal-ui/update-p0-bootstrap.result.json", module.RECORD_LIMIT),
+                predecessor_inventory=read(work / "update-baseline-case/input" / INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES),
+                package_body=package_body, descriptor=descriptor, observation=observation, statuses=statuses,
+                source=args.expected_source, target=command_target(args), run=binding["runId"], attempt=binding["runAttempt"])
+        except (ValueError, KeyError, TypeError) as error:
+            raise Refused("update-carrier-preservation-handoff") from error
+
+
 def preview_command(args, *, prepared=None):
     """Copy only an audited, normally built and read-back package to fresh output."""
     args._carrier_validation_group = 'source-selection'
@@ -2834,11 +2899,6 @@ def preview_command(args, *, prepared=None):
             expected_environment["GITHUB_EVENT_NAME"] = "push"
         need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
              "candidate-carrier-ci-context" if candidate else "update-carrier-ci-context" if update else "installed-carrier-ci-context")
-    if update:
-        for segment in ("update-p0-bootstrap", "update-p1-resume"):
-            for phase in ("test", "summary"):
-                need(read(work / "normal-ui" / (segment + "-" + phase + ".status"), 4) == b"0\n",
-                     "update-carrier-credential-status")
     args._carrier_validation_group = 'build-products'
     if prepared is None:
         need(read(work / "normal-build.status", 4) == b"0\n"
@@ -2943,6 +3003,9 @@ def preview_command(args, *, prepared=None):
          and current["runtimeManifestSha256"] == observed["runtimeManifestSha256"]
          and (distribution.get("packageSha256"), distribution.get("descriptorSha256"), distribution.get("signatureSha256"))
              == (digest(package), digest(descriptor), digest(signed)), "preview-emitted-current-correspondence")
+    if update:
+        args._carrier_validation_group = 'installation-readback'
+        manual = update_manual_delivery(args, binding, package_body=owner_body, descriptor=descriptor, observation=observed)
     args._carrier_validation_group = 'original-image'
     image = read(work / "distribution/MobileReleaseKit.dmg")
     need(distribution.get("userImage") == {"file": "MobileReleaseKit.dmg", "bytes": len(image), "sha256": digest(image)},
@@ -2993,7 +3056,7 @@ def preview_command(args, *, prepared=None):
                        unexecutedReason="candidate-export-before-independent-ui-verification")
     if update:
         summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow,
-                       unexecutedReason="update-export-is-not-complete-product-qualification")
+                       unexecutedReason="manual-p1-verification-required", **manual)
     if prepared is not None:
         summary["preparedProducer"] = prepared.origin
         summary["candidateProducerJob"] = "prepared-installed-" + selection.target
@@ -3001,12 +3064,14 @@ def preview_command(args, *, prepared=None):
     files = {"MobileReleaseKit.dmg": (image, 0o444), "PREVIEW.json": (canonical(summary) + b"\n", 0o444)}
     if candidate:
         files["README.md"] = (_CANDIDATE_GUIDE, 0o444)
+    elif update:
+        files["README.md"] = (_UPDATE_GUIDE, 0o444)
     elif not installed:
         files["README.md"] = (read(DESKTOP / "packaging/macos-preview.md", 32768), 0o444)
     write_tree(args.output, files)
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "packageSha256": digest(package),
             "distributionSha256": digest(image), "fileCount": len(files),
-            "qualification": "positive-update-carrier-not-product-qualified" if update else
+            "qualification": "positive-update-manual-p1-verification-required" if update else
                              "current-candidate-not-consumer-or-product-qualified" if candidate else
                              "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
                              "normal-early-preview-not-launched-or-product-qualified"}
@@ -3055,15 +3120,15 @@ def remove_preview_command(args, *, candidate_binding=None):
             "GITHUB_SHA": args.expected_source, "GITHUB_WORKFLOW_SHA": args.expected_source,
             "GITHUB_RUN_ID": binding["runId"], "GITHUB_RUN_ATTEMPT": binding["runAttempt"], "GITHUB_EVENT_NAME": "push"}
         need(all(os.environ.get(key) == value for key, value in expected_environment.items()), "update-carrier-ci-context")
-        for segment in ("update-p0-bootstrap", "update-p1-resume"):
-            for phase in ("test", "summary"):
-                need(read(work / "normal-ui" / (segment + "-" + phase + ".status"), 4) == b"0\n",
-                     "update-carrier-credential-status")
         args._carrier_validation_group = "installation-readback"
         installed_observation = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
         result = maintenance_result_data(canonical(installed_observation.get("originalInstallerResult")) + b"\n",
                                         installed_observation.get("requestId"))
         need(result["action"] == "update", "update-carrier-installer-action")
+        update_descriptor = read(work / "producer-root/producer.json", PRODUCER_DESCRIPTOR_BYTES)
+        manual = update_manual_delivery(args, binding,
+            package_body=read(work / "android-helper-package-install.json", 16384),
+            descriptor=update_descriptor, observation=installed_observation)
     for name in ("remove-package-finalization.status", "package-remove.status", "remove-image-finalization.status"):
         need(read(work / name, 4) == b"0\n", "remove-preview-original-statuses")
     package = read(work / "remove-package-final/Remove.pkg", MAX_BYTES)
@@ -3072,6 +3137,8 @@ def remove_preview_command(args, *, candidate_binding=None):
     signed = read(work / "remove-producer-root/remove-producer.sig", PRODUCER_SIGNATURE_BYTES)
     input_root = work / "remove-emitter-input"
     installed = read(input_root / "producer.json", PRODUCER_DESCRIPTOR_BYTES)
+    if update:
+        need(installed == update_descriptor, "update-carrier-preservation-handoff")
     inventory = read(input_root / "install-inventory.json", INVENTORY_BYTES)
     with parent(input_root / REMOVER_NAME) as (fd, name):
         program, info = read_at(fd, name, REMOVER_BYTES)
@@ -3114,7 +3181,7 @@ def remove_preview_command(args, *, candidate_binding=None):
         "initialRemovalQualified": False, "interruptedRemovalQualified": False, "distributionQualified": False, "productReady": False}
     guide = read(DESKTOP / "packaging/macos-removal.md", 32768)
     if update:
-        summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow)
+        summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow, **manual)
     if candidate_binding is not None:
         summary.update(scope="candidate-matched-removal-delivery", workflowRef=workflow,
             workflowSource=binding["source"], installedArtifactId=binding["artifactId"],
@@ -7538,13 +7605,13 @@ def main(argv=None):
     carrier.add_argument("--candidate-carrier", action="store_true",
                         help="Only the fixed candidate build/install/final-image carrier; no UI/removal/product qualification")
     carrier.add_argument("--positive-update-carrier", action="store_true",
-                         help="Only the finalized ordinary P1 update delivery; not product or public-release approval")
+                         help="Finalized ordinary update with owned-file proof; manual P1 UI/credential verification required")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)
     remove_preview = commands.add_parser("remove-preview")
     remove_preview.add_argument("--positive-update-carrier", action="store_true",
-                                help="Only the matching ordinary P1 removal delivery; never execute removal")
+                                help="Matching manual-verification P1 removal delivery; never execute or qualify removal")
     remove_preview.add_argument("--work", required=True, type=Path)
     remove_preview.add_argument("--expected-source", required=True)
     remove_preview.add_argument("--output", required=True, type=Path)

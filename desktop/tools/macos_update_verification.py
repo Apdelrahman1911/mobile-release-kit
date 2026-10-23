@@ -645,6 +645,133 @@ def credential_bootstrap_data(value, baseline, *, baseline_sha, source, target, 
     return value
 
 
+MANUAL_DELIVERY_STATUSES = (
+    "update-baseline.status", "update-baseline-case/installer-output.status",
+    "normal-ui/update-p0-bootstrap-test.status", "normal-ui/update-p0-bootstrap-summary.status",
+    "installer-output.status", "package-install.status",
+)
+
+
+def manual_delivery_data(stager, *, nomination_body, baseline_body, bootstrap_body, package_body,
+                         predecessor_inventory, descriptor, observation, statuses, source, target, run, attempt):
+    """Join existing original DATA for delivery, never execute or qualify P1 UI.
+
+    The package owner held and POST-checked the exact P0 sentinel/vault originals
+    around the real P1 Installer. Its receipt binds the original P0 bootstrap.
+    This reader cannot supply Keychain access, decryption, Bind/Delete or Quit
+    evidence, and never reads or manufactures a P1 credential result.
+    """
+    need(hx(source, 40) and target in TARGETS and positive(run) and positive(attempt), "update-delivery-context")
+    need(type(statuses) is dict and statuses == {name: b"0\n" for name in MANUAL_DELIVERY_STATUSES},
+         "update-delivery-original-statuses")
+    selected = nomination_data(stager.maintenance_json(nomination_body, RECORD_LIMIT), target, stager)
+    need(source != selected["source"], "update-delivery-distinct-source")
+    expected_context = dict(source=source, workflowSource=source, target=target, runId=run, runAttempt=attempt)
+    baseline_owner = stager.maintenance_json(baseline_body, RECORD_LIMIT)
+    package_owner = stager.maintenance_json(package_body, RECORD_LIMIT)
+    for owner, phase, roles in ((baseline_owner, PHASE, ROLES),
+                                (package_owner, "package-install", stager.PACKAGING_CALL_ROLES)):
+        need(type(owner.get("schemaVersion")) is int and owner["schemaVersion"] == 1
+             and owner.get("phase") == phase and owner.get("packageRole") == "ordinary-image"
+             and owner.get("workflow") == REPOSITORY + "/.github/workflows/desktop-macos-installed.yml@" + REF
+             and all(owner.get(k) == v for k, v in expected_context.items())
+             and all(owner.get(k) is True for k in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired"))
+             and owner.get("cleanupErrors") == [] and owner.get("directStagerIOPending") is None
+             and owner.get("productReady") is False, "update-delivery-original-owner")
+        calls = owner.get("originalCalls")
+        need(type(calls) is list and all(type(row) is dict for row in calls)
+             and tuple(row.get("role") for row in calls) == roles
+             and all(all(row.get(k) is True for k in ("entered", "returned", "capturesSettled"))
+                 and type(row.get("returncode")) is int
+                 and row["returncode"] in ((0, 1) if row["role"] in ("installer-log-cursor", "installer-log-capture") else (0,))
+                 for row in calls), "update-delivery-original-calls")
+    phase_credit(baseline_owner["originalCalls"], phase=PHASE)
+    baseline = baseline_owner.get("updateBaseline")
+    need(type(baseline) is dict and type(baseline.get("schemaVersion")) is int and baseline["schemaVersion"] == 1
+         and all(baseline.get(k) == v for k, v in expected_context.items())
+         and baseline.get("predecessorSource") == selected["source"]
+         and baseline.get("predecessorPackageSha256") == selected["package"]["sha256"]
+         and baseline.get("publicControlsSha256") == selected["publicControlsSha256"]
+         and baseline.get("nominationSha256") == sha(stager.canonical(selected))
+         and baseline.get("expectedCurrentDescriptorSha256") == sha(descriptor)
+         and "qualificationEvidenceSha256" not in baseline
+         and all(baseline.get(k) is True for k in ("freshCurrentBytesReadback", "originalInstallerReturnedZero", "originalMountDetached"))
+         and baseline.get("productReady") is False, "update-delivery-baseline")
+    producer = stager.maintenance_producer_data(descriptor, target=target)
+    current = producer["releaseSet"]["current"]
+    need(producer["releaseSet"]["acceptedPredecessors"] == [selected["release"]]
+         and selected["signingPolicy"] in producer["signingPolicies"] and current["sourceCommit"] == source
+         and current["release"] != selected["release"]["release"]
+         and current["packageSha256"] != selected["package"]["sha256"], "update-delivery-source-lineage")
+    stager.maintenance_pair_data("update", selected["release"], current, producer, current=True)
+    readback = baseline.get("readback")
+    need(type(readback) is dict and set(readback) == {"previous", "rootIdentity", "generation"}
+         and type(readback["previous"]) is dict and set(readback["previous"]) == {"invocation", "sha256"}
+         and hx(readback["previous"]["invocation"], 32) and hx(readback["previous"]["sha256"], 64)
+         and hx(baseline.get("requestId"), 32) and type(baseline.get("census")) is dict
+         and set(baseline["census"]) == {baseline["requestId"]}, "update-delivery-baseline-readback")
+    stager.maintenance_identity_data(readback["rootIdentity"], 0o755)
+    generation = stager.maintenance_generation_data(readback["generation"], producer, retained=False)
+    need(generation["release"] == selected["release"], "update-delivery-baseline-generation")
+    bootstrap = credential_bootstrap_data(stager.maintenance_json(bootstrap_body, RECORD_LIMIT), baseline,
+        baseline_sha=sha(baseline_body), source=source, target=target, run=run, attempt=attempt, selected=selected)
+    need(type(predecessor_inventory) is bytes and len(predecessor_inventory) == selected["inventory"]["bytes"]
+         and sha(predecessor_inventory) == selected["inventory"]["sha256"], "update-delivery-predecessor-inventory")
+    inventory = stager.observation_inventory_bytes(predecessor_inventory, selected["release"]["inventorySha256"],
+        selected["release"]["runtimeManifestSha256"], selection=stager.BuildSelection(target,
+            selected["release"]["packageVersion"], selected["release"]["release"]))
+    helper = inventory["app/" + stager.VAULT_HELPER]
+    need(helper["executable"] is True and (bootstrap["helperSha256"], bootstrap["helperBytes"]) == (helper["sha256"], helper["size"]),
+         "update-delivery-p0-helper")
+    distribution = package_owner.get("distribution")
+    need(type(distribution) is dict and distribution.get("kind") == "mrk-ordinary-package-observed-v2"
+         and (distribution.get("target"), distribution.get("release"), distribution.get("packageVersion"))
+             == (target, current["release"], current["packageVersion"])
+         and distribution.get("packageSha256") == current["packageSha256"]
+         and distribution.get("descriptorSha256") == sha(descriptor)
+         and all(distribution.get(k) is True for k in ("originalInstallerReturnedZero", "sameRequestV2Readback", "originalMountDetached",
+                                                       "groupEndpointMet", "originalOuterReturnRequired"))
+         and distribution.get("productReady") is False, "update-delivery-current-distribution")
+    request = distribution.get("requestId")
+    need(type(observation) is dict and type(observation.get("schemaVersion")) is int and observation["schemaVersion"] == 2
+         and observation.get("sourceCommit") == source and observation.get("release") == current["release"]
+         and observation.get("runtimeManifestSha256") == current["runtimeManifestSha256"]
+         and observation.get("inventorySha256") == current["inventorySha256"]
+         and observation.get("completedPackageSha256") == current["packageSha256"]
+         and hx(request, 32) and observation.get("requestId") == request != baseline["requestId"]
+         and all(observation.get(k) is True for k in ("originalInstallerReturnedZero", "originalWriterJoined"))
+         and all(observation.get(k) is False for k in ("applicationLaunched", "guiSaveQualified")), "update-delivery-current-readback")
+    result = stager.maintenance_result_data(stager.canonical(observation.get("originalInstallerResult")) + b"\n", request)
+    need(result["action"] == "update" and result["invocation"] == observation.get("invocation")
+         and result["invocation"] != readback["previous"]["invocation"], "update-delivery-installer-action")
+    metadata = observation.get("installationMetadata")
+    need(type(metadata) is list and len(metadata) == 2 and all(type(row) is dict for row in metadata)
+         and metadata[0].get("release") == current["release"] and hx(metadata[0].get("instance"), 32)
+         and metadata[0]["instance"] != generation["instance"]
+         and type(observation.get("nonrootReadbackFileCount")) is int and observation["nonrootReadbackFileCount"] > 0
+         and metadata[0].get("verifiedCurrentFiles") == observation["nonrootReadbackFileCount"]
+         and (metadata[1].get("release"), metadata[1].get("instance")) == (selected["release"]["release"], generation["instance"])
+         and type(metadata[1].get("verifiedCurrentFiles")) is int and metadata[1]["verifiedCurrentFiles"] == 0,
+         "update-delivery-two-generation-readback")
+    positive_update = package_owner.get("positiveUpdate")
+    expected = {"schemaVersion": 1, **expected_context, "predecessorSource": selected["source"],
+        "predecessorPackageSha256": selected["package"]["sha256"], "predecessorPublicControlsSha256": selected["publicControlsSha256"],
+        "currentDescriptorSha256": sha(descriptor), "credentialBootstrapSha256": sha(bootstrap_body),
+        "baselineInvocation": readback["previous"]["invocation"], "currentInvocation": result["invocation"],
+        "rootIdentityPreserved": True, "generationInstancesDistinct": True, "previousExportUnchanged": True, "exportCount": 2,
+        "testedAppDataOriginalPreserved": True, "originalCurrentInstallerReturnedZero": True, "originalMountDetached": True,
+        "currentPayloadReadback": True, "retainedPayloadRehashed": False, "downloadedLaunchQualified": False,
+        "allUserDataCompatible": False, "productReady": False}
+    need(type(positive_update) is dict and positive_update == expected
+         and all(type(positive_update[k]) is type(v) for k, v in expected.items()), "update-delivery-preservation-handoff")
+    # Public finite claims only; no credential names, file facts or bytes leave
+    # this join. Original preserved files are not P1 access/compatibility proof.
+    return {"deliveryOutcome": "manual-p1-verification-required", "p0CredentialBootstrapObserved": True,
+        "updateInstallerObserved": True, "ownedAppDataOriginalsPreserved": True,
+        "p1UIAndCredentialCompatibility": "unverified", "allUserDataCompatible": False,
+        "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+
+
 def credential_state_open(op, expected):
     """Retain only the already owned sentinel root's exact three controls/one record."""
     api = op.update_api

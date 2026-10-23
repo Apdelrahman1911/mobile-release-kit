@@ -2310,18 +2310,12 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-cold-restart
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
-      - name: Verify credential continuity and owned-record deletion on P1
-        id: update_p1_credentials
-        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'
-        timeout-minutes: 12
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UPDATE_SEGMENT: update-p1-resume
-        run: *mrk_update_credentials
+      # Positive-update delivery retains genuine P0 bootstrap and P1 Installer/
+      # owned-file preservation evidence. P1 UI, Keychain/decrypt, Bind/Delete
+      # and normal Quit require the owner's manual test; no P1 result is made.
       - name: Notarize, staple and verify only the final user image
         id: finalize_image
-        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success' || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success' || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2771,7 +2765,7 @@ jobs:
           # mandatory. This is not restore/update/GUI/service-exit evidence.
 
       - name: Prepare the fixed two-file removal package without executing it
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 8
         shell: bash
         run: |
@@ -2824,7 +2818,7 @@ jobs:
           [[ $xar_status == 0 ]] || exit "$xar_status"
           # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.
       - name: Sign and notarize the completed removal package without executing it
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2860,7 +2854,7 @@ jobs:
           # plus the retained purpose-specific receipt; no removal is executed.
 
       - name: Emit the genuine removal descriptor and readonly carrier without Installer
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success')
         id: removal_package
         timeout-minutes: 18
         shell: bash
@@ -2959,7 +2953,7 @@ jobs:
           # separately joins actual Installer/UI/supervisor/observer outcomes.
           # No protected path/log copy, fake peer, release or power-loss claim.
       - name: Notarize staple and verify the separate readonly removal carrier
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success'))
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'))
         timeout-minutes: 32
         shell: bash
         env:
@@ -2990,7 +2984,7 @@ jobs:
           # actual original0. Preview has no fallback to the old image.
       - name: Stage only the audited normal early-preview deliverables
         id: preview
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success'))
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'))
         timeout-minutes: 3
         shell: bash
         run: |
@@ -3006,10 +3000,14 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-preview ${carrier[@]+"${carrier[@]}"} --target "$MRK_MACOS_TARGET" \
             --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/remove-preview" > "$MRK_MACOS_WORK/remove-preview-result.json"
-          printf '%s\n' 'Matched installation/removal images retained for verification; availability is not complete UI or release acceptance.'
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
+            printf '%s\n' 'Matched installation/removal images retained: manual P1 UI verification required; only Installer and owned-file preservation are observed.'
+          else
+            printf '%s\n' 'Matched installation/removal images retained for verification; availability is not complete UI or release acceptance.'
+          fi
       - name: Upload only the normal user preview package and guide
         id: preview_upload
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success') && steps.preview.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success') || ((github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success') && steps.preview.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-release-kit-macos26-${{ matrix.target }}-preview-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -5415,7 +5413,7 @@ jobs:
                              os.environ["MRK_MACOS_IOS_UI_SCOPE"])
           PY_P0_CARRIER_RETIRE
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_test.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.p0_carrier_retire.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success' && steps.installed_normal_data_contracts.outcome == 'success' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.update_p1_credentials.outcome == 'success' && steps.preview_upload.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_test.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.normal_remaining_saved_file_ui.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.p0_carrier_retire.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success' && steps.installed_normal_data_contracts.outcome == 'success' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled') || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success' && steps.preview_upload.outcome == 'success' && steps.public_evidence.outcome == 'success' && steps.evidence.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -5457,7 +5455,7 @@ jobs:
           if os.environ.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-positive-update":
               if binding.get("scope") != "positive-macos-update-distribution" or binding.get("instrumented") is not False:
                   raise ValueError("task cleanup update scope refused")
-              stems = ("update-p0-bootstrap", "update-p1-resume")
+              stems = ("update-p0-bootstrap",)
           # The skipped cohort supplies no finality or cleanup authority.
           # remaining-three reaches this step only after all four original binders returned0.
           saved_directories = tuple(root / ("normal-ui/" + stem + "-test.xcresult") for stem in stems)

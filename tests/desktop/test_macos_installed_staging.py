@@ -19617,6 +19617,25 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertFalse(binding["applicationLaunched"] or binding["fullUIQualified"] or binding["distributionQualified"])
         return binding
 
+    def positive_update_export_fixture(self, target):
+        from test_macos_update_verification import manual_delivery_fixture
+        work, values, documents, inventory, selection = self.preview_fixture(target)
+        documents["source-binding.json"] = self.actual_workflow_binding(target, installed=False, update=True)
+        inputs = manual_delivery_fixture(target, producer=TOOL.decode(values[work / "producer-root/producer.json"]),
+            observation=documents["installation-observation.json"], package_owner=documents["android-helper-package-install.json"])
+        values[work / "producer-root/producer.json"] = inputs["descriptor"]
+        receipt = documents["android-helper-finalize-image.json"]
+        receipt["workflow"] = TOOL._UPDATE_FINAL_IMAGE_WORKFLOW
+        receipt["finalImage"].update(descriptorSha256=TOOL.digest(inputs["descriptor"]), descriptorBytes=len(inputs["descriptor"]),
+            packageInstallReceiptSha256=TOOL.digest(TOOL.canonical(documents["android-helper-package-install.json"])))
+        values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
+        values.update({work / name: body for name, body in inputs["statuses"].items()})
+        values.update({work / "android-helper-update-baseline.json": inputs["baseline_body"],
+            work / "normal-ui/update-p0-bootstrap.result.json": inputs["bootstrap_body"],
+            work / "update-baseline-case/input/install-inventory.json": inputs["predecessor_inventory"],
+            TOOL.DESKTOP / "macos-installed-inputs/update-predecessors.json": inputs["nomination_body"]})
+        return work, values, documents, inventory, selection
+
     def test_preview_roster_has_no_raw_evidence_and_keeps_open_and_quit_unexecuted(self):
         for target in TOOL.MAC_TARGETS:
             work, values, documents, expected, selection = self.preview_fixture(target)
@@ -19858,7 +19877,7 @@ class MacNormalPreviewData(unittest.TestCase):
         tree = ast.parse(code)
         node = next(n for n in tree.body if isinstance(n, ast.If) and "positive-update" in ast.unparse(n.test))
         selected = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "<cleanup-update-selection>", "exec")
-        for route, binding, expected in (("positive-update", {"scope": TOOL._UPDATE_DISTRIBUTION_SCOPE, "instrumented": False}, ("update-p0-bootstrap", "update-p1-resume")),
+        for route, binding, expected in (("positive-update", {"scope": TOOL._UPDATE_DISTRIBUTION_SCOPE, "instrumented": False}, ("update-p0-bootstrap",)),
                 ("preview", {}, ("saved-checks",)), ("positive-update", {"scope": "normal-macos-early-preview", "instrumented": False}, None),
                 ("positive-update", {"scope": TOOL._UPDATE_DISTRIBUTION_SCOPE, "instrumented": True}, None)):
             namespace = {"os": SimpleNamespace(environ={"GITHUB_REF": "refs/heads/verify/desktop-macos-" + route}),
@@ -19871,25 +19890,31 @@ class MacNormalPreviewData(unittest.TestCase):
     def test_positive_update_export_requires_current_update_and_closed_credentials(self):
         # Reuse the existing inert signed/native fixture; this tests actual exporter
         # logic, not Mac signatures, Installer, Keychain or update qualification.
+        # Only P0 has credential evidence. No P1 result/status file is available.
         faults = (None, "wrong-ref", "wrong-event", "wrong-scope", "fixture", "mixed-mode",
-                  "old-workflow", "fresh-install", "package-status", "p0-test", "p0-summary", "p1-test", "p1-summary")
+                  "old-workflow", "fresh-install", "package-status", "p0-test", "p0-summary", "missing-p0-test",
+                  "missing-p0-result", "changed-bootstrap", "missing-update", "preservation", "notary", "final-image")
         for target in TOOL.MAC_TARGETS:
             for fault in faults:
                 with self.subTest(target=target, fault=fault):
-                    work, values, documents, inventory, selection = self.preview_fixture(target)
-                    documents["source-binding.json"] = self.actual_workflow_binding(target, installed=False, update=True)
+                    work, values, documents, inventory, selection = self.positive_update_export_fixture(target)
                     observed = documents["installation-observation.json"]
                     observed["originalInstallerResult"]["action"] = "fresh-install" if fault == "fresh-install" else "update"
                     documents["android-helper-finalize-image.json"]["workflow"] = (
                         TOOL._PREVIEW_FINAL_IMAGE_WORKFLOW if fault == "old-workflow" else TOOL._UPDATE_FINAL_IMAGE_WORKFLOW)
                     if fault == "wrong-scope": documents["source-binding.json"]["scope"] = "normal-macos-early-preview"
                     if fault == "fixture": documents["source-binding.json"]["instrumented"] = True
+                    if fault == "missing-update": del documents["android-helper-package-install.json"]["positiveUpdate"]
+                    if fault == "preservation": documents["android-helper-package-install.json"]["positiveUpdate"]["testedAppDataOriginalPreserved"] = False
+                    if fault == "notary": documents["android-helper-finalize-image.json"]["finalImage"]["status"] = "Invalid"
                     values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
                     if fault == "package-status": values[work / "package-install.status"] = b"1\n"
-                    for segment in ("p0-bootstrap", "p1-resume"):
-                        for phase in ("test", "summary"):
-                            bad = fault == segment[:2] + "-" + phase
-                            values[work / "normal-ui" / ("update-" + segment + "-" + phase + ".status")] = b"1\n" if bad else b"0\n"
+                    for phase in ("test", "summary"):
+                        if fault == "p0-" + phase: values[work / "normal-ui" / ("update-p0-bootstrap-" + phase + ".status")] = b"1\n"
+                    if fault == "missing-p0-test": del values[work / "normal-ui/update-p0-bootstrap-test.status"]
+                    if fault == "missing-p0-result": del values[work / "normal-ui/update-p0-bootstrap.result.json"]
+                    if fault == "changed-bootstrap": values[work / "normal-ui/update-p0-bootstrap.result.json"] += b"\n"
+                    if fault == "final-image": values[work / "distribution-final/MobileReleaseKit.dmg"] += b"changed"
                     env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
                         "GITHUB_REF": "refs/heads/verify/desktop-macos-positive-update",
                         "GITHUB_WORKFLOW_REF": TOOL._UPDATE_FINAL_IMAGE_WORKFLOW,
@@ -19899,8 +19924,15 @@ class MacNormalPreviewData(unittest.TestCase):
                     if fault == "wrong-event": env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
                     args = SimpleNamespace(target=target, work=work, output=work / "preview", expected_source="a" * 40,
                                            positive_update_carrier=True, candidate_carrier=fault == "mixed-mode")
+                    reads = []
+                    def read_original(path, *_):
+                        reads.append(path)
+                        if path not in values: raise FileNotFoundError(path)
+                        return values[path]
                     with (mock.patch.dict(os.environ, env, clear=True),
-                          mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]),
+                          mock.patch.dict(sys.modules, {TOOL.__name__: TOOL}),
+                          mock.patch.object(TOOL.os, "getuid", return_value=501), mock.patch.object(TOOL.os, "getgid", return_value=20),
+                          mock.patch.object(TOOL, "read", side_effect=read_original),
                           mock.patch.object(TOOL, "source_build_selection", return_value=selection),
                           mock.patch.object(TOOL, "observation_inventory", return_value=inventory),
                           mock.patch.object(TOOL, "write_tree") as output):
@@ -19911,11 +19943,19 @@ class MacNormalPreviewData(unittest.TestCase):
                             summary = TOOL.decode(files["PREVIEW.json"][0])
                             self.assertEqual((summary["scope"], summary["workflowRef"]),
                                              (TOOL._UPDATE_DISTRIBUTION_SCOPE, TOOL._UPDATE_FINAL_IMAGE_WORKFLOW))
-                            self.assertFalse(summary["productReady"] or summary["distributionQualified"] or summary["fullUIQualified"])
-                            self.assertEqual(result["qualification"], "positive-update-carrier-not-product-qualified")
+                            self.assertEqual(summary["deliveryOutcome"], "manual-p1-verification-required")
+                            self.assertTrue(summary["p0CredentialBootstrapObserved"] and summary["ownedAppDataOriginalsPreserved"])
+                            self.assertEqual(summary["p1UIAndCredentialCompatibility"], "unverified")
+                            self.assertEqual((summary["normalQuit"], summary["manualUIAcceptance"]), ("unexecuted", "pending"))
+                            self.assertFalse(summary["productReady"] or summary["distributionQualified"] or summary["fullUIQualified"]
+                                             or summary["allUserDataCompatible"])
+                            self.assertEqual(files["README.md"][0], TOOL._UPDATE_GUIDE)
+                            self.assertIn(b'Keychain access', files["README.md"][0])
+                            self.assertEqual(result["qualification"], "positive-update-manual-p1-verification-required")
                         else:
-                            with self.assertRaises(TOOL.Refused): TOOL.preview_command(args)
+                            with self.assertRaises((TOOL.Refused, FileNotFoundError)): TOOL.preview_command(args)
                             output.assert_not_called()
+                    self.assertFalse(any('update-p1' in str(path) for path in reads), "never replace a P1 original with DATA success")
         # Real argparse selection: explicit mode reaches both existing exporters;
         # mixed candidate/update mode is rejected before an exporter is invoked.
         for command, method in (("preview", "preview_command"), ("remove-preview", "remove_preview_command")):
@@ -19928,6 +19968,69 @@ class MacNormalPreviewData(unittest.TestCase):
                 with mock.patch.object(TOOL, method) as action, contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit): TOOL.main(argv + ["--candidate-carrier"])
                     action.assert_not_called()
+
+    def test_positive_update_removal_delivery_uses_same_handoff_and_explicit_marker(self):
+        # The new preservation join runs unchanged. Existing removal descriptor/
+        # final-image validators use inert DATA ports here, not native authority.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, 'p0-status', 'missing-bootstrap', 'wrong-installed-producer', 'remove-status', 'changed-image'):
+                with self.subTest(target=target, fault=fault):
+                    work, values, documents, inventory, selection = self.positive_update_export_fixture(target)
+                    package, descriptor, signed, program = b'inert Remove pkg', b'inert Remove descriptor', b'inert signature', b'inert remover'
+                    original_image, final_image = b'inert original Remove DMG', b'inert final Remove DMG'
+                    input_root = work / 'remove-emitter-input'
+                    values.update({work / 'remove-package-final/Remove.pkg': package, work / 'remove-producer-root/Remove.pkg': package,
+                        work / 'remove-producer-root/remove-producer.json': descriptor, work / 'remove-producer-root/remove-producer.sig': signed,
+                        input_root / 'producer.json': values[work / 'producer-root/producer.json'], input_root / 'install-inventory.json': b'inert inventory',
+                        input_root / 'remove-descriptor-input.json': descriptor, work / 'android-helper-package-remove.json': b'inert Remove owner',
+                        work / 'android-helper-finalize-remove-package.json': b'inert Remove finalization',
+                        work / 'android-helper-finalize-remove-image.json': b'inert final-image receipt',
+                        work / 'remove-distribution/MobileReleaseKit-Remove.dmg': original_image,
+                        work / 'remove-distribution-final/MobileReleaseKit-Remove.dmg': final_image,
+                        TOOL.DESKTOP / 'packaging/macos-removal.md': b'inert removal guide'})
+                    values.update({work / name: b'0\n' for name in
+                        ('remove-package-finalization.status', 'package-remove.status', 'remove-image-finalization.status')})
+                    if fault == 'p0-status': values[work / 'normal-ui/update-p0-bootstrap-test.status'] = b'1\n'
+                    if fault == 'missing-bootstrap': del values[work / 'normal-ui/update-p0-bootstrap.result.json']
+                    if fault == 'wrong-installed-producer': values[input_root / 'producer.json'] += b'\n'
+                    if fault == 'remove-status': values[work / 'remove-image-finalization.status'] = b'1\n'
+                    if fault == 'changed-image': values[work / 'remove-distribution-final/MobileReleaseKit-Remove.dmg'] += b'changed'
+                    originals = copy.deepcopy(values)
+                    args = SimpleNamespace(target=target, work=work, output=work / 'remove-preview', expected_source='a' * 40, positive_update_carrier=True)
+                    env = {'GITHUB_REPOSITORY': 'Apdelrahman1911/mobile-release-kit', 'GITHUB_EVENT_NAME': 'push',
+                        'GITHUB_REF': 'refs/heads/verify/desktop-macos-positive-update', 'GITHUB_WORKFLOW_REF': TOOL._UPDATE_FINAL_IMAGE_WORKFLOW,
+                        'GITHUB_SHA': 'a' * 40, 'GITHUB_WORKFLOW_SHA': 'a' * 40, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+                    reads = []
+                    def read_original(path, *_):
+                        reads.append(path)
+                        if path not in values: raise FileNotFoundError(path)
+                        return values[path]
+                    with (mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, {TOOL.__name__: TOOL}),
+                          mock.patch.object(TOOL.os, 'getuid', return_value=501), mock.patch.object(TOOL.os, 'getgid', return_value=20),
+                          mock.patch.object(TOOL, 'source_build_selection', return_value=selection),
+                          mock.patch.object(TOOL, 'read', side_effect=read_original),
+                          mock.patch.object(TOOL, 'parent', return_value=contextlib.nullcontext((42, TOOL.REMOVER_NAME))),
+                          mock.patch.object(TOOL, 'read_at', return_value=(program, SimpleNamespace(st_mode=stat.S_IFREG | 0o555))),
+                          mock.patch.object(TOOL, 'packaging_removal_descriptor_data', return_value=descriptor),
+                          mock.patch.object(TOOL, 'removal_package_receipt_data', return_value={'userImage': {
+                              'file': 'MobileReleaseKit-Remove.dmg', 'bytes': len(original_image), 'sha256': TOOL.digest(original_image)}}),
+                          mock.patch.object(TOOL, 'final_image_receipt_data', return_value={
+                              'imageBytes': len(final_image), 'imageSha256': TOOL.digest(final_image)}) as final,
+                          mock.patch.object(TOOL, 'write_tree') as output):
+                        if fault is None:
+                            TOOL.remove_preview_command(args)
+                            summary = TOOL.decode(output.call_args.args[1]['REMOVAL.json'][0])
+                            self.assertEqual(summary['deliveryOutcome'], 'manual-p1-verification-required')
+                            self.assertEqual(summary['p1UIAndCredentialCompatibility'], 'unverified')
+                            self.assertTrue(summary['p0CredentialBootstrapObserved'] and summary['ownedAppDataOriginalsPreserved'])
+                            self.assertFalse(summary['productReady'] or summary['allUserDataCompatible'] or summary['fullUIQualified']
+                                             or summary['removalExecuted'] or summary['distributionQualified'])
+                            self.assertEqual(final.call_args.kwargs['expected_workflow'], TOOL._UPDATE_FINAL_IMAGE_WORKFLOW)
+                        else:
+                            with self.assertRaises((TOOL.Refused, FileNotFoundError)): TOOL.remove_preview_command(args)
+                            output.assert_not_called()
+                    self.assertEqual(values, originals)
+                    self.assertFalse(any('update-p1' in str(path) for path in reads))
 
     def test_candidate_carrier_checks_actual_workflow_and_original_final_image(self):
         # Real bounded original reads/fresh writes. SOURCE/native observations are
