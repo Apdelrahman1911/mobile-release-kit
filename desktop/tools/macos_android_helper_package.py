@@ -1649,6 +1649,129 @@ _PACKAGE_DIAGNOSTIC_ROLES = (
     'observation-verify-image', 'distribution-attach', 'installer-log-cursor',
     'installer', 'installer-log-capture', 'distribution-detach',
 )
+
+# Failure-only observations. Neither a command name nor a visible open file
+# authenticates a service, identifies Disk Arbitration's dissenter, or grants
+# detach/retry/cleanup authority. Raw lsof output is never published.
+_DETACH_STDERR_REASONS = ('empty', 'resource-busy', 'permission-denied', 'operation-not-permitted',
+                          'no-such-device', 'unclassified')
+_DETACH_HOLDER_STATES = ('unavailable', 'mount-unavailable', 'deadline-unavailable', 'native-unknown',
+                         'native-nonzero', 'malformed-output', 'no-visible-match', 'visible-holders')
+_DETACH_HOLDER_OWNERS = ('self', 'same-user', 'root-visible', 'other-visible', 'unknown-user')
+_DETACH_HOLDER_COMMANDS = ('installer-name', 'indexer-name', 'disk-image-name', 'other-name')
+_DETACH_HOLDER_REFERENCES = ('cwd', 'descriptor', 'mapping', 'other-reference')
+_DETACH_LSOF_LIMIT = 16 * 1024
+
+
+def distribution_detach_stderr(stderr):
+    """Closed tokens from the SAME returned original, never arbitrary lines."""
+    if type(stderr) is not bytes or len(stderr) > 65536:
+        return 'unclassified'
+    if not stderr:
+        return 'empty'
+    known = {b'Resource busy': 'resource-busy', b'Permission denied': 'permission-denied',
+             b'Operation not permitted': 'operation-not-permitted', b'No such device': 'no-such-device'}
+    lines = stderr.split(b'\n')
+    found = {label for text, label in known.items() if b'hdiutil: detach failed - ' + text in lines}
+    return next(iter(found)) if len(found) == 1 else 'unclassified'
+
+
+def distribution_busy_holders(stdout, stderr, code, *, device, own_pid, own_uid):
+    """NUL fields plus newline set delimiters; never split command values."""
+    empty = {'state': 'malformed-output', 'rows': [], 'rowsOmitted': False,
+             'processes': 0, 'references': 0, 'skipped': 0, 'warnings': bool(stderr) if type(stderr) is bytes else False}
+    if (type(stdout) is not bytes or type(stderr) is not bytes
+            or len(stdout) + len(stderr) > _DETACH_LSOF_LIMIT or type(code) is not int
+            or any(type(value) is not int or value < 0 for value in (device, own_pid, own_uid))):
+        return empty
+    if code not in (0, 1):
+        return dict(empty, state='native-nonzero')
+    if not stdout:
+        return dict(empty, state='no-visible-match')  # NOT evidence of no holder.
+    fields = stdout.split(b'\0')
+    if len(fields) > 1025 or fields[-1] != b'\n':
+        return empty
+    sets, current = [], {}
+    for field in fields[:-1]:
+        if field.startswith(b'\n'):
+            sets.append(current); current = {}; field = field[1:]
+        if (not field or field[:1] not in (b'p', b'c', b'u', b'f', b't', b'D')
+                or field[:1] in current or len(field) > 1024):
+            return empty
+        current[field[:1]] = field[1:]
+    sets.append(current)
+    if len(sets) > 256:
+        return empty
+    process, groups, processes, references, skipped = None, {}, set(), 0, 0
+    commands = {b'installer': 'installer-name', b'installd': 'installer-name',
+        b'system_installd': 'installer-name', b'mds': 'indexer-name', b'mds_stores': 'indexer-name',
+        b'mdworker': 'indexer-name', b'mdworker_shared': 'indexer-name', b'hdiutil': 'disk-image-name',
+        b'diskimages-helper': 'disk-image-name', b'diskimagesiod': 'disk-image-name'}
+    for fields in sets:
+        if b'p' in fields:
+            if (not set(fields) <= {b'p', b'c', b'u'}
+                    or re.fullmatch(rb'[1-9][0-9]{0,9}', fields[b'p']) is None):
+                return empty
+            pid = int(fields[b'p'])
+            uid = fields.get(b'u')
+            if uid is not None and re.fullmatch(rb'(?:0|[1-9][0-9]{0,9})', uid) is None:
+                return empty
+            uid = None if uid is None else int(uid)
+            owner = ('self' if pid == own_pid else 'unknown-user' if uid is None else
+                     'same-user' if uid == own_uid else 'root-visible' if uid == 0 else 'other-visible')
+            process = (pid, owner, commands.get(fields.get(b'c'), 'other-name'))
+            continue
+        if process is None or b'f' not in fields or not set(fields) <= {b'f', b't', b'D'}:
+            return empty
+        # NOFD and inaccessible references have no device. Keep positive
+        # same-device observations, but never turn skipped rows into absence.
+        disk = fields.get(b'D', b'')
+        if re.fullmatch(rb'(?:0x)?[0-9a-fA-F]{1,16}', disk) is None or int(disk, 16) != device:
+            skipped += 1
+            continue
+        fd = fields[b'f']
+        kind = ('cwd' if fd == b'cwd' else 'mapping' if fd in (b'txt', b'mem', b'ltx') else
+                'descriptor' if re.fullmatch(rb'(?:0|[1-9][0-9]{0,9})', fd) is not None else 'other-reference')
+        key = (*process[1:], kind)
+        groups[key] = groups.get(key, 0) + 1
+        processes.add(process[0]); references += 1
+    rows = [dict(owner=key[0], command=key[1], reference=key[2], count=groups[key]) for key in sorted(groups)[:8]]
+    return dict(empty, state='visible-holders' if references else 'no-visible-match', rows=rows,
+                rowsOmitted=len(groups) > 8, processes=len(processes), references=references, skipped=skipped)
+
+
+def distribution_detach_diagnostic_data(value):
+    """Finite copy only; no raw paths, devices, PIDs, names or exception text."""
+    if type(value) is not dict:
+        return None
+    def flag(key):
+        return value.get(key) if type(value.get(key)) is bool else None
+    observed = value.get('holders')
+    holders = None
+    if type(observed) is dict:
+        rows = observed.get('rows')
+        valid = (type(rows) is list and len(rows) <= 8
+            and type(observed.get('state')) is str and observed['state'] in _DETACH_HOLDER_STATES
+            and all(type(observed.get(key)) is int and 0 <= observed[key] <= 256
+                    for key in ('processes', 'references', 'skipped'))
+            and all(type(observed.get(key)) is bool for key in ('rowsOmitted', 'warnings')))
+        if valid:
+            for row in rows:
+                if (type(row) is not dict or set(row) != {'owner', 'command', 'reference', 'count'}
+                        or any(type(row.get(key)) is not str or row[key] not in allowed for key, allowed in (
+                            ('owner', _DETACH_HOLDER_OWNERS), ('command', _DETACH_HOLDER_COMMANDS),
+                            ('reference', _DETACH_HOLDER_REFERENCES)))
+                        or type(row.get('count')) is not int or not 1 <= row['count'] <= 256):
+                    valid = False; break
+        if valid:
+            holders = {key: observed[key] for key in ('state', 'processes', 'references', 'skipped', 'rowsOmitted', 'warnings')}
+            holders['rows'] = [dict(row) for row in rows]
+    status = value.get('state')
+    return {'state': status if type(status) is str and status in _DETACH_HOLDER_STATES else 'unavailable',
+            **{key: flag(key) for key in ('entered', 'returned', 'settled', 'resourceUnknown')},
+            'holders': holders, 'visibility': 'nonroot-visible-only', 'holderAuthentication': False,
+            'systemServiceExitClaimed': False}
+
 _INSTALLER_PHASES = ('entry', 'target-ok', 'relative-entry', 'absolute-entry', 'cwd-ok', 'pre-exec')
 _INSTALLER_REFUSALS = ('target', 'entry', 'cwd')
 _INSTALLER_ACL_ROLES = ('input-directory', 'input-inventory', 'system-root', 'system-library',
@@ -2647,12 +2770,19 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "native": setup_installer_diagnostics_data(current.get("setupDiagnostic")),
             "errors": installer_errors_data(current.get("installerErrors")), "log": log,
             "systemServiceExitClaimed": False}
+    detach = None
+    if (state.get("phase") == "package-install" and native.get("role") == "distribution-detach"
+            and native.get("entered") is True and native.get("returned") is True
+            and native.get("capturesSettled") is True and type(native.get("returncode")) is int
+            and native["returncode"] == 16):
+        detach = {"stderr": token(native.get("detachStderr"), _DETACH_STDERR_REASONS),
+                  "holderObservation": distribution_detach_diagnostic_data(state.get("distribution_detach_diagnostic"))}
     return {
         "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
         "diagnosticOnly": True, "productReady": False,
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
-        "packageInstall": package, "setupInstall": setup,
+        "packageInstall": package, "setupInstall": setup, "distributionDetach": detach,
         "fixtureInstall": fixture_installer_diagnostic(state.get("phase"), state.get("calls")),
         "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
         "notaryIssues": notary_failure_summary_data(state.get("notary_issue_diagnostic")),
@@ -2734,6 +2864,13 @@ def emit_failure_diagnostic(error, **context):
                     if name != "errors": row["available"] = bool(row[key])
                     else: row["omitted"] = True
                     body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        detach = value["distributionDetach"]
+        observation = detach.get("holderObservation") if detach is not None else None
+        holders = observation.get("holders") if observation is not None else None
+        while len(body) > 4096 and holders is not None and holders["rows"]:
+            holders["rows"].pop()
+            holders["rowsOmitted"] = True
+            body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
             if type(written) is int and written == len(body):
@@ -3168,6 +3305,8 @@ class Operation:
         self.transport_mount = self.transport_slash = self.transport_volumes = self.transport_roster = None
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
+        self.distribution_detach_refusal = None  # SAME exception/call, not a matching error token.
+        self.distribution_detach_diagnostic = None  # Separate native custody; never joins self.calls.
         self.removal_package_complete = False
         self.android_support = self.android_support_module = None
         self.store_signing = self.store_signing_module = None
@@ -3628,6 +3767,14 @@ class Operation:
         diagnostic = (self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
                       or self.setup_verify and role in ("setup-log-cursor", XCODE_SETUP_LOG_CAPTURE)
                       or self.phase == "candidate-baseline" and role in ("app-absence-log-cursor", "app-absence-log-capture"))
+        if self.phase == "package-install" and role == "distribution-detach" and result.returncode == 16:
+            try:
+                record["detachStderr"] = distribution_detach_stderr(result.stderr)
+            except BaseException:
+                pass  # Passive diagnosis never replaces the identical original16.
+            original = Refused("original-nonzero-distribution-detach")
+            self.distribution_detach_refusal = (original, record)
+            raise original
         need(result.returncode == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, role))
              or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode)
@@ -8361,9 +8508,15 @@ class Operation:
 
     def package_settled(self):
         return (self.stager_io_pending is None and not self.errors and self.credential_known()
+                and self.distribution_detach_diagnostic_known()
                 and not self.credential_failed and not self.signing_mutation_pending
                 and all(call["returned"] and call.get("capturesSettled") is True for call in self.calls)
                 and all(entry["closed"] for entry in self.entries if entry["role"].startswith("output-")))
+
+    def distribution_detach_diagnostic_known(self):
+        record = self.distribution_detach_diagnostic
+        return (record is None or type(record) is dict and record.get("resourceUnknown") is False
+                and (record.get("entered") is False or record.get("settled") is True))
 
     def package_stager_io(self, operation, args):
         # Closed direct stager I/O boundaries, including the fixed no-op census. A thrown parse
@@ -8785,6 +8938,76 @@ class Operation:
              "remove-producer.sig" if self.removal else "producer.sig"}, "package-mounted-post-roster")
         self.recheck_mount()
 
+    def observe_distribution_detach_failure(self, original):
+        """One bounded nonroot observation of this SAME failed detach only."""
+        admitted = self.distribution_detach_refusal
+        if (admitted is None or admitted[0] is not original or type(original) is not Refused
+                or self.phase != "package-install" or self.app_absence is not None or self.update is not None
+                or self.removal_baseline_mount is not None or self.distribution_detach_diagnostic is not None
+                or tuple(row.get("role") for row in self.calls) != _PACKAGE_DIAGNOSTIC_ROLES
+                or self.calls[-1] is not admitted[1] or self.calls[-1].get("returncode") != 16
+                or not self.package_settled() or not self.installer_zero or not self.installation_readback):
+            return
+        record = {"state": "unavailable", "entered": False, "returned": False, "settled": False,
+                  "resourceUnknown": False, "holders": None}
+        self.distribution_detach_diagnostic = record  # Before any fallible/native observation.
+        try:
+            now = self.package_clock()
+            package_timeout_data(now, self.package_endpoint, 10)
+        except BaseException:
+            record["state"] = "deadline-unavailable"
+            return
+        try:
+            path, mount, parent = self.transport_mount, self.mount_entry, self.transport_volumes
+            context = {key: self.environment.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
+            if (path != transport_mount_path_data(context, self.target, self.phase)
+                    or mount is None or parent is None or mount.get("fd") is not None
+                    or mount.get("closed") is not True or mount.get("parent_entry") is not parent
+                    or any(not row["closed"] for row in self.entries if row["kind"] in ("mount", "mounted-file"))):
+                record["state"] = "mount-unavailable"
+                return
+            identity = mount["identity"]
+            def original_mount_name():
+                # Do not reopen the consumed mount or acquire a new directory
+                # reader on it. The held /Volumes original supplies this stat.
+                self.removal_directory_post(parent)
+                info = os.stat(path.name, dir_fd=parent["fd"], follow_symlinks=False)
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid) == identity
+            if not original_mount_name():
+                record["state"] = "mount-unavailable"
+                return
+            argv = ["/usr/sbin/lsof", "-n", "-P", "-b", "-F0pcuftD", "+f", "--", str(path)]
+            # +f selects the original filesystem, not a recursive +D walk.
+            # Darwin lsof uses its mount table under -b; its device cache is
+            # disabled. No sudo, repeat mode, raw name field or cache flag.
+            timeout = package_timeout_data(self.package_clock(), self.package_endpoint, 10)
+            environment = self.native_environment()
+            own_pid, own_uid = os.getpid(), os.getuid()
+            record["entered"] = True
+            result = self.owner.run_owned(argv, environ=environment, cwd=self.work,
+                timeout=timeout, capture=True, text=False, output_limit=_DETACH_LSOF_LIMIT)
+            need(type(result) is subprocess.CompletedProcess and type(result.returncode) is int
+                 and type(result.args) in (list, tuple) and tuple(result.args) == tuple(argv)
+                 and type(result.stdout) is bytes and type(result.stderr) is bytes
+                 and len(result.stdout) + len(result.stderr) <= _DETACH_LSOF_LIMIT, "original-return-contract")
+            # A normal original owner return proves its native/capture cleanup.
+            # No raw stdout/stderr is published or appended to the package book.
+            record.update(returned=True, settled=True)
+            self.package_clock()
+            if not original_mount_name():
+                record["state"] = "mount-unavailable"
+                return
+            holders = distribution_busy_holders(result.stdout, result.stderr, result.returncode,
+                device=identity[0], own_pid=own_pid, own_uid=own_uid)
+            self.package_clock()
+            record.update(state=holders["state"], holders=holders)
+        except BaseException:
+            if record["entered"] and not record["settled"]:
+                record.update(state="native-unknown", resourceUnknown=True)
+                self.errors.append({"stage": "distribution-detach-diagnostic", "type": "CompletionUnknown"})
+            # Preserve the exact original detach refusal, not a diagnostic
+            # error, cancellation or invented successful cleanup.
+
     def detach_package_mount(self):
         need(self.mount_known and not self.mount_detached
              and (not self.installer_entered or self.installer_zero and self.installation_readback), "package-mount-retention-required")
@@ -8796,8 +9019,15 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
-        self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
-                          ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
+        try:
+            self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
+                              ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
+        except BaseException as original:
+            try:
+                self.observe_distribution_detach_failure(original)
+            except BaseException:
+                pass
+            raise
         if self.removal_baseline_mount is not None:
             self.removal_baseline_detached()
         elif self.transport_mount is not None:
@@ -9700,7 +9930,7 @@ class Operation:
                 self.tool_clock(work=False)
             except BaseException as error:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
-        if (not self.removal_cleanup_ready()
+        if (not self.distribution_detach_diagnostic_known() or not self.removal_cleanup_ready()
                 or self.store_signing is not None and not self.store_signing_module.finish_ready(self)
                 or self.android_support is not None and not self.android_support_module.finish_ready(self)
                 or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
