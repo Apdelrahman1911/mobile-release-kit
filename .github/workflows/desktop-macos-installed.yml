@@ -1308,12 +1308,28 @@ jobs:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
         run: |
           builtin source ./desktop/tools/macos_installed_app_build.sh
-      - name: Record the effective pinned compiler from the successful build context
+      - name: Record the effective pinned compiler and preflight configured observer DATA
         id: app_compiler
         timeout-minutes: 1
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_installed_app_compiler.sh
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
+            # Same one-minute context cap; no compile, fixture or native/UI entry.
+            # This early DATA check never replaces the actual installed checks.
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+            [[ -f "$MRK_MACOS_OBSERVER_BINARY" && ! -L "$MRK_MACOS_OBSERVER_BINARY" && -O "$MRK_MACOS_OBSERVER_BINARY" && -x "$MRK_MACOS_OBSERVER_BINARY" ]] || exit 1
+            cd "$MRK_MACOS_WORK"
+            umask 077
+            ulimit -c 0
+            set +e
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+              "$MRK_MACOS_OBSERVER_BINARY" data-contracts 2>&1 | /usr/bin/tail -c 65536
+            observer_status=("${PIPESTATUS[@]}")
+            set -e
+            (( observer_status[0] == 0 )) || exit "${observer_status[0]}"
+            (( observer_status[1] == 0 )) || exit "${observer_status[1]}"
+          fi
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update'))
