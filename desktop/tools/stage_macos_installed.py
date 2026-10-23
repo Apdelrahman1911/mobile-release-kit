@@ -7116,13 +7116,16 @@ def restore_previous_data(result, parsed, expected):
 def update_predecessor_selection(args, nomination):
     # Only the fixed checked-out SOURCE nomination may select historical P0.
     # It never changes current source_build_selection or the command-line API.
+    # Match nomination_data's independent target admission; an absent peer is
+    # not a synthetic nomination. That outer parser still checks every row.
     document = maintenance_json(read(DESKTOP / "macos-installed-inputs/update-predecessors.json", 16384), 16384)
     need(type(document) is dict and set(document) == {"schemaVersion", "mode", "targets"}
          and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
-         and document["mode"] == "configured" and type(document["targets"]) is dict
-         and set(document["targets"]) == set(MAC_TARGETS), "update-source-nomination")
+         and document["mode"] == "configured" and type(document["targets"]) is dict and bool(document["targets"])
+         and set(document["targets"]).issubset(MAC_TARGETS), "update-source-nomination")
     target = command_target(args)
-    need(type(nomination) is dict and nomination == document["targets"][target], "update-source-nomination")
+    need(target in document["targets"] and type(nomination) is dict
+         and nomination == document["targets"][target], "update-source-nomination")
     old = maintenance_release_data(nomination["release"], target)
     need((args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
          == tuple(old[k] for k in ("sourceCommit", "inventorySha256", "runtimeManifestSha256", "packageSha256")),

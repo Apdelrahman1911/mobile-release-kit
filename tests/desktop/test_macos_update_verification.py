@@ -334,6 +334,58 @@ class UpdateDataTests(unittest.TestCase):
                 with self.assertRaises((ValueError, STAGER.Refused)):
                     DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
 
+    def test_stager_readback_accepts_source_target_subsets_without_changing_current_selection(self):
+        # The real source reader and both DATA selectors execute; no Installer,
+        # process call, signed input creation or production nomination changes.
+        def arguments(target, row):
+            old = row["release"]
+            return SimpleNamespace(target=target, expected_source=old["sourceCommit"],
+                expected_inventory=old["inventorySha256"], expected_manifest=old["runtimeManifestSha256"],
+                expected_package=old["packageSha256"])
+        def selection(target, row):
+            return STAGER.BuildSelection(target, row["release"]["packageVersion"], row["release"]["release"])
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("no native/process execution")):
+            source = STAGER.decode(STAGER.read(ROOT / DATA.NOMINATION, DATA.RECORD_LIMIT))
+            row = DATA.nomination_data(source, STAGER.ARM_TARGET, STAGER)
+            current = STAGER.source_build_selection(STAGER.ARM_TARGET)
+            self.assertEqual(STAGER.update_predecessor_selection(arguments(STAGER.ARM_TARGET, row), row),
+                             selection(STAGER.ARM_TARGET, row))
+            self.assertEqual(STAGER.source_build_selection(STAGER.ARM_TARGET), current)
+            with tempfile.TemporaryDirectory() as temporary:
+                desktop = Path(temporary)
+                path = desktop / "macos-installed-inputs/update-predecessors.json"
+                path.parent.mkdir()
+                def publish(document):
+                    path.write_bytes(STAGER.canonical(document) + b"\n")
+                    path.chmod(0o644)
+                with mock.patch.object(STAGER, "DESKTOP", desktop):
+                    comparison = nomination()  # Existing explicitly inert two-target fixture.
+                    for target in DATA.TARGETS:
+                        selected = comparison["targets"][target]
+                        args = arguments(target, selected)
+                        for targets in (comparison["targets"], {target: selected}):
+                            publish(dict(comparison, targets=targets))
+                            self.assertEqual(STAGER.update_predecessor_selection(args, selected), selection(target, selected))
+                        other = next(value for value in DATA.TARGETS if value != target)
+                        for targets in ({}, {other: comparison["targets"][other]},
+                                        {"unsupported": selected}, {**comparison["targets"], "unsupported": selected},
+                                        {target: None}):
+                            publish(dict(comparison, targets=targets))
+                            with self.subTest(target=target, keys=tuple(targets)), self.assertRaisesRegex(STAGER.Refused, "update-source-nomination"):
+                                STAGER.update_predecessor_selection(args, selected)
+                        publish(dict(comparison, targets={target: selected}))
+                        with self.assertRaisesRegex(STAGER.Refused, "update-source-nomination"):
+                            STAGER.update_predecessor_selection(args, dict(selected, source="b" * 40))
+                        for key in ("expected_source", "expected_inventory", "expected_manifest", "expected_package"):
+                            bad_args = SimpleNamespace(**vars(args))
+                            setattr(bad_args, key, "f" * (40 if key == "expected_source" else 64))
+                            with self.subTest(binding=key), self.assertRaisesRegex(STAGER.Refused, "update-baseline-source-binding"):
+                                STAGER.update_predecessor_selection(bad_args, selected)
+                        malformed = copy.deepcopy(selected)
+                        malformed["release"]["packageVersion"] = "not-a-version"
+                        publish(dict(comparison, targets={target: malformed}))
+                        with self.assertRaises(STAGER.Refused): STAGER.update_predecessor_selection(args, malformed)
+
     def test_complete_artifact_originals_keep_nested_namespaces_and_post(self):
         # Real existing descriptor-bound owner IO, hashes, POST and consuming
         # closes. No original process, mount, signing or Installer is started.
