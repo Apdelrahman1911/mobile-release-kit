@@ -2175,6 +2175,86 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
             self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
 
+    def test_original_exception_clipped_git_timeout_uses_stored_common_frames(self):
+        marker = (b"PRIVATE CHILD OUTPUT\nMRK_MACOS_AQUA_FAILURE_STEP=Bootstrap\n"
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\n")
+        class IntChild(int): pass
+        for case in (*M.GIT_CLI.CASES, "first-save"):
+            if case in M.GIT_CLI.CASES:
+                clock = [1000.25]
+                calls = M.CLI.Calls(clock=lambda: clock[0], case=case, original_end=1120.0)
+                shortened = calls.application_timeout()  # Actual DATA clock clipping, no thread/process.
+                self.assertEqual(shortened, 134)
+                clock[0] = 2000.0  # Failure occurs after expiry; never recompute the old call's timeout.
+                samples = ((shortened, True), (1, True), (135, True), (0, False), (-1, False), (136, False),
+                           (True, False), (False, False), (134.0, False), ("134", False), (None, False), (IntChild(134), False))
+            else:
+                samples = ((M.case_timeout(case), True), (M.case_timeout(case) - 1, False))
+            for timeout, accepted in samples:
+                with self.subTest(case=case, timeout=timeout, kind=type(timeout).__name__), \
+                        inert_exception_owner(stderr=marker) as call:
+                    state = BINDING.root() / "state" / case
+                    call.frozen.args = (M.EXECUTABLE, case)
+                    call.frozen.argv = tuple(arg.encode("ascii") for arg in call.frozen.args)
+                    call.frozen.cwd = str(state).encode("ascii")
+                    try:
+                        call.owner.run_owned(list(call.frozen.args), environ={}, cwd=state, timeout=timeout,
+                                             capture=True, text=False, output_limit=M.OUTPUT_LIMIT)
+                    except RuntimeError as error:
+                        self.assertIs(error, call.original)
+                        # Keep the original traceback alive while reducing it.
+                        with patch("time.monotonic", side_effect=AssertionError("No new clock")):
+                            reduced = M._original_exception_diagnostics(error, call.owner.run_owned, case, state)
+                    else:
+                        self.fail("inert original did not raise")
+                    self.assertEqual(reduced, ("Bootstrap", "observer-deadline", None, None) if accepted else None)
+                    self.assertNotIn("PRIVATE", json.dumps(reduced))
+
+    def test_original_exception_clipped_git_timeout_rejects_changed_and_foreign_frames(self):
+        mutations = (
+            lambda f: f.command.overrides.update(timeout=133),  # Both in range, but not one original call.
+            lambda f: f.command.overrides.update(timeout=134.0),
+            lambda f: setattr(f.command.__spec__, "origin", "/foreign"),
+            lambda f: setattr(f.owner, "run_command", FunctionType(f.command.run_command.__code__, dict(vars(f.command)))),
+            lambda f: setattr(f.owner, "run_command", f.command._run_command),
+            lambda f: setattr(f.command, "_run_command", FunctionType(f.command._run_command.__code__, dict(vars(f.command)))),
+            lambda f: setattr(f.command, "_run_command", FunctionType(f.command._run_command.__code__.replace(co_filename="/foreign"), vars(f.command))),
+        )
+        for index, mutation in enumerate(mutations):
+            with self.subTest(index=index), inert_exception_owner() as call:
+                case = M.GIT_CLI.INDEX
+                state = BINDING.root() / "state" / case
+                call.frozen.args = (M.EXECUTABLE, case)
+                call.frozen.argv = tuple(arg.encode("ascii") for arg in call.frozen.args)
+                call.frozen.cwd = str(state).encode("ascii")
+                mutation(call)
+                try:
+                    call.owner.run_owned(list(call.frozen.args), environ={}, cwd=state, timeout=134,
+                                         capture=True, text=False, output_limit=M.OUTPUT_LIMIT)
+                except RuntimeError as error:
+                    self.assertIs(error, call.original)
+                    self.assertIsNone(M._original_exception_diagnostics(error, call.owner.run_owned, case, state))
+                else:
+                    self.fail("inert original did not raise")
+
+    def test_git_failure_steps_admit_only_exact_existing_enum_labels(self):
+        # Exact signed216 enum names were compared once; no open-ended parser.
+        families = {
+            "GitCli": "Read ReadWait Allow Submitted Prepared Started Terminal Checked Revoke Denied Done Finish",
+            "GitUpstream": "Read ReadWait Prepare PrepareWait Apply ApplyWait CloseReview Finish",
+            "GitFetch": "Connect Connected Read ReadWait Prepare PrepareWait Apply ApplyWait Disconnect Disconnected Finish",
+            "GitPush": "Connect Connected Read ReadWait Prepare PrepareWait Apply ApplyWait Disconnect Disconnected Finish",
+        }
+        labels = [f"{family}({step})" for family, steps in families.items() for step in steps.split()]
+        self.assertEqual(len(labels), 42)
+        for label in labels:
+            row = f"MRK_MACOS_AQUA_FAILURE_STEP={label}\n".encode("ascii")
+            with self.subTest(label=label):
+                self.assertEqual(M.failure_step(b"", row), label)
+                for bad in (row[:-1], row + row, row.replace(b"\n", b"\r\n"), b"PRIVATE " + row,
+                            row.replace(b")", b"-PRIVATE)"), row.replace(b"=Git", b"=ForeignGit")):
+                    self.assertIsNone(M.failure_step(b"", bad))
+
     def test_native_action_closed_sites_cover_three_remaining_original_actions(self):
         self.assertEqual(set(M.NATIVE_ACTION_STEPS), {"CancelProject", "QuitCancel", "Quit"})
         self.assertEqual(len(M.NATIVE_ACTION_SITES), 36)

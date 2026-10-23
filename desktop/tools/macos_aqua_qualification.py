@@ -1213,6 +1213,12 @@ FAILURE_STEPS |= frozenset(f"UploadKey(Backup({name}))" for name in (
 FAILURE_STEPS |= frozenset(f"ToolSetup({name})" for name in (
     "Context Service ServiceWait Catalog CatalogWait Inspect InspectWait Acquire AcquireWait RegisterInspect RegisterReview Register Registered Recover Recovered Select Reuse ReuseWait Finish"
 ).split()) | frozenset(f"ToolSetup({name}({i}))" for name in ("Choose", "Native", "Chosen") for i in range(4))
+FAILURE_STEPS |= frozenset(f"GitCli({name})" for name in (
+    "Read ReadWait Allow Submitted Prepared Started Terminal Checked Revoke Denied Done Finish").split())
+FAILURE_STEPS |= frozenset(f"GitUpstream({name})" for name in (
+    "Read ReadWait Prepare PrepareWait Apply ApplyWait CloseReview Finish").split())
+FAILURE_STEPS |= frozenset(f"{family}({name})" for family in ("GitFetch", "GitPush") for name in (
+    "Connect Connected Read ReadWait Prepare PrepareWait Apply ApplyWait Disconnect Disconnected Finish").split())
 FAILURE_REASONS = frozenset((
     "git-fetch-original-contract git-push-original-contract "
     "installed-cli-original-contract git-cli-original-contract git-upstream-original-contract tool-setup-original-contract identity-original-contract upload-key-original-contract upload-key-expected-retention observer-invariant observer-deadline observer-record-unavailable observer-data-check "
@@ -4404,12 +4410,19 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
             return None
         # The public wrapper still binds this call; its delegated original owns
         # the engine. Neither an unrelated inner frame nor wrapper locals suffice.
+        # Git CLI clips this actual call to its pre-setup endpoint. Read the
+        # same stored integer in both frames; never recompute it after expiry.
+        timeout = wrapped.f_locals.get("timeout")
+        if type(timeout) is not int:
+            return None
+        if not (1 <= timeout <= case_timeout(case) if case in GIT_CLI.CASES else timeout == case_timeout(case)):
+            return None
         for frame in (wrapped, original):
             local = frame.f_locals  # Python 3.14 can supply FrameLocalsProxy.
             actual = local.get("argv")
             if (type(actual) is not list or len(actual) != 2 or any(type(arg) is not str for arg in actual)
                     or tuple(actual) != argv or type(local.get("cwd")) is not type(cwd) or local["cwd"] != cwd
-                    or type(local.get("timeout")) is not int or local["timeout"] != case_timeout(case)
+                    or type(local.get("timeout")) is not int or local["timeout"] != timeout
                     or local.get("capture") is not True or local.get("text") is not False
                     or type(local.get("output_limit")) is not int or local["output_limit"] != OUTPUT_LIMIT):
                 return None
