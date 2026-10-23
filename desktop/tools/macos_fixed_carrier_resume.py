@@ -1047,11 +1047,13 @@ def scripts_archive_data(packed, stager, live, allocation_budget=None):
     return archive
 
 
-def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False, capture_scripts=None):
+def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False,
+                 retained_observer=False, capture_scripts=None):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
          and all(type(v) is tuple and len(v) == 2 and type(v[0]) is bytes and type(v[1]) is int for v in originals.values()), 'enrollment-mounted-roster')
-    need(type(candidate) is bool, 'resume-mounted-purpose')
+    need(type(candidate) is bool and type(retained_observer) is bool
+         and (not retained_observer or candidate and target == TARGETS[0]), 'resume-mounted-purpose')
     need(capture_scripts is None or candidate and callable(capture_scripts), 'resume-mounted-capture-purpose')
     bodies = {k: v[0] for k, v in originals.items()}
     for key in ('package', 'descriptor', 'signature'):
@@ -1073,13 +1075,18 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
     selection = (stager.source_build_selection(target) if candidate else
                  stager.BuildSelection(target, row['packageVersion'], row['release']))
     need((selection.package_version, selection.release) == (row['packageVersion'], row['release']), 'resume-source-release')
-    members = (stager.install_product_members(bodies['Install.pkg']) if allocation_budget is None else
-        stager.install_product_members(bodies['Install.pkg'], allocation_budget=allocation_budget))
+    # Only the explicitly selected retained observer has a flat scripts package.
+    # Ordinary candidates/fixed P0 keep the product parser; never sniff or retry.
+    parser = stager.xar_members if retained_observer else stager.install_product_members
+    members = (parser(bodies['Install.pkg']) if allocation_budget is None else
+        parser(bodies['Install.pkg'], allocation_budget=allocation_budget))
     outer_retained = sum(len(value) for value in members.values())
     def nested_budget(phase, live, packed, output):
         if allocation_budget is not None:
             allocation_budget(phase, outer_retained + live, packed, output)
-    if stager.INSTALL_COMPONENT in members:
+    if retained_observer:
+        component = members
+    elif stager.INSTALL_COMPONENT in members:
         component = (stager.xar_members(members[stager.INSTALL_COMPONENT]) if allocation_budget is None else
             stager.xar_members(members[stager.INSTALL_COMPONENT], allocation_budget=nested_budget))
     else:

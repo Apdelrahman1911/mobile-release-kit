@@ -2024,6 +2024,136 @@ class FixedCarrierResumeData(unittest.TestCase):
                 m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)
             self.assertEqual(tool.source_build_selection(tool.ARM_TARGET), selection)
 
+    def test_retained_observer_flat_parser_is_explicit_and_keeps_common_checks_and_budgets(self):
+        # Tiny genuine XAR/CPIO DATA, not reconstructed artifact bytes or a
+        # native signature/Installer result. Every production parser is real.
+        m = ADAPTER
+        with mock.patch('subprocess.Popen', side_effect=AssertionError('no process/native execution')):
+            tool = inert_module('retained_flat_stager_data', 'desktop/tools/stage_macos_installed.py')
+            selection = tool.source_build_selection(tool.ARM_TARGET)
+            manifest = 'a' * 64
+            paths = {'app/' + tool.ENTRY_BINARY, 'app/' + tool.APP_BINARY, 'app/' + tool.VAULT_HELPER,
+                     'app/Contents/Info.plist', 'app/' + tool.PAYLOAD_INFO, 'runtime/python/bin/python3', 'runtime/manifest.json'}
+            executables = {'app/' + tool.ENTRY_BINARY, 'app/' + tool.APP_BINARY, 'app/' + tool.VAULT_HELPER,
+                           'runtime/python/bin/python3'}
+            inventory = tool.canonical(dict(schemaVersion=1, release=selection.release, runtimeManifestSha256=manifest,
+                files=[dict(path=p, sha256=manifest if p == 'runtime/manifest.json' else 'b' * 64,
+                            size=1, executable=p in executables) for p in sorted(paths)]))
+            info = ('<pkg-info identifier="%s" version="%s" install-location="/" auth="root">'
+                    '<scripts><postinstall file="./postinstall"/></scripts></pkg-info>'
+                    % (tool.PACKAGE_ID, selection.package_version)).encode('ascii')
+            history = tool.read(ROOT / 'desktop/macos-installed-inputs/producer-history.json', tool.PRODUCER_DESCRIPTOR_BYTES)
+            signing = tool.packaging_signing_data(tool.read(tool.PRODUCER_PROFILE, 1024), tool.read(tool.SERVICE_PROFILE, 512))
+
+            def cpio(body=inventory, *, mode=0o444, uid=0):
+                def odc(name, kind, value=b''):
+                    name = name.encode('ascii') + b'\0'
+                    fields = ((0, 6), (1, 6), (kind, 6), (uid, 6), (0, 6), (1, 6),
+                              (0, 6), (0, 11), (len(name), 6), (len(value), 11))
+                    return b'070707' + ''.join(format(v, '0%do' % width) for v, width in fields).encode() + name + value
+                return (odc('.', m.stat.S_IFDIR | 0o755) + odc('input', m.stat.S_IFDIR | 0o555)
+                        + odc('input/' + tool.INSTALLATION_INVENTORY_NAME, m.stat.S_IFREG | mode, body)
+                        + odc('TRAILER!!!', 0))
+
+            def xar(parts):
+                heap, serial = bytearray(), 0
+                def node(name, value):
+                    nonlocal serial
+                    serial += 1
+                    prefix = '<file id="%d"><name>%s</name>' % (serial, name)
+                    if type(value) is list:
+                        return prefix + '<type>directory</type>' + ''.join(node(*part) for part in value) + '</file>'
+                    offset = 20 + len(heap); heap.extend(value)
+                    return (prefix + '<type>file</type><data><length>%d</length><offset>%d</offset><size>%d</size>'
+                            '<encoding style="application/octet-stream"/></data></file>' % (len(value), offset, len(value)))
+                toc = ('<xar><toc><checksum style="sha1"><offset>0</offset><size>20</size></checksum>'
+                       + ''.join(node(*part) for part in parts) + '</toc></xar>').encode('ascii')
+                packed = m.zlib.compress(toc)
+                return (m.struct.pack('>IHHQQI', 0x78617221, 28, 1, len(packed), len(toc), 1)
+                        + packed + m.hashlib.sha1(packed).digest() + bytes(heap))
+
+            def originals(package, *, legacy=False):
+                descriptor = tool.packaging_descriptor_data(history, signing, selection, source_commit='1' * 40,
+                    manifest=manifest, inventory=m.sha(inventory), package=m.sha(package))
+                if legacy:
+                    document = tool.maintenance_producer_data(descriptor, target=tool.ARM_TARGET)
+                    document['releaseSet']['acceptedPredecessors'] = []
+                    descriptor = tool.canonical(document) + b'\n'
+                bodies = {'Install.pkg': package, 'producer.json': descriptor, 'producer.sig': b'INERT-NOT-A-SIGNATURE'}
+                row = dict(source='1' * 40, tree='2' * 40, runId='42', runAttempt='1', jobId='43', artifactId='44',
+                    artifactSha256='3' * 64, members=[], qualificationEvidenceSha256='4' * 64,
+                    packageVersion=selection.package_version, release=selection.release,
+                    runtimeManifestSha256=manifest, inventorySha256=m.sha(inventory),
+                    signingIdentity=dict(teamIdentifier=signing.team, leafCertificateSha1=signing.leaf_sha1,
+                                         leafCertificateSha256=signing.leaf_sha256))
+                for key, name in (('package', 'Install.pkg'), ('descriptor', 'producer.json'), ('signature', 'producer.sig')):
+                    row[key] = dict(name=name, bytes=len(bodies[name]), sha256=m.sha(bodies[name]))
+                return {name: (body, 0o444) for name, body in bodies.items()}, row
+
+            archive = cpio()
+            compressor = m.zlib.compressobj(wbits=31)
+            gzipped = compressor.compress(archive) + compressor.flush()
+            for scripts in (archive, gzipped):
+                flat = xar([('PackageInfo', info), ('Scripts', scripts)])
+                flat_phases = []
+                self.assertEqual(tool.xar_members(flat, allocation_budget=lambda *v: flat_phases.append(v)),
+                                 {'PackageInfo': info, 'Scripts': scripts})
+                # Actual old/default product dispatch rejects this valid flat
+                # fixture. This label describes the fixture, not the live run.
+                for candidate in (True, False):
+                    with self.subTest(default_candidate=candidate), self.assertRaisesRegex(tool.Refused, '^install-product-xar-roster$'):
+                        m.mounted_data(*originals(flat, legacy=not candidate), tool.ARM_TARGET, tool, candidate=candidate)
+                result, retained = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True)
+                phases = []
+                observed = m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True,
+                    allocation_budget=lambda *v: phases.append(v))
+                self.assertEqual(observed, (result, retained))
+                self.assertEqual(retained, inventory)
+                self.assertEqual(result['inventoryFiles'], len(paths))
+                self.assertEqual(result['inventoryPayloadBytes'], len(paths))
+                self.assertFalse(result['nativeQualificationInferred'] or result['updateActivated'] or result['productReady'])
+                self.assertEqual(phases[:len(flat_phases)], flat_phases)
+                self.assertFalse(any(phase.startswith('install-product-') for phase, *_ in phases))
+                self.assertEqual(sum(phase == 'cpio-window' for phase, *_ in phases), 1)
+                self.assertEqual(sum(phase == 'scripts' for phase, *_ in phases), int(scripts is gzipped))
+                window = next(v for v in phases if v[0] == 'cpio-window')
+                self.assertEqual(window, ('cpio-window', len(info) + len(scripts) + 2 * len(archive), 0, 0))
+
+            product = xar([('Distribution', b'PUBLIC-XML'), ('Resources', [('InstallerReadMe.html', b'PUBLIC-HTML')]),
+                           (tool.INSTALL_COMPONENT, flat)])
+            self.assertIn(tool.INSTALL_COMPONENT, tool.install_product_members(product))
+            malformed = (
+                (product, tool.Refused, 'scripts-only-package-no-payload'),
+                (xar([('PackageInfo', info), ('Scripts', archive), ('Bom', b'INERT')]), m.Refused, 'enrollment-product-component'),
+                (xar([('PackageInfo', info), ('Scripts', archive), ('Payload', b'INERT')]), tool.Refused, 'scripts-only-package-no-payload'),
+                (xar([('PackageInfo', info.replace(selection.package_version.encode(), b'0.1.9')), ('Scripts', archive)]), tool.Refused, 'scripts-package-identity'),
+                (xar([('PackageInfo', info), ('Scripts', cpio(uid=1))]), tool.Refused, 'scripts-root-owner-mode'),
+                (xar([('PackageInfo', info), ('Scripts', cpio(mode=0o555))]), m.Refused, 'enrollment-original-inventory'),
+                (xar([('PackageInfo', info), ('Scripts', cpio(inventory + b' '))]), tool.Refused, 'observation-inventory-anchor'),
+            )
+            for package, error, reason in malformed:
+                with self.subTest(refusal=reason), self.assertRaisesRegex(error, '^' + reason + '$'):
+                    m.mounted_data(*originals(package), tool.ARM_TARGET, tool, candidate=True, retained_observer=True)
+            for flag, candidate, target in ((1, True, tool.ARM_TARGET), (None, True, tool.ARM_TARGET),
+                    (True, False, tool.ARM_TARGET), (True, True, tool.INTEL_TARGET)):
+                with self.subTest(flag=flag, candidate=candidate, target=target), self.assertRaisesRegex(m.Refused, '^resume-mounted-purpose$'):
+                    m.mounted_data(*originals(flat), target, tool, candidate=candidate, retained_observer=flag)
+            for phase in ('xar-toc', 'xar-member', 'scripts', 'cpio-window'):
+                first = m.Refused('inert-allocation-stop')
+                phases = []
+                def refuse(selected, *values):
+                    phases.append(selected)
+                    if selected == phase: raise first
+                with mock.patch.object(tool, 'inflate', wraps=tool.inflate) as codec, \
+                        mock.patch.object(tool, 'cpio_members', wraps=tool.cpio_members) as cpio_parser:
+                    with self.subTest(allocation=phase), self.assertRaises(m.Refused) as caught:
+                        m.mounted_data(*originals(flat), tool.ARM_TARGET, tool, candidate=True, retained_observer=True,
+                                       allocation_budget=refuse)
+                    self.assertIs(caught.exception, first)
+                    self.assertEqual(phases[-1], phase)
+                    self.assertEqual(codec.call_count, 0 if phase == 'xar-toc' else 2 if phase == 'cpio-window' else 1)
+                    self.assertEqual(cpio_parser.call_count, int(phase == 'cpio-window'))
+
     def test_producer_signature_uses_native_domain_and_retained_original_message(self):
         import ast
         import re
