@@ -11,7 +11,13 @@
         "bytes": 34824526
       },
       "transport": {
-        "kind": "original"
+        "kind": "retained-actions",
+        "source": "d89843404f19d14f3e73eba2666f650c7acb771d",
+        "runId": "39930824417",
+        "runAttempt": "1",
+        "artifactId": "12491676660",
+        "digest": "sha256:244fbdff6d8c852ca061186bb2b09d0be62a98012afb835d4e76b7c6123d89eb",
+        "bytes": 34824676
       }
     },
     "x86_64-apple-darwin": null
