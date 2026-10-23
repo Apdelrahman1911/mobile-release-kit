@@ -121,7 +121,10 @@ const FAILURE_REASONS: &[&str] = &[
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
     // Unknown internal labels degrade only to generic failure, never raw text.
-    let code = FAILURE_REASONS.iter().position(|label| *label == reason).map_or(1, |index| index as u8 + 1);
+    // The generic reason need not be the first entry in the closed roster.
+    let code = FAILURE_REASONS.iter().position(|label| *label == reason)
+        .or_else(|| FAILURE_REASONS.iter().position(|label| *label == "observer-invariant"))
+        .expect("fixed generic observer failure reason") as u8 + 1;
     let won = first.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst).is_ok();
     failed.store(true, Ordering::SeqCst);
     won
