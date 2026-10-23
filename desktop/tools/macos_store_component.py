@@ -1,8 +1,9 @@
-"""Archive/restore unsigned Ruby base artifacts for the fixed component CI.
+"""Archive/restore fixed Ruby components and retain an original signed ZIP.
 
-Actions owns artifact identity. This helper checks that identity and the exact
-successful native-base job, then uses ordinary bounded DATA extraction. It is
-not a signing, installation or Store authority and never executes a download.
+Actions owns original job/artifact identity. A retained signed ZIP additionally
+requires an independent SOURCE pin of its original service bytes, not a new
+signing claim from its carrier. Extraction is bounded DATA work, never payload
+execution, signing, installation or Store authority.
 """
 from __future__ import annotations
 import argparse
@@ -13,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -26,6 +28,14 @@ ASSEMBLY_BRANCH = 'task/ci-simplification-20261015'
 VERSIONS = {'ruby': '3.3.12', 'openssl': '3.5.8', 'libyaml': '0.2.5', 'deploymentTarget': '26.0'}
 LIMIT = 512 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[2]
+RETAINED_SELECTION = 'macos-installed-inputs/store-signed-retained-transport.json'
+RETAINED_SELECTION_LIMIT = 4096
+RETAINED_WORKFLOW = '.github/workflows/desktop-macos-components.yml'
+RETAINED_BRANCH = 'verify/desktop-macos-store-retention'
+RETAINED_JOB = 'Retain signed Store runtime (arm64)'
+ORIGINAL_ZIP = 'store-original.zip'
+ZIP_LIMIT = LIMIT + 1024 * 1024
+RETAINED_ZIP_LIMIT = ZIP_LIMIT + 1024 * 1024
 # Native recipe DATA, consumed by the builder; unrelated assembly/tooling code
 # is deliberately not hashed. Bump recipeVersion for native build logic changes
 # not described by these actual inputs/options.
@@ -251,35 +261,20 @@ def restore_runtime(output, run_id, source, arch, artifact_id):
     return runtime
 
 
-def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attempt=None):
-    """Project one exact successful signing job, without executing its payload.
-
-    Ordinary packaging selects these identifiers from its source input. This
-    service/content boundary is not a new keychain or native-signature owner.
-    """
+def _signed_producer(run_id, source, arch, attempt):
+    """Original signing authority, independent of the ZIP's current storage."""
     checked_source(source)
     if (arch not in ('arm64', 'x86_64')
-            or any(type(v) is not int or v <= 0 for v in (run_id, artifact_id))):
-        raise ValueError('Expected exact signed component source/run/artifact')
-    target = 'aarch64-apple-darwin' if arch == 'arm64' else 'x86_64-apple-darwin'
+            or any(type(v) is not int or v <= 0 for v in (run_id, attempt))):
+        raise ValueError('Expected exact signed component source/run/attempt')
     run = api(f'actions/runs/{run_id}')
     workflow = api('actions/workflows/desktop-macos-python-runtime-signing.yml')
-    artifact = api(f'actions/artifacts/{artifact_id}')
-    matched = re.fullmatch(re.escape(f'store-signed-{target}-{run_id}-') + r'([1-9][0-9]*)', artifact.get('name', ''))
     if (run.get('id') != run_id or run.get('repository', {}).get('full_name') != REPOSITORY
             or run.get('head_repository', {}).get('full_name') != REPOSITORY
             or run.get('head_branch') != 'verify/desktop-macos-store-signing' or run.get('event') != 'push'
             or run.get('head_sha') != source or workflow.get('path') != '.github/workflows/desktop-macos-python-runtime-signing.yml'
-            or run.get('workflow_id') != workflow.get('id') or matched is None
-            or artifact.get('id') != artifact_id or artifact.get('expired') is not False
-            or artifact.get('workflow_run', {}).get('id') != run_id
-            or artifact.get('workflow_run', {}).get('head_sha') != source
-            or type(artifact.get('size_in_bytes')) is not int or not 0 < artifact['size_in_bytes'] <= LIMIT + 1024 * 1024
-            or not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact.get('digest', ''))):
+            or run.get('workflow_id') != workflow.get('id')):
         raise ValueError('Signed Store service origin differs')
-    attempt = int(matched[1])
-    if expected_attempt is not None and (type(expected_attempt) is not int or attempt != expected_attempt):
-        raise ValueError('SOURCE-selected signed Store attempt differs')
     jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
     if type(jobs.get('total_count')) is not int or not 0 < jobs['total_count'] <= 100:
         raise ValueError('Signed Store job roster differs')
@@ -288,15 +283,63 @@ def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attemp
             or selected[0].get('head_sha') != source or selected[0].get('status') != 'completed'
             or selected[0].get('conclusion') != 'success'):
         raise ValueError('Original signed Store producer did not pass')
-    output.mkdir(mode=0o700)
-    transport = output / 'artifact.zip'
-    with transport.open('xb') as stream:
+
+
+def _signed_origin(run_id, source, arch, artifact_id, *, expected_attempt=None):
+    checked_source(source)
+    if (arch not in ('arm64', 'x86_64')
+            or any(type(v) is not int or v <= 0 for v in (run_id, artifact_id))):
+        raise ValueError('Expected exact signed component source/run/artifact')
+    target = 'aarch64-apple-darwin' if arch == 'arm64' else 'x86_64-apple-darwin'
+    artifact = api(f'actions/artifacts/{artifact_id}')
+    matched = re.fullmatch(re.escape(f'store-signed-{target}-{run_id}-') + r'([1-9][0-9]*)', artifact.get('name', ''))
+    if (matched is None
+            or artifact.get('id') != artifact_id or artifact.get('expired') is not False
+            or artifact.get('workflow_run', {}).get('id') != run_id
+            or artifact.get('workflow_run', {}).get('head_sha') != source
+            or type(artifact.get('size_in_bytes')) is not int or not 0 < artifact['size_in_bytes'] <= ZIP_LIMIT
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact.get('digest', ''))):
+        raise ValueError('Signed Store service origin differs')
+    attempt = int(matched[1])
+    if expected_attempt is not None and (type(expected_attempt) is not int or attempt != expected_attempt):
+        raise ValueError('SOURCE-selected signed Store attempt differs')
+    _signed_producer(run_id, source, arch, attempt)
+    return {'source': source, 'runId': str(run_id), 'runAttempt': str(attempt),
+            'artifactId': str(artifact_id), 'digest': artifact['digest'], 'bytes': artifact['size_in_bytes']}
+
+
+def _check_signed_zip(path, binding):
+    with path.open('rb') as stream:
+        if (path.stat().st_size != binding['bytes']
+                or 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() != binding['digest']):
+            raise ValueError('Signed Store transport differs')
+
+
+def _download_signed_zip(path, binding):
+    artifact_id = int(binding['artifactId'])
+    with path.open('xb') as stream:
         subprocess.run(['gh', 'api', f'repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip'],
                        stdout=stream, check=True, timeout=180)
-    with transport.open('rb') as stream:
-        if (transport.stat().st_size != artifact['size_in_bytes']
-                or 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() != artifact['digest']):
-            raise ValueError('Signed Store transport differs')
+    _check_signed_zip(path, binding)
+
+
+def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attempt=None, archive_pin=None):
+    """Project one exact successful signing job, without executing its payload."""
+    origin = _signed_origin(run_id, source, arch, artifact_id, expected_attempt=expected_attempt)
+    if archive_pin is not None and archive_pin != origin:
+        raise ValueError('SOURCE-pinned original signed Store ZIP differs')
+    output.mkdir(mode=0o700)
+    _download_signed_zip(output / 'artifact.zip', origin)
+    return _project_signed(output, origin, arch)
+
+
+def _project_signed(output, origin, arch, *, retained_transport=None):
+    # Retention changes only storage. This is the same original receipt,
+    # signer, complete archive and native-member validation for both routes.
+    run_id, attempt, artifact_id = (int(origin[key]) for key in ('runId', 'runAttempt', 'artifactId'))
+    source = origin['source']
+    target = 'aarch64-apple-darwin' if arch == 'arm64' else 'x86_64-apple-darwin'
+    transport = output / 'artifact.zip'
     with zipfile.ZipFile(transport) as zipped:
         entries = zipped.infolist()
         if len(entries) != 2 or {r.filename for r in entries} != {'store-signed.tar.gz', 'store-signed-receipt.json'}:
@@ -368,9 +411,12 @@ def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attemp
                     or expected.get('identifier') != signing.identifier(row['path']) or expected.get('codeDirectoryFlags') != flags):
                 raise ValueError('Signed Store native member differs')
     runtime = _extract_component(archive, output / 'extracted', 'runtime')
-    (output / 'signed-origin.json').write_text(json.dumps({'schema': 1, 'source': source, 'target': target,
-        'runId': run_id, 'runAttempt': attempt, 'artifactId': artifact_id, 'artifactDigest': artifact['digest'],
-        'receiptSha256': hashlib.sha256(receipt_body).hexdigest(), 'archiveSha256': receipt['signedArchiveSha256']}, sort_keys=True) + '\n')
+    provenance = {'schema': 1, 'source': source, 'target': target,
+        'runId': run_id, 'runAttempt': attempt, 'artifactId': artifact_id, 'artifactDigest': origin['digest'],
+        'receiptSha256': hashlib.sha256(receipt_body).hexdigest(), 'archiveSha256': receipt['signedArchiveSha256']}
+    if retained_transport is not None:
+        provenance['retainedTransport'] = retained_transport
+    (output / 'signed-origin.json').write_text(json.dumps(provenance, sort_keys=True) + '\n')
     transport.unlink()
     return runtime
 
@@ -449,17 +495,155 @@ def restore(output, run_id, source, arch, artifact_id=None):
     return base
 
 
-def restore_selected(output, target):
+def _source_selector():
     spec = importlib.util.spec_from_file_location('_mrk_store_source_selector', ROOT / 'desktop/tools/stage_macos_installed.py')
     stager = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = stager
     spec.loader.exec_module(stager)
-    selected, original = stager.signed_store_selection(target)
+    return stager
+
+
+def retained_selection_data(body, selected, stager):
+    """SOURCE pins historical service bytes; a carrier cannot nominate them."""
+    if type(body) is not bytes or not 0 < len(body) <= RETAINED_SELECTION_LIMIT:
+        raise ValueError('Signed Store retention nomination size differs')
+    value = stager.decode(body, byte_limit=RETAINED_SELECTION_LIMIT, node_limit=256)
+    if (type(value) is not dict or set(value) != {'schemaVersion', 'targets'}
+            or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
+            or type(value['targets']) is not dict or set(value['targets']) != set(stager.MAC_TARGETS)):
+        raise ValueError('Signed Store retention nomination shape differs')
+
+    fields = {'source', 'runId', 'runAttempt', 'artifactId', 'digest', 'bytes'}
+    def archive_binding(row, limit):
+        if (type(row) is not dict or set(row) != fields
+                or type(row['source']) is not str or not re.fullmatch(r'[0-9a-f]{40}', row['source'])
+                or any(type(row[key]) is not str or not re.fullmatch(r'[1-9][0-9]{0,15}', row[key])
+                       or int(row[key]) > 9007199254740991 for key in ('runId', 'runAttempt', 'artifactId'))
+                or type(row['digest']) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', row['digest'])
+                or type(row['bytes']) is not int or not 0 < row['bytes'] <= limit):
+            raise ValueError('Signed Store retention archive binding differs')
+
+    for target, row in value['targets'].items():
+        if row is None:
+            continue  # Explicit original route, not a failed-retention fallback.
+        if (type(row) is not dict or set(row) != {'original', 'transport'}
+                or type(row['transport']) is not dict):
+            raise ValueError('Signed Store retention target shape differs')
+        archive_binding(row['original'], ZIP_LIMIT)
+        transport = row['transport']
+        if transport == {'kind': 'original'}:
+            continue
+        if (target != stager.ARM_TARGET or set(transport) != fields | {'kind'}
+                or transport['kind'] != 'retained-actions'):
+            raise ValueError('Signed Store retention transport differs')
+        archive_binding({key: transport[key] for key in fields}, RETAINED_ZIP_LIMIT)
+    target = stager.mac_target(selected['target'])
+    row = value['targets'][target]
+    if row is not None and any(row['original'][key] != selected[key]
+                               for key in ('source', 'runId', 'runAttempt', 'artifactId')):
+        raise ValueError('Signed Store retention original selection differs')
+    return row
+
+
+def _retained_selection(stager, selected):
+    with stager.parent(stager.DESKTOP / RETAINED_SELECTION) as (fd, leaf):
+        body, info = stager.read_at(fd, leaf, RETAINED_SELECTION_LIMIT)
+        return retained_selection_data(body, selected, stager), (body, stager.signature(info))
+
+
+def _selection_post(stager, target, selection, retained):
+    if stager.signed_store_selection(target) != selection:
+        raise ValueError('SOURCE-selected signed Store changed during operation')
+    if _retained_selection(stager, selection[0]) != retained:
+        raise ValueError('SOURCE-selected signed Store retention changed during operation')
+
+
+def _validate_retained_transport(record, target):
+    # Expiry of the original ZIP does not replace its original signing job.
+    # No original artifact GET/download or fabricated expired=false response:
+    # the explicitly reviewed SOURCE pin authenticates those historical bytes.
+    original, transport = record['original'], record['transport']
+    _signed_producer(int(original['runId']), original['source'], 'arm64', int(original['runAttempt']))
+    run_id, attempt, artifact_id = (int(transport[key]) for key in ('runId', 'runAttempt', 'artifactId'))
+    source = transport['source']
+    run = api(f'actions/runs/{run_id}')
+    workflow = api('actions/workflows/desktop-macos-components.yml')
+    artifact = api(f'actions/artifacts/{artifact_id}')
+    if (run.get('id') != run_id or run.get('repository', {}).get('full_name') != REPOSITORY
+            or run.get('head_repository', {}).get('full_name') != REPOSITORY
+            or run.get('head_branch') != RETAINED_BRANCH or run.get('event') != 'workflow_dispatch'
+            or run.get('head_sha') != source or workflow.get('path') != RETAINED_WORKFLOW
+            or run.get('workflow_id') != workflow.get('id')
+            or artifact.get('id') != artifact_id or artifact.get('expired') is not False
+            or artifact.get('name') != f'store-signed-retained-{target}-{run_id}-{attempt}'
+            or artifact.get('workflow_run', {}).get('id') != run_id
+            or artifact.get('workflow_run', {}).get('head_sha') != source
+            or type(artifact.get('size_in_bytes')) is not int or artifact['size_in_bytes'] != transport['bytes']
+            or artifact.get('digest') != transport['digest']):
+        raise ValueError('Retained signed Store service transport differs')
+    jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+    if type(jobs.get('total_count')) is not int or not 0 < jobs['total_count'] <= 100:
+        raise ValueError('Retained signed Store job roster differs')
+    selected = [row for row in jobs['jobs'] if row.get('name') == RETAINED_JOB]
+    if (len(selected) != 1 or selected[0].get('run_id') != run_id or selected[0].get('run_attempt') != attempt
+            or selected[0].get('head_sha') != source or selected[0].get('status') != 'completed'
+            or selected[0].get('conclusion') != 'success'):
+        raise ValueError('Original signed Store retention job did not pass')
+
+
+def _restore_retained(output, record, target):
+    _validate_retained_transport(record, target)
+    output.mkdir(mode=0o700)
+    outer = output / 'retained-transport.zip'
+    _download_signed_zip(outer, record['transport'])
+    with zipfile.ZipFile(outer) as zipped:
+        entries = zipped.infolist()
+        if (len(entries) != 1 or entries[0].filename != ORIGINAL_ZIP
+                or entries[0].file_size != record['original']['bytes'] or entries[0].flag_bits & 1
+                or stat.S_IFMT(entries[0].external_attr >> 16) not in (0, stat.S_IFREG)):
+            raise ValueError('Retained signed Store transport roster differs')
+        with zipped.open(entries[0]) as original, (output / 'artifact.zip').open('xb') as destination:
+            shutil.copyfileobj(original, destination, 1024 * 1024)
+    _check_signed_zip(output / 'artifact.zip', record['original'])
+    runtime = _project_signed(output, record['original'], 'arm64', retained_transport=record['transport'])
+    outer.unlink()
+    return runtime
+
+
+def retain_selected(output, target):
+    """Copy the live original ZIP once; no payload parsing or native work."""
+    stager = _source_selector()
+    selection = stager.signed_store_selection(target)
+    selected = selection[0]
+    retained = _retained_selection(stager, selected)
+    record = retained[0]
+    if target != stager.ARM_TARGET or record is None or record['transport'] != {'kind': 'original'}:
+        raise ValueError('Retention requires the explicitly pinned original ARM signed Store ZIP')
+    origin = _signed_origin(int(selected['runId']), selected['source'], 'arm64',
+                            int(selected['artifactId']), expected_attempt=int(selected['runAttempt']))
+    if origin != record['original']:
+        raise ValueError('SOURCE-pinned original signed Store ZIP differs')
+    output.mkdir(mode=0o700)
+    path = output / ORIGINAL_ZIP
+    _download_signed_zip(path, origin)
+    _selection_post(stager, target, selection, retained)
+    return path
+
+
+def restore_selected(output, target):
+    stager = _source_selector()
+    selection = stager.signed_store_selection(target)
+    selected = selection[0]
+    retained = _retained_selection(stager, selected)
+    record = retained[0]
     arch = 'arm64' if target == stager.ARM_TARGET else 'x86_64'
-    runtime = restore_signed(output, int(selected['runId']), selected['source'], arch,
-                             int(selected['artifactId']), expected_attempt=int(selected['runAttempt']))
-    if stager.signed_store_selection(target) != (selected, original):
-        raise ValueError('SOURCE-selected signed Store changed during restore')
+    if record is not None and record['transport']['kind'] == 'retained-actions':
+        runtime = _restore_retained(output, record, target)
+    else:
+        runtime = restore_signed(output, int(selected['runId']), selected['source'], arch,
+                                 int(selected['artifactId']), expected_attempt=int(selected['runAttempt']),
+                                 archive_pin=record['original'] if record is not None else None)
+    _selection_post(stager, target, selection, retained)
     return runtime
 
 
@@ -469,6 +653,9 @@ def main():
     selected = sub.add_parser('restore-selected', help='Restore only the fixed SOURCE-selected signed Store component')
     selected.add_argument('output', type=Path)
     selected.add_argument('--target', required=True, choices=['aarch64-apple-darwin', 'x86_64-apple-darwin'])
+    retain = sub.add_parser('retain-selected', help='Retain the exact live original signed ARM Store ZIP without extraction')
+    retain.add_argument('output', type=Path)
+    retain.add_argument('--target', required=True, choices=['aarch64-apple-darwin'])
     config = sub.add_parser('config')
     config.add_argument('output', type=Path)
     pack = sub.add_parser('archive')
@@ -490,6 +677,8 @@ def main():
     args = parser.parse_args()
     if args.command == 'restore-selected':
         restore_selected(args.output, args.target)
+    elif args.command == 'retain-selected':
+        retain_selected(args.output, args.target)
     elif args.command == 'config':
         write_build_config(args.output)
     elif args.command == 'archive':
