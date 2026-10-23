@@ -1372,6 +1372,9 @@ class Resume:
             signature = self.command(role, ['/usr/bin/codesign', '--verify', '--strict', '--test-requirement', requirement, str(path)], 30)
             need(signature.returncode == 0 and signature.stdout == b'' and signature.stderr == b'', 'resume-installed-signature')
 
+    def pre_detach_originals(self, post, facts):
+        need(post() == facts, 'resume-pre-detach-originals')
+
     def install_image(self, image, preview):
         self.publish_image(self.work / self.image_name, image)
         image_entry, original = self.quota.call(self.outer, 'file', self.work / self.image_name, len(image), modes=(0o444,))
@@ -1468,7 +1471,7 @@ class Resume:
                  'resume-current-installer-result-join')
             self.readback_known = True
             self.verify_installed_signatures()
-            need(post() == facts, 'resume-pre-detach-originals')
+            self.pre_detach_originals(post, facts)
             self.installation = observed
         except BaseException as error:
             primary = error

@@ -1100,6 +1100,104 @@ class PredecessorInstallTests(unittest.TestCase):
         value.installer_zero = value.readback_known = True
         return value
 
+    def test_final_reread_capture_aliases_only_the_three_acquired_originals(self):
+        for predecessor in (False, True):
+            originals, row, stage = mounted_fixture('aarch64-apple-darwin')
+            owner = self.owner() if predecessor else instance()
+            if predecessor: owner._CandidateResume__nomination = nomination()
+            owner._CandidateResume__artifact_admitted = True
+            owner._CandidateResume__members_document = R.canonical(row['members'])
+            owner.selection = stage.source_build_selection(owner.target)
+            stage.PRODUCER_DESCRIPTOR_BYTES = stage.PRODUCER_SIGNATURE_BYTES = 65536
+            owner.stager, owner.signing_identity = stage, row['signingIdentity']
+            owner.point = mock.Mock(); owner.admit_resources = mock.Mock(); owner._resource_inputs = (0,0)
+            owner.allocation_budget = mock.Mock()
+            mounted, entries = object(), {}
+            def acquired(book, operation, path, *args, **kwargs):
+                self.assertIs(book, mounted)
+                self.assertEqual(operation, 'file')
+                entry = entries[path.name] = {'path':path}
+                return entry, originals[path.name][0]
+            owner.quota = SimpleNamespace(call=acquired)
+            preview = {key+'Sha256':row[key]['sha256'] for key in ('package','descriptor','signature')}
+            preview.update(packageSize=len(originals['Install.pkg'][0]), installerInventorySha256=row['inventorySha256'],
+                           runtimeManifestSha256=row['runtimeManifestSha256'])
+            with self.subTest(predecessor=predecessor), mock.patch.object(C.os, 'stat', side_effect=lambda name, **kwargs:
+                    SimpleNamespace(st_mode=stat.S_IFREG|0o444, st_size=len(originals[name][0]),
+                                    st_uid=C.os.getuid(), st_gid=C.os.getgid())), mock.patch.object(C.os, 'open') as opened:
+                returned, _, _, _ = owner.read_mounted(mounted, {'fd':-1}, Path('/inert'), b'image', preview)
+                opened.assert_not_called()
+            self.assertEqual(len(entries), 3)
+            captured = owner._CandidateResume__mounted_reread_inputs
+            if predecessor:
+                self.assertIs(captured[0], mounted)
+                self.assertEqual(tuple(name for name,entry,body in captured[1]), tuple(originals))
+                for name,entry,body in captured[1]:
+                    self.assertIs(entry, entries[name])
+                    self.assertIs(body, originals[name][0])
+                    self.assertIs(body, returned[name][0])
+            else:
+                self.assertIsNone(captured)
+
+    def test_final_reread_reads_real_held_fds_in_bounded_blocks_without_reopening(self):
+        import tempfile
+        names = ('Install.pkg','producer.json','producer.sig')
+        bodies = (b'P'*(2*65536+7), b'inert-descriptor', b'inert-signature')
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory(prefix='.p0-reread-', dir=ROOT) as folder:
+                entries, held, reads, identities = [], [], [], []
+                try:
+                    for name,body in zip(names,bodies):
+                        path = Path(folder) / name
+                        path.write_bytes(body); path.chmod(0o444)
+                        fd = C.os.open(path, C.os.O_RDONLY | C.os.O_NOFOLLOW | C.os.O_CLOEXEC)
+                        entry = {'fd':fd, 'closed':False, 'path':path, 'kind':'file', 'identity':R.identity(C.os.fstat(fd))}
+                        entries.append(entry)
+                        held.append((name,entry,body[:-1]+b'X' if corrupt and name == 'Install.pkg' else body))
+                    def check_one(entry):
+                        identities.append(entry)
+                        R.need(R.identity(C.os.fstat(entry['fd'])) == entry['identity'] ==
+                               R.identity(C.os.stat(entry['path'], follow_symlinks=False)), 'inert-original-identity')
+                    book = SimpleNamespace(entries=entries, check_one=check_one)
+                    owner = self.owner()
+                    owner.mount_path = lambda: Path(folder)
+                    owner.clock = R.Deadline(now=lambda:1)
+                    owner.quota = SimpleNamespace(check=lambda: [check_one(entry) for entry in entries])
+                    owner._CandidateResume__installed_signature_state = 'deferred'
+                    owner._CandidateResume__mounted_reread_inputs = (book,tuple(held))
+                    actual_pread = C.os.pread
+                    def pread(fd, count, offset):
+                        self.assertIs(owner.clock.finality, False)
+                        self.assertIn(fd, [entry['fd'] for entry in entries])
+                        self.assertLessEqual(count, 65536)
+                        reads.append((fd,count,offset))
+                        return actual_pread(fd,count,offset)
+                    with mock.patch.dict(R.STATE), mock.patch.object(C.os, 'pread', side_effect=pread), \
+                            mock.patch.object(C.os, 'open') as opened:
+                        if corrupt:
+                            with self.assertRaisesRegex(R.Refused, 'resume-image-retained-post'):
+                                owner.pre_detach_originals(lambda:'same', 'same')
+                            self.assertEqual(owner._CandidateResume__mounted_reread_state, 'entered')
+                            self.assertEqual(reads, [(entries[0]['fd'],65536,0), (entries[0]['fd'],65536,65536),
+                                                     (entries[0]['fd'],7,2*65536)])
+                        else:
+                            owner.pre_detach_originals(lambda:'same', 'same')
+                            self.assertEqual(owner._CandidateResume__mounted_reread_state, 'verified')
+                            expected = []
+                            for entry,body in zip(entries,bodies):
+                                expected += [(entry['fd'],min(65536,len(body)-offset),offset) for offset in range(0,len(body),65536)]
+                                expected.append((entry['fd'],1,len(body)))
+                            self.assertEqual(reads, expected)
+                            self.assertTrue(all(sum(item is entry for item in identities) >= 2 for entry in entries))
+                        self.assertIsNone(owner._CandidateResume__mounted_reread_inputs)
+                        before = list(reads)
+                        with self.assertRaisesRegex(R.Refused, 'candidate-predecessor-reread-order'):
+                            owner.pre_detach_originals(lambda:'same', 'same')
+                        self.assertEqual(reads, before)
+                        opened.assert_not_called()
+                finally:
+                    for entry in entries: C.os.close(entry['fd'])
+
     @contextmanager
     def scheduled_install(self, mode='predecessor', fault=None):
         """Actual install/command/signature methods; inert native and FS ports."""
@@ -1142,10 +1240,18 @@ class PredecessorInstallTests(unittest.TestCase):
             if operation == 'directory': return directory
             return {'path':path, 'identity':(1,2)}, image if path.suffix == '.dmg' else message
         owner.quota = SimpleNamespace(call=quote, check=lambda: None)
+        bodies = {'Install.pkg':b'P'*(65536+17), 'producer.json':b'inert-descriptor', 'producer.sig':b'inert-signature'}
+        held = tuple((name, {'kind':'file', 'path':mount/name, 'fd':100+index, 'closed':False,
+            'identity':(1,index,stat.S_IFREG|0o444,0,0,1,len(body),0,0)}, body)
+            for index,(name,body) in enumerate(bodies.items()))
+        descriptors = {entry['fd']:(name,body) for name,entry,body in held}
         def finish():
             events.append('mounted-finish')
+            for name,entry,body in held: entry.update(fd=None, closed=fault != 'mounted-close')
             return fault != 'mounted-close'
-        owner.fresh_book = lambda **kwargs: SimpleNamespace(check=lambda: None, finish=finish)
+        mounted = SimpleNamespace(entries=[entry for name,entry,body in held], check=lambda: None,
+            check_one=lambda entry: self.assertIs(entry['closed'], False), finish=finish)
+        owner.fresh_book = lambda **kwargs: mounted
         owner.host = SimpleNamespace(filesystem=lambda fd: {'flags':0})
         owner.transport_facts = lambda entry: facts
         def roster(entry):
@@ -1160,7 +1266,8 @@ class PredecessorInstallTests(unittest.TestCase):
         owner.fresh_directory = lambda parent, name: {'path':owner.work / name}
         def read_mounted(*args):
             if mode != 'fixed': owner._CandidateResume__binding = R.canonical(row)
-            return {'producer.json':(b'inert-descriptor',0o444)}, row, {}, b'inert-inventory'
+            if mode == 'predecessor': owner._CandidateResume__mounted_reread_inputs = (mounted,held)
+            return {name:(body,0o444) for name,body in bodies.items()}, row, {}, b'inert-inventory'
         owner.read_mounted = read_mounted
         owner.prepare_readback = lambda *args: False if mode in ('acquire','acquire-restore','acquire-removal') else None
         request = 'f'*32
@@ -1179,7 +1286,7 @@ class PredecessorInstallTests(unittest.TestCase):
             role = owner.calls[-1]['role']
             events.append(role); native_calls.append((role, argv, kwargs))
             if fault == role + '-unknown': raise original_error
-            code = 16 if role == 'detach' and fault == 'detach16' else 1 if fault == role else 0
+            code = 16 if role == 'detach' and fault in ('detach16','reread-bytes-detach16') else 1 if fault == role else 0
             stdout = (b'-----BEGIN PUBLIC KEY-----\ninert\n-----END PUBLIC KEY-----\n' if role == 'producer-key'
                       else b'Verified OK\n' if role == 'producer-signature' else b'')
             if fault == role + '-stdout': stdout = b'inert-not-empty'
@@ -1187,6 +1294,26 @@ class PredecessorInstallTests(unittest.TestCase):
             if role == 'detach' and fault == 'work-deadline': now[0] = owner.clock.work + 1
             return subprocess.CompletedProcess(argv, code, stdout, stderr)
         owner.owner = SimpleNamespace(run_owned=run_owned)
+        retained_post = R.retained_image_post
+        def byte_post(book, entry, body, clock):
+            if book is not mounted:
+                events.append('mounted-post')
+                return
+            self.assertIs(entry, next(item for item in mounted.entries if item is entry))
+            retained_post(book,entry,body,clock)
+        def pread(fd, count, offset):
+            name,body = descriptors[fd]
+            self.assertLessEqual(count,65536)
+            self.assertIs(owner.clock.finality,False)
+            self.assertIn('readback', events)
+            self.assertNotIn('mounted-finish',events)
+            events.append(('reread',name,count,offset))
+            if fault == 'reread-unknown': raise original_error
+            if name == 'Install.pkg':
+                if fault in ('reread-bytes','reread-bytes-detach16') and offset == 65536: return b'X'*count
+                if fault == 'reread-eof' and offset == len(body): return b'X'
+                if fault == 'reread-deadline': now[0] = owner.clock.work + 1
+            return body[offset:offset+count]
         with ExitStack() as patches:
             patches.enter_context(mock.patch.dict(R.STATE, phase='admission', firstFailurePhase=None))
             patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
@@ -1194,7 +1321,8 @@ class PredecessorInstallTests(unittest.TestCase):
             patches.enter_context(mock.patch.object(R.os, 'fstatvfs', return_value=SimpleNamespace(f_flag=0)))
             patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg','producer.json','producer.sig']))
             patches.enter_context(mock.patch.object(R, 'mount_data'))
-            patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=lambda *args: events.append('mounted-post')))
+            patches.enter_context(mock.patch.object(R.os, 'pread', side_effect=pread))
+            patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=byte_post))
             yield owner, image, preview, events, native_calls, original_error
 
     def test_only_predecessor_moves_the_exact_pair_after_first_detach(self):
@@ -1217,9 +1345,20 @@ class PredecessorInstallTests(unittest.TestCase):
                 self.assertLess(events.index('mounted-finish'), events.index('detach'))
                 if mode == 'predecessor':
                     self.assertEqual(owner._CandidateResume__installed_signature_state, 'verified')
+                    self.assertEqual(owner._CandidateResume__mounted_reread_state, 'verified')
+                    self.assertIsNone(owner._CandidateResume__mounted_reread_inputs)
                     self.assertLess(events.index('readback'), events.index('mounted-post', events.index('readback')))
                     self.assertLess(events.index('detach-post'), events.index('entry-signature'))
                     self.assertEqual(C._PREDECESSOR_DETACH['outcome'], 'detach0')
+                    self.assertTrue(C._PREDECESSOR_DETACH['finalMountedRereadKnown'])
+                    rereads = [event for event in events if type(event) is tuple and event[0] == 'reread']
+                    self.assertEqual(rereads, [('reread','Install.pkg',65536,0),('reread','Install.pkg',17,65536),
+                        ('reread','Install.pkg',1,65553),('reread','producer.json',16,0),('reread','producer.json',1,16),
+                        ('reread','producer.sig',15,0),('reread','producer.sig',1,15)])
+                    self.assertLess(events.index('mounted-post',events.index('readback')),events.index(rereads[0]))
+                    self.assertEqual(events[events.index(rereads[-1])+1], 'mounted-finish')
+                else:
+                    self.assertFalse(any(type(event) is tuple and event[0] == 'reread' for event in events))
                 for role,argv,kwargs in calls:
                     self.assertEqual(kwargs['environ'], owner.environment)
                     self.assertEqual(kwargs['cwd'], owner.work)
@@ -1268,15 +1407,37 @@ class PredecessorInstallTests(unittest.TestCase):
                     self.assertEqual(report['reason'], 'resume-original-detach')
                     self.assertEqual(report['detachObservation']['outcome'], 'detach16')
 
+    def test_final_reread_failure_keeps_primary_and_cannot_reach_signature_or_success(self):
+        for fault in ('reread-bytes','reread-eof','reread-unknown','reread-deadline','reread-bytes-detach16'):
+            with self.subTest(fault=fault), self.scheduled_install(fault=fault) as (owner,image,preview,events,calls,original):
+                with self.assertRaises((R.Refused,RuntimeError)) as caught: owner.install_image(image,preview)
+                if fault == 'reread-unknown': self.assertIs(caught.exception,original)
+                self.assertEqual(owner._CandidateResume__mounted_reread_state,'entered')
+                self.assertIsNone(owner._CandidateResume__mounted_reread_inputs)
+                self.assertEqual(owner._CandidateResume__installed_signature_state,'deferred')
+                self.assertEqual([role for role,argv,kwargs in calls], ['attach','producer-key','producer-signature','installer','detach'])
+                self.assertEqual(events.count('mounted-finish'),1)
+                self.assertLess(events.index('mounted-finish'),events.index('detach'))
+                report = C.failure_data(caught.exception)
+                self.assertFalse(report['detachObservation']['finalMountedRereadKnown'])
+                self.assertNotIn('finalMountedRereadVerified',report)
+                self.assertNotIn('installedSignaturesVerified',report)
+                if fault == 'reread-bytes-detach16':
+                    self.assertEqual(report['reason'],'resume-image-retained-post')
+                    self.assertEqual(report['detachObservation']['outcome'],'detach16')
+                    self.assertIn('resume-detach-finality-failed',caught.exception.__notes__)
+
     def test_predecessor_receipt_cannot_promote_pending_or_failed_signatures(self):
         originals, row, stage = mounted_fixture('aarch64-apple-darwin')
         result, inventory = R.mounted_data(originals, row, row['target'], stage, candidate=True)
-        for state in (None,'deferred','entered','verified'):
-            with self.subTest(state=state):
+        for state,reread in ((None,'verified'),('deferred','verified'),('entered','verified'),
+                             ('verified',None),('verified','entered'),('verified','verified')):
+            with self.subTest(state=state,reread=reread):
                 owner = self.owner()
                 owner._CandidateResume__nomination = nomination()
                 owner._CandidateResume__source_loaded = True
                 owner._CandidateResume__installed_signature_state = state
+                owner._CandidateResume__mounted_reread_state = reread
                 owner._CandidateResume__detach_observation = {'outcome':'detach0'}
                 owner.helper_source, owner.helper_tree, owner.run_id, owner.run_attempt = 'd'*40, 'e'*40, '51', '2'
                 owner.quota = SimpleNamespace(reserved=0, finish=mock.Mock(return_value=True))
@@ -1290,10 +1451,14 @@ class PredecessorInstallTests(unittest.TestCase):
                 with mock.patch.object(C.candidate, 'candidate_preview_data', return_value={}):
                     if state != 'verified':
                         with self.assertRaisesRegex(R.Refused, 'candidate-predecessor-installed-signatures'): owner.consume(0,0)
+                    elif reread != 'verified':
+                        with self.assertRaisesRegex(R.Refused, 'candidate-predecessor-reread-known'): owner.consume(0,0)
                     else:
                         report = owner.consume(0,0)
                         self.assertTrue(report['installedSignaturesVerified'])
                         self.assertEqual(report['installedSignatureCheckOrder'], 'after-first-detach0')
+                        self.assertTrue(report['finalMountedRereadVerified'])
+                        self.assertEqual(report['finalMountedRereadOrder'],'after-readback-before-mounted-closes')
                         self.assertFalse(report['packageInstallScheduleEqual'] or report['p0Qualified'] or report['productReady'])
                         self.assertLessEqual(len(R.canonical(report)), C.PREDECESSOR_METADATA_LIMIT)
 

@@ -275,6 +275,7 @@ class CandidateResume(resume.Resume):
         self.__predecessor_install = predecessor_install
         self.__detach_observation = None
         self.__installed_signature_state = None
+        self.__mounted_reread_inputs = self.__mounted_reread_state = None
         self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
         self.acquisition_result = None
         self.__predecessor_metadata = None
@@ -304,6 +305,7 @@ class CandidateResume(resume.Resume):
                     'candidate-predecessor-detach-once')
         observation = {'entered': True, 'returned': False, 'outcome': 'unknown',
             'installerReturnedZero': self.installer_zero is True, 'readbackKnown': self.readback_known is True,
+            'finalMountedRereadKnown': self.__mounted_reread_state == 'verified',
             'stderr': 'unclassified', 'textHints': None, 'systemServiceExitClaimed': False}
         self.__detach_observation = observation
         global _PREDECESSOR_DETACH
@@ -538,6 +540,7 @@ class CandidateResume(resume.Resume):
         self.admit_resources(*self._resource_inputs, image_bytes=len(image),
                              package_bytes=preview['packageSize'], reading=True)
         originals, selected = {}, {}
+        held = [] if self.__predecessor_install else None
         for key, name, cap in (('package', 'Install.pkg', preview['packageSize']),
                               ('descriptor', 'producer.json', self.stager.PRODUCER_DESCRIPTOR_BYTES),
                               ('signature', 'producer.sig', self.stager.PRODUCER_SIGNATURE_BYTES)):
@@ -549,6 +552,7 @@ class CandidateResume(resume.Resume):
                         and (key != 'package' or len(body) == preview['packageSize']), 'candidate-mounted-content-pin')
             originals[name] = (body, 0o444)
             selected[key] = {'name': name, 'bytes': len(body), 'sha256': resume.sha(body)}
+            if held is not None: held.append((name, entry, body))
         row = dict(self.nomination, **selected, packageVersion=self.selection.package_version, release=self.selection.release,
             members=resume.decode(self.__members_document),
             inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
@@ -562,8 +566,43 @@ class CandidateResume(resume.Resume):
         self.point()
         self.__binding = resume.canonical(row)
         self.__binding_image_bytes = len(image)
+        if held is not None: self.__mounted_reread_inputs = (mounted, tuple(held))  # Aliases only; no byte copy/new original.
         if self.purpose in ("acquire-restore", "acquire-removal"): self._restore_originals = originals
         return originals, row, result, inventory
+
+    def pre_detach_originals(self, post, facts):
+        super().pre_detach_originals(post, facts)
+        if not self.__predecessor_install: return
+        # Production's final mounted-read workload, after full readback and
+        # immediately before the unchanged consuming mounted.finish/detach.
+        # Bounded streaming is NOT production's whole-file syscall schedule.
+        # Stay in the SAME work region; never spend the cleanup reserve here.
+        resume.need(self.__installed_signature_state == 'deferred' and self.__mounted_reread_state is None
+                    and self.__mounted_reread_inputs is not None and self.__detach_observation is None
+                    and self.installer_zero is True and self.readback_known is True and self.clock.finality is False,
+                    'candidate-predecessor-reread-order')
+        self.__mounted_reread_state = 'entered'
+        mounted, held = self.__mounted_reread_inputs
+        self.__mounted_reread_inputs = None  # Drop extra aliases before any fallible reread; never retry.
+        resume.STATE['phase'] = 'mounted-reread'
+        names = ('Install.pkg', 'producer.json', 'producer.sig')
+        mount = self.mount_path()
+        resume.need(tuple(name for name, entry, body in held) == names
+                    and sum(entry['kind'] == 'file' for entry in mounted.entries) == 3,
+                    'candidate-predecessor-reread-originals')
+        for name, entry, body in held:
+            resume.need(any(entry is original for original in mounted.entries)
+                        and entry['kind'] == 'file' and entry['path'] == mount / name
+                        and type(entry['fd']) is int and entry['fd'] >= 0 and entry['closed'] is False
+                        and type(body) is bytes and 0 < len(body) <= resume.LIMIT
+                        and entry['identity'][6] == len(body) and stat.S_IMODE(entry['identity'][2]) == 0o444,
+                        'candidate-predecessor-reread-originals')
+            self.point()
+            # The existing reader compares exact retained bytes plus EOF and
+            # original identity, with 64KiB reads and no full-size extra copy.
+            resume.retained_image_post(mounted, entry, body, self.clock)
+            self.point()
+        self.__mounted_reread_state = 'verified'
 
     def install_image(self, image, preview):
         resume.need(self.__artifact_admitted and self.__binding is None and self.__source_loaded
@@ -579,7 +618,8 @@ class CandidateResume(resume.Resume):
             # The unchanged owner has consumed mounted originals and completed
             # its sole detach0/namespace POST. A failed/unknown detach never gets
             # here. These remain actual calls under the SAME owner and deadline.
-            resume.need(self.__installed_signature_state == 'deferred' and self.mount_detached is True
+            resume.need(self.__installed_signature_state == 'deferred' and self.__mounted_reread_state == 'verified'
+                        and self.mount_detached is True
                         and self.__detach_observation is not None and self.__detach_observation['outcome'] == 'detach0'
                         and self.installer_zero is True and self.readback_known is True,
                         'candidate-predecessor-signature-order')
@@ -763,9 +803,11 @@ class CandidateResume(resume.Resume):
                 result['predecessorMetadata'] = predecessor_metadata_data(resume.decode(self.__predecessor_metadata), self.nomination)
                 if self.__predecessor_install:
                     resume.need(self.__installed_signature_state == 'verified', 'candidate-predecessor-installed-signatures')
+                    resume.need(self.__mounted_reread_state == 'verified', 'candidate-predecessor-reread-known')
                     result.update(experiment='public-predecessor-install-detach',
                         detachObservation=dict(self.__detach_observation), packageInstallScheduleEqual=False,
-                        installedSignatureCheckOrder='after-first-detach0', installedSignaturesVerified=True)
+                        installedSignatureCheckOrder='after-first-detach0', installedSignaturesVerified=True,
+                        finalMountedRereadOrder='after-readback-before-mounted-closes', finalMountedRereadVerified=True)
                 resume.need(len(resume.canonical(result)) <= PREDECESSOR_METADATA_LIMIT, 'candidate-predecessor-receipt-bound')
                 self.clock.check()
             if self.purpose == 'restore-install':
@@ -1122,6 +1164,8 @@ def failure_data(error):
         'candidate-predecessor-install-purpose', 'candidate-predecessor-target',
         'candidate-predecessor-detach-once', 'resume-original-detach',
         'candidate-predecessor-signature-order', 'candidate-predecessor-installed-signatures', 'resume-installed-signature',
+        'candidate-predecessor-reread-order', 'candidate-predecessor-reread-originals',
+        'candidate-predecessor-reread-known', 'resume-image-retained-post', 'resume-image-retained-eof',
         'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
         'candidate-materialize-lifetime-quote', 'candidate-materialize-live-quote',
         'candidate-materialize-os-fd-limit', 'candidate-materialize-originals-known',
