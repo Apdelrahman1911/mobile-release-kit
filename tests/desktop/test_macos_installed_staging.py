@@ -9334,7 +9334,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             entry["closed"] = True
         def returned(role, argv, **options):
             events.append(role)
-            self.assertEqual(argv, ["/usr/bin/hdiutil", "detach", "/dev/disk99s1"])
+            self.assertEqual(argv, ["/usr/bin/hdiutil", "detach", "/dev/disk99s1", "-verbose"])
             self.assertEqual(options, {"timeout": 30})
         with (mock.patch.object(operation, "recheck_mount", side_effect=lambda: events.append("mount-post")),
               mock.patch.object(operation, "close", side_effect=closed),

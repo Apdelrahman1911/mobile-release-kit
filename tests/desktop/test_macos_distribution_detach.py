@@ -99,6 +99,25 @@ class DistributionDetachData(unittest.TestCase):
                     b'hdiutil: detach failed - Resource busy\nhdiutil: detach failed - Permission denied\n'):
             self.assertEqual(H.distribution_detach_stderr(raw), 'unclassified')
 
+    def test_text_hints_use_both_bounded_original_captures_not_a_cause_claim(self):
+        expected = ['resource-busy-text', 'unmount-text', 'eject-text', 'dissent-text']
+        stdout = b'UNMOUNT DISSENTER ' + PRIVATE
+        stderr = b'EJECT Resource Busy resource busy ' + PRIVATE
+        self.assertEqual(H.distribution_detach_text_hints(stdout, stderr), expected)
+        self.assertEqual(H.distribution_detach_text_hints(stderr, stdout), expected)
+        for stdout, stderr in ((b'', b''), (PRIVATE, PRIVATE), (b'un', b'mount')):
+            self.assertEqual(H.distribution_detach_text_hints(stdout, stderr), [])
+        self.assertEqual(H.distribution_detach_text_hints(b'x' * 65529, b'unmount'), ['unmount-text'])
+        for stdout, stderr in ((b'x' * 65530, b'unmount'), (b'', b'x' * 65537),
+                               (None, b''), (b'', None), ('unmount', b''), (bytearray(b'unmount'), b'')):
+            with self.subTest(stdoutType=type(stdout), stderrType=type(stderr)):
+                self.assertIsNone(H.distribution_detach_text_hints(stdout, stderr))
+        self.assertEqual(H.distribution_detach_text_hints_data(expected), expected)
+        self.assertEqual(H.distribution_detach_text_hints_data([]), [])
+        for value in (None, {}, expected * 2, expected[::-1], ['unmount-text'] * 2,
+                      [True], [PRIVATE.decode()], ['unmount-text', PRIVATE.decode()]):
+            self.assertIsNone(H.distribution_detach_text_hints_data(value))
+
     def test_nul_fields_scope_device_and_never_publish_raw_identity(self):
         raw = (lsof_rows(9, pid=321, uid=501, fd=b'cwd')
             + lsof_rows(9, pid=543, uid=0, command=b'installd', fd=b'3')
@@ -145,6 +164,29 @@ class DistributionDetachCustody(unittest.TestCase):
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
 
+    def test_only_package_install_adds_verbose_without_changing_other_detach_routes(self):
+        # Isolate argv construction/consuming closes, not full native phases.
+        for phase in ('package-install', H.SAME_PACKAGE_PHASE, H.UPDATE_PHASE, *H.FINAL_IMAGE_PHASES):
+            with self.subTest(phase=phase), operation() as op:
+                op.phase = phase
+                op.installation_readback = True
+                mounted_fds = [row['fd'] for row in op.entries if row['kind'] in ('mount', 'mounted-file')]
+                def original(role, argv, **options):
+                    self.assert_closed(mounted_fds)
+                    self.assertEqual(role, H.UPDATE_ROLES[2] if phase == H.UPDATE_PHASE else 'distribution-detach')
+                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1']
+                                     + (['-verbose'] if phase == 'package-install' else []))
+                    self.assertEqual(options, {'timeout': 60 if phase == H.UPDATE_PHASE else 30})
+                    return subprocess.CompletedProcess(argv, 0, b'', b'')
+                with (mock.patch.object(op, 'package_call', side_effect=original) as call,
+                      mock.patch.object(op, 'transport_mount_detached') as absent,
+                      mock.patch.object(op, 'package_clock', return_value=NOW)):
+                    op.detach_package_mount()
+                call.assert_called_once()
+                absent.assert_called_once_with()
+                self.assertTrue(op.mount_detached)
+                self.assertIsNone(op.distribution_detach_diagnostic)
+
     def test_real_readback_and_mounted_fds_close_before_original16_and_single_probe(self):
         with operation() as op:
             selected = S.BuildSelection(op.target, '0.2.0', 'macos26-detach-data')
@@ -183,9 +225,11 @@ class DistributionDetachCustody(unittest.TestCase):
                 self.assertEqual(options['environ'], op.native_environment())
                 if argv[0] == '/usr/bin/hdiutil':
                     events.append(('detach', None))
-                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1'])
-                    self.assertEqual(options['timeout'], 30)
-                    return subprocess.CompletedProcess(argv, 16, b'', b'hdiutil: detach failed - Resource busy\n')
+                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1', '-verbose'])
+                    self.assertEqual((options['timeout'], options['output_limit'], options['text'], options['capture']),
+                                     (30, 65536, False, True))
+                    return subprocess.CompletedProcess(argv, 16, b'UNMOUNT EJECT ' + PRIVATE,
+                        b'hdiutil: detach failed - Resource busy\nDISSENT ' + PRIVATE)
                 events.append(('lsof', None))
                 self.assertEqual(argv, ['/usr/sbin/lsof', '-n', '-P', '-b', '-F0pcuftD', '+f', '--', str(op.transport_mount)])
                 self.assertEqual((options['timeout'], options['output_limit'], options['text'], options['capture']),
@@ -221,6 +265,8 @@ class DistributionDetachCustody(unittest.TestCase):
             value = json.loads(public)
             self.assertEqual(value['lastRecordedNative']['role'], 'distribution-detach')
             self.assertEqual(value['distributionDetach']['stderr'], 'resource-busy')
+            self.assertEqual(value['distributionDetach']['textHints'],
+                             ['resource-busy-text', 'unmount-text', 'eject-text', 'dissent-text'])
             observation = value['distributionDetach']['holderObservation']
             self.assertEqual(observation['state'], 'visible-holders')
             self.assertEqual(observation['holders']['rows'][0]['command'], 'installer-name')
@@ -232,6 +278,31 @@ class DistributionDetachCustody(unittest.TestCase):
             self.assertEqual(set(path.name for path in op.work.iterdir()), {op.target_name,
                 'android-helper-distribution-detach.stdout', 'android-helper-distribution-detach.stderr',
                 'android-helper-distribution-detach.status'})
+
+    def test_hint_failure_cannot_replace_original16_or_authorize_retry(self):
+        with operation() as op:
+            op.installation_readback = True
+            def command(argv, **options):
+                return subprocess.CompletedProcess(argv, 16 if argv[0] == '/usr/bin/hdiutil' else 1, b'', b'')
+            op.owner.run_owned = mock.Mock(side_effect=command)
+            with mock.patch.object(H, 'distribution_detach_text_hints', side_effect=KeyboardInterrupt(PRIVATE.decode())):
+                with self.assertRaises(H.Refused) as caught:
+                    op.detach_package_mount()
+            self.assertIs(caught.exception, op.distribution_detach_refusal[0])
+            self.assertEqual(op.calls[-1]['returncode'], 16)
+            self.assertTrue(op.calls[-1]['capturesSettled'])
+            self.assertEqual(op.owner.run_owned.call_count, 2)
+            self.assertFalse(op.mount_detached)
+            self.assertTrue(op.distribution_detach_diagnostic_known())
+            self.assertIsNone(H.failure_diagnostic(caught.exception, operation=op)['distributionDetach']['textHints'])
+            # The public projection must also refuse corrupted finite DATA,
+            # not publish an arbitrary native string from a calls record.
+            op.calls[-1]['detachTextHints'] = ['unmount-text', PRIVATE.decode()]
+            public = H.failure_diagnostic(caught.exception, operation=op)
+            self.assertIsNone(public['distributionDetach']['textHints'])
+            self.assertNotIn(PRIVATE.decode(), json.dumps(public))
+            op.observe_distribution_detach_failure(caught.exception)
+            self.assertEqual(op.owner.run_owned.call_count, 2)
 
     def test_only_same_refusal_can_start_probe_not_late_errors_or_close_uncertainty(self):
         for fault in ('different-object', 'deadline-after-zero', 'nonzero-other', 'capture-unknown', 'close-unknown'):
@@ -265,6 +336,9 @@ class DistributionDetachCustody(unittest.TestCase):
                 if fault == 'deadline-after-zero':
                     self.assertEqual(op.calls[-1]['returncode'], 0)
                     self.assertTrue(op.calls[-1]['returned'] and op.calls[-1]['capturesSettled'])
+                if fault in ('deadline-after-zero', 'nonzero-other'):
+                    self.assertNotIn('detachTextHints', op.calls[-1])
+                    self.assertIsNone(H.failure_diagnostic(H.Refused('inert'), operation=op)['distributionDetach'])
                 self.assertFalse(op.mount_detached)
 
     def test_unknown_diagnostic_original_retains_resources_not_just_a_state_word(self):

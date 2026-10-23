@@ -1655,6 +1655,8 @@ _PACKAGE_DIAGNOSTIC_ROLES = (
 # detach/retry/cleanup authority. Raw lsof output is never published.
 _DETACH_STDERR_REASONS = ('empty', 'resource-busy', 'permission-denied', 'operation-not-permitted',
                           'no-such-device', 'unclassified')
+_DETACH_TEXT_HINTS = ((b'resource busy', 'resource-busy-text'), (b'unmount', 'unmount-text'),
+                      (b'eject', 'eject-text'), (b'dissent', 'dissent-text'))
 _DETACH_HOLDER_STATES = ('unavailable', 'mount-unavailable', 'deadline-unavailable', 'native-unknown',
                          'native-nonzero', 'malformed-output', 'no-visible-match', 'visible-holders')
 _DETACH_HOLDER_OWNERS = ('self', 'same-user', 'root-visible', 'other-visible', 'unknown-user')
@@ -1674,6 +1676,24 @@ def distribution_detach_stderr(stderr):
     lines = stderr.split(b'\n')
     found = {label for text, label in known.items() if b'hdiutil: detach failed - ' + text in lines}
     return next(iter(found)) if len(found) == 1 else 'unclassified'
+
+
+def distribution_detach_text_hints(stdout, stderr):
+    """Literal hints from BOTH same-original captures, never cause or PID."""
+    if (type(stdout) is not bytes or type(stderr) is not bytes
+            or len(stdout) + len(stderr) > 65536):
+        return None
+    data = stdout.lower() + b'\n' + stderr.lower()
+    return [label for text, label in _DETACH_TEXT_HINTS if text in data]
+
+
+def distribution_detach_text_hints_data(value):
+    """Closed canonical copy only; no arbitrary native strings can escape."""
+    if (type(value) is not list or len(value) > len(_DETACH_TEXT_HINTS)
+            or any(type(hint) is not str for hint in value)):
+        return None
+    selected = [label for _, label in _DETACH_TEXT_HINTS if label in value]
+    return selected if selected == value else None
 
 
 def distribution_busy_holders(stdout, stderr, code, *, device, own_pid, own_uid):
@@ -2776,6 +2796,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             and native.get("capturesSettled") is True and type(native.get("returncode")) is int
             and native["returncode"] == 16):
         detach = {"stderr": token(native.get("detachStderr"), _DETACH_STDERR_REASONS),
+                  "textHints": distribution_detach_text_hints_data(native.get("detachTextHints")),
                   "holderObservation": distribution_detach_diagnostic_data(state.get("distribution_detach_diagnostic"))}
     return {
         "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
@@ -3770,6 +3791,7 @@ class Operation:
         if self.phase == "package-install" and role == "distribution-detach" and result.returncode == 16:
             try:
                 record["detachStderr"] = distribution_detach_stderr(result.stderr)
+                record["detachTextHints"] = distribution_detach_text_hints(result.stdout, result.stderr)
             except BaseException:
                 pass  # Passive diagnosis never replaces the identical original16.
             original = Refused("original-nonzero-distribution-detach")
@@ -9019,9 +9041,12 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
+        argv = ["/usr/bin/hdiutil", "detach", self.mount_device]
+        if self.phase == "package-install":
+            argv.append("-verbose")  # Same first operation and deadline; diagnostic text only.
         try:
             self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
-                              ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
+                              argv, timeout=60 if self.phase == UPDATE_PHASE else 30)
         except BaseException as original:
             try:
                 self.observe_distribution_detach_failure(original)
