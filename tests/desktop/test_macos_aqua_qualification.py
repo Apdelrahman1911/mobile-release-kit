@@ -3319,6 +3319,137 @@ class AquaDataTests(unittest.TestCase):
                             fixtures.close()
                             self.assertEqual((fixtures.fds, fixtures.close_errors), (set(), 0))
 
+    def test_git_template_retirement_uses_originals_and_namespace_not_directory_link_count(self):
+        # Execute only each actual leaf's trailing template-retirement block.
+        # No Git commands/native owner/app; real disposable directories/FDs.
+        leaves = [(M.GIT_CLI, scope) for scope in M.GIT_CLI.SCOPES]
+        leaves += [(M.PUSH, scope) for scope in M.PUSH.SCOPES]
+        leaves += [(M.UPSTREAM, M.UPSTREAM.SCOPE), (M.FETCH, M.FETCH.SCOPE)]
+        self.assertEqual(sum(len(M.selected_cases(scope)) for _, scope in leaves), 15)
+        for helper, scope in leaves:
+            tree = ast.parse(Path(helper.__file__).read_text())
+            prepare = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "before_invocation")
+            blocks = [node for node in ast.walk(prepare) if isinstance(node, ast.With)
+                      and any(isinstance(item.optional_vars, ast.Name) and item.optional_vars.id == "template" for item in node.items)]
+            self.assertEqual(len(blocks), 1)
+            start = next(i for i, node in enumerate(blocks[0].body)
+                         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                         and isinstance(node.value.func, ast.Attribute)
+                         and node.value.func.attr in ("_roster", "_retire_git_template"))
+            wrapper = ast.parse("def retire(f, case, tmp, template): pass")
+            wrapper.body[0].body = blocks[0].body[start:]
+            namespace = dict(vars(helper))
+            exec(compile(ast.fix_missing_locations(wrapper), "<fixed-git-template-retirement>", "exec"), namespace)
+            retire = namespace["retire"]
+            for case in M.selected_cases(scope):
+                faults = ("links", "replacement", "symlink", "template-before", "parent-before", "parent-after",
+                          "template-inode", "template-owner", "template-mode", "parent-inode", "not-empty",
+                          "rmdir", "fsync", "stat") if case == M.GIT_CLI.INDEX else ("links",)
+                for fault in faults:
+                    with self.subTest(case=case, fault=fault), tempfile.TemporaryDirectory(prefix="mrk-git-template-") as temporary:
+                        fixtures = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), scope)
+                        events, removed = [], False
+                        failure = OSError("inert fixed filesystem failure")
+                        real_stat, real_fstat, real_rmdir, real_fsync = M.os.stat, M.os.fstat, M.os.rmdir, M.os.fsync
+                        try:
+                            state = fixtures._open(temporary, directory=True)
+                            fixtures.states[case] = state
+                            tmp = fixtures._mkdir(state, "tmp")
+                            template = fixtures._mkdir(tmp, "empty-template")
+                            fixtures.last_returned = True  # DATA only; no command was run.
+                            if fault == "not-empty": fixtures._write(template, "unexpected", b"public fixture\n")
+                            if fault == "template-before":
+                                M.os.rename("empty-template", "held-template", src_dir_fd=tmp, dst_dir_fd=tmp)
+                                M.os.mkdir("empty-template", 0o700, dir_fd=tmp)
+                            if fault == "parent-before":
+                                M.os.rename("tmp", "held-tmp", src_dir_fd=state, dst_dir_fd=state)
+                                M.os.mkdir("tmp", 0o700, dir_fd=state)
+                            def unlink(name, *, dir_fd):
+                                nonlocal removed
+                                self.assertEqual((name, dir_fd), ("empty-template", tmp))
+                                events.append("rmdir")
+                                if fault == "rmdir": raise failure
+                                real_rmdir(name, dir_fd=dir_fd); removed = True
+                                if fault == "replacement": M.os.mkdir(name, 0o700, dir_fd=dir_fd)
+                                if fault == "symlink": M.os.symlink("absent-target", name, dir_fd=dir_fd)
+                                if fault == "parent-after":
+                                    M.os.rename("tmp", "held-tmp", src_dir_fd=state, dst_dir_fd=state)
+                                    M.os.mkdir("tmp", 0o700, dir_fd=state)
+                            def sync(fd):
+                                self.assertEqual(fd, tmp); events.append("fsync")
+                                if fault == "fsync": raise failure
+                                real_fsync(fd)
+                            def named(name, *, dir_fd=None, follow_symlinks=True):
+                                if removed and name == "empty-template" and dir_fd == tmp and fault == "stat": raise failure
+                                return real_stat(name, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+                            def held(fd):
+                                actual = real_fstat(fd)
+                                if not removed: return actual
+                                fields = {name: getattr(actual, name) for name in ("st_dev", "st_ino", "st_mode", "st_uid",
+                                    "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                                if fd == template:
+                                    # Explicit synthetic metadata, not a guessed Mac observation.
+                                    if fault == "links": fields["st_nlink"] = 7
+                                    if fault == "template-inode": fields["st_ino"] += 1
+                                    if fault == "template-owner": fields["st_uid"] += 1
+                                    if fault == "template-mode": fields["st_mode"] = stat.S_IFDIR | 0o755
+                                if fd == tmp and fault == "parent-inode": fields["st_ino"] += 1
+                                return SimpleNamespace(**fields)
+                            with patch("subprocess.Popen", side_effect=AssertionError("No command")), \
+                                    patch("socket.socket", side_effect=AssertionError("No network")), \
+                                    patch.object(M.os, "rmdir", side_effect=unlink), patch.object(M.os, "fsync", side_effect=sync), \
+                                    patch.object(M.os, "stat", side_effect=named), patch.object(M.os, "fstat", side_effect=held):
+                                if fault == "links":
+                                    with fixtures._temporary(template):
+                                        retire(fixtures, case, tmp, template)
+                                        self.assertIn(template, fixtures.fds)  # Same caller owns the sole close.
+                                elif fault in ("rmdir", "fsync", "stat"):
+                                    with self.assertRaises(OSError) as caught: retire(fixtures, case, tmp, template)
+                                    self.assertIs(caught.exception, failure)
+                                else:
+                                    with self.assertRaises(M.Refused): retire(fixtures, case, tmp, template)
+                            if fault == "links":
+                                # Retire the metadata injection with the original FD;
+                                # the next roster reader can reuse its numeric value.
+                                fixtures._roster(tmp, (), "final-empty-tmp")
+                            else:
+                                self.assertTrue({state, tmp, template} <= fixtures.fds)
+                            self.assertEqual(events, [] if fault in ("not-empty", "template-before", "parent-before")
+                                             else ["rmdir"] if fault == "rmdir" else ["rmdir", "fsync"])
+                        finally:
+                            fixtures.close()
+                            self.assertEqual((fixtures.fds, fixtures.close_errors), (set(), 0))
+
+    def test_git_template_retirement_refuses_unknown_or_non_git_custody_before_io(self):
+        for fault in ("inflight", "inflight-type", "unreturned", "returned-type", "close-error", "non-git",
+                      "unselected", "missing-state", "unowned-state", "unowned-tmp", "unowned-template"):
+            scope = None if fault == "non-git" else M.GIT_CLI.SCOPES[0]
+            fixtures = M.Fixtures(BINDING, UID, GID, scope)
+            case = fixtures.cases[0]
+            state, tmp, template = object(), object(), object()  # Inert DATA, never real native/FD custody.
+            fixtures.fds.update((state, tmp, template)); fixtures.states[case] = state
+            fixtures.last_returned = True
+            if fault == "inflight": fixtures.inflight = True
+            if fault == "inflight-type": fixtures.inflight = 0
+            if fault == "unreturned": fixtures.last_returned = False
+            if fault == "returned-type": fixtures.last_returned = 1
+            if fault == "close-error": fixtures.close_errors = 1
+            if fault == "unselected": fixtures.cases = (M.GIT_CLI.BRANCH,)
+            if fault == "missing-state": del fixtures.states[case]
+            if fault.startswith("unowned-"):
+                fixtures.fds.remove({"unowned-state": state, "unowned-tmp": tmp, "unowned-template": template}[fault])
+            before = (fixtures.inflight, fixtures.last_returned, fixtures.close_errors,
+                      fixtures.fds.copy(), fixtures.states.copy())
+            with self.subTest(fault=fault), patch.object(M.os, "stat", side_effect=AssertionError("No filesystem admission")), \
+                    patch.object(M.os, "fstat", side_effect=AssertionError("No filesystem admission")), \
+                    patch.object(M.os, "rmdir", side_effect=AssertionError("No removal")), \
+                    patch.object(M.os, "fsync", side_effect=AssertionError("No sync")), \
+                    patch.object(M.os, "close", side_effect=AssertionError("No consuming close")):
+                with self.assertRaisesRegex(M.Refused, "^git-template-retirement-custody$"):
+                    fixtures._retire_git_template(case, tmp, template)
+            self.assertEqual((fixtures.inflight, fixtures.last_returned, fixtures.close_errors,
+                              fixtures.fds, fixtures.states), before)
+
     def test_original_file_error_survives_one_spent_cleanup_failure(self):
         fixtures = M.Fixtures(BINDING, UID, GID)
         token = object()  # Not an actual descriptor, even if a mock is broken.

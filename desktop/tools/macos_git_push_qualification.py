@@ -380,12 +380,7 @@ def before_invocation(f, case, run_owned, username):
                 # fetch, remote process, object removal or separate pack spool.
                 f._write(git, DATA, data)
                 f.push_cases[case].update(base=base, target=target, other=other, version=version.decode("ascii"))
-            f._roster(template, (), "push-template-used")
-            held = _sig(os.fstat(template))
-            _need(held[:5] == _sig(os.stat("empty-template", dir_fd=tmp, follow_symlinks=False))[:5], "push-template-original")
-            os.rmdir("empty-template", dir_fd=tmp)
-            os.fsync(tmp)
-            _need(os.fstat(template).st_nlink == 0, "push-template-unlink")
+            f._retire_git_template(case, tmp, template)
         f._roster(tmp, (), "push-setup-tmp-not-empty")
     f.push_cases[case]["before"] = _capture(f, case)
     remaining(f, case)

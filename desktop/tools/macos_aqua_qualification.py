@@ -4866,6 +4866,38 @@ class Fixtures:
         need(signature(before) == signature(info) and info.st_mode == stat.S_IFDIR | mode
              and (info.st_uid, info.st_gid) == (self.uid, self.gid), "fixture-directory-custody")
 
+    def _retire_git_template(self, case, tmp, template):
+        need(type(case) is str and case in (*GIT_CLI.CASES, *UPSTREAM.CASES, *PUSH.ALL_CASES, *FETCH.CASES)
+             and case in self.cases and case in self.states
+             and self.inflight is False and self.last_returned is True and not self.close_errors
+             and all(fd in self.fds for fd in (self.states[case], tmp, template)),
+             "git-template-retirement-custody")
+        state = self.states[case]
+        self._named(state, "tmp", tmp, 0o700)
+        self._named(tmp, "empty-template", template, 0o700)
+        parent = signature(os.fstat(tmp))[:5]
+        original = signature(os.fstat(template))
+        self._roster(template, (), "git-template-not-empty")
+        self._named(state, "tmp", tmp, 0o700)
+        need(signature(os.fstat(tmp))[:5] == parent
+             and signature(os.fstat(template)) == original
+             and signature(os.stat("empty-template", dir_fd=tmp, follow_symlinks=False)) == original,
+             "git-template-retirement-original")
+        os.rmdir("empty-template", dir_fd=tmp)
+        os.fsync(tmp)
+        # An open removed directory can retain a nonzero link count on Darwin.
+        # Namespace absence, not st_nlink, proves this fixed entry was retired.
+        try:
+            os.stat("empty-template", dir_fd=tmp, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            need(False, "git-template-retirement-named")
+        need(signature(os.fstat(template))[:5] == original[:5]
+             and signature(os.fstat(tmp))[:5] == parent, "git-template-retirement-original")
+        self._named(state, "tmp", tmp, 0o700)
+        # The original caller keeps the sole consuming close and final tmp scan.
+
     def _write(self, parent, name, body, *, mode=0o600):
         need(mode in (0o600, 0o644), "fixture-write-mode")
         with self._temporary(self._open(name, parent, create=True)) as fd:
