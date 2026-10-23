@@ -251,6 +251,59 @@ def retained_observer_memory_requirement(selection, retained, *, image_bytes=Non
     return copies + (16 << 20) + retained + (512 << 20) + (1 << 30)
 
 
+def stager_failure_data(error, value, origins, expected_path):
+    """Only the source-loaded parser's bounded failure DATA; never its inputs."""
+    try:
+        from pathlib import Path
+        from types import ModuleType, FunctionType
+        import sys
+        path = str(expected_path)
+        module = sys.modules.get('_mrk_candidate_stager')
+        if (type(module) is not ModuleType or vars(module).get('__file__') != path
+                or vars(module).get('__name__') != '_mrk_candidate_stager'):
+            return value
+        source = vars(module)
+        parsers = tuple(source.get(name) for name in ('install_product_members', 'xar_members'))
+        namespace, filename = origins[1]
+        boundary = namespace.get('mounted_data')
+        if not all(type(fn) is FunctionType and fn.__globals__ is ns and fn.__code__.co_filename == name
+                   for fn, ns, name in ((boundary, namespace, filename), *((fn, source, path) for fn in parsers))):
+            return value
+        labels = source.get('INSTALL_PRODUCT_AUDIT_REASONS')
+        if not (type(labels) is frozenset and 0 < len(labels) <= 64
+                and all(type(label) is str and re.fullmatch(r'[a-z][a-z0-9-]{0,95}', label) for label in labels)):
+            return value
+        frames, boundary_seen, parser_seen = [], False, False
+        tb = BaseException.__traceback__.__get__(error)
+        for _ in range(32):
+            if tb is None: break
+            frame, code = tb.tb_frame, tb.tb_frame.f_code
+            boundary_seen |= code is boundary.__code__ and frame.f_globals is namespace
+            parser_seen |= boundary_seen and frame.f_globals is source and any(code is fn.__code__ for fn in parsers)
+            for ns, name in (*origins, (source, path)):
+                if (frame.f_globals is ns and code.co_filename == name
+                        and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', code.co_name)
+                        and type(tb.tb_lineno) is int and 0 < tb.tb_lineno < 1000000):
+                    frames.append({'file': Path(name).name, 'function': code.co_name, 'line': tb.tb_lineno})
+                    frames = frames[-8:]
+                    break
+            tb = tb.tb_next
+        if not parser_seen: return value
+        result = dict(value, sourceFrames=frames)
+        refused = source.get('Refused')
+        if type(refused) is type and vars(refused).get('__module__') == '_mrk_candidate_stager' and type(error) is refused:
+            labels = labels | frozenset(('xar-header', 'xar-header-bound', 'xar-toc-size', 'xar-toc',
+                'scripts-only-package-no-payload', 'xar-member-bound', 'xar-member-encoding',
+                'xar-member-size', 'scripts-package-required', 'compressed-data-bound'))
+            parts = BaseException.args.__get__(error)
+            result['exceptionClass'] = 'Refused'
+            result['reason'] = (parts[0] if len(parts) == 1 and type(parts[0]) is str
+                                and len(parts[0]) <= 96 and parts[0] in labels else 'unavailable')
+        return result
+    except BaseException:
+        return value
+
+
 def retained_observer_install_receipt_data(value, selection, helper_source, helper_tree, run, attempt, work_identity):
     """Closed new consumer DATA. Caller must ALSO hold its actual post-return0.
 

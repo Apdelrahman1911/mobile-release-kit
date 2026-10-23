@@ -1396,8 +1396,7 @@ def failure_data(error):
         PermissionError: 'PermissionError', ValueError: 'ValueError', TypeError: 'TypeError',
         RuntimeError: 'RuntimeError', KeyError: 'KeyError', AttributeError: 'AttributeError',
         ImportError: 'ImportError', KeyboardInterrupt: 'KeyboardInterrupt', SystemExit: 'SystemExit'}
-    # Only these already-loaded module globals and their actual compile paths
-    # are eligible. A matching basename or forged traceback filename is not enough.
+    # Exact loaded globals and compile paths only.
     origins = ((globals(), __file__), (vars(resume), resume.__file__), (vars(candidate), candidate.__file__))
     captured, donor, boundary_seen, donor_seen = _SYSTEM_TOOL_FAILURE, None, False, False
     if (type(captured) is tuple and len(captured) == 3 and captured[0] is error
@@ -1459,7 +1458,7 @@ def failure_data(error):
                      installedSignatureCheckOrder='after-first-detach0')
     if _RETAINED_DETACH is not None:
         value['retainedDetachObservation'] = retained_detach_diagnostic_data(_RETAINED_DETACH)
-    return value
+    return candidate.stager_failure_data(error, value, origins, CANDIDATE_ROOT / STAGER_PATH)
 
 
 if __name__ == '__main__':
