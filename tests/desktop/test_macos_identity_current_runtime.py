@@ -55,6 +55,14 @@ def environment():
     }
 
 
+def retained_environment():
+    return {**environment(), "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": M.RETAINED_REF,
+        "GITHUB_WORKFLOW_REF": M.RETAINED_WORKFLOW, "GITHUB_SHA": "b" * 40, "GITHUB_WORKFLOW_SHA": "b" * 40,
+        "GITHUB_RUN_ID": "900", "GITHUB_RUN_ATTEMPT": "2", "MRK_MACOS_NATIVE_SCOPE": M.TOOLS_SCOPE,
+        "MRK_MACOS_TARGET": M.TARGET, "MRK_CANDIDATE_MODE": "install-retained-observer",
+        "MRK_CANDIDATE_SOURCE": BINDING.source}
+
+
 class InertOnly(unittest.TestCase):
     def setUp(self):
         no_process = patch("subprocess.Popen", side_effect=AssertionError("native/process execution forbidden"))
@@ -63,6 +71,45 @@ class InertOnly(unittest.TestCase):
 
 
 class CurrentRouteTests(InertOnly):
+    def test_retained_modifier_is_explicit_and_never_admits_git_intel_or_mac27(self):
+        env = retained_environment()
+        self.assertEqual(M.retained_context(env, M.TARGET),
+            ("b" * 40, "900", "2", Path(env["MRK_MACOS_WORK"])))
+        with self.assertRaises(M.Refused): M.current_context(env, M.TARGET)
+        with self.assertRaises(M.Refused): M.retained_context(environment(), M.TARGET)
+        for scope in M.RETAINED_SCOPES:
+            args = ["--target", M.TARGET, "--scope", scope]
+            if scope == M.PUBLIC_TOOLS_SCOPE:
+                args = ["--target", M.TARGET, "--scope", M.TOOLS_SCOPE, "--tool-cases", "public-acquisition"]
+            self.assertEqual(M.entry_arguments(["--retained-observer", *args]), (scope, True))
+            self.assertEqual(M.entry_arguments(args), (scope, False))
+        for args in (["--target", M.TARGET, "--scope", M.FETCH_SCOPE],
+                     ["--target", M.TARGET, "--scope", M.GIT_CLI_SCOPES[0]], ["--target", A.INTEL_TARGET],
+                     ["--target", M.TARGET, "--retained-observer"]):
+            with self.subTest(args=args), self.assertRaises(M.Refused):
+                M.entry_arguments(["--retained-observer", *args])
+        for key, value in (("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", M.REF),
+                           ("GITHUB_WORKFLOW_SHA", BINDING.source), ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image"),
+                           ("MRK_MACOS_NATIVE_SCOPE", M.GIT_SCOPE), ("GITHUB_RUN_ATTEMPT", "0"),
+                           ("MRK_MACOS_RUNNER", "xcode-27"), ("MRK_CANDIDATE_MODE", "install")):
+            with self.subTest(key=key), self.assertRaises(M.Refused):
+                M.retained_context({**env, key: value}, M.TARGET)
+
+    def test_retained_main_binds_original_tuple_but_preserves_actual_current_helper_environment(self):
+        # Tuple comparison DATA only: installed admission/run are not executed.
+        selected = (None, b"INERT selection", {"origin": {
+            "source": BINDING.source, "runId": BINDING.run, "runAttempt": BINDING.attempt}})
+        env = retained_environment()
+        result, observed, owner, run, error = self.main_with_host_data(env, "26.6.2", M.SCOPE, retained=selected)
+        self.assertEqual((result, error), (0, ""))
+        observed.assert_called_once_with(); owner.assert_called_once_with(retained=True)
+        self.assertEqual(run.call_args.args[1], BINDING)
+        self.assertEqual(run.call_args.args[5], Path(env["MRK_MACOS_WORK"]))
+        self.assertEqual(run.call_args.args[6], env)
+        self.assertIs(run.call_args.kwargs["retained"], selected)
+        result, _, owner, run, _ = self.main_with_host_data(env, "26.6.2", M.SCOPE)
+        self.assertEqual(result, 1); owner.assert_not_called(); run.assert_not_called()
+
     def test_two_git_cli_singletons_require_same_closed_combined_image_and_real_host_gate(self):
         env = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE,
                "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
@@ -102,15 +149,19 @@ class CurrentRouteTests(InertOnly):
             with self.subTest(native=native), self.assertRaises(M.Refused):
                 M.observation_scope({**env, "MRK_MACOS_NATIVE_SCOPE": native}, M.PUBLIC_TOOLS_SCOPE)
 
-    def main_with_host_data(self, env, version, scope, *, machine="arm64"):
+    def main_with_host_data(self, env, version, scope, *, machine="arm64", retained=None):
         # These substituted host observations are DATA only. main, context,
         # _native_user and the before-owner refusal ordering are actual code;
         # no installed owner or Mac native work is invoked.
         import stat
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, env, clear=True))
-            stack.enter_context(patch.object(sys, "argv", ["entry", "--target", M.TARGET, "--scope", scope]))
-            stack.enter_context(patch.object(M, "__file__", str(M.CHECKOUT / "desktop/tools/macos_identity_current_runtime.py")))
+            prefix = ["--retained-observer"] if retained is not None else []
+            stack.enter_context(patch.object(sys, "argv", ["entry", *prefix, "--target", M.TARGET, "--scope", scope]))
+            source = M.HELPER_ROOT if retained is not None else M.CHECKOUT
+            stack.enter_context(patch.object(M, "__file__", str(source / "desktop/tools/macos_identity_current_runtime.py")))
+            if retained is not None:
+                stack.enter_context(patch.object(M, "_retained_selection", return_value=retained))
             stack.enter_context(patch.object(M.Path, "cwd", return_value=M.CHECKOUT))
             stack.enter_context(patch("platform.machine", return_value=machine))
             observed = stack.enter_context(patch("platform.mac_ver", return_value=(version, (), "arm64")))
@@ -390,9 +441,210 @@ class CurrentBindingFilesTests(InertOnly):
             self.admit()
 
 
+class RetainedBindingFilesTests(InertOnly):
+    """Actual bounded readers/parsers; the installed/native owner alone is inert."""
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(ROOT))
+        try:
+            self.parser = importlib.import_module("desktop.tools.macos_candidate_carrier")
+        finally:
+            sys.path.pop(0)
+        self.temp = tempfile.TemporaryDirectory(prefix="mrk-retained-runtime-data-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.checkout, self.work, self.installed = (self.root / name for name in ("checkout", "work", "installed"))
+        self.helper = self.checkout / ".candidate-consumer-helper"
+        # Kernel file ownership only, not a mocked native-user qualification.
+        self.uid, self.gid = os.getuid() or 501, os.getgid()
+        for path in (self.checkout, self.work, self.installed, self.checkout / ".git", self.checkout / "desktop",
+                     self.checkout / "desktop/macos-installed-inputs", self.checkout / "desktop/packaging",
+                     self.helper, self.helper / ".git", self.helper / "desktop", self.helper / "desktop/tools",
+                     self.helper / "desktop/macos-installed-inputs", self.helper / "src", self.helper / "src/mobile_release"):
+            path.mkdir(mode=0o700)
+            if os.getuid() == 0: os.chown(path, self.uid, self.gid)
+        self.env = retained_environment()
+        self.put(self.checkout / ".git/HEAD", (BINDING.source + "\n").encode())
+        self.put(self.helper / ".git/HEAD", (self.env["GITHUB_SHA"] + "\n").encode())
+        for name in M.RETAINED_HELPER_FILES:
+            self.put(self.helper / "desktop/tools" / name, b"# INERT helper SOURCE for FD/readback checks\n")
+        for name in (*A.OWNER_FILES, "__init__.py", "errors.py", "_lifetime_evidence.py", "_store_lane_contract.py"):
+            self.put(self.helper / "src/mobile_release" / name, b"# INERT owner SOURCE; never imported/executed\n")
+        for name in ("macos-install-producer-signing.profile", "macos-android-service-signing.profile"):
+            self.put(self.checkout / "desktop/packaging" / name, (ROOT / "desktop/packaging" / name).read_bytes())
+        python_bytes = b"INERT interpreter bytes; no native execution\n"
+        python = json.loads((ROOT / "desktop" / STAGE.SIGNED_RUNTIME_BINDING).read_bytes())
+        python["targets"][M.TARGET]["signedPythonSha256"] = A.digest(python_bytes)
+        self.put(self.checkout / "desktop" / STAGE.SIGNED_RUNTIME_BINDING, STAGE.canonical(python))
+        for name in (STAGE.SIGNED_STORE_SELECTION, "macos-installed-inputs/build-release.json"):
+            self.put(self.checkout / "desktop" / name, (ROOT / "desktop" / name).read_bytes())
+        release = json.loads((self.checkout / "desktop/macos-installed-inputs/build-release.json").read_bytes())
+        rows = [{"path": name, "size": len(python_bytes) if name == "python/bin/python3" else 1,
+                 "sha256": A.digest(python_bytes if name == "python/bin/python3" else b"x")}
+                for name in sorted(STAGE.CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "python/bin/python3"})]
+        manifest = STAGE.canonical({"schemaVersion": 1, "protocol": 1, "coreVersion": release["packageVersion"],
+            "target": M.TARGET, "coreSha256": A.digest(b"x"), "protocolSha256": STAGE.CURRENT_PROTOCOL,
+            "inventorySha256": A.digest(STAGE.canonical(rows)), "files": rows})
+        inventory = b"INERT inventory bytes: installed-owner seam is substituted\n"
+        for name, body in (("manifest.json", manifest), (STAGE.INSTALLATION_INVENTORY_NAME, inventory),
+                           (STAGE.INSTALLATION_RECORD_NAME, b'{"instance":"' + b"7" * 32 + b'"}'),
+                           ("python3", python_bytes)):
+            self.put(self.installed / name, body)
+        origin = dict(source=BINDING.source, tree="c" * 40, target=M.TARGET, runId=BINDING.run,
+            runAttempt=BINDING.attempt, jobId="456", artifactId="789", artifactBytes=512, artifactSha256="d" * 64)
+        self.selection = dict(schemaVersion=1, kind="retained-observer-source-selection-v1", packageRole=M.ROLE,
+            nativeScope=M.TOOLS_SCOPE, origin=origin, members=[{"name": name, "bytes": 0 if cap == 0 else 1}
+                for name, cap in sorted(self.parser.RETAINED_OBSERVER_MEMBERS.items())])
+        self.selection_body = STAGE.canonical(self.selection)
+        self.put(self.helper / M.RETAINED_SELECTION, self.selection_body)
+        members = [dict(row, sha256=A.digest(b"" if row["bytes"] == 0 else row["name"].encode()))
+                   for row in self.selection["members"]]
+        info = self.work.stat()
+        self.receipt = dict(schemaVersion=1, scope="retained-observer-fresh-install", packageRole=M.ROLE,
+            nativeScope=M.TOOLS_SCOPE, target=M.TARGET, nomination=origin, members=members,
+            image=next(row for row in members if row["name"] == self.parser.RETAINED_OBSERVER_IMAGE),
+            helperSource=self.env["GITHUB_SHA"], helperTree="e" * 40, consumerRunId="900", consumerRunAttempt="2",
+            consumerWorkDirectory=[info.st_dev, info.st_ino, info.st_uid],
+            freshInstall=dict(requestId="8" * 32, invocation="7" * 32, instance="7" * 32,
+                              stateSha256="8" * 64, resultSha256="9" * 64),
+            release=dict(profile="fixed-macos26-arm64-maintenance-v2", packageIdentifier=STAGE.PACKAGE_ID,
+                bundleIdentifier=STAGE.BUNDLE_ID, packageVersion=release["packageVersion"], release=release["release"],
+                sourceCommit=BINDING.source, protocolSha256=STAGE.CURRENT_PROTOCOL, runtimeManifestSha256=A.digest(manifest),
+                inventorySha256=A.digest(inventory), signingPolicySha256="2" * 64, packageSha256="1" * 64))
+        for key, name, size, hashed in (("package", "Install.pkg", 1, "1" * 64),
+                ("descriptor", "producer.json", 1, "3" * 64), ("signature", "producer.sig", 256, "4" * 64),
+                ("inventory", "install-inventory.json", len(inventory), A.digest(inventory))):
+            self.receipt[key] = dict(name=name, bytes=size, sha256=hashed)
+        self.receipt.update({key: True for key in ("nativeProducerSignatureVerified", "installedSignaturesVerified",
+            "originalInstallerReturnedZero", "sameRequestReadback", "originalMountDetached", "originalClosesKnown",
+            "workloadsKnownSettled", "privateOutputsRetired")})
+        self.receipt.update(productReady=False, uiQualified=False, p0Qualified=False)
+        self.put(self.work / "retained-observer-install.json", STAGE.canonical(self.receipt))
+        self.put(self.work / "retained-observer-install.status", b"0\n")
+        self.new_book()
+
+    def put(self, path, body):
+        path.write_bytes(body); path.chmod(0o600)
+        if os.getuid() == 0: os.chown(path, self.uid, self.gid)
+
+    def new_book(self):
+        if hasattr(self, "fixtures"): self.fixtures.close()
+        fixtures = self.fixtures = A.Fixtures(BINDING, self.uid, self.gid, M.SCOPE)
+        self.addCleanup(fixtures.close)
+        self.admissions = []
+        def admit(*args, **kwargs):
+            self.admissions.append((args, kwargs))
+            A._gate_file(fixtures, str(self.checkout / "desktop/macos-installed-inputs/build-release.json"), None, 4096)
+        fixtures.admit_normal_account_runtime = admit
+        fixtures.recovery_runtime_paths = lambda: ("INERT", "INERT")
+        fixtures.normal_stager_registrations = [STAGE]
+        parent = fixtures._open(str(self.installed), directory=True)
+        for name in ("manifest.json", STAGE.INSTALLATION_INVENTORY_NAME, STAGE.INSTALLATION_RECORD_NAME, "python3"):
+            fd = fixtures._open(name, parent)
+            fixtures.recovery_runtime_originals.append((parent, name, fd, A.signature(os.fstat(fd))))
+
+    def gate(self, *, fixture_context=False):
+        retained = (self.parser, self.selection_body, self.selection)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(M, "CHECKOUT", self.checkout))
+            stack.enter_context(patch.object(M, "HELPER_ROOT", self.helper))
+            # The actual fixed-host route has separate tests above; only its
+            # pathname/native seam is redirected to these temporary originals.
+            stack.enter_context(patch.object(M, "retained_context", return_value=("b" * 40, "900", "2", self.work)))
+            if fixture_context:
+                stack.enter_context(patch.object(M, "_retained_selection", return_value=retained))
+                stack.enter_context(patch.object(M, "_load_observer", return_value=A))
+                stack.enter_context(patch.object(A, "Fixtures", return_value=self.fixtures))
+                for name, value in (("getuid", self.uid), ("geteuid", self.uid), ("getgid", self.gid), ("getegid", self.gid)):
+                    stack.enter_context(patch.object(os, name, return_value=value))
+                return M.retained_fixture_context(self.env, M.TARGET, self.uid, self.gid)
+            return M._admit_retained_runtime(A, self.fixtures, BINDING, self.work, self.env, retained)
+
+    def test_same_installed_fds_join_new_receipt_without_any_old_work_binding(self):
+        with patch.object(STAGE, "composed_runtime_binding_data", side_effect=AssertionError("no old composition")), \
+             patch.object(STAGE, "composed_source_binding_data", side_effect=AssertionError("no old work")):
+            public = self.gate()
+        self.assertEqual(self.admissions, [((self.checkout, self.work), {"application_source": BINDING.source})])
+        for _, name, fd, _ in self.fixtures.recovery_runtime_originals:
+            self.assertEqual([r["fd"] for r in self.fixtures.gate_files if r["name"] == name], [fd])
+        self.assertEqual((public["origin"]["source"], public["helperSource"], public["consumerRunId"]),
+                         (BINDING.source, "b" * 40, "900"))
+        self.assertNotIn("consumerWorkDirectory", public)
+        self.assertNotIn(str(self.root), json.dumps(public))
+        self.assertFalse((self.work / "runtime-binding.json").exists())
+        self.assertFalse((self.work / "source-binding.json").exists())
+        M._current(A, self.fixtures)
+
+    def test_status_is_separate_and_receipt_bound_precedes_parser_or_installed_owner(self):
+        for status in (b"", b"1\n", b"16\n", b"0", b"0\n0\n"):
+            self.put(self.work / "retained-observer-install.status", status); self.new_book()
+            with self.subTest(status=status), self.assertRaises((M.Refused, A.Refused)):
+                self.gate()
+            self.assertEqual(self.admissions, [])
+        self.put(self.work / "retained-observer-install.status", b"0\n")
+        self.put(self.work / "retained-observer-install.json", b"x" * 16385); self.new_book()
+        with patch.object(self.parser, "retained_observer_install_receipt_data", side_effect=AssertionError("oversize parsed")), \
+             self.assertRaisesRegex(A.Refused, "gate-original-file"):
+            self.gate()
+
+    def test_old_helper_run_work_or_release_never_substitutes_for_current_install(self):
+        mutations = (("helperSource", BINDING.source), ("consumerRunId", BINDING.run),
+                     ("consumerWorkDirectory", [1, 2, 3]), ("packageRole", "ordinary-image"),
+                     ("nativeScope", M.GIT_SCOPE), ("originalClosesKnown", False),
+                     ("freshInstall", dict(self.receipt["freshInstall"], instance="6" * 32)),
+                     ("release", dict(self.receipt["release"], runtimeManifestSha256="f" * 64)),
+                     ("release", dict(self.receipt["release"], packageVersion="0.1.4")))
+        for key, value in mutations:
+            self.put(self.work / "retained-observer-install.json", STAGE.canonical(dict(self.receipt, **{key: value})))
+            self.new_book()
+            with self.subTest(key=key), self.assertRaises((ValueError, A.Refused, STAGE.Refused)):
+                self.gate()
+
+    def test_distinct_heads_inventory_and_python_must_match_their_held_originals(self):
+        for path in (self.checkout / ".git/HEAD", self.helper / ".git/HEAD"):
+            body = path.read_bytes()
+            self.put(path, ("f" * 40 + "\n").encode()); self.new_book()
+            with self.subTest(path=path.parent), self.assertRaises(A.Refused): self.gate()
+            self.assertEqual(self.admissions, [])
+            self.put(path, body)
+        changed = dict(self.receipt, inventory=dict(self.receipt["inventory"], sha256="f" * 64),
+                       release=dict(self.receipt["release"], inventorySha256="f" * 64))
+        self.put(self.work / "retained-observer-install.json", STAGE.canonical(changed)); self.new_book()
+        with self.assertRaisesRegex(A.Refused, "retained-observer-installed-digest"): self.gate()
+        self.put(self.work / "retained-observer-install.json", STAGE.canonical(self.receipt))
+        path = self.checkout / "desktop" / STAGE.SIGNED_RUNTIME_BINDING
+        python = json.loads(path.read_bytes())
+        python["targets"][M.TARGET]["signedPythonSha256"] = "f" * 64
+        self.put(path, STAGE.canonical(python)); self.new_book()
+        with self.assertRaisesRegex(A.Refused, "retained-observer-installed-digest"): self.gate()
+
+    def test_replaced_selection_receipt_status_helper_or_installed_original_refuses_post_without_repair(self):
+        for path in (self.helper / M.RETAINED_SELECTION, self.work / "retained-observer-install.json",
+                     self.work / "retained-observer-install.status", self.helper / ".git/HEAD",
+                     self.helper / "desktop/tools/macos_aqua_qualification.py", self.installed / "manifest.json"):
+            self.new_book(); self.gate()
+            body = path.read_bytes()
+            replacement = path.with_name(path.name + ".inert-replacement")
+            self.put(replacement, body); replacement.replace(path)
+            with self.subTest(path=path.name), self.assertRaises(A.Refused): M._current(A, self.fixtures)
+            self.assertEqual(path.read_bytes(), body)
+
+    def test_fixture_namespace_api_runs_no_case_or_owner_and_requires_known_close(self):
+        with patch.object(self.fixtures, "prepare", side_effect=AssertionError("no fixture prepare")), \
+             patch.object(A, "load_owner", side_effect=AssertionError("no process owner")), \
+             patch.object(A, "run_cases", side_effect=AssertionError("no native cases")):
+            self.assertEqual(self.gate(fixture_context=True), (BINDING.source, BINDING.run, BINDING.attempt, self.work))
+        self.assertFalse(self.fixtures.fds)
+        self.new_book()
+        with patch.object(self.fixtures, "close", side_effect=OSError("INERT close unknown")) as close:
+            with self.assertRaisesRegex(OSError, "INERT close unknown"): self.gate(fixture_context=True)
+            close.assert_called_once_with()
+
+
 class OriginalCallFlowTests(InertOnly):
-    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None, scope=M.SCOPE, not_ready=False):
+    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None, scope=M.SCOPE, not_ready=False, retained=False):
         events, errors = [], []
+        admission = "admit-retained-runtime" if retained else "admit-current-runtime"
         fixtures = A.Fixtures(BINDING, 501, 20, scope)
         def prepare():
             events.append("prepare")
@@ -412,13 +664,14 @@ class OriginalCallFlowTests(InertOnly):
         fixtures.close = close
 
         def admit(*args):
-            events.append("admit-current-runtime")
+            events.append(admission)
             if admission_failure:
                 raise admission_failure
+            return {"inertOnly": True}
 
         def original(argv, **options):
             self.assertTrue(fixtures.inflight)
-            self.assertIn("admit-current-runtime", events)
+            self.assertIn(admission, events)
             self.assertEqual(argv, [A.EXECUTABLE, fixtures.case])
             self.assertEqual(options["timeout"], A.case_timeout(fixtures.case))
             self.assertEqual(options["environ"], A.app_environment(options["cwd"], 501, "runner"))
@@ -440,7 +693,7 @@ class OriginalCallFlowTests(InertOnly):
         owner = SimpleNamespace(run_owned=original)
         with ExitStack() as stack:
             stack.enter_context(patch.object(A, "Fixtures", return_value=fixtures))
-            stack.enter_context(patch.object(M, "_admit_runtime", side_effect=admit))
+            stack.enter_context(patch.object(M, "_admit_retained_runtime" if retained else "_admit_runtime", side_effect=admit))
             owner_load = stack.enter_context(patch.object(A, "load_owner", return_value=owner))
             stack.enter_context(patch.object(A.identity_qualification, "before_invocation", return_value=None))
             stack.enter_context(patch.object(A.identity_qualification, "readback", side_effect=readback))
@@ -465,11 +718,35 @@ class OriginalCallFlowTests(InertOnly):
                 stack.enter_context(patch.object(A, "run_cases", side_effect=run_cases))
             out, err = io.StringIO(), io.StringIO()
             stack.enter_context(redirect_stdout(out)); stack.enter_context(redirect_stderr(err))
-            env = environment()
+            env = retained_environment() if retained else environment()
             if scope != M.SCOPE:
                 env["MRK_MACOS_NATIVE_SCOPE"] = M.TOOLS_SCOPE
-            status = M._run(A, BINDING, 501, 20, "runner", Path(env["MRK_MACOS_WORK"]), env, scope=scope)
+            status = M._run(A, BINDING, 501, 20, "runner", Path(env["MRK_MACOS_WORK"]), env, scope=scope,
+                            **({"retained": ("INERT admission seam",)} if retained else {}))
         return status, events, [json.loads(line) for line in out.getvalue().splitlines()], errors, fixtures, owner_load
+
+    def test_retained_reuses_original_order_finality_and_prerequisite_without_current_or_shipping_claim(self):
+        status, events, rows, errors, fixtures, owner = self.execute(retained=True)
+        self.assertEqual((status, errors), (0, []))
+        self.assertEqual(events[:2], ["prepare", "admit-retained-runtime"])
+        self.assertEqual(events[-1], "close")
+        owner.assert_called_once_with(M.HELPER_ROOT)
+        self.assertEqual(rows[-1]["type"], "macos-retained-observer-complete")
+        self.assertEqual(rows[-1]["scope"], M.SCOPE)
+        self.assertTrue(all(row["runtimeMode"] == "retained-observer" for row in rows))
+        self.assertFalse(rows[-1]["currentInstalledRuntime"])
+        self.assertFalse(rows[-1]["shippingBinaryQualified"])
+        status, events, rows, errors, fixtures, _ = self.execute(retained=True, scope=M.SERVICE_SCOPE, not_ready=True)
+        self.assertEqual((status, errors), (78, [])); self.assertEqual(events[-1], "close")
+        self.assertEqual(rows[-1]["type"], "macos-retained-observer-unexecuted")
+        first = RuntimeError("INERT retained original unreturned")
+        status, events, rows, errors, fixtures, _ = self.execute(retained=True, failure=first)
+        self.assertEqual((status, rows, errors), (1, [], [first]))
+        self.assertTrue(fixtures.inflight); self.assertNotIn("close", events)
+        self.assertFalse(any(type(row) is tuple and row[0] == "inert-readback" for row in events))
+        status, events, rows, errors, fixtures, owner = self.execute(retained=True,
+            admission_failure=first, close_failure=OSError("INERT close"))
+        self.assertEqual((status, rows, errors), (1, [], [first])); owner.assert_not_called()
 
     def test_same_run_cases_dispatches_exact_four_after_admission_and_close_precedes_complete(self):
         status, events, rows, errors, fixtures, _ = self.execute()

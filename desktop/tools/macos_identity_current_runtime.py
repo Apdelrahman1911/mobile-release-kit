@@ -4,6 +4,8 @@
 Import is DATA-only. The explicit main entry uses the existing Fixtures and
 run_cases/owned_process owners; it never prepares, signs or installs a runtime.
 An ordinary shipping image cannot be substituted for the compiled observer.
+The explicit retained mode separates its original compiled fixture tuple from
+the current helper job; its fresh Installer receipt never recreates old work.
 """
 from pathlib import Path
 import os
@@ -32,6 +34,22 @@ CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
 REF = "refs/heads/verify/desktop-macos-candidate"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-installed.yml@" + REF
+HELPER_ROOT = CHECKOUT / ".candidate-consumer-helper"
+RETAINED_REF = "refs/heads/verify/desktop-macos-observer-reuse"
+RETAINED_WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-candidate-consume.yml@" + RETAINED_REF
+RETAINED_SELECTION = "desktop/macos-installed-inputs/retained-observer-selection.json"
+RETAINED_SCOPES = (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, PUBLIC_TOOLS_SCOPE, CLI_SCOPE,
+                   *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE, BACKUP_CLI_SCOPE)
+# Fixed current helper SOURCE, not a second content-hash or supplier authority.
+# The retained mode uses only these existing tool/identity/upload observers.
+RETAINED_HELPER_FILES = (
+    "macos_identity_current_runtime.py", "macos_aqua_qualification.py",
+    "macos_candidate_carrier.py", "macos_fixed_carrier_resume.py",
+    "macos_identity_qualification.py", "macos_tool_setup_observation.py",
+    "macos_tool_acquisition_observation.py", "macos_cli_local_check_observation.py",
+    "macos_upload_key_observation.py", "macos_upload_key_restart_observation.py",
+    "macos_upload_key_backup_observation.py", "macos_upload_key_cli_observation.py",
+)
 # A source-selected observer host is not a product minimum-OS or Git build
 # nomination. Keep the exact old host; only combined Git admits the preview.
 HOST_PROFILES = (
@@ -115,6 +133,34 @@ def current_context(environment, target):
     return source, environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"], Path(value)
 
 
+def retained_context(environment, target):
+    """Actual current consumer context, never the retained observer's job."""
+    source = environment.get("GITHUB_SHA", "")
+    need(target == TARGET and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+         and source != "0" * 40, "retained-observer-helper-source")
+    required = {
+        "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": RETAINED_REF,
+        "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_REF": RETAINED_WORKFLOW,
+        "GITHUB_WORKFLOW_SHA": source, "MRK_MACOS_TARGET": TARGET,
+        "MRK_CANDIDATE_MODE": "install-retained-observer", "MRK_MACOS_NATIVE_SCOPE": TOOLS_SCOPE,
+        "MRK_MACOS_PACKAGE_ROLE": ROLE,
+    }
+    need(all(environment.get(key) == value for key, value in required.items()), "retained-observer-current-route")
+    need(_host_profile(environment)[0] == "macos-26", "retained-observer-host")
+    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+        need(type(environment.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", environment[key]),
+             "retained-observer-current-run")
+    work = environment.get("MRK_MACOS_WORK")
+    need(type(work) is str and re.fullmatch(
+        r"/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}", work), "retained-observer-current-work")
+    need(all(environment.get(key, "disabled") == "disabled" for key in (
+        "MRK_MACOS_AQUA_SCOPE", "MRK_MACOS_SAME_PACKAGE_SCOPE", "MRK_MACOS_XCODE_SETUP_SCOPE",
+        "MRK_MACOS_REMOVAL_CASE")), "retained-observer-single-scope")
+    return source, environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"], Path(work)
+
+
 def observation_scope(environment, scope):
     """One source-selected package, separate explicit driver invocations.
 
@@ -142,13 +188,21 @@ def arguments(argv):
     return argv[3]
 
 
-def _native_user(environment):
+def entry_arguments(argv):
+    retained = type(argv) is list and argv[:1] == ["--retained-observer"]
+    scope = arguments(argv[1:] if retained else argv)
+    need(not retained or scope in RETAINED_SCOPES, "retained-observer-scope")
+    return scope, retained
+
+
+def _native_user(environment, *, retained=False):
     import platform
     import pwd
     import stat
     import threading
     profile = _host_profile(environment)
-    need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_identity_current_runtime.py"
+    source = HELPER_ROOT if retained else CHECKOUT
+    need(Path(__file__).absolute() == source / "desktop/tools/macos_identity_current_runtime.py"
          and Path.cwd() == CHECKOUT, "identity-native-source-driver")
     # Observe once, bound and compare that exact value, then carry it as DATA.
     # Never reread a changed host value merely to decorate a successful report.
@@ -169,16 +223,35 @@ def _native_user(environment):
     return uid, gid, username, (profile[0], version)
 
 
-def _load_observer():
+def _load_observer(*, retained=False):
     import importlib.util
     name = "_mrk_identity_current_observer"
     need(name not in sys.modules, "identity-native-observer-imported")
-    spec = importlib.util.spec_from_file_location(name, CHECKOUT / "desktop/tools/macos_aqua_qualification.py")
+    source = HELPER_ROOT if retained else CHECKOUT
+    spec = importlib.util.spec_from_file_location(name, source / "desktop/tools/macos_aqua_qualification.py")
     need(spec is not None and spec.loader is not None, "identity-native-observer-loader")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module  # Retain the original before its loader can fail.
     spec.loader.exec_module(module)
     return module
+
+
+def _retained_selection():
+    # Trusted current SOURCE only. This bounded first read proposes a fixture
+    # tuple; admission retains/rechecks the original before any process owner.
+    import importlib
+    need("desktop.tools.macos_candidate_carrier" not in sys.modules, "retained-observer-parser-imported")
+    sys.path.insert(0, str(HELPER_ROOT))
+    try:
+        parser = importlib.import_module("desktop.tools.macos_candidate_carrier")
+    finally:
+        sys.path.pop(0)
+    need(Path(parser.__file__).absolute() == HELPER_ROOT / "desktop/tools/macos_candidate_carrier.py",
+         "retained-observer-parser-source")
+    with (HELPER_ROOT / RETAINED_SELECTION).open("rb") as original:
+        body = original.read(8193)
+    need(0 < len(body) <= 8192, "retained-observer-selection-bound")
+    return parser, body, parser.retained_observer_selection_data(parser.decode(body))
 
 
 def _admit_runtime(aqua, fixtures, binding, work, environment):
@@ -246,31 +319,169 @@ def _admit_runtime(aqua, fixtures, binding, work, environment):
     _current(aqua, fixtures)
 
 
+def _retained_installed_original(aqua, fixtures, name, limit, *, expected=None, capture=False):
+    """Hash the SAME installed original, retained in the existing Fixtures book."""
+    originals = [item for item in fixtures.recovery_runtime_originals if item[1] == name]
+    aqua.need(len(originals) == 1, "retained-observer-installed-original")
+    parent, name, fd, before = originals[0]
+    aqua.need(0 < before[6] <= limit, "retained-observer-installed-bound")
+    record = {"parent": parent, "name": name, "fd": fd, "full9": before, "sha256": expected}
+    fixtures.gate_files.append(record)
+    body, actual = aqua._gate_file_read(record, capture=capture)
+    aqua.need(expected is None or actual == expected, "retained-observer-installed-digest")
+    record["sha256"] = actual
+    return body, before[6]
+
+
+def _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained):
+    helper_source, run, attempt, actual_work = retained_context(environment, binding.target)
+    parser, proposed_body, selected = retained
+    origin = selected["origin"]
+    aqua.need(work == actual_work and environment.get("MRK_CANDIDATE_SOURCE") == binding.source
+              and (binding.source, binding.run, binding.attempt, binding.target) ==
+              tuple(origin[key] for key in ("source", "runId", "runAttempt", "target")),
+              "retained-observer-original-tuple")
+    checkout = aqua._gate_directory(fixtures, str(CHECKOUT))
+    git = aqua._gate_directory(fixtures, ".git", checkout)
+    head, _ = aqua._gate_file(fixtures, "HEAD", git, 41)
+    aqua.need(head == (binding.source + "\n").encode("ascii"), "retained-observer-product-head")
+    helper = aqua._gate_directory(fixtures, HELPER_ROOT.name, checkout)
+    git = aqua._gate_directory(fixtures, ".git", helper)
+    head, _ = aqua._gate_file(fixtures, "HEAD", git, 41)
+    aqua.need(head == (helper_source + "\n").encode("ascii"), "retained-observer-helper-head")
+    helper_desktop = aqua._gate_directory(fixtures, "desktop", helper)
+    helper_inputs = aqua._gate_directory(fixtures, "macos-installed-inputs", helper_desktop)
+    body, _ = aqua._gate_file(fixtures, Path(RETAINED_SELECTION).name, helper_inputs, 8192)
+    aqua.need(body == proposed_body and parser.retained_observer_selection_data(parser.decode(body)) == selected,
+              "retained-observer-selection-changed")
+    helper_tools = aqua._gate_directory(fixtures, "tools", helper_desktop)
+    for name in RETAINED_HELPER_FILES:
+        aqua._gate_file(fixtures, name, helper_tools, 1024 * 1024, capture=False)
+    helper_src = aqua._gate_directory(fixtures, "src", helper)
+    helper_core = aqua._gate_directory(fixtures, "mobile_release", helper_src)
+    for name in (*aqua.OWNER_FILES, "__init__.py", "errors.py", "_lifetime_evidence.py", "_store_lane_contract.py"):
+        aqua._gate_file(fixtures, name, helper_core, 256 * 1024, capture=False)
+    work_fd = aqua._gate_directory(fixtures, str(work), private=True)
+    receipt_body, receipt_original = aqua._gate_file(fixtures, "retained-observer-install.json", work_fd, 16384)
+    status, _ = aqua._gate_file(fixtures, "retained-observer-install.status", work_fd, 2)
+    aqua.need(status == b"0\n", "retained-observer-original-consumer-return")
+    receipt = parser.decode(receipt_body)
+    aqua.need(type(receipt) is dict, "retained-observer-receipt")
+    info = os.fstat(work_fd)
+    # helperTree is the earlier consumer's actual Git observation, NOT another
+    # runtime tree observation obtained by passing the same field to a parser.
+    receipt = parser.retained_observer_install_receipt_data(receipt, selected, helper_source,
+        receipt.get("helperTree"), run, attempt, (info.st_dev, info.st_ino, info.st_uid))
+    # No old work, composition receipt or Store archive is recreated. This
+    # owner loads the ORIGINAL product stager/release and holds installed I/M,
+    # protected record, core and Python under its unchanged root-owned policy.
+    fixtures.admit_normal_account_runtime(CHECKOUT, work, application_source=binding.source)
+    aqua.need(len(fixtures.normal_stager_registrations) == 1, "retained-observer-stager-original")
+    stage = fixtures.normal_stager_registrations[0]
+    desktop = aqua._gate_directory(fixtures, "desktop", checkout)
+    inputs = aqua._gate_directory(fixtures, "macos-installed-inputs", desktop)
+    packaging = aqua._gate_directory(fixtures, "packaging", desktop)
+    python_body, _ = aqua._gate_file(fixtures, "python-signed-runtime-binding.json", inputs, 4096)
+    producer, _ = aqua._gate_file(fixtures, "macos-install-producer-signing.profile", packaging, 1024)
+    service, _ = aqua._gate_file(fixtures, "macos-android-service-signing.profile", packaging, 512)
+    python = stage.signed_runtime_binding_data(python_body, producer, service, target=binding.target)
+    store_body, _ = aqua._gate_file(fixtures, "store-signed-component.json", inputs, 4096)
+    stage.signed_store_selection_data(store_body, target=binding.target)
+    releases = [row for row in fixtures.gate_files
+                if row["name"] == str(CHECKOUT / "desktop/macos-installed-inputs/build-release.json")]
+    aqua.need(len(releases) == 1, "retained-observer-product-release-original")
+    release_body, actual = aqua._gate_file_read(releases[0], capture=True)
+    aqua.need(actual == releases[0]["sha256"], "retained-observer-product-release-changed")
+    release = stage.build_release_data(release_body, target=binding.target)
+    signed = stage.maintenance_release_data(receipt["release"], binding.target)
+    aqua.need(all(signed[key] == release[key] for key in ("packageVersion", "release"))
+              and signed["sourceCommit"] == binding.source and signed["protocolSha256"] == stage.CURRENT_PROTOCOL,
+              "retained-observer-product-release")
+    manifest, _ = _retained_installed_original(aqua, fixtures, "manifest.json", stage.MANIFEST_BYTES,
+        expected=signed["runtimeManifestSha256"], capture=True)
+    stage.manifest_files(manifest, signed["runtimeManifestSha256"], current=True, target=binding.target)
+    _, size = _retained_installed_original(aqua, fixtures, stage.INSTALLATION_INVENTORY_NAME, stage.INVENTORY_BYTES,
+        expected=signed["inventorySha256"])
+    aqua.need(size == receipt["inventory"]["bytes"], "retained-observer-installed-inventory-size")
+    record_body, _ = _retained_installed_original(aqua, fixtures, stage.INSTALLATION_RECORD_NAME,
+        stage.INSTALLATION_RECORD_LIMIT, capture=True)
+    record = stage.decode(record_body)
+    aqua.need(type(record) is dict and record.get("instance") == receipt["freshInstall"]["instance"]
+              == receipt["freshInstall"]["invocation"], "retained-observer-fresh-installed-instance")
+    _retained_installed_original(aqua, fixtures, "python3", stage.MAX_BYTES, expected=python["signedPythonSha256"])
+    _current(aqua, fixtures)
+    # Bounded public provenance, not the private receipt/work identity or any
+    # recovered historical finality. Runtime/native observations still follow.
+    return {"origin": dict(origin), "helperSource": helper_source,
+        "helperTreeObservedByConsumer": receipt["helperTree"], "consumerRunId": run, "consumerRunAttempt": attempt,
+        "freshInstallReceiptSha256": receipt_original["sha256"], "originalConsumerReturnedZero": True,
+        "installedInstanceSha256": aqua.digest(record["instance"].encode("ascii")),
+        "runtimeManifestSha256": signed["runtimeManifestSha256"], "inventorySha256": signed["inventorySha256"],
+        "productReady": False, "uiQualified": False, "p0Qualified": False}
+
+
+def retained_fixture_context(environment, target, uid, gid):
+    """Read-only fixture namespace DATA after actual current admission/close.
+
+    The caller supplies its single checked _native_user observation. No fixture
+    prepare, process owner, native call or old job environment is created here.
+    Every eventual runtime invocation independently retains its own originals.
+    """
+    _, _, _, work = retained_context(environment, target)
+    need(type(uid) is int and type(gid) is int and uid > 0 and gid >= 0
+         and uid == os.getuid() == os.geteuid() and gid == os.getgid() == os.getegid(),
+         "retained-observer-fixture-user")
+    retained = _retained_selection()
+    origin = retained[2]["origin"]
+    aqua = _load_observer(retained=True)
+    binding = aqua.Binding(origin["source"], origin["runId"], origin["runAttempt"], target).checked()
+    fixtures = aqua.Fixtures(binding, uid, gid, TOOLS_SCOPE)
+    error = None
+    try:
+        _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained)
+    except BaseException as caught:
+        error = caught
+    try:
+        fixtures.close()  # Existing consuming close; never retried on failure.
+    except BaseException as caught:
+        if error is None:
+            error = caught
+    if error is not None:
+        raise error
+    return binding.source, binding.run, binding.attempt, work
+
+
 def _current(aqua, fixtures):
     aqua._gate_recheck(fixtures)
     fixtures.recovery_runtime_paths()
 
 
-def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, host=None):
+def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, host=None, retained=None):
     """One fixed invocation; test doubles never supply production authority."""
     fixtures = owner = error = None
     count = 0
     cases = ()
     not_executed = ()
+    provenance = {}
     try:
         observation_scope(environment, scope)
         cases = aqua.TOOLS.RUN_ORDER if scope == TOOLS_SCOPE else aqua.selected_cases(scope)
         fixtures = aqua.Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
-        _admit_runtime(aqua, fixtures, binding, work, environment)
-        owner = aqua.load_owner(CHECKOUT)
+        if retained is None:
+            _admit_runtime(aqua, fixtures, binding, work, environment)
+        else:
+            aqua.need(scope in RETAINED_SCOPES, "retained-observer-scope")
+            provenance = {"runtimeMode": "retained-observer", "retainedObserver":
+                _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained)}
+        owner = aqua.load_owner(HELPER_ROOT if retained is not None else CHECKOUT)
         _current(aqua, fixtures)
 
         def emit_checked(value):
             nonlocal count
             aqua.need(count < len(cases) and value.get("case") == cases[count], "identity-native-case-order")
             _current(aqua, fixtures)  # Only after run_cases' original return/readback.
-            aqua.emit_record(value, sys.stdout)
+            aqua.emit_record({**value, **provenance} if provenance else value, sys.stdout)
             count += 1
 
         not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
@@ -303,7 +514,8 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, h
             # can be unexecuted. No runtime error or unknown becomes exit78.
             # Do not manufacture Ready or automatically run another case.
             upload = scope in (*UPLOAD_SCOPES, BACKUP_SCOPE, BACKUP_CLI_SCOPE)
-            aqua.emit_record({"schemaVersion": 1, "type": "macos-upload-key-current-unexecuted" if upload else "macos-tool-current-unexecuted",
+            aqua.emit_record({"schemaVersion": 1, "type": "macos-retained-observer-unexecuted" if retained is not None else "macos-upload-key-current-unexecuted" if upload else "macos-tool-current-unexecuted",
+                **provenance,
                 **binding.public(), "target": binding.target, "scope": scope,
                 "notExecuted": list(not_executed), "allOriginalCallsReturned": True,
                 "fixtureHandlesClosed": True, "manualStep": (
@@ -311,13 +523,14 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, h
                     if upload else "The independent cancellation case returned; cold acquisition needs the reported genuinely absent host sources. No discovery override or retry was performed." if scope == PUBLIC_TOOLS_SCOPE else "Resolve the reported service prerequisite before starting the tool cases; no automatic retry was performed."),
                 "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
             return 78
-        aqua.emit_record({"schemaVersion": 1, "type": kind,
+        aqua.emit_record({"schemaVersion": 1, "type": "macos-retained-observer-complete" if retained is not None else kind,
+            **provenance, **({"scope": scope} if retained is not None else {}),
             **binding.public(), "target": binding.target, "cases": list(cases),
             # Only main passes its SAME checked native observation. Old direct
             # DATA fixtures omit it rather than manufacturing a host claim.
             **({"host": {"runner": host[0], "osVersion": host[1]}} if host is not None else {}),
             "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
-            "currentInstalledRuntime": True, "instrumentedEngineeringApp": True,
+            "currentInstalledRuntime": retained is None, "instrumentedEngineeringApp": True,
             "shippingBinaryQualified": False, "distributionQualified": False,
             "processLossEvidence": False, **({"cleanProcessRestart": True, "backupRoundtrip": False,
                 "physicalPickerQualified": False} if scope == COLD_SCOPE else {
@@ -330,15 +543,20 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, h
 
 def main():
     try:
-        scope = arguments(sys.argv[1:])
+        scope, retained_mode = entry_arguments(sys.argv[1:])
         environment = dict(os.environ)
         observation_scope(environment, scope)
-        source, run, attempt, work = current_context(environment, TARGET)
-        uid, gid, username, host = _native_user(environment)
-        aqua = _load_observer()
+        source, run, attempt, work = (retained_context if retained_mode else current_context)(environment, TARGET)
+        uid, gid, username, host = _native_user(environment, retained=True) if retained_mode else _native_user(environment)
+        retained = _retained_selection() if retained_mode else None
+        aqua = _load_observer(retained=True) if retained_mode else _load_observer()
+        if retained is not None:
+            origin = retained[2]["origin"]
+            source, run, attempt = origin["source"], origin["runId"], origin["runAttempt"]
         binding = aqua.Binding(source, run, attempt, TARGET).checked()
         os.umask(0o077)
-        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope, host=host)
+        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope, host=host,
+                    **({"retained": retained} if retained is not None else {}))
     except BaseException as error:
         # No source paths, environment values, transcripts or exception text.
         try:
