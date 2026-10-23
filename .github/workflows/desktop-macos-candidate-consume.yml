@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Package a matching remover or inspect the fixed delivered predecessor; no app rebuild or installation
+        description: Reuse the fixed delivered app for removal packaging, read-only inspection or a fresh install check; no app rebuild
         type: choice
-        options: [remove-delivery, inspect-predecessor]
+        options: [remove-delivery, inspect-predecessor, install-predecessor]
         default: remove-delivery
       architecture:
         description: Package only the selected architecture
@@ -25,6 +25,84 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  install-predecessor:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'install-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-install'
+    name: Install the existing signed ARM app and observe its first detach
+    runs-on: macos-26
+    timeout-minutes: 18
+    env:
+      MRK_CANDIDATE_MODE: install-predecessor
+      MRK_CANDIDATE_SOURCE: 'bf9d397bde641aae4b4cd205f3c962e899557650'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Require the isolated disposable ARM host
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-predecessor-install ]]
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
+      - name: Check out the unchanged delivered application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MRK_CANDIDATE_SOURCE }}
+          persist-credentials: false
+      - name: Keep the current diagnostic helper separate from the original source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          test ! -L "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate-consumer-helper
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: arm64
+      - name: Prepare the existing private host interpreter
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          export MRK_MACOS_WORK="$work"
+          printf 'MRK_MACOS_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py"
+          export MRK_HOST_BASE_CONTEXT
+          MRK_HOST_BASE_CONTEXT=$(python3 -I -S -B "$helper" host-base)
+          python3 -I -S -B -m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"
+          "$work/host-python/bin/python3" -I -S -B "$helper" bind-host
+          unset MRK_HOST_BASE_CONTEXT
+      - name: Reuse the signed app for one actual install, full readback and first unforced detach
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # No compiler, signing credentials, notarization, Restore or UI journey.
+          # The existing owner prints only its bounded public result/diagnostic.
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py"
+
   inspect-predecessor:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'inspect-predecessor' && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-predecessor-inspection'
     name: Read-only delivered ARM predecessor controls
