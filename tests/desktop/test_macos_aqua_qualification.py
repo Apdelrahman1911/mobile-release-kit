@@ -3262,6 +3262,63 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual((entries.pulls, entries.closes, fixtures.close_errors), (1, 1, 1))
         self.assertIs(fixtures.first_close_error, closing)
 
+    def test_git_literal_rosters_match_real_file_capture_and_keep_exact_guards(self):
+        # Real disposable public files/FDs, not a Mac/Git/app execution. Unlike
+        # initial_snapshot(), _capture obtains entries from the actual scanner.
+        scopes = (*M.GIT_CLI.SCOPES, *M.PUSH.SCOPES, M.UPSTREAM.SCOPE)
+        self.assertEqual(sum(len(M.selected_cases(scope)) for scope in scopes), 11)
+        with patch("subprocess.Popen", side_effect=AssertionError("No native command")), \
+                patch("socket.socket", side_effect=AssertionError("No network")):
+            for scope in scopes:
+                for case in M.selected_cases(scope):
+                    with self.subTest(scope=scope, case=case), \
+                            tempfile.TemporaryDirectory(prefix="mrk-git-roster-") as temporary:
+                        fixtures = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), scope)
+                        try:
+                            project = fixtures._open(temporary, directory=True)
+                            fixtures.projects[case] = project
+                            files, directories = M.fixture_data(case, False)
+                            opened = {".": project}
+                            for path, (mode, _) in directories.items():
+                                if path != ".":
+                                    parent, _, name = path.rpartition("/")
+                                    opened[path] = fixtures._mkdir(opened[parent or "."], name, mode)
+                            for path, body in files.items():
+                                parent, _, name = path.rpartition("/")
+                                fixtures._write(opened[parent or "."], name, body)
+                            original = fixtures._capture(case, False)
+                            self.assertEqual(original["."].entries, tuple(sorted(directories["."][1])))
+                            M.validate_snapshot(original, fixtures._capture(case, True), case, True,
+                                                fixtures.uid, fixtures.gid)
+                            if case == M.GIT_CLI.INDEX:
+                                fixtures._write(project, "unexpected.txt", b"public extra fixture\n")
+                                with self.assertRaisesRegex(M.Refused, "^fixture-directory-roster$"):
+                                    fixtures._capture(case, False)
+                                M.os.unlink("unexpected.txt", dir_fd=project)
+                                M.os.unlink("untracked.txt", dir_fd=project)
+                                with self.assertRaisesRegex(M.Refused, "^fixture-directory-roster$"):
+                                    fixtures._capture(case, False)
+                                fixtures._write(project, "untracked.txt", files["untracked.txt"])
+                                M.os.fchmod(opened["release"], 0o755)
+                                with self.assertRaisesRegex(M.Refused, "^fixture-directory-custody$"):
+                                    fixtures._capture(case, False)
+                                M.os.fchmod(opened["release"], 0o700)
+                                M.os.unlink("keep.txt", dir_fd=project)
+                                fixtures._write(project, "keep.txt", b"!" + files["keep.txt"][1:])
+                                with self.assertRaises(M.Refused):
+                                    fixtures._capture(case, False)
+                                # Owner mismatch remains a closed DATA guard;
+                                # never chown a supplied or system pathname.
+                                wrong_owner = dict(original)
+                                facts = original["."].identity
+                                wrong_owner["."] = replace(original["."],
+                                    identity=(*facts[:3], fixtures.uid + 1, *facts[4:]))
+                                with self.assertRaisesRegex(M.Refused, "^fixture-owner$"):
+                                    M._shape(wrong_owner, case, False, fixtures.uid, fixtures.gid)
+                        finally:
+                            fixtures.close()
+                            self.assertEqual((fixtures.fds, fixtures.close_errors), (set(), 0))
+
     def test_original_file_error_survives_one_spent_cleanup_failure(self):
         fixtures = M.Fixtures(BINDING, UID, GID)
         token = object()  # Not an actual descriptor, even if a mock is broken.

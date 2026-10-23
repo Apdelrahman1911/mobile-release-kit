@@ -64,7 +64,7 @@ def _sig(info):
 
 def fixture_data(config, version, keep, ignore, source):
     return ({FILES[0]: source, FILES[1]: config, FILES[2]: version, FILES[3]: keep, FILES[4]: ignore, FILES[5]: UNTRACKED},
-            {".": (0o700, (".gitignore", "app", "keep.txt", "release", "version.properties", "untracked.txt")),
+            {".": (0o700, (".gitignore", "app", "keep.txt", "release", "untracked.txt", "version.properties")),
              "app": (0o700, ("build.gradle.kts",)), "release": (0o700, ("mobile-release.json",))})
 
 
