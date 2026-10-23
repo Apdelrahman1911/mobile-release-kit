@@ -41,6 +41,9 @@ if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE
 # Same fixed observer target and original Cargo artifact checks;
 # no ordinary cdylib, fallback executable or test execution. Render
 # diagnostics to stderr, not repeated warning payloads in the artifact JSON.
+# Fixed progress only, not success authority or a fresh clock. All compilers
+# and artifact checks still share the same single Actions step allowance.
+printf 'MRK_MACOS_BUILD_PHASE=observer-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
   --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json-render-diagnostics \
@@ -49,12 +52,14 @@ status=$?
 printf '%s\n' "$status" > "$MRK_MACOS_WORK/observer-build.status"
 status_saved=$?
 set -e
+printf 'MRK_MACOS_BUILD_PHASE=observer-compile-returned status=%s\n' "$status" >&2 2>/dev/null || :
 if [[ "$status" != 0 ]]; then
   printf 'Observer compiler failed with original status %s; bounded diagnostics are retained.\n' "$status" >&2 2>/dev/null || :
   report_compiler_failure observer "$status" >&2 2>/dev/null || :
   exit "$status"
 fi
 [[ "$status_saved" == 0 ]] || exit "$status_saved"
+printf 'MRK_MACOS_BUILD_PHASE=observer-artifact-begin\n' >&2 2>/dev/null || :
 "$MRK_PYTHON" -I -S -B - <<'PY_BUILD'
 import hashlib, json, os, pathlib, re, stat
 root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
@@ -88,6 +93,7 @@ with open(os.environ["GITHUB_ENV"], "a") as stream:
     stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
     stream.write("MRK_MACOS_OBSERVER_SHA256=" + h.hexdigest() + "\n")
 PY_BUILD
+printf 'MRK_MACOS_BUILD_PHASE=observer-artifact-returned\n' >&2 2>/dev/null || :
 else
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
@@ -116,6 +122,7 @@ if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MR
 fi
 # Same architecture-selected app-build budget; no independent timeout entitlement.
 # This current SOURCE role cannot embed its not-yet-created inventory.
+printf 'MRK_MACOS_BUILD_PHASE=remover-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
   --locked --offline --release --jobs 1 --no-default-features --features "$remover_features" --bin mrk-macos-remove \
@@ -125,6 +132,7 @@ remover_status=$?
 printf '%s\n' "$remover_status" > "$MRK_MACOS_WORK/remover-build.status"
 remover_status_saved=$?
 set -e
+printf 'MRK_MACOS_BUILD_PHASE=remover-compile-returned status=%s\n' "$remover_status" >&2 2>/dev/null || :
 if [[ "$remover_status" != 0 ]]; then
   # Optional diagnostics cannot replace the original compiler status.
   set +e
@@ -135,6 +143,7 @@ fi
 [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
 # Separate read-only CLI graph; same selected compiler and app-build
 # budget. It never starts the service or grants a project access.
+printf 'MRK_MACOS_BUILD_PHASE=installed-cli-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/installed-cli-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
   --locked --offline --release --jobs 1 --no-default-features --features installed-cli --bin mrk \
@@ -144,6 +153,7 @@ cli_status=$?
 printf '%s\n' "$cli_status" > "$MRK_MACOS_WORK/installed-cli-build.status"
 cli_status_saved=$?
 set -e
+printf 'MRK_MACOS_BUILD_PHASE=installed-cli-compile-returned status=%s\n' "$cli_status" >&2 2>/dev/null || :
 if [[ "$cli_status" != 0 ]]; then
   printf 'Fixed installed CLI compiler failed with original status %s; originals remain local.\n' "$cli_status" >&2 2>/dev/null || :
   report_compiler_failure installed-cli "$cli_status" >&2 2>/dev/null || :

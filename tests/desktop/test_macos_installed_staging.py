@@ -2977,14 +2977,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         roles = (("observer", "status"), ("normal", "cargo_status"), ("remover", "remover_status"),
                  ("installed-cli", "cli_status"), ("removal-observer", "observer_status"))
         for role, variable in roles:
+            begin = re.search(r"(?m)^printf 'MRK_MACOS_BUILD_PHASE=" + role
+                + r"-compile-begin\\n'[^\n]*\nset \+e\n", source)
+            checkpointed = role in ("observer", "remover", "installed-cli")
+            self.assertEqual(begin is not None, checkpointed)
             start = re.search(r"(?m)^ *" + variable + r"=\$\?\n", source).start()
             gate = '[[ "$' + variable + '_saved" == 0 ]] || exit "$' + variable + '_saved"'
             end = source.index(gate, start) + len(gate)
-            # Execute the SAME reporter and each original post-Cargo failure
-            # block, not any compiler argv, artifact validator or native owner.
+            # Execute the SAME checkpoints under the original set -e, reporter
+            # and post-Cargo block, not any compiler argv or native owner.
             block = source[start:end]
             faults = ("rust", "linker", "missing", "oversized", "reporter-nonzero", "launcher-failure",
-                      "status-write", "output-write", "success", "success-status-write")
+                      "status-write", "output-write", "success", "success-status-write", "success-output-write")
             if role == "normal":
                 faults += ("optional-tail",)
             for fault in faults:
@@ -3014,9 +3018,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     elif fault == "optional-tail":
                         (work / "normal-build.stderr.tail.txt").mkdir()
                     status = 0 if fault.startswith("success") else 101
-                    script = reporter + "\nset +e\n"
-                    if fault == "output-write":
+                    script = reporter + "\n"
+                    if fault.endswith("output-write"):
                         script += "exec 2>&-\n"
+                    script += begin.group(0) if begin is not None else "set +e\n"
                     script += f"(exit {status})\n" + block + "\n"
                     returned = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
                         cwd=checkout, env=environment, capture_output=True, timeout=10, check=False)
@@ -3024,12 +3029,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(returned.stdout, b"")
                     self.assertNotIn(secret.encode(), returned.stderr)
                     self.assertNotIn(b"Traceback", returned.stderr)
+                    phases = [line for line in returned.stderr.splitlines() if line.startswith(b"MRK_MACOS_BUILD_PHASE=")]
+                    self.assertEqual(phases, [f"MRK_MACOS_BUILD_PHASE={role}-compile-begin".encode(),
+                        f"MRK_MACOS_BUILD_PHASE={role}-compile-returned status={status}".encode()]
+                        if checkpointed and not fault.endswith("output-write") else [])
+                    if fault not in ("status-write", "success-status-write"):
+                        self.assertEqual((work / (role + "-build.status")).read_text(), f"{status}\n")
                     lines = [line.removeprefix(b"MRK_MACOS_COMPILER_DIAGNOSTIC=") for line in returned.stderr.splitlines()
                              if line.startswith(b"MRK_MACOS_COMPILER_DIAGNOSTIC=")]
                     if fault in ("missing", "oversized", "reporter-nonzero", "launcher-failure"):
                         self.assertEqual(lines, [])
                         self.assertIn(b"Compiler diagnostics unavailable", returned.stderr)
-                    elif fault in ("output-write", "success", "success-status-write"):
+                    elif fault == "output-write" or fault.startswith("success"):
                         self.assertEqual(lines, [])
                     else:
                         self.assertEqual(len(lines), 1, returned.stderr)
@@ -3041,6 +3052,51 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         else:
                             self.assertEqual(value["compiler"]["rows"], [{"kind": "rust", "code": "E0433",
                                 "source": location, "line": 21, "column": 7}])
+
+    def test_existing_observer_artifact_checkpoints_keep_original_validator_authority(self):
+        import subprocess
+        checkout = Path(__file__).absolute().parents[2]
+        source = (checkout / "desktop/tools/macos_installed_app_build.sh").read_text()
+        preamble = source[:source.index("report_compiler_failure() {")]
+        start = source.index("printf 'MRK_MACOS_BUILD_PHASE=observer-artifact-begin\\n'")
+        end = source.index("\n", source.index("printf 'MRK_MACOS_BUILD_PHASE=observer-artifact-returned\\n'", start)) + 1
+        block = source[start:end]
+        for fault in ("success", "profile", "path", "launcher-failure", "success-output-write", "profile-output-write"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary)
+                target, binary, rows, body = observer_cargo_fixture(work / "target")
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(body)
+                binary.chmod(0o500)
+                if fault.startswith("profile"):
+                    rows[0]["profile"]["test"] = False
+                elif fault == "path":
+                    rows[0]["executable"] = str(binary.parent / "wrong-target")
+                (work / "observer-build.jsonl").write_bytes(cargo_lines(*rows,
+                    {"reason": "build-finished", "success": True}))
+                exported = work / "github-env"
+                exported.write_bytes(b"")
+                environment = {"PATH": "/usr/bin:/bin", "MRK_PYTHON": sys.executable, "MRK_MACOS_WORK": str(work),
+                    "CARGO_TARGET_DIR": str(target), "MRK_MACOS_TARGET": TOOL.ARM_TARGET, "GITHUB_ENV": str(exported)}
+                if fault == "launcher-failure":
+                    environment["MRK_PYTHON"] = str(work / "absent-python")
+                # Real artifact reads/hashing and original shell error handling;
+                # the fixture Mach-O is inert DATA and is never executed.
+                script = preamble + ("exec 2>&-\n" if fault.endswith("output-write") else "") + block
+                returned = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                    cwd=checkout, env=environment, capture_output=True, timeout=10, check=False)
+                succeeded = fault.startswith("success")
+                self.assertEqual(returned.returncode, 0 if succeeded else 127 if fault == "launcher-failure" else 1,
+                    returned.stderr)
+                self.assertEqual(returned.stdout, b"")
+                phases = [line for line in returned.stderr.splitlines() if line.startswith(b"MRK_MACOS_BUILD_PHASE=")]
+                expected = [b"MRK_MACOS_BUILD_PHASE=observer-artifact-begin"]
+                if succeeded:
+                    expected.append(b"MRK_MACOS_BUILD_PHASE=observer-artifact-returned")
+                self.assertEqual(phases, [] if fault.endswith("output-write") else expected)
+                self.assertEqual(exported.read_text(), (f"MRK_MACOS_OBSERVER_BINARY={binary}\n"
+                    f"MRK_MACOS_OBSERVER_SHA256={TOOL.digest(body)}\n") if succeeded else "")
+                self.assertEqual(binary.read_bytes(), body)
 
     def test_removal_target_routes_keep_preparation_scripts_and_observers_bound(self):
         module = ANDROID_HELPER
