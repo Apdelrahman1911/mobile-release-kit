@@ -757,18 +757,23 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
             def __call__(self, *arguments):
                 self.library.calls.append(self.name)
                 if self.name == "issetugid":
-                    return 0
+                    return int(self.library.privileged)
                 if self.name == "sysctlbyname":
                     self.library.case.assertEqual(arguments[0], b"kern.osproductversion")
-                    arguments[1].value = b"26.0"
-                    ctypes.cast(arguments[2], ctypes.POINTER(ctypes.c_size_t)).contents.value = 5
-                    return 0
+                    body = self.library.version + (b"\0" if self.library.terminated else b"X")
+                    arguments[1].raw = body.ljust(64, b"\0")
+                    length = self.library.length if self.library.length is not None else len(body)
+                    ctypes.cast(arguments[2], ctypes.POINTER(ctypes.c_size_t)).contents.value = length
+                    return self.library.version_status
                 raise AssertionError("unit prototype binding must not invoke another native function")
 
         class LibraryData:
-            def __init__(self, case, missing=None):
+            def __init__(self, case, missing=None, *, version=b"26.0", privileged=False,
+                         version_status=0, length=None, terminated=True):
                 self.case, self.missing = case, missing
                 self.lookups, self.calls, self.functions = [], [], {}
+                self.version, self.privileged = version, privileged
+                self.version_status, self.length, self.terminated = version_status, length, terminated
 
             def __getattr__(self, name):
                 self.lookups.append(name)
@@ -778,16 +783,17 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                 self.functions[name] = function
                 return function
 
-        for target, stat_name, fs_name in (
-                (M.ARM_TARGET, "fstatx_np", "fstatfs"),
-                (M.INTEL_TARGET, "fstatx_np$INODE64", "fstatfs$INODE64")):
-            native = LibraryData(self)
+        for target, stat_name, fs_name, version, selection in (
+                (M.ARM_TARGET, "fstatx_np", "fstatfs", b"26.0", {}),
+                (M.INTEL_TARGET, "fstatx_np$INODE64", "fstatfs$INODE64", b"26.0", {}),
+                (M.ARM_TARGET, "fstatx_np", "fstatfs", b"27.0.1", {"expected_major": 27})):
+            native = LibraryData(self, version=version)
             deadline = types.SimpleNamespace(check=lambda: None)
-            with self.subTest(target=target), mock.patch.object(M.ctypes, "CDLL", return_value=native) as load:
-                api = M.DarwinAPI(deadline, target=target)
+            with self.subTest(target=target, selection=selection), mock.patch.object(M.ctypes, "CDLL", return_value=native) as load:
+                api = M.DarwinAPI(deadline, target=target, **selection)
                 load.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
                 self.assertIs(api.deadline, deadline)
-                self.assertEqual(api.version, "26.0")
+                self.assertEqual(api.version, version.decode("ascii"))
             self.assertEqual(native.lookups, ["issetugid", "sigaction", "sysctlbyname", fs_name,
                 "filesec_init", "filesec_free", stat_name, "filesec_get_property",
                 "filesec_query_property", "acl_valid", "acl_get_entry", "acl_free", "flistxattr", "fgetxattr"])
@@ -799,11 +805,11 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                              [ctypes.c_int, ctypes.POINTER(M.DarwinStat), ctypes.c_void_p])
             self.assertEqual(native.fstatfs.argtypes, [ctypes.c_int, ctypes.POINTER(M.DarwinStatFS)])
             for missing in (stat_name, fs_name):
-                native = LibraryData(self, missing)
-                with self.subTest(target=target, missing=missing), \
+                native = LibraryData(self, missing, version=version)
+                with self.subTest(target=target, missing=missing, selection=selection), \
                         mock.patch.object(M.ctypes, "CDLL", return_value=native) as load, \
                         self.assertRaises(AttributeError):
-                    M.DarwinAPI(deadline, target=target)
+                    M.DarwinAPI(deadline, target=target, **selection)
                 self.assertEqual(load.call_count, 1)
                 self.assertEqual(native.lookups.count(missing), 1)
                 self.assertNotIn("fstatx_np" if "$" in stat_name else "fstatx_np$INODE64", native.lookups)
@@ -811,6 +817,37 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                 self.assertEqual(native.calls, [])
         with mock.patch.object(M.ctypes, "CDLL") as load, self.assertRaises(M.Refused):
             M.DarwinAPI(types.SimpleNamespace(check=lambda: None), target="i686-apple-darwin")
+        load.assert_not_called()
+
+        # The actual constructor predicate, fed inert original sysctl DATA:
+        # default26 still refuses the observed Git27 version, never auto-widens.
+        for selection, versions, reason in (
+                ({}, (b"27.0.1", b"25.6", b"26", b"26.0\n"), "real-macos26-required"),
+                ({"expected_major": 27}, (b"26.0", b"28.0", b"27", b"27.0\n", b"27.0.1.2"), "real-macos27-required")):
+            for version in versions:
+                native = LibraryData(self, version=version)
+                with self.subTest(selection=selection, version=version), \
+                        mock.patch.object(M.ctypes, "CDLL", return_value=native), \
+                        self.assertRaisesRegex(M.Refused, "^" + reason + "$"):
+                    M.DarwinAPI(deadline, **selection)
+                self.assertEqual(native.calls, ["issetugid", "sysctlbyname"])
+        for options, reason in (({"privileged": True}, "issetugid-refused"),
+                ({"version_status": -1}, "real-macos-version-unavailable"),
+                ({"length": 0}, "real-macos-version-unavailable"),
+                ({"length": 65}, "real-macos-version-unavailable"),
+                ({"terminated": False}, "real-macos-version-unavailable")):
+            native = LibraryData(self, version=b"27.0.1", **options)
+            with self.subTest(options=options), mock.patch.object(M.ctypes, "CDLL", return_value=native), \
+                    self.assertRaisesRegex(M.Refused, "^" + reason + "$"):
+                M.DarwinAPI(deadline, expected_major=27)
+        for target, major in ((M.ARM_TARGET, x) for x in (None, True, 27.0, "27", 25, 28)):
+            with self.subTest(major=major), mock.patch.object(M.ctypes, "CDLL") as load, \
+                    self.assertRaisesRegex(M.Refused, "^fixed-macos-host-major-required$"):
+                M.DarwinAPI(deadline, target=target, expected_major=major)
+            load.assert_not_called()
+        with mock.patch.object(M.ctypes, "CDLL") as load, \
+                self.assertRaisesRegex(M.Refused, "^fixed-macos-host-major-required$"):
+            M.DarwinAPI(deadline, target=M.INTEL_TARGET, expected_major=27)
         load.assert_not_called()
 
 

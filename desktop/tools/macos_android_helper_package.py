@@ -8754,16 +8754,30 @@ class Operation:
              and self.removal_baseline_mount is None and not self.mount_entered
              and self.mount_api is None and self.mount_host_source is None and self.package_settled(),
              "package-mount-host-admission")
-        entry = self.source_original("desktop/tools/macos_xcode_host_preparation.py", "source-package-mount-host", 96477)
+        expected_major = 26
+        if self.environment.get("MRK_MACOS_RUNNER") == "xcode-27":
+            # Additional scope restriction after the original hosted SOURCE
+            # admission; never extend ordinary/prepared/Update/Remove to27.
+            need(self.phase == "package-install" and self.target == ARM_TARGET
+                 and self.prepared_binding is None
+                 and all(self.environment.get(key) == value for key, value in {
+                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": CANDIDATE_REF,
+                     "MRK_MACOS_NATIVE_SCOPE": "git-native",
+                     "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation",
+                     "MRK_MACOS_MACHINE": "arm64",
+                     "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}.items()),
+                 "package-mount-host-admission")
+            expected_major = 27
+        entry = self.source_original("desktop/tools/macos_xcode_host_preparation.py", "source-package-mount-host", 97065)
         body = self.read(entry)
-        need(len(body) == 96477 and digest(body) == "d03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376",
+        need(len(body) == 97065 and digest(body) == "ae198b3615450a474d948b32145735bbfa16635fb7871d0ef7c31efdc3bd785e",
              "package-mount-host-source")
         self.package_sources.append((entry, body))
         self.mount_host_source = (entry, body)
         module = load_data(self.checkout, "macos_xcode_host_preparation.py", "_mrk_package_mount_host")
         need(self.read(entry) == body, "package-mount-host-source-post")
         self.package_clock()
-        self.mount_api = module.DarwinAPI(_RemovalHostClock(self), target=self.target)
+        self.mount_api = module.DarwinAPI(_RemovalHostClock(self), target=self.target, expected_major=expected_major)
         if self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY):
             need(self.removal_host_module is None and self.removal_api is None, "package-transport-host-original")
             self.removal_host_module, self.removal_api = module, self.mount_api

@@ -402,10 +402,16 @@ def _acl_snapshot(library, descriptor, expected):
 
 
 class DarwinAPI:
-    def __init__(self, deadline, target=ARM_TARGET):
+    def __init__(self, deadline, target=ARM_TARGET, *, expected_major=26):
         # Bind only the selected Apple ABI. Missing symbols refuse; no
         # retry with another architecture, stat64 or another library.
         _, _, stat_symbol, filesystem_symbol = _target_data(target)
+        # Ordinary preparation/classification remain26. Only the separately
+        # SOURCE-admitted ARM27 observer mount caller explicitly selects27;
+        # this selects an exact real-host check, never a version bypass.
+        if (type(expected_major) is not int or expected_major not in (26, 27)
+                or expected_major == 27 and target != ARM_TARGET):
+            raise Refused("fixed-macos-host-major-required")
         symbols = {"fstatx_np": stat_symbol, "fstatfs": filesystem_symbol}
         _check_abi()
         self.deadline = deadline
@@ -447,8 +453,9 @@ class DarwinAPI:
                 or version.raw[length.value - 1:length.value] != b"\0"):
             raise Refused("real-macos-version-unavailable")
         self.version = version.raw[:length.value - 1].decode("ascii", "strict")
-        if not re.fullmatch(r"26\.[0-9]+(?:\.[0-9]+)?", self.version):
-            raise Refused("real-macos26-required")
+        pattern = r"26\.[0-9]+(?:\.[0-9]+)?" if expected_major == 26 else r"27\.[0-9]+(?:\.[0-9]+)?"
+        if not re.fullmatch(pattern, self.version):
+            raise Refused("real-macos26-required" if expected_major == 26 else "real-macos27-required")
 
     def waitable_sigchld(self):
         self.deadline.check()

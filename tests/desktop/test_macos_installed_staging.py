@@ -5707,6 +5707,62 @@ sys.exit(status)
         self.assertEqual(state.operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
 
+    def test_mount_host27_requires_the_current_source_git_observer_scope(self):
+        """Inert source/constructor ports only; no library, mount or native call."""
+        module = ANDROID_HELPER
+        checkout = Path(__file__).absolute().parents[2]
+        body = (checkout / "desktop/tools/macos_xcode_host_preparation.py").read_bytes()
+        environment = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": module.CANDIDATE_REF,
+            "MRK_MACOS_NATIVE_SCOPE": "git-native", "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation",
+            "MRK_MACOS_RUNNER": "xcode-27", "MRK_MACOS_MACHINE": "arm64",
+            "MRK_MACOS_HOSTED_JOB": "github-hosted-xcode27-arm64"}
+
+        def operation(env, *, phase="package-install", target=module.ARM_TARGET, prepared=None, source=body):
+            return SimpleNamespace(phase=phase, target=target, prepared_binding=prepared,
+                environment=env, checkout=checkout, package_clock=mock.Mock(), package_settled=lambda: True,
+                removal_baseline_mount=None, mount_entered=False, mount_api=None, mount_host_source=None,
+                removal_host_module=None, removal_api=None, package_sources=[],
+                source_original=mock.Mock(return_value=object()), read=mock.Mock(return_value=source))
+
+        for env, major, phase in (({}, 26, "package-install"),
+                ({**environment, "MRK_MACOS_RUNNER": "macos-26"}, 26, "package-install"),
+                ({}, 26, module.UPDATE_PHASE), ({}, 26, "finalize-image"),
+                (environment, 27, "package-install")):
+            op = operation(env, phase=phase)
+            api = object()
+            native = mock.Mock(return_value=api)
+            with self.subTest(major=major, phase=phase), \
+                    mock.patch.object(module, "load_data", return_value=SimpleNamespace(DarwinAPI=native)) as load:
+                module.Operation.normal_mount_host(op)
+            self.assertIs(op.mount_api, api)
+            self.assertEqual(native.call_count, 1)
+            self.assertEqual(native.call_args.kwargs, {"target": module.ARM_TARGET, "expected_major": major})
+            self.assertIs(native.call_args.args[0].operation, op)
+            load.assert_called_once_with(checkout, "macos_xcode_host_preparation.py", "_mrk_package_mount_host")
+            op.source_original.assert_called_once_with("desktop/tools/macos_xcode_host_preparation.py",
+                "source-package-mount-host", len(body))
+            self.assertEqual(op.package_sources, [(op.source_original.return_value, body)])
+
+        invalid = [operation({**environment, key: value}) for key, value in (
+            ("GITHUB_EVENT_NAME", "workflow_dispatch"), ("GITHUB_REF", "refs/heads/verify/desktop-macos-preview"),
+            ("MRK_MACOS_NATIVE_SCOPE", "tool-setup"), ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image"),
+            ("MRK_MACOS_MACHINE", "x86_64"), ("MRK_MACOS_HOSTED_JOB", "github-hosted-macos26-arm64"))]
+        invalid += [operation(environment, phase=phase) for phase in
+                    (module.SAME_PACKAGE_PHASE, module.UPDATE_PHASE, module.XCODE_SETUP_VERIFY, *module.FINAL_IMAGE_PHASES)]
+        invalid += [operation(environment, target=module.INTEL_TARGET), operation(environment, prepared=object())]
+        for op in invalid:
+            with self.subTest(phase=op.phase, target=op.target, environment=op.environment), \
+                    mock.patch.object(module, "load_data") as load, \
+                    self.assertRaisesRegex(module.Refused, "^package-mount-host-admission$"):
+                module.Operation.normal_mount_host(op)
+            op.source_original.assert_not_called(); load.assert_not_called()
+        for source in (body[:-1], b"X" + body[1:]):
+            op = operation(environment, source=source)
+            with mock.patch.object(module, "load_data") as load, \
+                    self.assertRaisesRegex(module.Refused, "^package-mount-host-source$"):
+                module.Operation.normal_mount_host(op)
+            load.assert_not_called()
+
     @contextlib.contextmanager
     def mount_fixture_call(self, operation, *, fault=None, events=None):
         """Explicit native metadata DATA; real original/roster/validators run."""
@@ -5761,8 +5817,9 @@ sys.exit(status)
         def statvfs(fd):
             if fd == mounted_fd(): return SimpleNamespace(f_flag=0 if fault == "metadata" else os.ST_RDONLY)
             return real_statvfs(fd)
-        def api(deadline, *, target):
+        def api(deadline, *, target, expected_major):
             self.assertFalse(operation.mount_entered or operation.mount_known)
+            self.assertEqual(expected_major, 26)
             self.assertEqual(target, operation.target); deadline.check(); events.append("api-admitted")
             def filesystem(fd):
                 role = selected(fd); self.assertIsNotNone(role); deadline.check()
@@ -5789,8 +5846,8 @@ sys.exit(status)
             if filename == "macos_xcode_host_preparation.py":
                 self.assertEqual((checkout, name), (operation.checkout, "_mrk_package_mount_host"))
                 source, body = operation.mount_host_source
-                self.assertEqual(operation.read(source), body); self.assertEqual(len(body), 96477)
-                self.assertEqual(module.digest(body), "d03cfd5c200564efd71050548ebac85b4f9b56fd3619027ec35ce6a1528e5376")
+                self.assertEqual(operation.read(source), body); self.assertEqual(len(body), 97065)
+                self.assertEqual(module.digest(body), "ae198b3615450a474d948b32145735bbfa16635fb7871d0ef7c31efdc3bd785e")
                 return SimpleNamespace(DarwinAPI=api, _acl_snapshot=acl, full9=module.signature)
             return real_load(checkout, filename, name)
         with (mock.patch.object(module, "load_data", side_effect=load), mock.patch.object(module.os, "fstat", side_effect=fstat),
