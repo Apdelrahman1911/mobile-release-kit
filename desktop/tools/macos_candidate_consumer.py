@@ -10,6 +10,7 @@ from types import MappingProxyType, ModuleType, FunctionType
 
 _SYSTEM_TOOL_FAILURE = None  # One diagnostic slot; never grants original custody.
 _PREDECESSOR_DETACH = None  # Finite SAME-call observations, never cleanup authority.
+_RETAINED_DETACH = None
 STARTED_NS = time.monotonic_ns()
 ROOT = Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -51,6 +52,74 @@ HELPER_SOURCE_INPUTS = tuple(path for path in resume.SOURCE_FILES if path not in
 
 
 PREDECESSOR_METADATA_LIMIT = 16 << 10
+DETACH_LOG_LIMIT = 16 << 10
+DA_SUBSYSTEM = 'com.apple.DiskArbitration.diskarbitrationd'
+
+
+def retained_detach_clock():
+    try:
+        pair = (time.time_ns(), time.monotonic_ns())
+        return pair if all(type(v) is int and 0 < v < 1 << 63 for v in pair) else None
+    except BaseException:
+        return None
+
+
+def retained_detach_log_argv(device, before, after):
+    resume.need(type(device) is str and re.fullmatch(r'/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?', device)
+        and all(type(p) is tuple and len(p) == 2 and all(type(v) is int and 0 < v < 1 << 63 for v in p)
+                for p in (before, after)), 'retained-log')
+    wall, mono = after[0] - before[0], after[1] - before[1]
+    resume.need(0 <= wall and 0 <= mono <= 30_000_000_000 and abs(wall - mono) <= 2_000_000_000,
+                'retained-log')
+    start, end = before[0] // 1_000_000_000, (after[0] + 999_999_999) // 1_000_000_000
+    resume.need(0 < start < end, 'retained-log')
+    dates = [time.strftime('%Y-%m-%d %H:%M:%S+0000', time.gmtime(v)) for v in (start, end)]
+    # Apple DARequest.c:1522 / DAQueue.c:304; error-level public messages.
+    predicate = ('process == "diskarbitrationd" AND subsystem == "' + DA_SUBSYSTEM + '" AND category == "default" AND ('
+        'eventMessage BEGINSWITH "unable to unmount ' + device + ' (status code " OR '
+        'eventMessage CONTAINS "kind = disk unmount approval, disk = ' + device + ', dissented, status = ")')
+    return ['/usr/bin/log', 'show', '--style', 'json', '--start', dates[0], '--end', dates[1],
+            '--timezone', 'UTC', '--no-pager', '--predicate', predicate]
+
+
+def retained_detach_log_codes(stdout, stderr, code, device):
+    resume.need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= DETACH_LOG_LIMIT
+                and type(code) is int and type(device) is str
+                and re.fullmatch(r'/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?', device), 'retained-log')
+    if code != 0 or stderr: return None
+    rows = resume.decode(stdout, allow_finite_floats=True)
+    resume.need(type(rows) is list and len(rows) <= 64, 'retained-log')
+    disk, codes = re.escape(device), set()
+    patterns = (('unmount-failure-log', r'unable to unmount ' + disk + r' \(status code 0x([0-9A-F]{8})\)\.'),
+        ('api-dissent-log', r'  dispatched response, id = [0-9A-F]{16}:[0-9A-F]{16}, kind = disk unmount approval, disk = '
+         + disk + r', dissented, status = 0x([0-9A-F]{8})\.'))
+    for row in rows:
+        resume.need(type(row) is dict and row.get('subsystem') == DA_SUBSYSTEM and row.get('category') == 'default'
+            and type(row.get('eventMessage')) is str and len(row['eventMessage']) <= 512, 'retained-log')
+        for kind, pattern in patterns:
+            found = re.fullmatch(pattern, row['eventMessage'])
+            if found: codes.add((kind, int(found[1], 16)))
+    resume.need(len(codes) <= 8, 'retained-log')
+    return {'codes': [dict(kind=kind, code=code) for kind, code in sorted(codes)]}
+
+
+def retained_detach_diagnostic_data(value):
+    """Observations only, never request/holder authentication."""
+    if type(value) is not dict or type(value.get('originalReturncode')) is not int or value['originalReturncode'] != 16:
+        return None
+    flags = {k: value.get(k) if type(value.get(k)) is bool else None for k in
+             ('entered', 'returned', 'settled', 'resourceUnknown', 'warnings')}
+    codes = value.get('codes')
+    valid = (type(codes) is list and len(codes) <= 8 and all(type(r) is dict and set(r) == {'kind', 'code'}
+        and type(r['kind']) is str and r['kind'] in ('unmount-failure-log', 'api-dissent-log')
+        and type(r['code']) is int and 0 <= r['code'] < 1 << 32 for r in codes))
+    codes = [dict(r) for r in codes] if valid else []
+    observed = (value.get('state') == 'observed' and codes and flags['resourceUnknown'] is False
+                and all(flags[k] is True for k in ('entered', 'returned', 'settled')))
+    return {'state': 'observed' if observed else 'unavailable', 'originalReturncode': 16, **flags,
+        'codes': codes if observed else [],
+        'rawOutputExported': False, 'absenceEstablished': False, 'requestAttributionEstablished': False,
+        'holderAuthentication': False, 'systemServiceExitClaimed': False}
 
 
 def predecessor_metadata_data(value, nomination):
@@ -303,6 +372,20 @@ class CandidateResume(resume.Resume):
         return self.__purpose
 
     def command(self, role, argv, maximum, *, env=None):
+        if self.__retained_observer and role == 'detach':
+            resume.need(self.__detach_observation is None and type(argv) is list and len(argv) == 3
+                and argv[:2] == ['/usr/bin/hdiutil', 'detach'] and type(argv[2]) is str
+                and maximum == 30 and env is None and self.clock.finality is True, 'retained-detach-once')
+            self.__detach_observation = {}
+            count, before = len(self.calls), retained_detach_clock()
+            result = super().command(role, argv, maximum)
+            after = retained_detach_clock()
+            if result.returncode == 16:
+                try:
+                    self.observe_retained_detach(result, count, before, after)
+                except BaseException:
+                    pass
+            return result
         if not self.__predecessor_install or role != 'detach':
             return super().command(role, argv, maximum, env=env)
         # Resume.install_image alone supplies its original reported device,
@@ -326,6 +409,56 @@ class CandidateResume(resume.Resume):
         except BaseException:
             pass  # A diagnostic failure never replaces this identical result.
         return result
+
+    def observe_retained_detach(self, original, count, before, after):
+        if self.__detach_observation != {}: return
+        record = {'originalReturncode': 16, 'state': 'unavailable',
+            'entered': False, 'returned': False, 'settled': False, 'resourceUnknown': False,
+            'warnings': False, 'codes': []}
+        self.__detach_observation = record
+        global _RETAINED_DETACH
+        _RETAINED_DETACH = record
+        tool_pending = False
+        try:
+            resume.need(self.__retained_observer and self.__installation_entered and self.installer_entered
+                and self.installer_zero and self.readback_known and type(getattr(self, 'installation', None)) is dict
+                and self.clock.finality is True and len(self.calls) == count + 1
+                and self.calls[-1]['role'] == 'detach' and self.calls[-1].get('returncode') == original.returncode == 16
+                and sum(row['role'] == 'detach' for row in self.calls) == 1
+                and all(row['returned'] and row['capturesSettled'] and row.get('returncode') == (16 if i == count else 0)
+                        for i, row in enumerate(self.calls)), 'retained-log')
+            argv = retained_detach_log_argv(original.args[2], before, after)
+            self.point()
+            endpoint = min(self.clock.deadline - 15_000_000_000, self.clock.check() + 10_000_000_000)
+            resume.need(os.getuid() == os.geteuid() != 0 and Path('/usr/bin') in self.outer.directories
+                and self.quota.reserved + 1 <= resume.MAX_ORIGINALS, 'retained-log')
+            # Original16 cannot spend the success-only third iterator cell.
+            tool_pending = True
+            _entry, body = self.quota.call(self.outer, 'file', Path('/usr/bin/log'), 64 << 20,
+                                           uid=0, modes=(0o555, 0o755))
+            resume.need(body, 'retained-log')
+            tool_pending = False
+            del body
+            self.point()
+            try: os.stat('.logrc', dir_fd=self.parent['fd'], follow_symlinks=False)
+            except FileNotFoundError: pass
+            else: raise resume.Refused('retained-log')
+            timeout = min(self.clock.seconds(10), (endpoint - self.clock.check()) // 1_000_000_000)
+            resume.need(timeout > 0, 'retained-log')
+            record['entered'] = True
+            result = self.owner.run_owned(argv, environ=dict(self.environment, HOME=str(self.work)), cwd=self.work,
+                timeout=timeout, capture=True, text=False, output_limit=DETACH_LOG_LIMIT, cleanup=True)
+            resume.need(result.args == argv and type(result.returncode) is int and type(result.stdout) is bytes
+                and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= DETACH_LOG_LIMIT,
+                'retained-log')
+            record.update(returned=True, settled=True, warnings=bool(result.stderr))
+            self.point()
+            parsed = retained_detach_log_codes(result.stdout, result.stderr, result.returncode, original.args[2])
+            if parsed is not None:
+                record.update(parsed, state='observed' if parsed['codes'] else 'unavailable')
+        except BaseException:
+            record['resourceUnknown'] |= tool_pending or record['entered'] and not record['settled']
+            # Never replace original16 or retry.
 
     @property
     def nomination(self):
@@ -1141,9 +1274,10 @@ def _admit_system_tool(session, role, tool):
 
 def main(purpose="install"):
     """Hosted fixed acquisition/install and explicit reuse only."""
-    global _SYSTEM_TOOL_FAILURE, _PREDECESSOR_DETACH
+    global _SYSTEM_TOOL_FAILURE, _PREDECESSOR_DETACH, _RETAINED_DETACH
     _SYSTEM_TOOL_FAILURE = None
     _PREDECESSOR_DETACH = None
+    _RETAINED_DETACH = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
     predecessor = os.environ.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
     retained = os.environ.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
@@ -1321,6 +1455,8 @@ def failure_data(error):
     if _PREDECESSOR_DETACH is not None:
         value.update(detachObservation=dict(_PREDECESSOR_DETACH), packageInstallScheduleEqual=False,
                      installedSignatureCheckOrder='after-first-detach0')
+    if _RETAINED_DETACH is not None:
+        value['retainedDetachObservation'] = retained_detach_diagnostic_data(_RETAINED_DETACH)
     return value
 
 
