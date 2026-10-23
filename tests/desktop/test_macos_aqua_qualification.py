@@ -270,7 +270,7 @@ def file_failure_context_data(case, index, panel_id):
     return value
 
 
-def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
+def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit, **unused):
     """Literal DATA-only body rebound below; no owner import or command call."""
     global recursion
     engine = original_engine
@@ -281,8 +281,8 @@ def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
     output_limit = overrides.get("output_limit", output_limit)
     if recursion:
         recursion -= 1
-        return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
-                           text=text, output_limit=output_limit)
+        return _run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                            text=text, output_limit=output_limit, **unused)
     try:
         raise original_error
     except BaseException as error:
@@ -292,15 +292,17 @@ def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
 
 
 def _inert_owned(argv, **options):
-    return run_command(argv, **options)
+    return run_command(argv, cancellation=None, on_start=None, cleanup=False,
+                       execution_scope=None, journal_binding=None, _evidence=None, **options)
 
 
 @contextmanager
 def inert_exception_owner(*, stderr=None, duplicate=False, recursion=0):
     """Synthetic function/frame DATA fixtures, NEVER evidence of a real owner.
 
-    No source loader/import is used. Expected filenames here exercise the
-    origin guard; the actual engine, Store, process and filesystem are absent.
+    Only the real forwarding wrapper is compiled from SOURCE; no core import
+    or engine/native operation runs. The engine exists only in the inert inner
+    frame, matching the real wrapper's split from _run_command.
     """
     source = PATH.parents[2] / "src" / "mobile_release"
     owner, command = ModuleType("mobile_release.owned_process"), ModuleType("mobile_release._command_process")
@@ -325,7 +327,11 @@ def inert_exception_owner(*, stderr=None, duplicate=False, recursion=0):
     command.duplicate_frame, command.recursion = duplicate, recursion
     command.overrides = {}
     command.mutate_argv = False
-    command.run_command = FunctionType(_inert_command.__code__.replace(co_filename=command.__file__), vars(command), "run_command")
+    command._run_command = FunctionType(_inert_command.__code__.replace(co_filename=command.__file__), vars(command), "_run_command")
+    source_tree = ast.parse(Path(command.__file__).read_text(encoding="utf-8"))
+    wrapper = next(node for node in source_tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_command")
+    code = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), wrapper], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(code), command.__file__, "exec"), vars(command))
     owner.run_command = command.run_command
     owner.run_owned = FunctionType(_inert_owned.__code__.replace(co_filename=owner.__file__), vars(owner), "run_owned")
     with patch.dict(sys.modules, {owner.__name__: owner, command.__name__: command}):
@@ -2110,6 +2116,20 @@ class AquaDataTests(unittest.TestCase):
                     for private in ("PRIVATE", M.EXECUTABLE, "MRKDBG_DESKTOP_BOOTSTRAP", "capabilities-"):
                         self.assertNotIn(private, output.getvalue())
 
+    def test_original_exception_uses_real_wrapper_inner_frame(self):
+        with inert_exception_owner() as call:
+            self.assertNotIn("engine", call.command.run_command.__code__.co_varnames)
+            self.assertIn("engine", call.command._run_command.__code__.co_varnames)
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            self.assertEqual(fixtures.inner_failure_step, "CancelProject")
+            self.assertEqual(fixtures.inner_failure_reason, "observer-deadline")
+            self.assertEqual(fixtures.inner_diagnostic_source, "original-exception-buffer")
+            self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+            self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+
     def test_native_action_closed_sites_cover_three_remaining_original_actions(self):
         self.assertEqual(set(M.NATIVE_ACTION_STEPS), {"CancelProject", "QuitCancel", "Quit"})
         self.assertEqual(len(M.NATIVE_ACTION_SITES), 36)
@@ -2196,6 +2216,9 @@ class AquaDataTests(unittest.TestCase):
             lambda f: setattr(f.command, "__file__", "/foreign"),
             lambda f: setattr(f.owner, "run_command", FunctionType(f.command.run_command.__code__, dict(vars(f.command)))),
             lambda f: setattr(f.owner, "run_command", FunctionType(f.command.run_command.__code__.replace(co_firstlineno=1), vars(f.command))),
+            lambda f: setattr(f.owner, "run_command", f.command._run_command),
+            lambda f: setattr(f.command, "_run_command", FunctionType(f.command._run_command.__code__, dict(vars(f.command)))),
+            lambda f: setattr(f.command, "_run_command", FunctionType(f.command._run_command.__code__.replace(co_filename="/foreign"), vars(f.command))),
             lambda f: setattr(f.command, "recursion", 1),
             change_shared_case,
             lambda f: f.command.overrides.update(argv=[M.EXECUTABLE, "noop-stale"]),
@@ -3226,6 +3249,71 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(report["innerOutput"], "unavailable")
         output = io.StringIO(); M.emit_record(report, output)
         self.assertNotIn("PRIVATE MESSAGE", output.getvalue())
+
+    def test_owner_exception_diagnostic_is_closed_and_never_finality(self):
+        class ProcessError(Exception):
+            def __str__(self): raise AssertionError("never format an owner exception")
+            def __repr__(self): raise AssertionError("never format an owner exception")
+        class ProcessCleanupError(ProcessError): pass
+        class ProcessOutcomeUnknown(ProcessError): pass
+        class ProcessInterrupted(KeyboardInterrupt): pass
+        class DerivedError(ProcessError): pass
+        class IntChild(int): pass
+        class TupleChild(tuple): pass
+        class StringChild(str): pass
+        owner = SimpleNamespace(ProcessError=ProcessError, ProcessCleanupError=ProcessCleanupError,
+                                ProcessOutcomeUnknown=ProcessOutcomeUnknown, ProcessInterrupted=ProcessInterrupted)
+        fixtures = InertFixtures(); fixtures.inflight = True
+        def project(error):
+            error.dispatched = error.contained = error.cleanup_complete = True
+            report = M.diagnostic(error, owner, fixtures)
+            self.assertEqual((report["innerOutput"], report["invocationFinality"], report["innerDiagnosticCompleteness"]),
+                             ("unavailable", "unknown", "unknown"))
+            self.assertIsNone(report["appReturncode"]); self.assertFalse(report["originalCallReturned"])
+            output = io.StringIO(); M.emit_record(report, output)
+            self.assertNotIn("PRIVATE", output.getvalue()); self.assertNotIn("owned command", output.getvalue())
+            return report.get("ownerDiagnostic")
+        categories = {
+            "owned command produced incomplete output": "incomplete-output",
+            "owned command exceeded its original deadline": "original-deadline",
+            "owned command output exceeds its bound": "output-bound",
+            "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+            "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
+            "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+            "owned command executable could not be started": "exec-rejected",
+            "owned command was stopped before execution": "stopped-before-exec",
+            "owned command original parent ended": "parent-ended",
+            "owned command original observer ended": "observer-ended",
+            "owned command fence name already exists": "fence-collision",
+        }
+        for kind in (ProcessError, ProcessCleanupError, ProcessOutcomeUnknown):
+            for message, reason in categories.items():
+                self.assertEqual(project(kind(message)), {"reason": reason, "failureMask": None, "ownerFinality": None})
+        for args in ((), ("PRIVATE",), ("owned command exceeded its original deadline PRIVATE",),
+                     ("owned command exceeded its original deadline", "PRIVATE"), (b"PRIVATE",),
+                     (StringChild("owned command exceeded its original deadline"),), ("PRIVATE" * 100,)):
+            self.assertEqual(project(ProcessError(*args)), {"reason": "unknown", "failureMask": None, "ownerFinality": None})
+        for kind in (DerivedError, ValueError, ProcessInterrupted):
+            self.assertIsNone(project(kind("owned command exceeded its original deadline")))
+        error = ProcessError("owned command produced incomplete output")
+        for mask in (32, 48, 63, 0, 31, 33, 47, 64, -1, True, IntChild(48), "PRIVATE", None):
+            error.owner_failure_mask = mask
+            expected = mask if type(mask) is int and (mask == 32 or 48 <= mask <= 63) else None
+            self.assertEqual(project(error), {"reason": "incomplete-output", "failureMask": expected, "ownerFinality": None})
+        error.owner_failure_mask = None
+        valid = ((1, 0, 0, 0, None), (1, 0, 1023, 15, None), (1, 1, 1048575, 15, 63),
+                 (1, 1, 0, 0, 0), (1, 1, 0, 0, 32), (1, 1, 0, 0, 48))
+        invalid = (None, [], (), TupleChild(valid[0]), (True, 0, 0, 0, None), (2, 0, 0, 0, None),
+                   (1, 2, 0, 0, None), (1, 0, 1024, 0, None), (1, 1, 1048576, 0, None),
+                   (1, 1, 0, 16, None), (1, 1, -1, 0, None), (1, 0, 0, 0, 32),
+                   (1, 1, 0, 0, True), (1, 1, 0, 0, IntChild(48)), (1, 1, 0, 0, 47),
+                   (1, 1, 0, 0, 64), (1, 1, 0, 0, "PRIVATE"))
+        for observed in valid + invalid:
+            error.owner_finality_diagnostic = observed
+            expected = list(observed) if any(observed is row for row in valid) else None
+            self.assertEqual(project(error), {"reason": "incomplete-output", "failureMask": None, "ownerFinality": expected})
+        with patch.object(M, "_owner_exception_diagnostic", side_effect=RuntimeError("PRIVATE DIAGNOSTIC FAULT")):
+            self.assertIsNone(project(error))
 
 
 @contextmanager

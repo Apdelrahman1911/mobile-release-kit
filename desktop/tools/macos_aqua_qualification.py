@@ -4373,35 +4373,42 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
                 return None
             modules.append(namespace)
         owner, command = modules
-        function = command.get("run_command")
+        wrapper, function = command.get("run_command"), command.get("_run_command")
         if (type(run_owned) is not FunctionType or owner.get("run_owned") is not run_owned
                 or run_owned.__globals__ is not owner or run_owned.__code__.co_filename != owner["__file__"]
-                or type(function) is not FunctionType or function.__globals__ is not command
-                or function.__code__.co_filename != command["__file__"]):
+                or any(type(candidate) is not FunctionType or candidate.__globals__ is not command
+                       or candidate.__code__.co_filename != command["__file__"] for candidate in (wrapper, function))):
             return None
-        original = None
+        wrapped = original = None
         trace = error.__traceback__
         for _ in range(TRACEBACK_LIMIT):
             if trace is None:
                 break
             frame = trace.tb_frame
+            if frame.f_code is wrapper.__code__:
+                if frame.f_globals is not command or wrapped is not None and frame is not wrapped:
+                    return None
+                wrapped = frame
             if frame.f_code is function.__code__:
                 if frame.f_globals is not command or original is not None and frame is not original:
                     return None
                 original = frame  # Re-raising can repeat this identical frame.
             trace = trace.tb_next
-        if trace is not None or original is None:
+        if trace is not None or original is None or wrapped is None or original.f_back is not wrapped:
             return None
-        local = original.f_locals  # Python 3.14 can supply FrameLocalsProxy.
-        engine = local.get("engine")
+        # The public wrapper still binds this call; its delegated original owns
+        # the engine. Neither an unrelated inner frame nor wrapper locals suffice.
+        for frame in (wrapped, original):
+            local = frame.f_locals  # Python 3.14 can supply FrameLocalsProxy.
+            actual = local.get("argv")
+            if (type(actual) is not list or len(actual) != 2 or any(type(arg) is not str for arg in actual)
+                    or tuple(actual) != argv or type(local.get("cwd")) is not type(cwd) or local["cwd"] != cwd
+                    or type(local.get("timeout")) is not int or local["timeout"] != case_timeout(case)
+                    or local.get("capture") is not True or local.get("text") is not False
+                    or type(local.get("output_limit")) is not int or local["output_limit"] != OUTPUT_LIMIT):
+                return None
+        engine = original.f_locals.get("engine")
         if type(engine) is not command.get("_Outer"):
-            return None
-        actual = local.get("argv")
-        if (type(actual) is not list or len(actual) != 2 or any(type(arg) is not str for arg in actual)
-                or tuple(actual) != argv or type(local.get("cwd")) is not type(cwd) or local["cwd"] != cwd
-                or type(local.get("timeout")) is not int or local["timeout"] != case_timeout(case)
-                or local.get("capture") is not True or local.get("text") is not False
-                or type(local.get("output_limit")) is not int or local["output_limit"] != OUTPUT_LIMIT):
             return None
         frozen = engine.frozen
         if type(frozen) is not command.get("FrozenCommand") or type(frozen.manifest) is not command.get("Manifest"):
@@ -6999,6 +7006,37 @@ def shipping_capacity_data_main(*, target=ARM_TARGET):
             pass
         return 130 if isinstance(error, KeyboardInterrupt) else 1
 
+def _owner_exception_diagnostic(error, owner):
+    """Existing closed owner observations, never output or finality authority."""
+    if owner is None or type(error) not in tuple(getattr(owner, name, None) for name in (
+            "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")):
+        return None
+    arguments = BaseException.args.__get__(error)  # Never format exception text.
+    reason = {
+        "owned command produced incomplete output": "incomplete-output",
+        "owned command exceeded its original deadline": "original-deadline",
+        "owned command output exceeds its bound": "output-bound",
+        "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+        "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
+        "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+        "owned command executable could not be started": "exec-rejected",
+        "owned command was stopped before execution": "stopped-before-exec",
+        "owned command original parent ended": "parent-ended",
+        "owned command original observer ended": "observer-ended",
+        "owned command fence name already exists": "fence-collision",
+    }.get(arguments[0], "unknown") if (type(arguments) is tuple and len(arguments) == 1
+        and type(arguments[0]) is str and len(arguments[0]) <= 128) else "unknown"
+    mask = error.__dict__.get("owner_failure_mask")
+    observed = error.__dict__.get("owner_finality_diagnostic")
+    valid = (type(observed) is tuple and len(observed) == 5
+             and all(type(value) is int for value in observed[:4]) and observed[0] == 1
+             and observed[1] in (0, 1) and 0 <= observed[2] <= (1023 if observed[1] == 0 else 1048575)
+             and 0 <= observed[3] <= 15 and (observed[4] is None or type(observed[4]) is int
+             and observed[1] == 1 and (observed[4] in (0, 32) or 48 <= observed[4] <= 63)))
+    return {"reason": reason, "failureMask": mask if type(mask) is int and (mask == 32 or 48 <= mask <= 63) else None,
+            "ownerFinality": list(observed) if valid else None}
+
+
 def diagnostic(error, owner, fixtures):
     # Preserve individual typed public lifetime facts, not a synthesized pass
     # from a later exception. Missing fields remain unknown (JSON null).
@@ -7040,6 +7078,9 @@ def diagnostic(error, owner, fixtures):
         location = _result_location(getattr(error, "result_location", None)) if type(error) is Refused else None
         if location is not None:
             result["resultLocation"] = location
+        owner_diagnostic = _owner_exception_diagnostic(error, owner)
+        if owner_diagnostic is not None:
+            result["ownerDiagnostic"] = owner_diagnostic
     except BaseException:
         pass  # Keep the original refusal/lifetime facts if optional detail fails.
     return result
