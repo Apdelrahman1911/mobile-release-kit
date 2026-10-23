@@ -38,9 +38,9 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, image-detach, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-compile, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, image-detach, image-installer-detach, app, app-typecheck, app-observer-compile, app-native-tests, app-contracts, automation-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
-        description: Architecture for installer-compile/image-detach/app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
+        description: Architecture for installer-compile/image-detach/image-installer-detach/app-typecheck/app-observer-compile/app-native-tests (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -58,8 +58,8 @@ concurrency:
 
 jobs:
   image-detach:
-    if: github.event_name == 'workflow_dispatch' && inputs.component == 'image-detach'
-    name: Observe a real busy disk image and clean detach without signing
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'image-detach' || inputs.component == 'image-installer-detach')
+    name: ${{ inputs.component == 'image-installer-detach' && 'Observe disk image detach after a harmless Installer package' || 'Observe a real busy disk image and clean detach without signing' }}
     runs-on: macos-26
     timeout-minutes: 5
     steps:
@@ -79,16 +79,22 @@ jobs:
         id: python
         with:
           python-version: '3.14.7'
-      - name: Observe only the owned harmless image and original holder
+      - name: Run only the selected harmless image case
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          IMAGE_COMPONENT: ${{ inputs.component }}
         run: |
           set -euo pipefail
           umask 077
           ulimit -c 0
-          "$MRK_PYTHON" -I -S -B tests/desktop/test_macos_distribution_detach_native.py
+          case "$IMAGE_COMPONENT" in
+            image-detach) test_case=DistributionDetachNative.test_original_holder_visible_until_original_fds_close ;;
+            image-installer-detach) test_case=DistributionDetachNative.test_scripts_only_installer_returns_before_original_detach ;;
+            *) exit 1 ;;
+          esac
+          "$MRK_PYTHON" -I -S -B tests/desktop/test_macos_distribution_detach_native.py "$test_case"
 
   resident-compile:
     if: github.event_name == 'workflow_dispatch' && inputs.component == 'resident-compile'
