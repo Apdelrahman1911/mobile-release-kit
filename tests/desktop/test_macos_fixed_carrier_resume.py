@@ -1943,6 +1943,87 @@ class FixedCarrierResumeData(unittest.TestCase):
         self.assertIn('fresh_book(transport=True)', text)
         self.assertIn("transport_transition_data(mounted_roster, after, volumes_facts, current, mount.name, member, present=False)", text)
 
+    def test_candidate_history_admission_keeps_current_bindings_and_legacy_empty_rule(self):
+        # Real SOURCE history and descriptor parser, but deliberately inert
+        # package/signature bytes: reaching the real XAR refusal proves only
+        # this DATA guard's admission, never a signed artifact or native result.
+        m = ADAPTER
+        with mock.patch('subprocess.Popen', side_effect=AssertionError('no process/native execution')):
+            tool = inert_module('candidate_history_stager_data', 'desktop/tools/stage_macos_installed.py')
+            history = tool.read(ROOT / 'desktop/macos-installed-inputs/producer-history.json', tool.PRODUCER_DESCRIPTOR_BYTES)
+            source = tool.packaging_signing_data(tool.read(tool.PRODUCER_PROFILE, 1024), tool.read(tool.SERVICE_PROFILE, 512))
+            selection = tool.source_build_selection(tool.ARM_TARGET)
+            package, signature = b'INERT-NOT-A-PACKAGE-' * 3, b'INERT-NOT-A-SIGNATURE'
+            encoded = tool.packaging_descriptor_data(history, source, selection, source_commit='1' * 40,
+                manifest='a' * 64, inventory='b' * 64, package=m.sha(package))
+            descriptor = tool.maintenance_producer_data(encoded, target=tool.ARM_TARGET)
+            current = descriptor['releaseSet']['current']
+            self.assertEqual(selection.package_version, '0.1.3')
+            self.assertEqual([old['packageVersion'] for old in descriptor['releaseSet']['acceptedPredecessors']], ['0.1.2'])
+            self.assertEqual(descriptor['releaseSet']['acceptedPredecessors'],
+                             tool.maintenance_json(history, tool.PRODUCER_DESCRIPTOR_BYTES)['targets'][tool.ARM_TARGET]['acceptedPredecessors'])
+            self.assertEqual(len(descriptor['signingPolicies']), 1)
+            identity = {key: descriptor['signingPolicies'][0]['policy'][key]
+                        for key in ('teamIdentifier', 'leafCertificateSha1', 'leafCertificateSha256')}
+
+            def inputs(document):
+                bodies = {'Install.pkg': package, 'producer.json': tool.canonical(document) + b'\n', 'producer.sig': signature}
+                row = dict(source=current['sourceCommit'], packageVersion=selection.package_version, release=selection.release,
+                    runtimeManifestSha256=current['runtimeManifestSha256'], inventorySha256=current['inventorySha256'],
+                    signingIdentity=dict(identity))
+                for key, name in (('package', 'Install.pkg'), ('descriptor', 'producer.json'), ('signature', 'producer.sig')):
+                    row[key] = dict(name=name, bytes=len(bodies[name]), sha256=m.sha(bodies[name]))
+                return {name: (body, 0o444) for name, body in bodies.items()}, row
+
+            originals, row = inputs(descriptor)
+            with self.assertRaisesRegex(tool.Refused, '^install-product-xar-header$'):
+                m.mounted_data(originals, row, tool.ARM_TARGET, tool, candidate=True)
+            with self.assertRaisesRegex(m.Refused, '^enrollment-release-original$'):
+                m.mounted_data(originals, row, tool.ARM_TARGET, tool)
+            with self.assertRaisesRegex(m.Refused, '^resume-mounted-purpose$'):
+                m.mounted_data(originals, row, tool.ARM_TARGET, tool, candidate=1)
+            empty = copy.deepcopy(descriptor); empty['releaseSet']['acceptedPredecessors'] = []
+            for candidate in (False, True):
+                with self.subTest(empty_history=candidate), self.assertRaisesRegex(tool.Refused, '^install-product-xar-header$'):
+                    m.mounted_data(*inputs(empty), tool.ARM_TARGET, tool, candidate=candidate)
+            for field, value in (('sourceCommit', '4' * 40), ('runtimeManifestSha256', '4' * 64),
+                    ('inventorySha256', '4' * 64), ('packageVersion', '0.1.4'),
+                    ('release', 'macos26-arm64-desktop-04'), ('packageSha256', '4' * 64)):
+                changed = copy.deepcopy(descriptor); changed['releaseSet']['current'][field] = value
+                with self.subTest(current=field), self.assertRaisesRegex(m.Refused, '^enrollment-release-original$'):
+                    m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)
+            for field in identity:
+                originals, row = inputs(descriptor)
+                row['signingIdentity'][field] = 'OTHERTEAM0' if field == 'teamIdentifier' else '4' * len(identity[field])
+                with self.subTest(identity=field), self.assertRaisesRegex(m.Refused, '^enrollment-policy-original$'):
+                    m.mounted_data(originals, row, tool.ARM_TARGET, tool, candidate=True)
+            for member in ('Install.pkg', 'producer.json', 'producer.sig'):
+                originals, row = inputs(descriptor)
+                originals[member] = (originals[member][0] + b'changed', 0o444)
+                with self.subTest(member=member), self.assertRaisesRegex(m.Refused, '^enrollment-mounted-original$'):
+                    m.mounted_data(originals, row, tool.ARM_TARGET, tool, candidate=True)
+            for fault in ('duplicate', 'version', 'policy'):
+                changed = copy.deepcopy(descriptor); old = changed['releaseSet']['acceptedPredecessors'][0]
+                if fault == 'duplicate': changed['releaseSet']['acceptedPredecessors'].append(copy.deepcopy(old))
+                elif fault == 'version': old['packageVersion'] = selection.package_version
+                else: old['signingPolicySha256'] = 'f' * 64
+                with self.subTest(history=fault), self.assertRaises(tool.Refused):
+                    m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)
+            # Even a fully DATA-valid historical key rotation does not waive
+            # the existing single-policy/current-identity restriction.
+            changed = copy.deepcopy(descriptor)
+            alternate = dict(changed['signingPolicies'][0]['policy'], teamIdentifier='ABCDE12345')
+            ordered = ('schemaVersion', 'kind', 'teamIdentifier', 'leafCertificateSha1',
+                       'leafCertificateSha256', 'hardenedRuntime', 'entitlements')
+            policy_sha = m.sha(json.dumps({key: alternate[key] for key in ordered}, separators=(',', ':')).encode('ascii'))
+            changed['signingPolicies'].append(dict(sha256=policy_sha, policy=alternate))
+            changed['signingPolicies'].sort(key=lambda value: value['sha256'])
+            changed['releaseSet']['current']['signingPolicySha256'] = policy_sha
+            tool.maintenance_producer_data(tool.canonical(changed), target=tool.ARM_TARGET)
+            with self.assertRaisesRegex(m.Refused, '^enrollment-release-original$'):
+                m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)
+            self.assertEqual(tool.source_build_selection(tool.ARM_TARGET), selection)
+
     def test_producer_signature_uses_native_domain_and_retained_original_message(self):
         import ast
         import re

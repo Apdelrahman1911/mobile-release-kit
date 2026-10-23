@@ -1061,7 +1061,10 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
     stager.distribution_layout_data(list(originals), 'Install.pkg', bodies, originals)
     descriptor = stager.maintenance_producer_data(bodies['producer.json'], target=target)
     releases = descriptor['releaseSet']; release = releases['current']
-    need(not releases['acceptedPredecessors'] and len(descriptor['signingPolicies']) == 1
+    # Candidate history is fully parsed above and bound by the exact artifact
+    # and subsequent native descriptor signature; it never selects P0 here.
+    # The fixed historical enrollment still requires an empty predecessor set.
+    need((candidate or not releases['acceptedPredecessors']) and len(descriptor['signingPolicies']) == 1
          and all(release[k] == row[v] for k, v in (('sourceCommit', 'source'), ('runtimeManifestSha256', 'runtimeManifestSha256'),
                  ('inventorySha256', 'inventorySha256'), ('packageVersion', 'packageVersion'), ('release', 'release')))
          and release['packageSha256'] == row['package']['sha256'], 'enrollment-release-original')
