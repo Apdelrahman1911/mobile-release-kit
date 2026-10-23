@@ -48,9 +48,13 @@ ORIGINALS = ("HEAD", "config", "index", "refs/heads/main", "logs/HEAD", "logs/re
              "refs/remotes/origin/main", "logs/refs/remotes/origin/main", DATA)
 
 
+class Refused(ValueError):
+    """Fixed helper reason only; never Git output, config or private text."""
+
+
 def _need(condition, reason):
     if not condition:
-        raise ValueError(reason)  # Fixed reason only; never Git output/config.
+        raise Refused(reason)
 
 
 def _hash(body):

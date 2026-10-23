@@ -7060,6 +7060,10 @@ def diagnostic(error, owner, fixtures):
             facts.append(row)
         pending.extend((current.__context__, current.__cause__))
     label = str(error) if type(error) is Refused else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "helper-or-owner-error"
+    if type(error) in (PUSH.Refused, UPSTREAM.shared.Refused, GIT_CLI.shared.Refused):
+        arguments = BaseException.args.__get__(error)
+        label = arguments[0] if (len(arguments) == 1 and type(arguments[0]) is str
+                                and len(arguments[0]) <= 64) else "helper-refused"
     if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", label) is None:
         label = "helper-refused"
     result = {"schemaVersion": 1, "type": "macos-aqua-failure", "status": "failed", "reason": label,
@@ -7078,6 +7082,11 @@ def diagnostic(error, owner, fixtures):
             "fixtureCloseErrors": fixtures.close_errors if fixtures else 0,
             "fixturesPreserved": True, "laterCasesStopped": True}
     try:
+        setup = getattr(fixtures, "git_cli", None)
+        if (fixtures and fixtures.stage == "git-cli-local-setup"
+                and fixtures.case in GIT_CLI.CASES and type(setup) is dict):
+            ordinal = setup.get("calls")  # Attempt only, never success or app entry.
+            result["gitSetupLastAttemptedCallOrdinal"] = ordinal if type(ordinal) is int and 1 <= ordinal <= 16 else None
         precursor = getattr(fixtures, "precursor_diagnostic", None)
         if precursor is not None:
             result["precursorDiagnostic"] = precursor

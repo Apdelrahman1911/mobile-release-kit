@@ -3352,6 +3352,51 @@ class AquaDataTests(unittest.TestCase):
         output = io.StringIO(); M.emit_record(report, output)
         self.assertNotIn("PRIVATE MESSAGE", output.getvalue())
 
+    def test_git_setup_fixed_helper_reasons_do_not_export_foreign_or_malformed_errors(self):
+        fixtures = M.Fixtures(BINDING, UID, GID, M.GIT_CLI.SCOPES[0])
+        fixtures.case, fixtures.stage = M.GIT_CLI.INDEX, "git-cli-local-setup"
+        fixtures.git_cli = {"calls": 1}
+        for helper, reason in ((M.PUSH, "push-file-original"),
+                               (M.UPSTREAM, "upstream-fixture-config"),
+                               (M.GIT_CLI, "git-cli-setup-failed")):
+            with self.subTest(reason=reason):
+                try:
+                    helper._need(False, reason)  # Actual fixed helper throw, no native effect.
+                except ValueError as error:
+                    caught = error
+                self.assertEqual(M.diagnostic(caught, None, fixtures)["reason"], reason)
+                foreign = type("ForeignRefused", (type(caught),), {})
+                for error in (ValueError(reason), foreign(reason), RuntimeError("PRIVATE")):
+                    self.assertEqual(M.diagnostic(error, None, fixtures)["reason"], "helper-or-owner-error")
+                class Unformattable:
+                    def __str__(self): raise AssertionError("Do not format malformed args")
+                    def __repr__(self): raise AssertionError("Do not format malformed args")
+                for args in ((), (None,), (Unformattable(),), ("PRIVATE\nTEXT",),
+                             ("x" * 65,), (reason, "PRIVATE")):
+                    report = M.diagnostic(type(caught)(*args), None, fixtures)
+                    self.assertEqual(report["reason"], "helper-refused")
+                    self.assertNotIn("PRIVATE", json.dumps(report))
+
+    def test_git_setup_ordinal_is_only_a_bounded_attempt_not_success_or_app_entry(self):
+        fixtures = M.Fixtures(BINDING, UID, GID, M.GIT_CLI.SCOPES[0])
+        fixtures.case, fixtures.stage = M.GIT_CLI.INDEX, "git-cli-local-setup"
+        field = "gitSetupLastAttemptedCallOrdinal"
+        for ordinal in (1, 5, 16, 0, 17, -1, True, False, 1.0, "1", None):
+            for inflight, returned in ((False, True), (True, False)):
+                with self.subTest(ordinal=ordinal, inflight=inflight):
+                    fixtures.git_cli = {"calls": ordinal}
+                    fixtures.inflight, fixtures.last_returned = inflight, returned
+                    report = M.diagnostic(ValueError("PRIVATE"), None, fixtures)
+                    self.assertIn(field, report)
+                    self.assertEqual(report[field], ordinal if type(ordinal) is int and 1 <= ordinal <= 16 else None)
+                    self.assertEqual(report["originalCallReturned"], returned)
+                    self.assertEqual(report["invocationFinality"], "unknown" if inflight else "no-pending-invocation")
+                    self.assertIsNone(report["appReturncode"])
+                    self.assertEqual((fixtures.inflight, fixtures.last_returned), (inflight, returned))
+                    self.assertNotIn("PRIVATE", json.dumps(report))
+        fixtures.stage = "invocation"
+        self.assertNotIn(field, M.diagnostic(ValueError("PRIVATE"), None, fixtures))
+
     def test_owner_exception_diagnostic_is_closed_and_never_finality(self):
         class ProcessError(Exception):
             def __str__(self): raise AssertionError("never format an owner exception")
