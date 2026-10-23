@@ -9,6 +9,7 @@ import time
 from types import MappingProxyType, ModuleType, FunctionType
 
 _SYSTEM_TOOL_FAILURE = None  # One diagnostic slot; never grants original custody.
+_PREDECESSOR_DETACH = None  # Finite SAME-call observations, never cleanup authority.
 STARTED_NS = time.monotonic_ns()
 ROOT = Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -21,8 +22,10 @@ HELPER_ROOT = CANDIDATE_ROOT / '.candidate-consumer-helper'
 WORKFLOW = '.github/workflows/desktop-macos-candidate-consume.yml'
 BRANCH = 'verify/desktop-macos-candidate-consume'
 REMOVAL_BRANCH = 'task/ci-simplification-20261015'
+PREDECESSOR_BRANCH = 'verify/desktop-macos-predecessor-install'
 SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-carrier-selection.json'
 REMOVAL_SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-removal-selection.json'
+PREDECESSOR_SELECTION_PATH = 'desktop/macos-installed-inputs/predecessor-install-selection.json'
 CHILD_SOURCE_LIMIT = 256 << 10
 PARSER_SOURCE_LIMIT = 64 << 10
 LEGACY_PATH = 'desktop/tools/macos_fixed_carrier_resume.py'
@@ -128,13 +131,15 @@ def context_data(environment, root, machine):
     arm = target == 'aarch64-apple-darwin'
     source = environment.get('GITHUB_SHA', '')
     removal = environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery'
-    branch = REMOVAL_BRANCH if removal else BRANCH
+    predecessor = environment.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
+    branch = PREDECESSOR_BRANCH if predecessor else REMOVAL_BRANCH if removal else BRANCH
     resume.need(root == HELPER_ROOT and environment.get('GITHUB_WORKSPACE') == str(CANDIDATE_ROOT)
                 and environment.get('RUNNER_TEMP') == '/Users/runner/work/_temp'
                 and environment.get('GITHUB_REPOSITORY') == resume.REPOSITORY
-                and (environment.get('GITHUB_EVENT_NAME') == 'push' or
+                and (environment.get('GITHUB_EVENT_NAME') == 'push' and not predecessor or
                      environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
-                     and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery')
+                     and (removal or predecessor))
+                and (not predecessor or arm)
                 and environment.get('GITHUB_REF') == 'refs/heads/' + branch
                 and environment.get('GITHUB_WORKFLOW_REF') == resume.REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + branch
                 and re.fullmatch(r'[0-9a-f]{40}', source) and source != '0' * 40
@@ -187,6 +192,27 @@ def candidate_transport_path(run, attempt, nomination):
     return Path('/Volumes') / ('MRK-Install-' + resume.sha(context.encode('ascii'))[:32])
 
 
+def predecessor_detach_data(stdout, stderr):
+    """Same bounded lexical policy as the production detach DATA helpers.
+
+    Kept local to avoid a 97th lifetime SOURCE original just for diagnostics.
+    Literal text hints are not cause, stage, PID or service-finality evidence.
+    """
+    label = 'unclassified'
+    if type(stderr) is bytes and len(stderr) <= 65536:
+        known = {b'Resource busy': 'resource-busy', b'Permission denied': 'permission-denied',
+                 b'Operation not permitted': 'operation-not-permitted', b'No such device': 'no-such-device'}
+        lines = stderr.split(b'\n')
+        found = {label for token, label in known.items() if b'hdiutil: detach failed - ' + token in lines}
+        label = 'empty' if not stderr else next(iter(found)) if len(found) == 1 else 'unclassified'
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 65536:
+        return {'stderr': label, 'textHints': None}
+    data = stdout.lower() + b'\n' + stderr.lower()
+    hints = [hint for token, hint in ((b'resource busy', 'resource-busy-text'),
+        (b'unmount', 'unmount-text'), (b'eject', 'eject-text'), (b'dissent', 'dissent-text')) if token in data]
+    return {'stderr': label, 'textHints': hints}
+
+
 def candidate_resource_requirements(nomination, retained, host_bytes, *, image_bytes=None):
     """Fund ZIP first, then its checked image before decode; retain disk cap."""
     row = candidate.candidate_selection_data(nomination)
@@ -237,11 +263,17 @@ class CandidateResume(resume.Resume):
     """Candidate adapter with separate held helper/application sources."""
     command_roles = (*resume.Resume.command_roles, 'helper-source', 'candidate-source')
 
-    def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None, purpose="install"):
+    def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None, purpose="install",
+                 predecessor_install=False):
         resume.need(helper_root == HELPER_ROOT and candidate_root == CANDIDATE_ROOT,
                     'candidate-separate-source-roots')
         resume.need(type(purpose) is str and purpose in PURPOSES, "candidate-purpose")
+        resume.need(type(predecessor_install) is bool
+                    and (not predecessor_install or purpose == 'install' and nomination is None),
+                    'candidate-predecessor-install-purpose')
         self.__purpose = purpose
+        self.__predecessor_install = predecessor_install
+        self.__detach_observation = None
         self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
         self.acquisition_result = None
         self.__predecessor_metadata = None
@@ -259,6 +291,30 @@ class CandidateResume(resume.Resume):
     @property
     def purpose(self):
         return self.__purpose
+
+    def command(self, role, argv, maximum, *, env=None):
+        if not self.__predecessor_install or role != 'detach':
+            return super().command(role, argv, maximum, env=env)
+        # Resume.install_image alone supplies its original reported device,
+        # after its existing consuming mounted-book finish. No retry/new owner.
+        resume.need(self.__detach_observation is None and type(argv) is list and len(argv) == 3
+                    and argv[:2] == ['/usr/bin/hdiutil', 'detach'] and type(argv[2]) is str
+                    and maximum == 30 and env is None and self.clock.finality is True,
+                    'candidate-predecessor-detach-once')
+        observation = {'entered': True, 'returned': False, 'outcome': 'unknown',
+            'installerReturnedZero': self.installer_zero is True, 'readbackKnown': self.readback_known is True,
+            'stderr': 'unclassified', 'textHints': None, 'systemServiceExitClaimed': False}
+        self.__detach_observation = observation
+        global _PREDECESSOR_DETACH
+        _PREDECESSOR_DETACH = observation
+        result = super().command(role, argv + ['-verbose'], maximum)
+        observation.update(returned=True, outcome='detach0' if result.returncode == 0 else
+                           'detach16' if result.returncode == 16 else 'other-return')
+        try:
+            observation.update(predecessor_detach_data(result.stdout, result.stderr))
+        except BaseException:
+            pass  # A diagnostic failure never replaces this identical result.
+        return result
 
     @property
     def nomination(self):
@@ -280,7 +336,9 @@ class CandidateResume(resume.Resume):
 
     def load_nomination(self, target):
         resume.need(self.__nomination is None, 'candidate-source-selection-once')
-        path = REMOVAL_SELECTION_PATH if self.purpose == 'acquire-removal' else SELECTION_PATH
+        resume.need(not self.__predecessor_install or target == 'aarch64-apple-darwin', 'candidate-predecessor-target')
+        path = (PREDECESSOR_SELECTION_PATH if self.__predecessor_install else
+                REMOVAL_SELECTION_PATH if self.purpose == 'acquire-removal' else SELECTION_PATH)
         body = self.source(path, 8192)
         self.__nomination = MappingProxyType(selection_data(body, target))
 
@@ -679,6 +737,9 @@ class CandidateResume(resume.Resume):
             if self.purpose == 'install':
                 resume.need(type(self.__predecessor_metadata) is bytes, 'candidate-predecessor-metadata-missing')
                 result['predecessorMetadata'] = predecessor_metadata_data(resume.decode(self.__predecessor_metadata), self.nomination)
+                if self.__predecessor_install:
+                    result.update(experiment='public-predecessor-install-detach',
+                        detachObservation=dict(self.__detach_observation), packageInstallScheduleEqual=False)
                 resume.need(len(resume.canonical(result)) <= PREDECESSOR_METADATA_LIMIT, 'candidate-predecessor-receipt-bound')
                 self.clock.check()
             if self.purpose == 'restore-install':
@@ -936,10 +997,13 @@ def _admit_system_tool(session, role, tool):
 
 def main(purpose="install"):
     """Hosted fixed acquisition/install and explicit reuse only."""
-    global _SYSTEM_TOOL_FAILURE
+    global _SYSTEM_TOOL_FAILURE, _PREDECESSOR_DETACH
     _SYSTEM_TOOL_FAILURE = None
+    _PREDECESSOR_DETACH = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
-    resume.need((purpose == 'acquire-removal') == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
+    predecessor = os.environ.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
+    resume.need(not predecessor or purpose == 'install', 'candidate-predecessor-install-purpose')
+    resume.need((purpose == 'acquire-removal' or predecessor) == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
                 'candidate-removal-purpose')
     context = entry_context(() if purpose == "install" else (purpose,))
     clock = resume.Deadline(started=STARTED_NS)
@@ -952,7 +1016,8 @@ def main(purpose="install"):
             os.mkdir(context['work'], 0o700)
         quota.reserve(1)  # Consuming bootstrap source FD, retained re-read below.
         session = CandidateResume(HELPER_ROOT, CANDIDATE_ROOT, context['work'], clock,
-                                  resume.bootstrap_originals(HELPER_ROOT), quota=quota, purpose=purpose)
+                                  resume.bootstrap_originals(HELPER_ROOT), quota=quota, purpose=purpose,
+                                  predecessor_install=predecessor)
         session.helper_source = context['helperSource']
         session.run_id, session.run_attempt = context['runId'], context['runAttempt']
         session.load_nomination(context['target'])
@@ -1028,6 +1093,8 @@ def main(purpose="install"):
 def failure_data(error):
     """Useful public failure locations, never exception text or frame locals."""
     allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
+        'candidate-predecessor-install-purpose', 'candidate-predecessor-target',
+        'candidate-predecessor-detach-once', 'resume-original-detach',
         'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
         'candidate-materialize-lifetime-quote', 'candidate-materialize-live-quote',
         'candidate-materialize-os-fd-limit', 'candidate-materialize-originals-known',
@@ -1099,9 +1166,12 @@ def failure_data(error):
         reason = parts[0]
         try: resource = resume.resource_projection_data(resume.STATE.get('resourceAdmission'))
         except Exception: pass
-    return {'scope': 'candidate-consumer-failure-only', 'reason': reason, 'resourceAdmission': resource,
+    value = {'scope': 'candidate-consumer-failure-only', 'reason': reason, 'resourceAdmission': resource,
         'exceptionClass': error_class, 'sourceFrames': frames, 'systemTool': system_tool,
         'rawOutputExported': False, 'cleanupAuthorized': False}
+    if _PREDECESSOR_DETACH is not None:
+        value.update(detachObservation=dict(_PREDECESSOR_DETACH), packageInstallScheduleEqual=False)
+    return value
 
 
 if __name__ == '__main__':

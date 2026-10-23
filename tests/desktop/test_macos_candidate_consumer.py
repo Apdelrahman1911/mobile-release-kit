@@ -1070,3 +1070,164 @@ class CandidateConsumerTests(unittest.TestCase):
             with mock.patch.object(C,'entry_context',return_value={}), mock.patch.object(R,'host_read') as read:
                 with self.assertRaises(ValueError): C.fixture_main('prepare-restore')
                 read.assert_not_called()
+
+
+class PredecessorInstallTests(unittest.TestCase):
+    """Fixed public P0 routing and inert SAME-call diagnostics, never native proof."""
+
+    def setUp(self):
+        self.previous = C._PREDECESSOR_DETACH
+        C._PREDECESSOR_DETACH = None
+
+    def tearDown(self):
+        C._PREDECESSOR_DETACH = self.previous
+
+    def environment(self):
+        return dict(MRK_MACOS_TARGET='aarch64-apple-darwin', GITHUB_WORKSPACE=str(C.CANDIDATE_ROOT),
+            RUNNER_TEMP='/Users/runner/work/_temp', GITHUB_REPOSITORY=R.REPOSITORY,
+            GITHUB_EVENT_NAME='workflow_dispatch', MRK_CANDIDATE_MODE='install-predecessor',
+            GITHUB_REF='refs/heads/' + C.PREDECESSOR_BRANCH,
+            GITHUB_WORKFLOW_REF=R.REPOSITORY + '/' + C.WORKFLOW + '@refs/heads/' + C.PREDECESSOR_BRANCH,
+            GITHUB_SHA='d'*40, GITHUB_WORKFLOW_SHA='d'*40, RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
+            RUNNER_ENVIRONMENT='github-hosted', GITHUB_RUN_ID='51', GITHUB_RUN_ATTEMPT='2',
+            MRK_MACOS_WORK='/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH')
+
+    def owner(self, **options):
+        with mock.patch.object(R.Resume, '__init__', return_value=None):
+            value = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
+                                      predecessor_install=True, **options)
+        value.clock = SimpleNamespace(finality=True)
+        value.installer_zero = value.readback_known = True
+        return value
+
+    def test_fixed_dispatch_and_arm_only_context(self):
+        env = self.environment()
+        context = C.context_data(env, C.HELPER_ROOT, 'arm64')
+        self.assertEqual(context['helperSource'], env['GITHUB_SHA'])
+        for key, value in (('GITHUB_EVENT_NAME', 'push'), ('MRK_CANDIDATE_MODE', 'restore'),
+            ('GITHUB_REF', 'refs/heads/' + C.BRANCH), ('GITHUB_SHA', 'e'*40),
+            ('GITHUB_WORKFLOW_REF', env['GITHUB_WORKFLOW_REF'] + '-other'),
+            ('RUNNER_ENVIRONMENT', 'self-hosted'), ('GITHUB_WORKSPACE', str(C.HELPER_ROOT))):
+            with self.subTest(key=key), self.assertRaises(R.Refused):
+                C.context_data(dict(env, **{key:value}), C.HELPER_ROOT, 'arm64')
+        with self.assertRaises(R.Refused):
+            C.context_data(dict(env, MRK_MACOS_TARGET='x86_64-apple-darwin', RUNNER_ARCH='X64'),
+                           C.HELPER_ROOT, 'x86_64')
+
+    def test_nomination_is_separate_exact_public_p0_original(self):
+        import json
+        body = (ROOT / C.PREDECESSOR_SELECTION_PATH).read_bytes()
+        selected = C.selection_data(body, 'aarch64-apple-darwin')
+        predecessor = json.loads((ROOT / 'desktop/macos-installed-inputs/update-predecessors.json').read_bytes())['targets']['aarch64-apple-darwin']
+        self.assertEqual({key:value for key,value in selected.items() if key not in ('tree','target')},
+                         {key:predecessor[key] for key in selected if key not in ('tree','target')})
+        self.assertEqual(selected['source'], 'bf9d397bde641aae4b4cd205f3c962e899557650')
+        self.assertEqual(selected['tree'], 'f3d2f9117d1f29e080c5138fa9675426fb79e247')
+        self.assertEqual(selected['artifactId'], '12157830080')
+        self.assertEqual(set(json.loads(body)['targets']), {'aarch64-apple-darwin'})
+        owner = self.owner()
+        owner.source = mock.Mock(return_value=body)
+        owner.load_nomination('aarch64-apple-darwin')
+        self.assertEqual(owner.nomination, selected)
+        owner.source.assert_called_once_with(C.PREDECESSOR_SELECTION_PATH, 8192)
+        with self.assertRaises(R.Refused): owner.load_nomination('aarch64-apple-darwin')
+        self.assertEqual(owner.source.call_count, 1)
+        for failure in (FileNotFoundError('inert missing'), R.Refused('inert custody')):
+            owner = self.owner(); owner.source = mock.Mock(side_effect=failure)
+            with self.assertRaises(type(failure)) as caught: owner.load_nomination('aarch64-apple-darwin')
+            self.assertIs(caught.exception, failure)
+            owner.source.assert_called_once_with(C.PREDECESSOR_SELECTION_PATH, 8192)
+        owner = self.owner(); owner.source = mock.Mock()
+        with self.assertRaises(R.Refused): owner.load_nomination('x86_64-apple-darwin')
+        owner.source.assert_not_called()
+
+    def test_only_no_argument_plain_install_is_admitted(self):
+        with self.assertRaises(R.Refused): self.owner(nomination=nomination())
+        with mock.patch.dict(C.os.environ, self.environment(), clear=True):
+            for purpose in C.PURPOSES[1:]:
+                with self.subTest(purpose=purpose), mock.patch.object(C, 'entry_context') as entry:
+                    with self.assertRaises(R.Refused): C.main(purpose)
+                    entry.assert_not_called()
+                    with self.assertRaises(R.Refused): self.owner(purpose=purpose)
+            stop = RuntimeError('inert stop before any native/source acquisition')
+            with mock.patch.object(C, 'entry_context', side_effect=stop) as entry:
+                with self.assertRaises(RuntimeError) as caught: C.main()
+                self.assertIs(caught.exception, stop)
+                entry.assert_called_once_with(())
+            with mock.patch.object(C, 'entry_context', return_value={}), mock.patch.object(R, 'host_read') as read:
+                for purpose in ('prepare-restore', 'restore-baseline', 'restore-chain'):
+                    with self.assertRaises(R.Refused): C.fixture_main(purpose)
+                for phase in C.REMOVAL_PHASES:
+                    with self.assertRaises(R.Refused): C.removal_main(phase)
+                read.assert_not_called()
+
+    def test_same_original_detach_is_verbose_once_and_result_is_unchanged(self):
+        import subprocess
+        argv = ['/usr/bin/hdiutil', 'detach', '/dev/disk9s1']
+        for code, outcome in ((0,'detach0'), (16,'detach16'), (1,'other-return')):
+            owner = self.owner()
+            result = subprocess.CompletedProcess(argv + ['-verbose'], code,
+                b'Unmount: PRIVATE-NATIVE-PATH\n', b'hdiutil: detach failed - Resource busy\n')
+            with mock.patch.object(R.Resume, 'command', return_value=result) as native:
+                self.assertIs(owner.command('detach', argv, 30), result)
+                native.assert_called_once_with('detach', argv + ['-verbose'], 30)
+                self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk9s1'])
+                with self.assertRaises(R.Refused): owner.command('detach', argv, 30)
+                self.assertEqual(native.call_count, 1)
+            report = C.failure_data(R.Refused('resume-original-detach'))
+            self.assertEqual(report['detachObservation']['outcome'], outcome)
+            self.assertTrue(report['detachObservation']['returned'])
+            self.assertTrue(report['detachObservation']['installerReturnedZero'])
+            self.assertTrue(report['detachObservation']['readbackKnown'])
+            self.assertEqual(report['detachObservation']['textHints'], ['resource-busy-text','unmount-text'])
+            self.assertFalse(report['packageInstallScheduleEqual'])
+            self.assertFalse(report['cleanupAuthorized'])
+            self.assertNotIn('PRIVATE-NATIVE-PATH', repr(report))
+
+    def test_unknown_original_and_diagnostic_error_never_replace_or_retry(self):
+        import subprocess
+        argv = ['/usr/bin/hdiutil', 'detach', '/dev/disk9s1']
+        owner = self.owner(); failure = RuntimeError('inert original unknown')
+        with mock.patch.object(R.Resume, 'command', side_effect=failure) as native:
+            with self.assertRaises(RuntimeError) as caught: owner.command('detach', argv, 30)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(C._PREDECESSOR_DETACH['outcome'], 'unknown')
+            self.assertFalse(C._PREDECESSOR_DETACH['returned'])
+            with self.assertRaises(R.Refused): owner.command('detach', argv, 30)
+            self.assertEqual(native.call_count, 1)
+        owner = self.owner(); result = subprocess.CompletedProcess(argv + ['-verbose'],16,b'',b'')
+        with mock.patch.object(R.Resume, 'command', return_value=result) as native, \
+                mock.patch.object(C, 'predecessor_detach_data', side_effect=RuntimeError('inert parser fault')):
+            self.assertIs(owner.command('detach', argv, 30), result)
+            self.assertEqual(C._PREDECESSOR_DETACH['outcome'], 'detach16')
+            native.assert_called_once_with('detach', argv + ['-verbose'], 30)
+        for bad in (argv + ['-force'], ['/usr/bin/sudo', 'hdiutil', 'detach']):
+            with mock.patch.object(R.Resume, 'command') as native:
+                with self.assertRaises(R.Refused): self.owner().command('detach', bad, 30)
+                native.assert_not_called()
+
+    def test_nonselected_calls_keep_original_argv_and_no_observation(self):
+        original = object(); argv = ['/inert/original']; environment = {'inert':'value'}
+        for owner, role in ((instance(),'detach'), (self.owner(),'installer')):
+            with mock.patch.object(R.Resume, 'command', return_value=original) as native:
+                self.assertIs(owner.command(role, argv, 123, env=environment), original)
+                native.assert_called_once_with(role, argv, 123, env=environment)
+        self.assertIsNone(C._PREDECESSOR_DETACH)
+
+    def test_projection_is_bounded_literal_both_streams_only(self):
+        from desktop.tools import macos_android_helper_package as H
+        cases = ((b'',b'',[]), (b'RESOURCE BUSY; UNMOUNT; EJECT',b'DISSENT',
+            ['resource-busy-text','unmount-text','eject-text','dissent-text']),
+            (b'resource',b' busy',[]), (b'x'*65536,b'',[]),
+            (b'x'*65536,b'x',None), ('not bytes',b'hdiutil: detach failed - Resource busy\n',None),
+            (b'',b'hdiutil: detach failed - Permission denied\n',[]), (b'',None,None),
+            (b'',b'\n'.join((b'hdiutil: detach failed - Resource busy',b'hdiutil: detach failed - No such device')),
+             ['resource-busy-text']))
+        for stdout,stderr,hints in cases:
+            with self.subTest(hints=hints):
+                self.assertEqual(C.predecessor_detach_data(stdout,stderr),
+                                 {'stderr':H.distribution_detach_stderr(stderr),'textHints':hints})
+        self.assertEqual(R.MAX_ORIGINALS,96)
+        clock = R.Deadline(now=lambda:1)
+        self.assertEqual(clock.deadline-clock.started,600_000_000_000)
+        self.assertEqual(clock.deadline-clock.work,60_000_000_000)
