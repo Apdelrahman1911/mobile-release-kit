@@ -1302,9 +1302,9 @@ jobs:
       # run39845106162 atdd1b9bb9. Definitions/helper remain available; only an
       # affected logic change requires their targeted rerun. Continue directly
       # to the uncompleted native work, not another library test compilation.
-      # Actual Tool/ARM build hit31min; restore the existing observer48 after
-      # removing the completed contracts. Overall350 and native clocks stay fixed.
-      # Git and ARM Tool's three serial builds get 60min headroom; job/native clocks stay fixed.
+      # Tool run39998949850 returned observer0/remover0 but its CLI was cut by
+      # the shared60min step. Keep the image allowance; give each serial helper
+      # its own fixed step. Overall350 and native clocks stay unchanged.
       - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Build the current nonshipping observer' || 'Build the ordinary selected-target desktop image' }}
         id: app_build
         timeout-minutes: ${{ (matrix.native_scope == 'git-native' || (matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin')) && 60 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
@@ -1312,7 +1312,23 @@ jobs:
         env:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
         run: |
-          builtin source ./desktop/tools/macos_installed_app_build.sh
+          builtin source ./desktop/tools/macos_installed_app_build.sh image
+      - name: Build the fixed remover and selected removal-only observer
+        id: app_remover
+        timeout-minutes: 60
+        shell: bash
+        env:
+          MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
+        run: |
+          builtin source ./desktop/tools/macos_installed_app_build.sh remover
+      - name: Build the fixed installed CLI
+        id: app_cli
+        timeout-minutes: 60
+        shell: bash
+        env:
+          MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
+        run: |
+          builtin source ./desktop/tools/macos_installed_app_build.sh installed-cli
       - name: Record the effective pinned compiler and preflight configured observer DATA
         id: app_compiler
         timeout-minutes: 1

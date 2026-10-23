@@ -37,12 +37,14 @@ PY_COMPILER
     printf 'Compiler diagnostics unavailable for %s; original status %s.\n' "$1" "$2"
   fi
 }
+case "$#:${1-}" in
+1:image)
 if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup || "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then
 # Same fixed observer target and original Cargo artifact checks;
 # no ordinary cdylib, fallback executable or test execution. Render
 # diagnostics to stderr, not repeated warning payloads in the artifact JSON.
-# Fixed progress only, not success authority or a fresh clock. All compilers
-# and artifact checks still share the same single Actions step allowance.
+# Fixed progress only, not success authority or a fresh clock. This original
+# image compiler and its artifact checks share the same Actions step allowance.
 printf 'MRK_MACOS_BUILD_PHASE=observer-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
@@ -116,11 +118,13 @@ image_sha=${image_sha%% *}
 [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
 printf 'MRK_MACOS_DESKTOP_IMAGE_SHA256=%s\n' "$image_sha" >> "$GITHUB_ENV"
 fi
+;;
+1:remover)
 remover_features=macos-installed-remover
 if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
   remover_features=macos-installed-removal-abrupt-fixture
 fi
-# Same architecture-selected app-build budget; no independent timeout entitlement.
+# Separate fixed helper step; the overall job and native clocks are unchanged.
 # This current SOURCE role cannot embed its not-yet-created inventory.
 printf 'MRK_MACOS_BUILD_PHASE=remover-compile-begin\n' >&2 2>/dev/null || :
 set +e
@@ -141,8 +145,28 @@ if [[ "$remover_status" != 0 ]]; then
   exit "$remover_status"
 fi
 [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
-# Separate read-only CLI graph; same selected compiler and app-build
-# budget. It never starts the service or grants a project access.
+if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+  # Separate genuine nonshipping observer graph; same fixed remover step.
+  # No key/signature/Installer execution and no target inventory substitution.
+  set +e
+  PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/removal-observer-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
+    --locked --offline --release --jobs 1 --no-default-features --features macos-installed-removal-observer --bin mrk-macos-remove \
+    --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
+    > "$MRK_MACOS_WORK/removal-observer-build.jsonl" 2> "$MRK_MACOS_WORK/removal-observer-build.stderr"
+  observer_status=$?
+  printf '%s\n' "$observer_status" > "$MRK_MACOS_WORK/removal-observer-build.status"
+  observer_status_saved=$?
+  set -e
+  if [[ "$observer_status" != 0 ]]; then
+    report_compiler_failure removal-observer "$observer_status" >&2 2>/dev/null || :
+    exit "$observer_status"
+  fi
+  [[ "$observer_status_saved" == 0 ]] || exit "$observer_status_saved"
+fi
+;;
+1:installed-cli)
+# Separate read-only CLI graph and fixed step; same selected compiler.
+# It never starts the service or grants a project access.
 printf 'MRK_MACOS_BUILD_PHASE=installed-cli-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/installed-cli-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
@@ -160,21 +184,6 @@ if [[ "$cli_status" != 0 ]]; then
   exit "$cli_status"
 fi
 [[ "$cli_status_saved" == 0 ]] || exit "$cli_status_saved"
-if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
-  # Separate genuine nonshipping observer graph; same24min preparation step.
-  # No key/signature/Installer execution and no target inventory substitution.
-  set +e
-  PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/removal-observer-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
-    --locked --offline --release --jobs 1 --no-default-features --features macos-installed-removal-observer --bin mrk-macos-remove \
-    --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
-    > "$MRK_MACOS_WORK/removal-observer-build.jsonl" 2> "$MRK_MACOS_WORK/removal-observer-build.stderr"
-  observer_status=$?
-  printf '%s\n' "$observer_status" > "$MRK_MACOS_WORK/removal-observer-build.status"
-  observer_status_saved=$?
-  set -e
-  if [[ "$observer_status" != 0 ]]; then
-    report_compiler_failure removal-observer "$observer_status" >&2 2>/dev/null || :
-    exit "$observer_status"
-  fi
-  [[ "$observer_status_saved" == 0 ]] || exit "$observer_status_saved"
-fi
+;;
+*) printf 'Expected one fixed compiler phase: image, remover or installed-cli.\n' >&2; exit 2 ;;
+esac

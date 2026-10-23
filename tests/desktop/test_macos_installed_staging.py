@@ -2967,11 +2967,132 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(cargo["classifications"], ["download-failed", "network-failed"])
         self.assertFalse(parse(stderr=b"x" * (4 * 1024 * 1024 + 1))["scanComplete"])
 
+    def test_app_compiler_phases_are_ordered_fail_fast_steps(self):
+        checkout = Path(__file__).absolute().parents[2]
+        workflow = (checkout / ".github/workflows/desktop-macos-installed.yml").read_text()
+        phases = (("app_build", "image"), ("app_remover", "remover"), ("app_cli", "installed-cli"))
+        for name, phase in phases:
+            blocks = [block for block in workflow.split("      - name: ")[1:]
+                      if "\n        id: " + name + "\n" in block]
+            self.assertEqual(len(blocks), 1)
+            block = blocks[0]
+            self.assertEqual(block.split("        run: |\n", 1)[1].strip(),
+                "builtin source ./desktop/tools/macos_installed_app_build.sh " + phase)
+            self.assertIn("        shell: bash\n", block)
+            self.assertIn("MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}", block)
+            self.assertNotIn("        if:", block)  # Ordinary default-success gate, not always()/retry.
+            self.assertNotIn("continue-on-error", block)
+            if phase != "image":
+                self.assertIn("        timeout-minutes: 60\n", block)
+            else:
+                self.assertIn("timeout-minutes: ${{ (matrix.native_scope == 'git-native' || (matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin')) && 60 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}", block)
+        order = [workflow.index("\n        id: " + name + "\n") for name in
+                 ("app_build", "app_remover", "app_cli", "app_compiler", "app_assemble")]
+        self.assertEqual(order, sorted(order))
+
+    def test_app_compiler_phases_route_original_commands_and_stop_on_failure(self):
+        import subprocess
+        checkout = Path(__file__).absolute().parents[2]
+        source = (checkout / "desktop/tools/macos_installed_app_build.sh").read_text()
+        cargo = '"/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo"'
+        self.assertEqual(source.count(cargo), 5)
+        routes = (("tool-setup", "disabled", TOOL.ARM_TARGET),
+                  ("project-identity-native", "disabled", TOOL.ARM_TARGET),
+                  ("git-native", "disabled", TOOL.ARM_TARGET),
+                  ("disabled", "disabled", TOOL.ARM_TARGET),
+                  ("disabled", "disabled", TOOL.INTEL_TARGET),
+                  ("disabled", "ordinary", TOOL.ARM_TARGET),
+                  ("disabled", "abrupt", TOOL.INTEL_TARGET))
+        for scope, removal, architecture in routes:
+            roles = ["observer" if scope != "disabled" else "normal", "remover"]
+            if removal != "disabled":
+                roles.append("removal-observer")
+            roles.append("installed-cli")
+            faults = [None, *roles] + (["observer-artifact"] if roles[0] == "observer" else [])
+            for fault in faults:
+                with self.subTest(scope=scope, removal=removal, target=architecture, fault=fault), tempfile.TemporaryDirectory() as temporary:
+                    work = Path(temporary)
+                    target, binary, rows, body = observer_cargo_fixture(work / "target", build_target=architecture)
+                    binary.parent.mkdir(parents=True)
+                    binary.write_bytes(body); binary.chmod(0o500)  # Inert DATA, never executed.
+                    if fault == "observer-artifact":
+                        rows[0]["profile"]["test"] = False
+                    normal = target / architecture / "release/libmrk_desktop_image.dylib"
+                    normal.parent.mkdir(parents=True)
+                    normal.write_bytes(b"inert original image bytes; never loaded")
+                    exported, trace, stub = work / "github-env", work / "calls.jsonl", work / "inert-cargo"
+                    exported.write_bytes(b""); trace.write_bytes(b"")
+                    # Only the five external Cargo executables are substituted.
+                    # Actual shell routing, statuses, diagnostics and artifact
+                    # reads remain unchanged; no compiler/native owner runs.
+                    stub.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+args = sys.argv[1:]
+feature = args[args.index('--features') + 1] if '--features' in args else None
+role = ('observer' if args[0] == 'test' else 'normal' if feature is None else {
+    'macos-installed-remover': 'remover', 'macos-installed-removal-abrupt-fixture': 'remover',
+    'macos-installed-removal-observer': 'removal-observer', 'installed-cli': 'installed-cli'}[feature])
+with open(os.environ['MRK_TEST_TRACE'], 'a') as output:
+    output.write(json.dumps({'role': role, 'args': args, 'target': os.environ['CARGO_TARGET_DIR'],
+        'inventory': os.environ.get('MRK_MACOS_INSTALL_INVENTORY_SHA256'),
+        'rustc': os.environ['RUSTC'], 'autoInstall': os.environ['RUSTUP_AUTO_INSTALL']}) + '\\n')
+status = 101 if os.environ.get('MRK_TEST_FAIL_ROLE') == role else 0
+if role == 'observer':
+    for row in json.loads(os.environ['MRK_TEST_MESSAGES']): print(json.dumps(row))
+print(json.dumps({'reason': 'build-finished', 'success': status == 0}))
+if status: print('error[E0433]: inert compiler refusal', file=sys.stderr)
+sys.exit(status)
+''')
+                    stub.chmod(0o700)
+                    toolchain = "1.98.1" if architecture == TOOL.ARM_TARGET else "1.98.0"
+                    environment = {"PATH": "/usr/bin:/bin", "MRK_PYTHON": sys.executable,
+                        "MRK_MACOS_WORK": str(work), "CARGO_TARGET_DIR": str(target), "GITHUB_ENV": str(exported),
+                        "MRK_MACOS_TARGET": architecture, "RUSTUP_TOOLCHAIN": toolchain, "MRK_MACOS_NATIVE_SCOPE": scope,
+                        "GITHUB_REF": "refs/heads/verify/desktop-macos-" + ("candidate" if removal == "disabled" else "removal-lifecycle"),
+                        "MRK_MACOS_REMOVAL_CASE": removal, "MRK_MACOS_INSTALL_INVENTORY_SHA256": "b" * 64,
+                        "MRK_TEST_TRACE": str(trace), "MRK_TEST_MESSAGES": json.dumps(rows), "MRK_TEST_FAIL_ROLE": fault or ""}
+                    script = source.replace(cargo, shlex.quote(str(stub)))
+                    def invoke(arguments):
+                        return subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script, "inert-build", *arguments],
+                            cwd=checkout, env=environment, capture_output=True, timeout=10, check=False)
+                    for phase in ("image", "remover", "installed-cli"):
+                        returned = invoke([phase])
+                        self.assertEqual(returned.stdout, b"")
+                        if returned.returncode:
+                            break  # Same default-success ordering asserted in the workflow above.
+                    expected = roles[:1] if fault == "observer-artifact" else roles[:roles.index(fault) + 1] if fault else roles
+                    self.assertEqual(returned.returncode, 1 if fault == "observer-artifact" else 101 if fault else 0, returned.stderr)
+                    calls = [json.loads(line) for line in trace.read_text().splitlines()]
+                    self.assertEqual([call["role"] for call in calls], expected)
+                    suffix = ["--target", architecture, "--message-format=json-render-diagnostics"]
+                    release = ["build", "--locked", "--offline", "--release", "--jobs", "1", "--no-default-features", "--features"]
+                    argv = {
+                        "observer": ["test", "--locked", "--no-default-features", "--features",
+                            "desktop-shell,custom-protocol,macos-installed-observation", "--target", architecture,
+                            "--test", "installed-shell-observation", "--no-run", "--message-format=json-render-diagnostics"],
+                        "normal": ["build", "--locked", "--release", "--manifest-path", "../helpers/macos-desktop-image/Cargo.toml", "--lib", *suffix],
+                        "remover": [*release, "macos-installed-removal-abrupt-fixture" if removal == "abrupt" else "macos-installed-remover", "--bin", "mrk-macos-remove", *suffix],
+                        "removal-observer": [*release, "macos-installed-removal-observer", "--bin", "mrk-macos-remove", *suffix],
+                        "installed-cli": [*release, "installed-cli", "--bin", "mrk", *suffix],
+                    }
+                    for call in calls:
+                        role = call["role"]
+                        self.assertEqual(call["args"], argv[role])
+                        self.assertEqual(call["target"], str(target if role in ("observer", "normal") else work / (role + "-target")))
+                        self.assertEqual(call["inventory"], None if role in ("remover", "removal-observer") else "b" * 64)
+                        self.assertEqual(call["rustc"], f"/Users/runner/.rustup/toolchains/{toolchain}-{architecture}/bin/rustc")
+                        self.assertEqual(call["autoInstall"], "0")
+                        self.assertEqual((work / (role + "-build.status")).read_text(), "101\n" if role == fault else "0\n")
+                    if fault is None:
+                        self.assertTrue(exported.read_text())
+                        for arguments in ([], ["other"], ["image", "remover"]):
+                            self.assertEqual(invoke(arguments).returncode, 2)
+                        self.assertEqual(len(trace.read_text().splitlines()), len(calls))
+
     def test_existing_app_build_failure_exits_report_safely_and_keep_original_status(self):
         import subprocess
         checkout = Path(__file__).absolute().parents[2]
         source = (checkout / "desktop/tools/macos_installed_app_build.sh").read_text()
-        reporter = source[:source.index('if [[ "$MRK_MACOS_NATIVE_SCOPE"')]
+        reporter = source[:source.index('case "$#:${1-}" in')]
         secret = "PRIVATE_COMPILER_SENTINEL_DO_NOT_EXPORT"
         location = "desktop/src-tauri/src/service_github_operation_native.rs"
         roles = (("observer", "status"), ("normal", "cargo_status"), ("remover", "remover_status"),
