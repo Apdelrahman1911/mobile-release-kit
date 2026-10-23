@@ -1,6 +1,7 @@
-"""Real nonroot macOS lsof smoke; no Installer, signing or app qualification.
+"""Real macOS detach diagnostics; no signing or app qualification.
 
-Run this file in a fresh interpreter on the selected disposable hosted runner.
+Select ONE test method in a fresh interpreter on the disposable hosted runner.
+Only the scripts-only case elevates the ordinary Installer for a fixed no-op.
 Unknown native completion retains the tiny fixture for runner disposal, never
 force-detaches, retries an uncertain detach or recursively removes a mount.
 """
@@ -23,6 +24,8 @@ HOSTED_MAC = (sys.platform == "darwin"
               and os.environ.get("GITHUB_ACTIONS") == "true"
               and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
 BODY = b"Harmless MobileReleaseKit detach diagnostic fixture.\n"
+POSTINSTALL = b"#!/bin/sh\nexit 0\n"
+RECEIPTS = "/private/var/db/receipts"
 
 
 class _FiniteFailure(Exception):
@@ -84,12 +87,50 @@ def _lsof_warning_hints(stderr):
     return [label for label, _ in forms if label in found] + (["other-warning"] if "other-warning" in found else [])
 
 
+def _noop_package(stager, body, identifier):
+    """Audit native pkgbuild output with existing bounded DATA parsers only."""
+    _need(0 < len(body) <= 1024 * 1024, "fixture-package-bound")
+
+    def allocation(_label, live, packed, expanded):
+        _need(live + packed + expanded <= 4 * 1024 * 1024, "fixture-package-data-bound")
+
+    members = stager.xar_members(body, allocation_budget=allocation)
+    _need(len(members["PackageInfo"]) <= 16384 and len(members["Scripts"]) <= 65536,
+          "fixture-package-members-bound")
+    info = stager.ET.fromstring(members["PackageInfo"])
+    _need(info.tag == "pkg-info" and info.get("identifier") == identifier
+          and info.get("version") == "1" and info.get("install-location") == "/"
+          and info.get("auth") == "root" and info.get("postinstall-action", "none") == "none",
+          "fixture-package-identity")
+    payload = info.findall("payload")
+    _need(len(payload) <= 1 and all(row.get("numberOfFiles") == "0"
+          and row.get("installKBytes", "0") == "0" for row in payload), "fixture-package-has-payload")
+    hooks = info.findall("scripts")
+    _need(len(hooks) == 1 and [row.tag for row in hooks[0]] == ["postinstall"]
+          and hooks[0][0].get("file") in ("postinstall", "./postinstall")
+          and hooks[0][0].get("timeout") in (None, "600"), "fixture-package-hooks")
+    archive = members["Scripts"]
+    if archive.startswith(b"\x1f\x8b"):
+        archive = stager.inflate(archive, 65536, gzip=True)
+    # The existing original-package preparation parser admits the packager's
+    # real UID/GID. No archive rewriting, root chown or custom serializer.
+    _need(stager._cpio_members(archive, (os.getuid(), os.getgid()), allocation_budget=allocation)
+          == {"postinstall": (POSTINSTALL, 0o555)}, "fixture-package-script-bytes")
+
+
 @unittest.skipUnless(HOSTED_MAC, "requires disposable github-hosted macOS")
 class DistributionDetachNative(unittest.TestCase):
     def test_original_holder_visible_until_original_fds_close(self):
+        self._exercise(installer_case=False)
+
+    def test_scripts_only_installer_returns_before_original_detach(self):
+        self._exercise(installer_case=True)
+
+    def _exercise(self, *, installer_case):
         deadline = time.monotonic() + 180
         report = {
             "scope": "macos-distribution-detach-native", "busyDetach16": None,
+            "case": "scripts-only-installer" if installer_case else "held-fd",
             "mountLocation": "volumes", "imageFormat": "UDZO",
             "mountAbsentBefore": None, "mountAbsentAfter": None,
             "busyStderr": "unavailable", "holderState": "unavailable",
@@ -99,10 +140,16 @@ class DistributionDetachNative(unittest.TestCase):
             "originalDetached": False, "callersReturned": True,
             "nativeOutcomeKnown": True, "originalChecksFailed": False, "fixtureRetired": False,
         }
+        if installer_case:
+            report.update(noPayloadPackageVerified=False, installerReturnedZero=None,
+                          receiptBefore="unobserved", receiptAfter="unobserved",
+                          protectedReceiptCleanup=False, systemServiceExitClaimed=False,
+                          finalDetach16=None, finalStderr="unavailable", finalTextHints=[])
         failure = None
         stage = "source-setup"
         host_fds, mounted_fds = [], []
         busy16 = False
+        installer_ready = False
 
         def clock():
             _need(time.monotonic() < deadline, "deadline")
@@ -130,7 +177,7 @@ class DistributionDetachNative(unittest.TestCase):
         def run(role, argv, maximum, limit=65536):
             work_original()
             # run_owned owns an additional three-second cleanup reserve. All
-            # five calls consume this ONE deadline; none renews the clock.
+            # selected-case calls consume this ONE deadline; none renews it.
             timeout = min(maximum, int(deadline - time.monotonic() - 3))
             _need(timeout >= 1, "deadline")
             report["callersReturned"] = False
@@ -172,6 +219,38 @@ class DistributionDetachNative(unittest.TestCase):
                 report["originalChecksFailed"] = True
                 raise
 
+        def observe_holders():
+            mount_original()
+            observed = run("lsof", ["/usr/sbin/lsof", "-n", "-P", "-b", "-F0pcuftD",
+                           "+f", "--", str(mount_path)], 10, 16 * 1024)
+            holders = helper.distribution_busy_holders(
+                observed.stdout, observed.stderr, observed.returncode,
+                device=mounted_identity[0], own_pid=os.getpid(), own_uid=os.getuid())
+            report["holderState"] = holders["state"]
+            report["holderReferences"] = holders["references"]
+            report["holderRows"] = holders["rows"]
+            report["lsofWarnings"] = holders["warnings"]
+            report["lsofWarningHints"] = _lsof_warning_hints(observed.stderr)
+            report["ownHolderOnOriginalDevice"] = holders["state"] == "visible-holders" and any(
+                row["owner"] == "self" and row["reference"] == "descriptor" and row["count"] >= 1
+                for row in holders["rows"])
+
+        def receipt_slots():
+            # Read-only observations of two fixed protected names. They are
+            # never cleanup targets, including after a known successful case.
+            same_entry(None, RECEIPTS, receipts_fd, receipts_identity)
+            slots = []
+            for suffix, limit in (("plist", 65536), ("bom", 1024 * 1024)):
+                try:
+                    info = os.stat(identifier + "." + suffix, dir_fd=receipts_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    slots.append(None)
+                    continue
+                _need(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+                      and info.st_nlink == 1 and 0 < info.st_size <= limit, "receipt-entry-shape")
+                slots.append(_identity(info) + (info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+            return tuple(slots)
+
         try:
             _need(os.getuid() == os.geteuid() != 0, "nonroot-required")
             qualification = _load("macos_aqua_qualification")
@@ -199,20 +278,61 @@ class DistributionDetachNative(unittest.TestCase):
                            "LC_ALL": "C", "TZ": "UTC", "HOME": str(work), "TMPDIR": str(work)}
             # Match the production transport namespace and image format. Only
             # hdiutil creates/removes this initially absent /Volumes entry.
+            context = {key: os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
             mount_path = helper.transport_mount_path_data(
-                {key: os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")},
-                helper.ARM_TARGET, "package-install")
+                context, helper.ARM_TARGET, "package-install")
             volumes_fd = host_open("/Volumes", directory_flags)
             volumes_identity = _identity(os.fstat(volumes_fd))
             _need(volumes_identity[3] == 0, "volumes-parent-owner-required")
             os.mkdir("source", 0o700, dir_fd=work_fd)
             source_fd = host_open("source", directory_flags, parent=work_fd)
             source_identity = _identity(os.fstat(source_fd))
-            source_file = host_open("held.txt", os.O_RDWR | os.O_CREAT | os.O_EXCL
-                                    | os.O_NOFOLLOW | os.O_CLOEXEC, parent=source_fd)
-            _need(os.write(source_file, BODY) == len(BODY), "fixture-write-incomplete")
-            source_file_identity = _identity(os.fstat(source_file))
+            source_name = "Install.pkg" if installer_case else "held.txt"
+            create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            if installer_case:
+                stage = "receipt-before"
+                identifier = ("dev.mobile-release-kit.detach-smoke." + context["GITHUB_RUN_ID"]
+                              + "." + context["GITHUB_RUN_ATTEMPT"])
+                receipts_fd = host_open(RECEIPTS, directory_flags)
+                receipts_identity = _identity(os.fstat(receipts_fd))
+                _need(receipts_identity[3] == 0, "receipt-parent-owner-required")
+                _need(receipt_slots() == (None, None), "receipt-collision")
+                report["receiptBefore"] = "absent"
+                stage = "package-fixture"
+                os.mkdir("scripts", 0o700, dir_fd=work_fd)
+                scripts_fd = host_open("scripts", directory_flags, parent=work_fd)
+                os.fchmod(scripts_fd, 0o755)  # This fresh original only; never a shared ancestor.
+                scripts_identity = _identity(os.fstat(scripts_fd))
+                script_fd = host_open("postinstall", create_flags, parent=scripts_fd)
+                _need(os.write(script_fd, POSTINSTALL) == len(POSTINSTALL), "fixture-script-write-incomplete")
+                os.fchmod(script_fd, 0o555)
+                script_identity = _identity(os.fstat(script_fd))
+                built = run("pkgbuild", ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(work / "scripts"),
+                            "--identifier", identifier, "--version", "1", "--install-location", "/",
+                            "--ownership", "recommended", "--compression", "legacy",
+                            str(work / "source" / source_name)], 15)
+                _need(built.returncode == 0, "pkgbuild-nonzero")
+                same_entry(work_fd, "scripts", scripts_fd, scripts_identity)
+                same_entry(scripts_fd, "postinstall", script_fd, script_identity)
+                _need(os.pread(script_fd, len(POSTINSTALL) + 1, 0) == POSTINSTALL, "fixture-script-changed")
+                source_file = host_open(source_name, read_flags, parent=source_fd)
+            else:
+                source_file = host_open(source_name, create_flags, parent=source_fd)
+                _need(os.write(source_file, BODY) == len(BODY), "fixture-write-incomplete")
+            source_info = os.fstat(source_file)
+            source_file_identity = _identity(source_info)
+            _need(stat.S_ISREG(source_info.st_mode) and source_info.st_uid == os.getuid()
+                  and source_info.st_nlink == 1 and 0 < source_info.st_size <= 1024 * 1024,
+                  "fixture-source-file-shape")
+            source_body = os.pread(source_file, source_info.st_size + 1, 0)
+            _need(len(source_body) == source_info.st_size and (installer_case or source_body == BODY),
+                  "fixture-source-file-read")
+            if installer_case:
+                stage = "package-audit"
+                _noop_package(stager, source_body, identifier)
+                report["noPayloadPackageVerified"] = True
 
+            stage = "image-fixture"
             created = run("create", ["/usr/bin/hdiutil", "create", "-size", "8m", "-fs", "HFS+",
                           "-volname", "MRKDetachSmoke", "-srcfolder", str(work / "source"),
                           "-format", "UDZO", str(work / "image.dmg")], 45)
@@ -244,36 +364,46 @@ class DistributionDetachNative(unittest.TestCase):
             device_info = os.stat(device, follow_symlinks=False)
             device_identity = _identity(device_info)
             mount_original()
-            file_fd = os.open("held.txt", read_flags, dir_fd=mounted_fd)
+            file_fd = os.open(source_name, read_flags, dir_fd=mounted_fd)
             mounted_fds.append(file_fd)
             file_info = os.fstat(file_fd)
             _need(stat.S_ISREG(file_info.st_mode) and file_info.st_dev == mounted_identity[0]
-                  and file_info.st_size == len(BODY) and os.read(file_fd, len(BODY) + 1) == BODY,
+                  and file_info.st_size == len(source_body) and os.read(file_fd, len(source_body) + 1) == source_body,
                   "original-mounted-file-required")
 
-            busy = run("busy-detach", ["/usr/bin/hdiutil", "detach", device, "-verbose"], 20)
-            busy16 = busy.returncode == 16
-            report["busyDetach16"] = busy16
-            report["originalDetached"] = busy.returncode == 0
-            report["busyStderr"] = helper.distribution_detach_stderr(busy.stderr)
-            report["busyTextHints"] = _detach_text_hints(busy.stdout, busy.stderr)
-            _need(busy16, "held-detach-not16")
-            mount_original()
-            observed = run("lsof", ["/usr/sbin/lsof", "-n", "-P", "-b", "-F0pcuftD",
-                           "+f", "--", str(mount_path)], 10, 16 * 1024)
-            stage = "holder-classifier"
-            holders = helper.distribution_busy_holders(
-                observed.stdout, observed.stderr, observed.returncode,
-                device=mounted_identity[0], own_pid=os.getpid(), own_uid=os.getuid())
-            report["holderState"] = holders["state"]
-            report["lsofWarnings"] = holders["warnings"]
-            report["lsofWarningHints"] = _lsof_warning_hints(observed.stderr)
-            # Nonroot warnings/NOFD/exit1 cannot prove absence. This assertion
-            # requires a positive OUR descriptor on the original mounted dev.
-            report["ownHolderOnOriginalDevice"] = holders["state"] == "visible-holders" and any(
-                row["owner"] == "self" and row["reference"] == "descriptor" and row["count"] >= 1
-                for row in holders["rows"])
-            _need(report["ownHolderOnOriginalDevice"], "own-original-holder-not-visible")
+            if installer_case:
+                stage = "installer"
+                same_entry(source_fd, source_name, source_file, source_file_identity)
+                same_entry(mounted_fd, source_name, file_fd, _identity(file_info))
+                _need(os.pread(source_file, len(source_body) + 1, 0) == source_body, "original-package-changed")
+                mount_original()
+                # The ONLY elevated call. Installer itself runs the audited
+                # standard no-op hook; no root Python/driver or other payload.
+                installed = run("installer", ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer",
+                                "-pkg", str(mount_path / source_name), "-target", "/", "-dumplog", "-verboseR"], 45)
+                report["installerReturnedZero"] = installed.returncode == 0
+                _need(report["installerReturnedZero"], "installer-nonzero")
+                stage = "receipt-after"
+                slots = receipt_slots()
+                # Slot observations only, not registry or daemon-finality proof.
+                # Do not contact PackageKit again before the detach being tested.
+                report["receiptAfter"] = ("absent" if slots == (None, None) else
+                                          "present" if all(slot is not None for slot in slots) else "partial")
+                _need(receipt_slots() == slots, "receipt-slots-changed")
+                installer_ready = True  # No artificial busy probe in this case.
+            else:
+                busy = run("busy-detach", ["/usr/bin/hdiutil", "detach", device, "-verbose"], 20)
+                busy16 = busy.returncode == 16
+                report["busyDetach16"] = busy16
+                report["originalDetached"] = busy.returncode == 0
+                report["busyStderr"] = helper.distribution_detach_stderr(busy.stderr)
+                report["busyTextHints"] = _detach_text_hints(busy.stdout, busy.stderr)
+                _need(busy16, "held-detach-not16")
+                stage = "holder-classifier"
+                observe_holders()
+                # Nonroot warnings/NOFD/exit1 cannot prove absence. This control
+                # requires a positive OUR descriptor on the original device.
+                _need(report["ownHolderOnOriginalDevice"], "own-original-holder-not-visible")
         except _FiniteFailure as error:
             failure = str(error)
         except BaseException:
@@ -289,18 +419,31 @@ class DistributionDetachNative(unittest.TestCase):
                     closes_known = False
                     failure = failure or "mounted-close-unknown"
             report["mountedFdsClosed"] = closes_known if had_mounted_fds else None
-            # The first detach16 was an intentional negative probe. Only known
-            # closure of those ORIGINAL holders authorizes this second detach.
-            # A failed classifier may still retire known originals; an unknown
-            # native outcome may not. No force or speculative detach is present.
+            # The held-FD control has one intentional negative probe. The
+            # Installer case has NONE: its one detach follows actual Installer0,
+            # known receipt observations and original mounted descriptor closes.
+            # A failed control classifier may retire known originals; an unknown
+            # native outcome may not. Neither case forces or retries a detach.
             # A failed original check is never refreshed into later authority.
-            if (busy16 and closes_known and report["callersReturned"] and report["nativeOutcomeKnown"]
+            if ((installer_ready if installer_case else busy16) and closes_known
+                    and report["callersReturned"] and report["nativeOutcomeKnown"]
                     and not report["originalChecksFailed"]):
                 try:
                     mount_original()
-                    final = run("final-detach", ["/usr/bin/hdiutil", "detach", device], 30)
+                    final = run("final-detach", ["/usr/bin/hdiutil", "detach", device]
+                                + (["-verbose"] if installer_case else []), 30)
                     report["finalDetach0"] = final.returncode == 0
                     report["originalDetached"] = final.returncode == 0
+                    if installer_case:
+                        report["finalDetach16"] = final.returncode == 16
+                        if not report["finalDetach0"]:
+                            failure = failure or ("final-detach16" if report["finalDetach16"] else "final-detach-nonzero")
+                        report["finalStderr"] = helper.distribution_detach_stderr(final.stderr)
+                        report["finalTextHints"] = _detach_text_hints(final.stdout, final.stderr)
+                        if report["finalDetach16"]:
+                            # Failure-only observation; no absence/cleanup claim
+                            # follows even a settled no-visible-match result.
+                            observe_holders()
                     _need(report["finalDetach0"], "final-detach-nonzero")
                 except _FiniteFailure as error:
                     failure = failure or str(error)
@@ -313,17 +456,27 @@ class DistributionDetachNative(unittest.TestCase):
                     mount_absent()
                     report["mountAbsentAfter"] = True
                     same_entry(work_fd, "source", source_fd, source_identity)
-                    same_entry(source_fd, "held.txt", source_file, source_file_identity)
+                    same_entry(source_fd, source_name, source_file, source_file_identity)
                     same_entry(work_fd, "image.dmg", image_fd, image_identity)
+                    if installer_case:
+                        _need(receipt_slots() == slots, "receipt-slots-changed")
+                        same_entry(work_fd, "scripts", scripts_fd, scripts_identity)
+                        same_entry(scripts_fd, "postinstall", script_fd, script_identity)
                     # Fixed original inventory only. Unexpected native scratch
                     # entries are retained by rmdir refusal, never discovered
                     # and recursively deleted or adopted into the inventory.
+                    # Protected Installer receipts are NOT part of this scratch.
                     clock()
-                    os.unlink("held.txt", dir_fd=source_fd)
+                    os.unlink(source_name, dir_fd=source_fd)
                     clock()
                     os.unlink("image.dmg", dir_fd=work_fd)
                     clock()
                     os.rmdir("source", dir_fd=work_fd)
+                    if installer_case:
+                        clock()
+                        os.unlink("postinstall", dir_fd=scripts_fd)
+                        clock()
+                        os.rmdir("scripts", dir_fd=work_fd)
                     work_original()
                     os.rmdir(work.name, dir_fd=temp_fd)
                     report["fixtureRetired"] = True
