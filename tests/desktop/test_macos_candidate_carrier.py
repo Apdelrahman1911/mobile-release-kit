@@ -400,6 +400,30 @@ class RetainedObserverCarrierData(unittest.TestCase):
             with self.subTest(fault=fault), self.assertRaises((ValueError, zipfile.BadZipFile, struct.error)):
                 M.retained_observer_members(changed, selected, CLOCK)
 
+    def test_retained_central_name_keeps_former_zipfile_original_spelling_check(self):
+        selection, entries, body, *_ = retained_fixture()
+        name = entries[-2][0]
+        footer = list(struct.unpack('<4s4H2LH', body[-22:]))
+        at = body.index(name.encode(), footer[6])
+        central = at - 46
+        self.assertEqual(body[central:central + 4], b'PK\x01\x02')
+        suffix = b'\0not-a-selected-member'
+        end = at + len(name)
+        changed = bytearray(body[:end] + suffix + body[end:])
+        struct.pack_into('<H', changed, central + 28, len(name) + len(suffix))
+        footer[5] += len(suffix)
+        changed[-22:] = struct.pack('<4s4H2LH', *footer)
+        changed = bytes(changed)
+        with zipfile.ZipFile(io.BytesIO(changed)) as parsed:
+            info = parsed.getinfo(name)
+            self.assertEqual(info.filename, name)
+            self.assertEqual(info.orig_filename, name + suffix.decode())
+            with self.assertRaises(zipfile.BadZipFile): parsed.open(info)
+        selected = dict(selection, origin=dict(selection['origin'],
+            artifactBytes=len(changed), artifactSha256=M.sha(changed)))
+        with self.assertRaisesRegex(ValueError, 'p0-zip-member'):
+            M.retained_observer_members(changed, selected, CLOCK)
+
     def test_discarded_deflate_codec_eof_crc_bound_and_deadline_remain_authoritative(self):
         data = b'IGNORED' * 40000
         compressor = zlib.compressobj(wbits=-15)

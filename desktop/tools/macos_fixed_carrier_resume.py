@@ -555,6 +555,8 @@ def zip_data(body, selected, clock):
                  and info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
                  and info.file_size == nominated['bytes'] and info.header_offset == span,
                  'p0-zip-member')
+            if retained:
+                need(info.orig_filename == info.filename, 'p0-zip-member')
             stream.seek(info.header_offset); raw = stream.read(30)
             need(len(raw) == 30, 'p0-zip-local')
             local = struct.unpack('<4s5H3L2H', raw)
