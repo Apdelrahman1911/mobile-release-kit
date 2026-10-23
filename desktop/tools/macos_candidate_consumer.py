@@ -274,6 +274,7 @@ class CandidateResume(resume.Resume):
         self.__purpose = purpose
         self.__predecessor_install = predecessor_install
         self.__detach_observation = None
+        self.__installed_signature_state = None
         self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
         self.acquisition_result = None
         self.__predecessor_metadata = None
@@ -573,7 +574,30 @@ class CandidateResume(resume.Resume):
                     and (len(image), resume.sha(image)) == (preview['distributionBytes'], preview['distributionSha256']),
                     'candidate-install-image-binding')
         # Artifact pins never replace native signature verification.
-        return super().install_image(image, preview)
+        installed = super().install_image(image, preview)
+        if self.__predecessor_install:
+            # The unchanged owner has consumed mounted originals and completed
+            # its sole detach0/namespace POST. A failed/unknown detach never gets
+            # here. These remain actual calls under the SAME owner and deadline.
+            resume.need(self.__installed_signature_state == 'deferred' and self.mount_detached is True
+                        and self.__detach_observation is not None and self.__detach_observation['outcome'] == 'detach0'
+                        and self.installer_zero is True and self.readback_known is True,
+                        'candidate-predecessor-signature-order')
+            self.__installed_signature_state = 'entered'
+            resume.STATE['phase'] = 'installed-signature'
+            super().verify_installed_signatures()
+            self.__installed_signature_state = 'verified'
+        return installed
+
+    def verify_installed_signatures(self):
+        if not self.__predecessor_install:
+            return super().verify_installed_signatures()
+        # Only this isolated comparison defers the pair; this is NOT a verified
+        # result. install_image above must perform both after first detach0.
+        resume.need(self.__installed_signature_state is None and self.__detach_observation is None
+                    and self.installer_zero is True and self.readback_known is True,
+                    'candidate-predecessor-signature-order')
+        self.__installed_signature_state = 'deferred'
 
     def __capture_restore_scripts(self, inventory, rows, scripts):
         # Retain only immutable app slices from the already budgeted parse.
@@ -738,8 +762,10 @@ class CandidateResume(resume.Resume):
                 resume.need(type(self.__predecessor_metadata) is bytes, 'candidate-predecessor-metadata-missing')
                 result['predecessorMetadata'] = predecessor_metadata_data(resume.decode(self.__predecessor_metadata), self.nomination)
                 if self.__predecessor_install:
+                    resume.need(self.__installed_signature_state == 'verified', 'candidate-predecessor-installed-signatures')
                     result.update(experiment='public-predecessor-install-detach',
-                        detachObservation=dict(self.__detach_observation), packageInstallScheduleEqual=False)
+                        detachObservation=dict(self.__detach_observation), packageInstallScheduleEqual=False,
+                        installedSignatureCheckOrder='after-first-detach0', installedSignaturesVerified=True)
                 resume.need(len(resume.canonical(result)) <= PREDECESSOR_METADATA_LIMIT, 'candidate-predecessor-receipt-bound')
                 self.clock.check()
             if self.purpose == 'restore-install':
@@ -1095,6 +1121,7 @@ def failure_data(error):
     allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
         'candidate-predecessor-install-purpose', 'candidate-predecessor-target',
         'candidate-predecessor-detach-once', 'resume-original-detach',
+        'candidate-predecessor-signature-order', 'candidate-predecessor-installed-signatures', 'resume-installed-signature',
         'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
         'candidate-materialize-lifetime-quote', 'candidate-materialize-live-quote',
         'candidate-materialize-os-fd-limit', 'candidate-materialize-originals-known',
@@ -1170,7 +1197,8 @@ def failure_data(error):
         'exceptionClass': error_class, 'sourceFrames': frames, 'systemTool': system_tool,
         'rawOutputExported': False, 'cleanupAuthorized': False}
     if _PREDECESSOR_DETACH is not None:
-        value.update(detachObservation=dict(_PREDECESSOR_DETACH), packageInstallScheduleEqual=False)
+        value.update(detachObservation=dict(_PREDECESSOR_DETACH), packageInstallScheduleEqual=False,
+                     installedSignatureCheckOrder='after-first-detach0')
     return value
 
 

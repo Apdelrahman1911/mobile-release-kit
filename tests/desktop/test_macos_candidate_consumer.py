@@ -4,7 +4,7 @@ Authored detached. Run only after the parent explicitly authorizes a focused
 networkless test invocation; no workflow/carrier/native qualification follows.
 """
 from collections import namedtuple
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import copy
 from pathlib import Path
 from types import SimpleNamespace
@@ -1100,6 +1100,203 @@ class PredecessorInstallTests(unittest.TestCase):
         value.installer_zero = value.readback_known = True
         return value
 
+    @contextmanager
+    def scheduled_install(self, mode='predecessor', fault=None):
+        """Actual install/command/signature methods; inert native and FS ports."""
+        import subprocess
+        C._PREDECESSOR_DETACH = None
+        events, native_calls, now = [], [], [1]
+        original_error = RuntimeError('inert original unknown')
+        image = b'inert-image'
+        preview = {'distributionBytes': len(image), 'distributionSha256': R.sha(image)}
+        if mode == 'fixed':
+            owner = object.__new__(R.Resume)
+            row = dict(R.ORIGIN, inventorySha256='a'*64, runtimeManifestSha256='b'*64)
+        else:
+            if mode == 'predecessor':
+                owner = self.owner()
+                owner._CandidateResume__nomination = nomination()
+            else:
+                with mock.patch.object(R.Resume, '__init__', return_value=None):
+                    owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
+                                              nomination=nomination(), purpose=mode)
+            row = dict(owner.nomination, package={'sha256':'c'*64}, inventorySha256='a'*64,
+                       runtimeManifestSha256='b'*64)
+            owner._CandidateResume__artifact_admitted = owner._CandidateResume__source_loaded = True
+            owner._CandidateResume__preview_document = R.canonical(preview)
+        owner.root, owner.work = C.HELPER_ROOT, Path('/inert')
+        owner.run_id, owner.run_attempt, owner.private, owner.calls = '51', '2', {}, []
+        owner.clock = R.Deadline(now=lambda: now[0])
+        owner.environment = {'PATH':'/usr/bin:/bin:/usr/sbin:/sbin', 'TMPDIR':'/inert/'}
+        owner.signing_identity = {'teamIdentifier':'INERTTEAM0', 'leafCertificateSha1':'e'*40}
+        mount = owner.mount_path()
+        info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o555,
+            st_uid=0, st_gid=0, st_nlink=1, st_size=0, st_mtime_ns=0, st_ctime_ns=0)
+        directory = {'fd':-1, 'identity':R.identity(info), 'path':owner.work}
+        facts = (R.identity(info), 0, 'inert-filesystem')
+        message = R.producer_message_data(b'inert-descriptor')
+        owner.outer = SimpleNamespace(directories={Path('/'):directory},
+            read=lambda entry: image if entry['path'].suffix == '.dmg' else message)
+        owner.parent = directory
+        def quote(book, operation, path, *args, **kwargs):
+            if operation == 'directory': return directory
+            return {'path':path, 'identity':(1,2)}, image if path.suffix == '.dmg' else message
+        owner.quota = SimpleNamespace(call=quote, check=lambda: None)
+        def finish():
+            events.append('mounted-finish')
+            return fault != 'mounted-close'
+        owner.fresh_book = lambda **kwargs: SimpleNamespace(check=lambda: None, finish=finish)
+        owner.host = SimpleNamespace(filesystem=lambda fd: {'flags':0})
+        owner.transport_facts = lambda entry: facts
+        def roster(entry):
+            if 'detach' in events:
+                events.append('detach-post')
+                if fault == 'detach-post': raise original_error
+                return {}, facts
+            return ({mount.name:(1,2,stat.S_IFDIR)} if 'attach' in events else {}), facts
+        owner.transport_roster = roster
+        owner.publish_image = mock.Mock()
+        owner.publish_owned = mock.Mock()
+        owner.fresh_directory = lambda parent, name: {'path':owner.work / name}
+        def read_mounted(*args):
+            if mode != 'fixed': owner._CandidateResume__binding = R.canonical(row)
+            return {'producer.json':(b'inert-descriptor',0o444)}, row, {}, b'inert-inventory'
+        owner.read_mounted = read_mounted
+        owner.prepare_readback = lambda *args: False if mode in ('acquire','acquire-restore','acquire-removal') else None
+        request = 'f'*32
+        owner.stager = SimpleNamespace(distribution_mount_data=lambda *args: '/dev/inert',
+            INSTALLATION_INVENTORY_NAME='install-inventory.json', INSTALL_ROOT=Path('/Applications'),
+            APP_NAME='MobileReleaseKit.app', ENTRY_BUNDLE_ID='dev.inert.entry', BUNDLE_ID='dev.inert.payload',
+            same_package_result_census=mock.Mock(side_effect=[{}, {request:'original'}, {request:'original'}]))
+        def readback(args, original):
+            events.append('readback')
+            self.assertEqual(args.request_id, request)
+            return dict(requestId=request, originalInstallerReturnedZero=True, originalWriterJoined=fault != 'readback',
+                sourceCommit=row['source'], completedPackageSha256=row['package']['sha256'],
+                inventorySha256=row['inventorySha256'], runtimeManifestSha256=row['runtimeManifestSha256'])
+        owner.observe_installation = readback
+        def run_owned(argv, **kwargs):
+            role = owner.calls[-1]['role']
+            events.append(role); native_calls.append((role, argv, kwargs))
+            if fault == role + '-unknown': raise original_error
+            code = 16 if role == 'detach' and fault == 'detach16' else 1 if fault == role else 0
+            stdout = (b'-----BEGIN PUBLIC KEY-----\ninert\n-----END PUBLIC KEY-----\n' if role == 'producer-key'
+                      else b'Verified OK\n' if role == 'producer-signature' else b'')
+            if fault == role + '-stdout': stdout = b'inert-not-empty'
+            stderr = b'inert-not-empty' if fault == role + '-stderr' else b''
+            if role == 'detach' and fault == 'work-deadline': now[0] = owner.clock.work + 1
+            return subprocess.CompletedProcess(argv, code, stdout, stderr)
+        owner.owner = SimpleNamespace(run_owned=run_owned)
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.dict(R.STATE, phase='admission', firstFailurePhase=None))
+            patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
+            patches.enter_context(mock.patch.object(R.os, 'stat', return_value=info))
+            patches.enter_context(mock.patch.object(R.os, 'fstatvfs', return_value=SimpleNamespace(f_flag=0)))
+            patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg','producer.json','producer.sig']))
+            patches.enter_context(mock.patch.object(R, 'mount_data'))
+            patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=lambda *args: events.append('mounted-post')))
+            yield owner, image, preview, events, native_calls, original_error
+
+    def test_only_predecessor_moves_the_exact_pair_after_first_detach(self):
+        for mode in ('predecessor','fixed',*C.PURPOSES):
+            with self.subTest(mode=mode), self.scheduled_install(mode) as (owner,image,preview,events,calls,_):
+                self.assertIsNone(owner.install_image(image, preview))
+                roles = [role for role,argv,kwargs in calls]
+                expected = ['attach','producer-key','producer-signature']
+                if mode not in ('acquire','acquire-restore','acquire-removal'):
+                    expected += ['installer']
+                    expected += (['detach','entry-signature','payload-signature'] if mode == 'predecessor'
+                                 else ['entry-signature','payload-signature','detach'])
+                    self.assertLess(events.index('producer-signature'), events.index('installer'))
+                    self.assertLess(events.index('installer'), events.index('readback'))
+                    self.assertLess(events.index('readback'), events.index('mounted-finish'))
+                else:
+                    expected += ['detach']
+                self.assertEqual(roles, expected)
+                self.assertTrue(owner.mount_detached)
+                self.assertLess(events.index('mounted-finish'), events.index('detach'))
+                if mode == 'predecessor':
+                    self.assertEqual(owner._CandidateResume__installed_signature_state, 'verified')
+                    self.assertLess(events.index('readback'), events.index('mounted-post', events.index('readback')))
+                    self.assertLess(events.index('detach-post'), events.index('entry-signature'))
+                    self.assertEqual(C._PREDECESSOR_DETACH['outcome'], 'detach0')
+                for role,argv,kwargs in calls:
+                    self.assertEqual(kwargs['environ'], owner.environment)
+                    self.assertEqual(kwargs['cwd'], owner.work)
+                    if role == 'detach':
+                        self.assertEqual(argv, ['/usr/bin/hdiutil','detach','/dev/inert'] + (['-verbose'] if mode == 'predecessor' else []))
+                        self.assertEqual(kwargs['timeout'], 30)
+                        self.assertIs(kwargs['cleanup'], True)
+                    if role in ('entry-signature','payload-signature'):
+                        identifier = 'dev.inert.entry' if role == 'entry-signature' else 'dev.inert.payload'
+                        requirement = ('=identifier "' + identifier + '" and anchor apple generic'
+                            ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                            ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+                            ' and certificate leaf[subject.OU] = "INERTTEAM0" and certificate leaf = H"' + 'e'*40 + '"')
+                        path = '/Applications/MobileReleaseKit.app' + ('' if role == 'entry-signature' else '/Contents/Helpers/MobileReleaseKitPayload.app')
+                        self.assertEqual(argv, ['/usr/bin/codesign','--verify','--strict','--test-requirement',requirement,path])
+                        self.assertEqual(kwargs['timeout'], 30)
+                        self.assertIs(kwargs['cleanup'], False)
+                if mode == 'predecessor':
+                    with self.assertRaisesRegex(R.Refused, 'candidate-install-order'): owner.install_image(image, preview)
+                    with self.assertRaisesRegex(R.Refused, 'candidate-predecessor-signature-order'): owner.verify_installed_signatures()
+                    self.assertEqual(len(calls), 7)
+
+    def test_predecessor_detach_and_required_signature_failures_never_succeed_or_retry(self):
+        for fault in ('installer','readback','mounted-close','detach16','detach-unknown','detach-post','work-deadline',
+                      'entry-signature','payload-signature','entry-signature-unknown',
+                      'entry-signature-stdout','entry-signature-stderr','payload-signature-stdout','payload-signature-stderr'):
+            with self.subTest(fault=fault), self.scheduled_install(fault=fault) as (owner,image,preview,events,calls,original):
+                with self.assertRaises((R.Refused, RuntimeError)) as caught: owner.install_image(image, preview)
+                if fault in ('detach-unknown','detach-post','entry-signature-unknown'):
+                    self.assertIs(caught.exception, original)
+                roles = [role for role,argv,kwargs in calls]
+                self.assertEqual(roles.count('detach'), 0 if fault in ('installer','readback','mounted-close') else 1)
+                signatures = [role for role in roles if role in ('entry-signature','payload-signature')]
+                self.assertEqual(signatures, ['entry-signature','payload-signature'] if fault.startswith('payload-signature')
+                                 else ['entry-signature'] if fault.startswith('entry-signature') else [])
+                self.assertNotEqual(owner._CandidateResume__installed_signature_state, 'verified')
+                if signatures:
+                    self.assertTrue(owner.mount_detached)
+                    self.assertLess(events.index('detach-post'), events.index('entry-signature'))
+                report = C.failure_data(caught.exception)
+                self.assertNotIn('installedSignaturesVerified', report)
+                if C._PREDECESSOR_DETACH is not None:
+                    self.assertEqual(report['installedSignatureCheckOrder'], 'after-first-detach0')
+                    self.assertFalse(report['packageInstallScheduleEqual'])
+                if fault == 'detach16':
+                    self.assertEqual(report['reason'], 'resume-original-detach')
+                    self.assertEqual(report['detachObservation']['outcome'], 'detach16')
+
+    def test_predecessor_receipt_cannot_promote_pending_or_failed_signatures(self):
+        originals, row, stage = mounted_fixture('aarch64-apple-darwin')
+        result, inventory = R.mounted_data(originals, row, row['target'], stage, candidate=True)
+        for state in (None,'deferred','entered','verified'):
+            with self.subTest(state=state):
+                owner = self.owner()
+                owner._CandidateResume__nomination = nomination()
+                owner._CandidateResume__source_loaded = True
+                owner._CandidateResume__installed_signature_state = state
+                owner._CandidateResume__detach_observation = {'outcome':'detach0'}
+                owner.helper_source, owner.helper_tree, owner.run_id, owner.run_attempt = 'd'*40, 'e'*40, '51', '2'
+                owner.quota = SimpleNamespace(reserved=0, finish=mock.Mock(return_value=True))
+                owner.clock = SimpleNamespace(finality=False, check=mock.Mock())
+                owner.point = mock.Mock(); owner.admit_resources = mock.Mock(); owner.retire = mock.Mock()
+                owner.verify_sources = mock.Mock()
+                owner.acquire_candidate = mock.Mock(return_value={'PREVIEW.json':b'inert','MobileReleaseKit.dmg':b'inert'})
+                owner.install_image = lambda *args: owner.prepare_readback(result, inventory)
+                owner.installer_zero = owner.readback_known = owner.mount_detached = True
+                owner.calls = [{'returned':True,'capturesSettled':True}]
+                with mock.patch.object(C.candidate, 'candidate_preview_data', return_value={}):
+                    if state != 'verified':
+                        with self.assertRaisesRegex(R.Refused, 'candidate-predecessor-installed-signatures'): owner.consume(0,0)
+                    else:
+                        report = owner.consume(0,0)
+                        self.assertTrue(report['installedSignaturesVerified'])
+                        self.assertEqual(report['installedSignatureCheckOrder'], 'after-first-detach0')
+                        self.assertFalse(report['packageInstallScheduleEqual'] or report['p0Qualified'] or report['productReady'])
+                        self.assertLessEqual(len(R.canonical(report)), C.PREDECESSOR_METADATA_LIMIT)
+
     def test_fixed_dispatch_and_arm_only_context(self):
         env = self.environment()
         context = C.context_data(env, C.HELPER_ROOT, 'arm64')
@@ -1181,6 +1378,8 @@ class PredecessorInstallTests(unittest.TestCase):
             self.assertTrue(report['detachObservation']['readbackKnown'])
             self.assertEqual(report['detachObservation']['textHints'], ['resource-busy-text','unmount-text'])
             self.assertFalse(report['packageInstallScheduleEqual'])
+            self.assertEqual(report['installedSignatureCheckOrder'], 'after-first-detach0')
+            self.assertNotIn('installedSignaturesVerified', report)
             self.assertFalse(report['cleanupAuthorized'])
             self.assertNotIn('PRIVATE-NATIVE-PATH', repr(report))
 

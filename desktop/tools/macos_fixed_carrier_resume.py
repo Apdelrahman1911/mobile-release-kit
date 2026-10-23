@@ -1361,6 +1361,17 @@ class Resume:
     def observe_installation(self, args, readback):
         return self.stager.observation_command(args, original_release_readback=readback)
 
+    def verify_installed_signatures(self):
+        for role, path, identifier in (('entry-signature', self.stager.INSTALL_ROOT / self.stager.APP_NAME, self.stager.ENTRY_BUNDLE_ID),
+             ('payload-signature', self.stager.INSTALL_ROOT / self.stager.APP_NAME / 'Contents/Helpers/MobileReleaseKitPayload.app', self.stager.BUNDLE_ID)):
+            requirement = ('=identifier "' + identifier + '" and anchor apple generic'
+                ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+                ' and certificate leaf[subject.OU] = "' + self.signing_identity['teamIdentifier'] + '"'
+                ' and certificate leaf = H"' + self.signing_identity['leafCertificateSha1'] + '"')
+            signature = self.command(role, ['/usr/bin/codesign', '--verify', '--strict', '--test-requirement', requirement, str(path)], 30)
+            need(signature.returncode == 0 and signature.stdout == b'' and signature.stderr == b'', 'resume-installed-signature')
+
     def install_image(self, image, preview):
         self.publish_image(self.work / self.image_name, image)
         image_entry, original = self.quota.call(self.outer, 'file', self.work / self.image_name, len(image), modes=(0o444,))
@@ -1456,15 +1467,7 @@ class Resume:
                  and observed['inventorySha256'] == row['inventorySha256'] and observed['runtimeManifestSha256'] == row['runtimeManifestSha256'],
                  'resume-current-installer-result-join')
             self.readback_known = True
-            for role, path, identifier in (('entry-signature', self.stager.INSTALL_ROOT / self.stager.APP_NAME, self.stager.ENTRY_BUNDLE_ID),
-                 ('payload-signature', self.stager.INSTALL_ROOT / self.stager.APP_NAME / 'Contents/Helpers/MobileReleaseKitPayload.app', self.stager.BUNDLE_ID)):
-                requirement = ('=identifier "' + identifier + '" and anchor apple generic'
-                    ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
-                    ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
-                    ' and certificate leaf[subject.OU] = "' + self.signing_identity['teamIdentifier'] + '"'
-                    ' and certificate leaf = H"' + self.signing_identity['leafCertificateSha1'] + '"')
-                signature = self.command(role, ['/usr/bin/codesign', '--verify', '--strict', '--test-requirement', requirement, str(path)], 30)
-                need(signature.returncode == 0 and signature.stdout == b'' and signature.stderr == b'', 'resume-installed-signature')
+            self.verify_installed_signatures()
             need(post() == facts, 'resume-pre-detach-originals')
             self.installation = observed
         except BaseException as error:
