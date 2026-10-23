@@ -3,8 +3,8 @@
 The exact imported lease/workspace names are replaced by explicit inert types,
 as in test_config_edit. No real custody object, descriptor, flock, signal,
 thread, process, transaction, recovery or project filesystem probe runs.
-Most cases use a synthetic resource. The predecessor case reads the fixed
-shipped public resource before entering the inert boundary, then exercises
+Most cases use a synthetic resource. The predecessor cases read the fixed
+shipped public resource before entering the inert boundary, then exercise
 the same proposal service; it is not installed/native workflow evidence.
 Source and exact command admission are required separately before execution.
 """
@@ -499,6 +499,105 @@ class GitHubWorkflowEditTests(unittest.TestCase):
                     self.assertEqual([row["id"] for row in conflict.view["conflicts"]], ["candidate"])
                     self.assertFalse(hasattr(conflict, "token"))
                     self.assertEqual(refused.applies, [])
+
+    def test_v012_candidate_upgrade_keeps_exact_review_and_current_only_handoff(self):
+        from mobile_release.github_workflow_candidate_compat import _V012_CANDIDATE, before_workflow_reference
+        raw = (Path(__file__).resolve().parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        templates = json.loads(raw)["workflows"]
+        generated = tuple(render_workflow_caller(templates[identity].encode(), _REPOSITORY, _SHA)
+                          for identity in _IDS)
+        old_reference = ("Apdelrahman1911/mobile-release-kit", "bf9d397bde641aae4b4cd205f3c962e899557650")
+        old = render_workflow_caller(_V012_CANDIDATE, *old_reference)
+        with inert_native(), patch.object(setup, "_read_resource_bytes", return_value=raw), \
+                patch(f"{__name__}.resource_bytes", return_value=raw):
+            current = templates["candidate"].encode()
+            self.assertEqual(before_workflow_reference("candidate", current, old), old_reference)
+            self.assertIsNone(canonical_workflow_reference(current, old))
+            self.assertEqual(canonical_workflow_reference(current, generated[1]), (_REPOSITORY, _SHA.lower()))
+            self.assertIs(edit.before_workflow_reference, before_workflow_reference)
+            self.assertIs(transaction.before_workflow_reference, before_workflow_reference)
+            lease = InertLease((generated[0], old, generated[2], generated[3]))
+            _, plan = prepare(lease)
+            self.assertIs(type(plan), edit.PreparedWorkflowEdit)
+            view = plan.view
+            self.assertEqual([row["action"] for row in view["files"]], ["preserve", "update", "preserve", "preserve"])
+            previous = {"content": old.decode(), "byteLength": len(old), "sha256": hashlib.sha256(old).hexdigest()}
+            self.assertEqual(view["files"][1]["previous"], previous)
+            self.assertEqual(view["files"][1]["generated"], {
+                "content": generated[1].decode(), "byteLength": len(generated[1]),
+                "sha256": hashlib.sha256(generated[1]).hexdigest()})
+            self.assertEqual(view["templateSet"]["resourceSha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(lease.closed, [0, 1])
+            self.assertEqual(lease.applies, [])  # Prepare/review is not consent to write.
+            view["files"][1]["previous"]["content"] = "not the captured original"
+            self.assertEqual(plan.view["files"][1]["previous"], previous)
+            with patch.object(setup, "_propose_with_templates", side_effect=AssertionError("Apply must not regenerate")):
+                self.assertEqual(edit.apply_github_workflow_edit(lease, plan),
+                                 shared.CoreEditOutcome("committed", "clean", "settled", "none"))
+            self.assertEqual(lease.applies[0][1][0].data, old)
+            self.assertEqual(lease.applies[0][1][0].before["sha256"], previous["sha256"])
+            self.assertEqual([payload for _, payload in lease.applies[0]], [None, generated[1], None, None])
+            self.assertIs(lease.scopes[2], lease.revision)
+            self.assertEqual(edit.apply_github_workflow_edit(lease, plan).reason, "invalid_params")
+            self.assertEqual(len(lease.applies), 1)
+
+    def test_v012_candidate_custom_mixed_and_foreign_callers_stay_conflicts(self):
+        from mobile_release.github_workflow_candidate_compat import _V012_CANDIDATE, before_workflow_reference
+        raw = (Path(__file__).resolve().parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        templates = json.loads(raw)["workflows"]
+        generated = tuple(render_workflow_caller(templates[identity].encode(), _REPOSITORY, _SHA)
+                          for identity in _IDS)
+        old = render_workflow_caller(_V012_CANDIDATE, "Previous/toolkit", "b" * 40)
+        changes = (old + b"# user change\n", old.replace(b"permissions: {}", b"permissions: write-all"),
+                   old.replace(b"b" * 40, b"c" * 40, 1), old.replace(b"\n", b"\r\n"), old[:-1])
+        cases = [("candidate", changed) for changed in changes]
+        cases.extend((identity, old) for identity in _IDS if identity != "candidate")
+        with inert_native() as token, patch.object(setup, "_read_resource_bytes", return_value=raw), \
+                patch(f"{__name__}.resource_bytes", return_value=raw):
+            for identity, changed in cases:
+                with self.subTest(identity=identity, sha256=hashlib.sha256(changed).hexdigest()):
+                    self.assertIsNone(before_workflow_reference(identity, templates[identity].encode(), changed))
+                    values = list(generated)
+                    values[_IDS.index(identity)] = changed
+                    lease = InertLease(values)
+                    _, conflict = prepare(lease)
+                    self.assertEqual(conflict.kind, "conflict")
+                    self.assertEqual(conflict.view["reason"], "existing_workflow_differs")
+                    self.assertEqual([row["id"] for row in conflict.view["conflicts"]], [identity])
+                    self.assertFalse(hasattr(conflict, "token"))
+                    self.assertEqual(edit.apply_github_workflow_edit(lease, conflict).reason, "invalid_params")
+                    self.assertEqual(lease.applies, [])
+            self.assertIsNone(before_workflow_reference("unknown", templates["candidate"].encode(), old))
+            token.assert_not_called()
+
+    def test_v012_candidate_stale_rechecks_never_apply_or_retry(self):
+        from mobile_release.github_workflow_candidate_compat import _V012_CANDIDATE
+        raw = (Path(__file__).resolve().parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        templates = json.loads(raw)["workflows"]
+        generated = tuple(render_workflow_caller(templates[identity].encode(), _REPOSITORY, _SHA)
+                          for identity in _IDS)
+        old = render_workflow_caller(_V012_CANDIDATE, "Previous/toolkit", "b" * 40)
+        for phase in (1, 2):
+            with self.subTest(phase=phase), inert_native() as token, \
+                    patch.object(setup, "_read_resource_bytes", return_value=raw), \
+                    patch(f"{__name__}.resource_bytes", return_value=raw):
+                lease = InertLease((generated[0], old, generated[2], generated[3]))
+                lease.enter_failures[phase] = InertFailure(InertOutcome("not_started", "not_created", "settled", "stale_revision"))
+                checkout = edit.capture_github_workflow_edit(lease)
+                if phase == 1:
+                    self.assert_refused("stale_revision", lambda: edit.prepare_github_workflow_edit(
+                        lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
+                    token.assert_not_called()
+                    self.assert_refused("invalid_params", lambda: edit.prepare_github_workflow_edit(
+                        lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA))
+                else:
+                    plan = edit.prepare_github_workflow_edit(lease, checkout, checkout.revision, draft(), _REPOSITORY, _SHA)
+                    self.assertEqual(edit.apply_github_workflow_edit(lease, plan),
+                                     shared.CoreEditOutcome("not_started", "not_created", "settled", "stale_revision"))
+                    self.assertEqual(edit.apply_github_workflow_edit(lease, plan).reason, "invalid_params")
+                self.assertIs(lease.scopes[-1], lease.revision)
+                self.assertEqual(len(lease.scopes), phase + 1)
+                self.assertEqual(lease.applies, [])
 
     def test_observation_or_conflict_recheck_failure_never_publishes_partial_rows(self):
         with inert_native() as token:
