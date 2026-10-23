@@ -1210,6 +1210,7 @@ FAILURE_STEPS |= frozenset(f"ToolSetup({name})" for name in (
     "Context Service ServiceWait Catalog CatalogWait Inspect InspectWait Acquire AcquireWait RegisterInspect RegisterReview Register Registered Recover Recovered Select Reuse ReuseWait Finish"
 ).split()) | frozenset(f"ToolSetup({name}({i}))" for name in ("Choose", "Native", "Chosen") for i in range(4))
 FAILURE_REASONS = frozenset((
+    "git-fetch-original-contract git-push-original-contract "
     "installed-cli-original-contract git-cli-original-contract git-upstream-original-contract tool-setup-original-contract identity-original-contract upload-key-original-contract upload-key-expected-retention observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
     "dom-callback-object dom-callback-state picker-unexpected-result dom-evaluation-budget dom-project-chooser-data "
