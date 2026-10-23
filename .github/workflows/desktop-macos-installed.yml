@@ -49,7 +49,7 @@ jobs:
   engineering-install:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
     environment: macos-developer-id
-    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
+    name: normal-installed-${{ matrix.target }}${{ matrix.native_scope == 'git-native' && '-git-native' || '' }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
     outputs:
       prepared-input-ready: ${{ steps.prepared_upload.outcome == 'success' }}
@@ -81,10 +81,11 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        # Candidate and positive-update: ARM only; other routes retain both targets and all removal cases.
+        # Candidate: independent Tool26/Git27 ARM rows; Git27 awaits native verification.
+        # Positive-update stays ARM only; other routes retain both targets and all removal cases.
         # native_scope is SOURCE-owned and disabled by default. Only a reviewed
         # verification-source change may select project-identity-native, tool-setup, or git-native.
-        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"tool-setup","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-positive-update' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"tool-setup","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"native_scope":"git-native","target":"aarch64-apple-darwin","runner":"xcode-27","machine":"arm64","hosted_job":"github-hosted-xcode27-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-positive-update' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -1300,10 +1301,10 @@ jobs:
       # to the uncompleted native work, not another library test compilation.
       # Actual Tool/ARM build hit31min; restore the existing observer48 after
       # removing the completed contracts. Overall350 and native clocks stay fixed.
-      # ARM Tool's three serial builds get 60min headroom; job/native clocks stay fixed.
+      # Git and ARM Tool's three serial builds get 60min headroom; job/native clocks stay fixed.
       - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 'Build the current nonshipping observer' || 'Build the ordinary selected-target desktop image' }}
         id: app_build
-        timeout-minutes: ${{ matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin' && 60 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'git-native' || (matrix.native_scope == 'tool-setup' && matrix.target == 'aarch64-apple-darwin')) && 60 || (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
         shell: bash
         env:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
@@ -2165,7 +2166,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-detach-nonshipping-unqualified-diagnostics-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: candidate-detach-nonshipping-unqualified-diagnostics-${{ matrix.target }}${{ matrix.native_scope == 'git-native' && '-git-native' || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
@@ -2175,7 +2176,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
-      - name: Observe four Fetch, three Push and five create-only Push cases on the same installed Git observer
+      - name: Observe fifteen existing Git cases on the same installed observer
         id: git_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && matrix.target == 'aarch64-apple-darwin' && matrix.native_scope == 'git-native' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
         timeout-minutes: 25
@@ -2186,19 +2187,21 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # Four success-ordered invocations of the existing owner, not a
-          # combined case or renewed clock. Each keeps600s suite/120s case and
-          # 45/55s original endpoints; all four runtime originals remain bound
-          # to the same installed M, including the unused peer pair.
-          # Thirteen cases share the unchanged25min outer limit: this is not a
-          # promise every worst-case runtime plus admission overhead will fit.
-          # Any nonzero/unknown/78 prevents the next call; no fallback/retry.
-          # Synthetic provider responses prove neither TLS nor a live account,
-          # and no shipping tool nomination is changed by these observations.
+          # Six success-ordered invocations, fifteen existing cases: local
+          # Index1, Branch1, Fetch4, Push3, create-only Push5, local Upstream1.
+          # Upstream has no retained native pass; source/DATA tests do not count.
+          # SAME built/signed/installed git-native image, held M and all four
+          # runtime originals; no relabelled tool image or cross-run adoption.
+          # Existing600s suite/120s case, Git2 clipped135s app-return ceiling
+          # and45/55s Git endpoints remain. Fifteen120s case ceilings exceed
+          # the unchanged25min outer cap: no worst-case completion promise.
+          # First nonzero/unknown/78 stops later calls; only final Upstream execs.
+          # No retry, account/keychain access, live remote write or nomination.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-index-cli-native
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-branch-cli-native
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-fetch-native
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
-          # One ordinary LOCAL configuration/parent/ACK journey, no Connection or provider.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-upstream-native
       - name: Observe four original identity edits on the current installed observer
         id: identity_native
